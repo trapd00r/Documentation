@@ -1,0 +1,144 @@
+diff -ru irssi-0.8.15/docs/signals.txt irssi-0.8.15-hax/docs/signals.txt
+--- irssi-0.8.15/docs/signals.txt	2010-04-03 18:19:55.000000000 +0200
++++ irssi-0.8.15-hax/docs/signals.txt	2010-04-05 21:31:08.000000000 +0200
+@@ -117,6 +117,9 @@
+  "default ctcp reply", SERVER_REC, char *args, char *nick, char *addr, char *target
+  "ctcp action", SERVER_REC, char *args, char *nick, char *addr, char *target
+ 
++irc-commands.c:
++ "knockout ban remove", CHANNEL_REC, char *ban
++
+ irc-log.c:
+  "awaylog show", LOG_REC, int away_msgs, int filepos
+ 
+@@ -325,6 +328,7 @@
+ 
+ gui-readline.c:
+  "gui key pressed", int key
++ "gui line entered", char *command, SERVER_REC, WI_ITEM_REC
+ 
+ gui-printtext.c:
+  "beep"
+diff -ru irssi-0.8.15/src/core/network-openssl.c irssi-0.8.15-hax/src/core/network-openssl.c
+--- irssi-0.8.15/src/core/network-openssl.c	2010-04-03 18:19:38.000000000 +0200
++++ irssi-0.8.15-hax/src/core/network-openssl.c	2010-04-05 21:58:20.000000000 +0200
+@@ -150,6 +150,9 @@
+ 	char *cert_subject_cn;
+ 	const GENERAL_NAME *gn;
+ 	STACK_OF(GENERAL_NAME) * gens;
++	GString *alt_names;
++
++	alt_names = g_string_new("");
+ 
+ 	/* Verify the dNSName(s) in the peer certificate against the hostname. */
+ 	gens = X509_get_ext_d2i(cert, NID_subject_alt_name, 0, 0);
+@@ -166,6 +169,7 @@
+ 			has_dns_name = TRUE;
+ 			cert_dns_name = tls_dns_name(gn);
+ 			if (cert_dns_name && *cert_dns_name) {
++				g_string_append_printf(alt_names, " '%s'", cert_dns_name);
+ 				matched = match_hostname(cert_dns_name, hostname);
+ 			}
+     	}
+@@ -177,10 +181,12 @@
+ 	if (has_dns_name) {
+ 		if (! matched) {
+ 			/* The CommonName in the issuer DN is obsolete when SubjectAltName is available. */
+-			g_warning("None of the Subject Alt Names in the certificate match hostname '%s'", hostname);
++			g_warning("None of the Subject Alt Names%s in the certificate match hostname '%s'", alt_names->str, hostname);
+ 		}
++		g_string_free(alt_names, TRUE);
+ 		return matched;
+ 	} else { /* No subjectAltNames, look at CommonName */
++		g_string_free(alt_names, TRUE);
+ 		cert_subject_cn = tls_text_name(X509_get_subject_name(cert), NID_commonName);
+ 	    if (cert_subject_cn && *cert_subject_cn) {
+ 	    	matched = match_hostname(cert_subject_cn, hostname);
+diff -ru irssi-0.8.15/src/fe-text/gui-readline.c irssi-0.8.15-hax/src/fe-text/gui-readline.c
+--- irssi-0.8.15/src/fe-text/gui-readline.c	2010-04-03 18:19:42.000000000 +0200
++++ irssi-0.8.15-hax/src/fe-text/gui-readline.c	2010-04-05 22:41:06.000000000 +0200
+@@ -436,7 +436,7 @@
+ 	history = command_history_current(active_win);
+ 
+ 	if (redir == NULL) {
+-		signal_emit("send command", 3, str,
++		signal_emit("gui line entered", 3, str,
+ 			    active_win->active_server,
+ 			    active_win->active);
+ 	} else {
+@@ -924,6 +924,11 @@
+ 	gui_entry_set_prompt(active_entry, entry);
+ }
+ 
++static void sig_gui_line_entered(const char *line, SERVER_REC *server, void *item)
++{
++	signal_emit("send command", 3, line, server, item);
++}
++
+ static void setup_changed(void)
+ {
+ 	paste_detect_time = settings_get_time("paste_detect_time");
+@@ -968,7 +973,7 @@
+ 
+         /* meta */
+ 	key_bind("key", NULL, "^[", "meta", (SIGNAL_FUNC) key_combo);
+-	key_bind("key", NULL, "meta-[", "meta2", (SIGNAL_FUNC) key_combo);
++	//key_bind("key", NULL, "meta-[", "meta2", (SIGNAL_FUNC) key_combo);
+ 	key_bind("key", NULL, "meta-O", "meta2", (SIGNAL_FUNC) key_combo);
+ 	key_bind("key", NULL, "meta-[O", "meta2", (SIGNAL_FUNC) key_combo);
+ 
+@@ -1106,6 +1111,7 @@
+ 	signal_add("window changed automatic", (SIGNAL_FUNC) sig_window_auto_changed);
+ 	signal_add("gui entry redirect", (SIGNAL_FUNC) sig_gui_entry_redirect);
+ 	signal_add("gui key pressed", (SIGNAL_FUNC) sig_gui_key_pressed);
++	signal_add("gui line entered", (SIGNAL_FUNC) sig_gui_line_entered);
+ 	signal_add("setup changed", (SIGNAL_FUNC) setup_changed);
+ }
+ 
+@@ -1178,5 +1184,6 @@
+ 	signal_remove("window changed automatic", (SIGNAL_FUNC) sig_window_auto_changed);
+ 	signal_remove("gui entry redirect", (SIGNAL_FUNC) sig_gui_entry_redirect);
+ 	signal_remove("gui key pressed", (SIGNAL_FUNC) sig_gui_key_pressed);
++	signal_remove("gui line entered", (SIGNAL_FUNC) sig_gui_line_entered);
+ 	signal_remove("setup changed", (SIGNAL_FUNC) setup_changed);
+ }
+diff -ru irssi-0.8.15/src/irc/core/irc-commands.c irssi-0.8.15-hax/src/irc/core/irc-commands.c
+--- irssi-0.8.15/src/irc/core/irc-commands.c	2010-04-03 18:19:47.000000000 +0200
++++ irssi-0.8.15-hax/src/irc/core/irc-commands.c	2010-04-05 21:30:25.000000000 +0200
+@@ -714,6 +714,11 @@
+ 	g_free(rec);
+ }
+ 
++static void sig_knockout_ban_remove(IRC_CHANNEL_REC *channel, const char *ban)
++{
++	ban_remove(channel, ban);
++}
++
+ /* timeout function: knockout */
+ static void knockout_timeout_server(IRC_SERVER_REC *server)
+ {
+@@ -732,7 +737,7 @@
+ 		next = tmp->next;
+ 		if (rec->unban_time <= now) {
+ 			/* timeout, unban. */
+-			ban_remove(rec->channel, rec->ban);
++			signal_emit("knockout ban remove", 2, rec->channel, rec->ban);
+ 			knockout_destroy(server, rec);
+ 		}
+ 	}
+@@ -1034,6 +1039,7 @@
+ 	command_bind_irc("server purge", NULL, (SIGNAL_FUNC) cmd_server_purge);
+ 
+ 	signal_add("channel destroyed", (SIGNAL_FUNC) sig_channel_destroyed);
++	signal_add("knockout ban remove", (SIGNAL_FUNC) sig_knockout_ban_remove);
+ 	signal_add("server disconnected", (SIGNAL_FUNC) sig_server_disconnected);
+ 	signal_add("whois try whowas", (SIGNAL_FUNC) sig_whois_try_whowas);
+ 	signal_add("whois event", (SIGNAL_FUNC) event_whois);
+@@ -1104,6 +1110,7 @@
+ 	command_unbind("server purge", (SIGNAL_FUNC) cmd_server_purge);
+ 
+ 	signal_remove("channel destroyed", (SIGNAL_FUNC) sig_channel_destroyed);
++	signal_remove("knockout ban remove", (SIGNAL_FUNC) sig_knockout_ban_remove);
+ 	signal_remove("server disconnected", (SIGNAL_FUNC) sig_server_disconnected);
+ 	signal_remove("whois try whowas", (SIGNAL_FUNC) sig_whois_try_whowas);
+ 	signal_remove("whois event", (SIGNAL_FUNC) event_whois);
