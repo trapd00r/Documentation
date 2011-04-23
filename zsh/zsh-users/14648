@@ -1,0 +1,186 @@
+From zsh-users-return-14648-mason-zsh=primenet.com.au@zsh.org Mon Dec 14 15:28:08 2009
+Return-Path: <zsh-users-return-14648-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22248 invoked by alias); 14 Dec 2009 15:28:08 -0000
+Mailing-List: contact zsh-users-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Users List <zsh-users.zsh.org>
+List-Post: <mailto:zsh-users@zsh.org>
+List-Help: <mailto:zsh-users-help@zsh.org>
+Delivered-To: mailing list zsh-users@zsh.org
+X-Seq: 14648
+Received: (qmail 28804 invoked from network); 14 Dec 2009 15:28:05 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received-SPF: none (proxy.melb.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Mon, 14 Dec 2009 15:27:46 +0000
+From: Peter Stephenson <pws@csr.com>
+To: zsh-users@zsh.org
+Subject: Re: Unable to read history on latest Cygwin
+Message-ID: <20091214152746.6f81dc9a@news01>
+In-Reply-To: <1260800369.32429.1350005931@webmail.messagingengine.com>
+References: <1260800369.32429.1350005931@webmail.messagingengine.com>
+Organization: CSR
+X-Mailer: Claws Mail 3.5.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 14 Dec 2009 15:27:48.0008 (UTC) FILETIME=[FDB66A80:01CA7CD1]
+X-Scanned-By: MailControl A-09-22-10 (www.mailcontrol.com) on 10.68.0.117
+
+On Mon, 14 Dec 2009 15:19:29 +0100
+"Thorsten Kampe" <thorsten@thorstenkampe.de> wrote:
+> the new Cygwin 1.7 release is soon to be released. According to Cygwin 
+> Project Co-Leader Corinna Vinschen, Cygwin will drop "fake support" for 
+> emulating hardlinks on FAT32: "Hardlinks on FAT [...] have been faked in 
+> 1.5 by copying the file. The decision was made a couple of weeks back to 
+> drop this fake since the application should know that the underlying 
+> filesystem is not capable of creating hardlinks."
+> 
+> The result of that is that I'm not able to run zsh "portable" from a 
+> FAT32 USB thumb drive: "zsh: failed to create hard link as lock file 
+> /home/thorsten/.zhistory.LOCK: operation not permitted". (Zsh is running 
+> but history is neither saved nor written). histfcntllock also results in 
+> errors.
+> 
+> "Your best bet now might be to report this as an upstream bug to zsh, 
+> and recommend that they use an alternative approach, such as symlink 
+> locking (the way emacs does things), if hard link locking doesn't work 
+> because of the underlying file system."
+
+I presume that means symlink() works OK?  We should probably be able to do
+something relatively straightforward like the following---using exactly the
+same code for symbolic links as hard links, most of the change is indenting
+code---though I've only checked it to the extent that it doesn't screw up
+somewhere that does support hard links.
+
+I haven't dared check specifically for EPERM, although in theory I could.
+
+> Bash does not exihibit the error.
+
+I don't see the relevance.  Have you any reason to suppose it would and
+that this would affect zsh?  There are various ways of simulating file
+locking.
+
+Index: configure.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/configure.ac,v
+retrieving revision 1.128
+diff -u -r1.128 configure.ac
+--- configure.ac	29 Sep 2009 19:19:21 -0000	1.128
++++ configure.ac	14 Dec 2009 15:10:55 -0000
+@@ -1169,7 +1169,8 @@
+ 	       htons ntohs \
+ 	       regcomp regexec regerror regfree \
+ 	       gdbm_open getxattr \
+-	       realpath canonicalize_file_name)
++	       realpath canonicalize_file_name \
++	       symlink)
+ AC_FUNC_STRCOLL
+ 
+ if test x$enable_cap = xyes; then
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.95
+diff -u -r1.95 hist.c
+--- Src/hist.c	16 Aug 2009 20:37:45 -0000	1.95
++++ Src/hist.c	14 Dec 2009 15:10:55 -0000
+@@ -2601,40 +2601,59 @@
+ 	char *lockfile;
+ #ifdef HAVE_LINK
+ 	char *tmpfile;
++	int failed = 0;
+ #endif
+ 
+ 	lockfile = bicat(unmeta(fn), ".LOCK");
+ #ifdef HAVE_LINK
+-	if ((fd = gettempfile(fn, 0, &tmpfile)) >= 0) {
+-	    FILE *out = fdopen(fd, "w");
+-	    if (out) {
+-		fprintf(out, "%ld %s\n", (long)getpid(), getsparam("HOST"));
+-		fclose(out);
+-	    } else
+-		close(fd);
+-	    while (link(tmpfile, lockfile) < 0) {
+-		if (errno != EEXIST)
+-		    zerr("failed to create hard link as lock file %s: %e",
+-			 lockfile, errno);
+-		else if (!keep_trying)
+-		    ;
+-		else if (stat(lockfile, &sb) < 0) {
+-		    if (errno == ENOENT)
++#ifdef HAVE_SYMLINK
++	do
++#endif
++	{
++	    if ((fd = gettempfile(fn, 0, &tmpfile)) >= 0) {
++		FILE *out = fdopen(fd, "w");
++		if (out) {
++		    fprintf(out, "%ld %s\n", (long)getpid(), getsparam("HOST"));
++		    fclose(out);
++		} else
++		    close(fd);
++		while (
++#ifdef HAVE_SYMLINK
++		    (failed ? symlink(tmpfile, lockfile) :
++		     link(tmpfile, lockfile)) < 0
++#else
++		    link(tmpfile, lockfile) < 0
++#endif
++		    ) {
++		    if (errno != EEXIST)
++			failed++; /* could check for EPERM here */
++		    else if (!keep_trying)
++			;
++		    else if (stat(lockfile, &sb) < 0) {
++			if (errno == ENOENT)
++			    continue;
++			zerr("failed to stat lock file %s: %e",
++			     lockfile, errno);
++		    } else {
++			if (time(NULL) - sb.st_mtime < 10)
++			    sleep(1);
++			else
++			    unlink(lockfile);
+ 			continue;
+-		    zerr("failed to stat lock file %s: %e", lockfile, errno);
+-		} else {
+-		    if (time(NULL) - sb.st_mtime < 10)
+-			sleep(1);
+-		    else
+-			unlink(lockfile);
+-		    continue;
++		    }
++		    lockhistct--;
++		    break;
+ 		}
+-		lockhistct--;
+-		break;
++		unlink(tmpfile);
++		free(tmpfile);
+ 	    }
+-	    unlink(tmpfile);
+-	    free(tmpfile);
+ 	}
++#ifdef HAVE_SYMLINK
++	while (failed == 1);
++#endif
++	if (failed)
++	    zerr("failed to create link as lock file %s: %e",
++		 lockfile, errno);
+ #else /* not HAVE_LINK */
+ 	while ((fd = open(lockfile, O_WRONLY|O_CREAT|O_EXCL, 0644)) < 0) {
+ 	    if (errno != EEXIST || !keep_trying)
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

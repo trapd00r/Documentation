@@ -1,0 +1,293 @@
+From zsh-workers-request@math.gatech.edu  Sat Nov  4 01:22:26 1995
+Received: from math.gatech.edu (euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with SMTP id BAA01111 for <mason@werple.mira.net.au>; Sat, 4 Nov 1995 01:22:22 +1100 (EST)
+Received: by math.gatech.edu (SMI-8.6/SMI-SVR4)
+	id IAA01826; Fri, 3 Nov 1995 08:50:16 -0500
+Old-Return-Path: <zsh-users-request@math.gatech.edu>
+Resent-Date: Fri, 3 Nov 1995 08:49:18 -0500
+Old-Return-Path: <pws@ifh.de>
+From: pws@ifh.de (Peter William Stephenson)
+Message-Id: <9511031354.AA27287@sgi.ifh.de>
+Subject: Asynchronous version of `sched'
+To: zsh-users@math.gatech.edu (Zsh users list)
+Date: Fri, 3 Nov 1995 14:54:15 +0100 (MET)
+X-Mailer: ELM [version 2.4 PL24]
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"1Nebn3.0.DS.UtXcm"@euclid>
+Resent-From: zsh-users@math.gatech.edu
+X-Mailing-List: <zsh-users@math.gatech.edu> archive/latest/120
+X-Loop: zsh-users@math.gatech.edu
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+While I'm watching endless streams of dubious data go past...
+
+Further to the recent discussion on a version of `sched' which doesn't
+just get executed before prompts, here's my first attempt at such a
+function.  It runs a background process which sleeps until the time is
+up, then sends a signal to the shell, which is waiting with a trap.
+(I've used SIGUSR1 for this purpose.)  If I've got it right, the
+background process should be HUP'd if the shell exits first.
+
+The function maintains a queue of waiting events in the file
+~/.asched, and will restart the sentinel process if necessary, so in
+principle you can issue an arbitrary series of 'asched' commands in
+any order, just like sched.
+
+I haven't written any sched-like management options: you can look at
+~/.asched for the list, and edit that and run `asched' on its own (or
+even kill off $ASCHED_PROC) if necessary.  However, asched -d will
+delete the current entry, while asched -n will do that and look for
+the next, if there is one.  Note ~/.asched always has absolute times,
+of course.
+
+Does anyone feel strong enough to investigate the tty problems I
+reported in the introduction below?
+
+# asched():  Queue up events to be executed within the shell:
+#            like sched except that it doesn't wait for prompts.
+#            Note, however, that jobs run when the shell is
+#            not active can do strange things to the tty settings.
+#            Must be a function, not a script.
+#
+# Author:  Peter Stephenson <pws@ifh.de>
+#
+# Usage:
+#   asched [+]hh:mm commands ...
+# (just like sched, with absolute or relative times)
+# or
+#   asched [-nd]
+#
+# The commands as passed to asched are executed verbatim, so remember
+# any internal quotes, e.g.
+#   asched 16:30 "print \"\\aIt's time to go.\""
+#
+# With no arguments, asched tries to find a job to execute from the
+# list maintained in ~/.asched.
+#
+# With the option -n, asched deletes the first job in the list
+# (whether or not it has run), and tries to find the next.  (This is
+# used internally by the queuing system).
+#
+# With -d, asched simply deletes the first job but does not try to
+# schedule another.  Both -n and -d fail silently.
+#
+# The variable ASCHED_PROC contains the pid of the background process
+# which is counting down to the appropriate time.
+#
+# Bugs:
+# * If you don't have perl in your path, any rescheduling of a job
+#   which hasn't run will leave a bogus 'sleep' process.
+#
+# * If you have job control, the current job will be altered (and will
+#   have been disowned) after the function.
+
+# make options local to function:  require extra glob patterns:
+# don't complain if =perl doesn't expand.
+setopt localoptions extendedglob nonomatch
+# make sure we can have multi-line quotations:
+# kill -HUP sentinel process when shell exits.
+unsetopt cshjunkiequotes nohup
+
+local tm dt hr mn shr smn rel line lcnt rest newcmd newsecs cmd next proc
+integer secs minsnow targsecs mins
+local ASCHED=~/.asched		# file to store info
+
+if [[ $1 = -[nd] ]]; then
+  # delete first job in list
+  next=1
+  shift
+
+  # update queue file
+  if [[ -f $ASCHED ]]; then
+    tail +2 $ASCHED > $ASCHED.new
+    if [[ -s $ASCHED.new ]]; then
+      mv -f $ASCHED.new $ASCHED
+    else
+      rm -f $ASCHED.new $ASCHED
+    fi
+  fi
+
+  # in case sentinel is still running, finish it off
+  if [[ -n $ASCHED_PROC ]]; then
+    kill $ASCHED_PROC
+    unset ASCHED_PROC
+    unfunction TRAPUSR1
+  fi
+  if [[ $1 = -d ]]; then
+    return 0
+  fi
+else
+  # look for time and command arguments
+
+  tm=$1				# time
+  shift				# command
+  cmd="$*";
+
+  if [[ -n $tm && ( $tm != +#<>:<> || -z $cmd ) ]]; then
+    # either no arguments, or time and command is present
+    print "Usage: asched [+]hh:mm command ..." >&2
+    return 1
+  fi
+
+  if [[ $tm = +* ]]; then
+    # time is relative to now.
+    tm=${tm#+}
+    rel=1
+  fi
+fi
+
+
+# Find out the time now.
+# Can't rely on "date +fmt" being available
+dt=$(date)
+hr=${dt%%:*}			# hour is first thing before colon
+mn=${dt#$hr:}			# minute is what comes next
+hr=${hr##* }			# strip words before hour
+mn=${mn%% *}			# and after minute
+mn=${mn%%:<>}			# strip possible seconds
+((minsnow = hr*60 + mn))
+
+# print Secs now: $((minsnow * 60))
+
+GetRel() {
+  # return time in seconds to hh:mm passed
+  # uses minsnow and sets secs
+  local rhr rmn
+  
+  rhr=${1%:<>}
+  rmn=${1#<>:}
+
+  ((rmn += rhr * 60))
+#  print Target secs:  $((rmn*60))
+  if ((rmn < minsnow)); then
+    # add mins in a day to get next morning
+    ((rmn += 24*60))
+  fi
+  ((secs = (rmn-minsnow)*60))
+}
+
+if [[ -n $tm ]]; then
+  # Process supplied time
+  shr=${tm%:<>}
+  smn=${tm#<>:}
+  if [[ -z $rel]]; then
+    # It's absolute:  find out howmany seconds to target
+    GetRel $tm
+    targsecs=$secs
+  else
+    # It's relative:  find seconds to target
+    ((mins = shr*60 + smn))
+    ((targsecs = mins*60))
+
+    # and find out absolute time of event
+    ((mins += minsnow))
+    if ((mins > 24*60)); then
+      ((mins -= 24*60))
+    fi
+    ((shr = mins/60))
+    ((smn = mins - shr*60))
+  fi
+
+#  print Secs till event: $targsecs at time ${shr}:${smn}
+fi
+
+if [[ -f $ASCHED ]]; then
+  while read line rest; do
+    # Loop through existing events in list.
+    [[ -z $line ]] && break
+    GetRel $line
+#    print "Found an event:  target $secs"
+    # See if it's earlier than the new event, if any
+    [[ -n $cmd ]] && ((targsecs < secs)) && break
+    # If it was, remember the first such event to be scheduled next.
+    [[ -z $newsecs ]] && newsecs="$secs" newcmd="$rest"
+    # If no new command, we only need to look at the first.
+    [[ -z $cmd ]] && break
+    ((lcnt++))
+  done < $ASCHED
+  if ((lcnt)); then
+    # Add new event in middle of queue file.
+    { head -$lcnt $ASCHED
+      print -n "${shr}:${smn} "
+      print -R $cmd
+      tail +$((lcnt+1)) $ASCHED
+    } > $ASCHED.new
+  elif [[ -n $cmd ]]; then
+    # Add new event at beginning of queue file.
+    { print -n "${shr}:${smn} "
+      print -R $cmd
+      cat $ASCHED
+    } > $ASCHED.new
+  fi
+  if [[ -n $newcmd ]]; then
+    # Remember earlier event than the one supplied on command line, if any.
+    targsecs=$newsecs
+    cmd=$newcmd
+  fi
+  # Replace queue file with new one.
+  [[ -f $ASCHED.new ]] && mv -f $ASCHED.new $ASCHED
+elif [[ -n $cmd ]]; then
+  # No queue file: creat one.
+  { print -n "${shr}:${smn} "
+    print -R $cmd
+  } > $ASCHED
+fi
+
+if [[ -z $cmd ]]; then
+  # Nothing to execute
+  if [[ -n $next ]]; then
+    # If just looking for command after deleting previous one, no error
+    return 0
+  else
+    print "No event found for scheduling." >&2
+    return 1
+  fi
+fi
+
+# print "Next event is in $targsecs seconds:\n$cmd"
+
+# Kill the old sentinel process if necessary
+[[ -n $ASCHED_PROC ]] && kill $ASCHED_PROC
+
+# Define trap to be executed when sent signal by sentinel
+eval "TRAPUSR1() {
+  $cmd
+  unfunction TRAPUSR1
+  unset ASCHED_PROC
+  asched -n
+  : If you unfunction me you must kill \$ASCHED_PROC, too!
+}"
+
+# Start sentinel process to send signal
+if [[ =perl != '=perl' ]]; then
+  # Do the subjob in perl, which saves processes (sleep is internal).
+  proc="perl -e \"sleep($targsecs); kill 'USR1', $$;\""
+else
+  # Is there some way of getting rid of the sleep if we kill $ASCHED_PROC?
+  proc="{sleep $targsecs; kill -USR1 $$}";
+fi
+
+if [[ -o monitor ]]; then
+  # Get around job control:  we don't want the sentinel to be in
+  # the job list.  Isn't there a better way than this?
+  eval "$proc &" >&/dev/null
+  disown
+else
+  eval "$proc &"
+fi
+ASCHED_PROC=$!
+
+# Tidy up.
+unfunction GetRel
+
+return 0
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

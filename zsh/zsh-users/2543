@@ -1,0 +1,169 @@
+From zsh-users-return-2543-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Aug 31 22:35:29 1999
+Return-Path: <zsh-users-return-2543-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2449 invoked from network); 31 Aug 1999 22:35:25 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 Aug 1999 22:35:25 -0000
+Received: (qmail 2206 invoked by alias); 31 Aug 1999 22:35:07 -0000
+Mailing-List: contact zsh-users-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-users@sunsite.auc.dk
+X-Seq: 2543
+Received: (qmail 2199 invoked from network); 31 Aug 1999 22:35:04 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <990831223444.ZM17274@candle.brasslantern.com>
+Date: Tue, 31 Aug 1999 22:34:44 +0000
+In-Reply-To: <19990831114112.A19733@cj952583-b.alex1.va.home.com>
+Comments: In reply to Sweth Chandramouli <sweth@gwu.edu>
+        "processing of pipelines" (Aug 31, 11:41am)
+References: <19990831114112.A19733@cj952583-b.alex1.va.home.com>
+X-Mailer: Z-Mail Lite (5.0.0 30July97)
+To: Sweth Chandramouli <sweth@gwu.edu>
+Subject: Re: processing of pipelines
+Cc: zsh-users@sunsite.auc.dk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Aug 31, 11:41am, Sweth Chandramouli wrote:
+> Subject: processing of pipelines
+> 	i've been part of a recent discussion in the comp.unix.shell
+> newsgroup about how different shells process pipelines, and thought i 
+> should ask this group about zsh's behaviour.
+
+Sven is probably the best person to give details of the internals, but:
+
+> some quick tests first 
+> led me to believe that zsh runs each command in a pipeline
+> sequentially in the current process;
+
+If you think about this for any length of time, you'll see that it is
+impossible.  If the command is not a shell builtin, the shell MUST fork()
+in order to exec() the external program.  Even if the command is a builtin,
+having the same process both write and read from the opposite ends of the
+same pipe is an invitation to deadlock [which is why `cmd` and $(cmd) also
+fork, and I wish Sven luck inventing a way around it that doesn't involve
+temporary files and just as much overhead as forking].
+
+> some more research now makes me 
+> think that this only appeared to be the case because i was testing
+> using a no-op on one side of the pipe, and zsh somehow checks to see 
+> if the command on the right side of a pipe is actually reading from
+> the pipe; if not, it treats the pipe like a semicolon.
+
+No, that's also impossible.  What zsh does in some circumstances is use a
+second pipe between the parent and the child as a semaphore, to delay the
+exec() until the parent has successfully entered the child in its process
+table.  This avoids a potential race condition where the child may run to
+completion and exit before the parent has even returned from the fork()
+call.  It does mean that extremely tiny jobs start a bit slower in zsh.
+
+> 	my new hypothesis, then, is that zsh (like ksh) runs all commands
+> in a pipeline in sub-processes except for the last command, which is
+> run in the current process
+
+Once again, "run in the current process" is not possible except for shell
+builtins.  Zsh *does* run the last command in a pipeline in the current
+shell when the command *is* a builtin, even if that builtin is a loop,
+which is AFAIK different from any other shell; it means that you can do
+things like
+
+    some external command | while read line; do export $line; done
+
+and the current shell's environment will actually be modified.  Ksh would
+have to use
+
+    some external command > somefile
+    . somefile
+
+to get a similar effect.
+
+> but that when the pipe isn't actually
+> being used, it splits the pipeline up into smaller lists to be
+> processed individually.  yes?  no?  something else entirely?
+
+Something else entirely.
+
+Here's a way to peek at the process tree:
+
+alias -g child='perl -e '\''print @ARGV, ": ", getppid(), "-->", $$, "\n";
+			while (<STDIN>) { print; }'\'
+
+echo $$ | child A | child B | child C | child D
+D: 5812-->5901
+C: 5812-->5900
+B: 5812-->5899
+A: 5812-->5898
+5812
+
+Now try sticking an "exec" in the middle somewhere:
+
+echo $$ | child A | exec child B | child C | child D
+D: 5812-->5910
+C: 5812-->5909
+B: 5812-->5908
+A: 5812-->5907
+5812
+
+Note that it made no difference; child B was already being exec()d.  Now
+put the exec at the end (be sure you start a new shell to try this, or
+you'll never see the output):
+
+echo $$ | child A | child B | child C | exec child D
+D: 5518-->5812
+C: 5812-->5914
+B: 5812-->5913
+A: 5812-->5912
+5812
+
+Now 5812 has exited; it exec'd the last perl in the pipeline, replacing
+the shell with it's child.
+
+Note the slight difference when you wrap the whole thing in parens:
+
+(echo $$ | child A | child B | child C | child D) 
+D: 5942-->5963
+C: 5963-->5967
+B: 5963-->5966
+A: 5963-->5965
+5942
+
+(echo $$ | child A | child B | child C | exec child D) 
+D: 5942-->5968
+C: 5968-->5972
+B: 5968-->5971
+A: 5968-->5970
+5942
+
+Zsh knows that it's safe to exec the last child when in a subshell, so it
+does so even if you don't explicitly say "exec".
+
+Now try it with "child" as a shell function:
+
+unalias \child
+child() { perl -e 'print @ARGV, ": ", getppid(), "-->", $$, "\n";
+                        while (<STDIN>) { print; }' $* }
+
+echo $$ | child A | child B | child C | child D
+D: 5942-->6021
+C: 6019-->6020
+B: 6017-->6018
+A: 6015-->6016
+5942
+
+echo $$ | child A | child B | child C | exec child D
+D: 5942-->6029
+C: 6027-->6028
+B: 6025-->6026
+A: 6023-->6024
+5942
+
+Note that each shell function got its own process, even when the last one
+was to be exec'd (though zsh still exits after the last function finishes,
+as if it really had done an "exec").  This is so that complex process
+management within the shell function is handled by the function process,
+while the parent zsh manages the surrounding pipeline.
+
+Make sense?  BTW, there's a proposed patch to 3.1.6 that would change this
+slightly in some circumstances, but the basic ideas are the same.
+

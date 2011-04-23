@@ -1,0 +1,176 @@
+From zsh-users-return-15303-mason-zsh=primenet.com.au@zsh.org Fri Aug 20 08:19:19 2010
+Return-Path: <zsh-users-return-15303-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3136 invoked by alias); 20 Aug 2010 08:19:18 -0000
+Mailing-List: contact zsh-users-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Users List <zsh-users.zsh.org>
+List-Post: <mailto:zsh-users@zsh.org>
+List-Help: <mailto:zsh-users-help@zsh.org>
+Delivered-To: mailing list zsh-users@zsh.org
+X-Seq: 15303
+Received: (qmail 23783 invoked from network); 20 Aug 2010 08:19:12 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at closedmail.com does not designate permitted sender hosts)
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-id: <100820011905.ZM28486@torch.brasslantern.com>
+Date: Fri, 20 Aug 2010 01:19:05 -0700
+In-reply-to: <20100819181556.4a3e6589@csr.com>
+Comments: In reply to Peter Stephenson <Peter.Stephenson@csr.com>
+ "Re: process substitution and Ctrl-C" (Aug 19,  6:15pm)
+References: <20100819124142.GQ16075@prunille.vinc17.org>
+	<20100819140730.70daeb3b@csr.com>	<20100819181556.4a3e6589@csr.com>
+	<20100819211853.33d720d8@pws-pc>	<100819083237.ZM26692@torch.brasslantern.com>
+	<20100819213717.5b5a7466@pws-pc>	<20100819211721.GB16241@prunille.vinc17.org>
+In-reply-to: <20100819211853.33d720d8@pws-pc>
+Comments: In reply to Peter Stephenson <p.w.stephenson@ntlworld.com>
+ "Re: process substitution and Ctrl-C" (Aug 19,  9:18pm)
+In-reply-to: <20100819213717.5b5a7466@pws-pc>
+Comments: In reply to Peter Stephenson <p.w.stephenson@ntlworld.com>
+ "Re: process substitution and Ctrl-C" (Aug 19,  9:37pm)
+In-reply-to: <20100819211721.GB16241@prunille.vinc17.org>
+Comments: In reply to Vincent Lefevre <vincent@vinc17.net>
+ "Re: process substitution and Ctrl-C" (Aug 19, 11:17pm)
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+To: zsh-users@zsh.org
+Subject: Re: process substitution and Ctrl-C
+MIME-version: 1.0
+Content-type: text/plain; charset=us-ascii
+
+Answering a whole bunch of messages at once ...
+
+On Aug 19,  6:15pm, Peter Stephenson wrote:
+}
+} In fact we're jumping through a fairly large and stable hoop not all that
+} the main shell.  You might think, logically, that any process attached to
+} any job marked as running in the current shell should also get the signal
+} passed, if we're going to maintain the fiction.
+
+On Aug 19,  9:18pm, Peter Stephenson wrote:
+}
+} I'm now wondering if we should do the same in the case where the shell
+} actually does get the SIGINT and abort processing as a result?
+
+What I'm now wondering is whether there's a reason it was the other way,
+more significant than just Paul never having gotten around to figuring
+out how to fit it into the job code.  I begin to believe not, see below.
+
+On Aug 19,  9:37pm, Peter Stephenson wrote:
+}
+} >     echo >>(cat; sleep 100)
+} > 
+} > then the shell is effectively frozen until "sleep 100" finishes
+} 
+} This is a separate problem.  It's not so much that the echo has gone as
+} that there are no processes in the tty process group to get the signal,
+} because the substitution is treated as asynchronous for the purposes of
+} job handling.
+
+Well, OK, but the main shell could still get the signal ...  That's
+what would happen if "echo" were replaced by a loop construct, as is
+demonstrated by Vincent's original example.
+
+} (In fact, I've decided I don't understand what "asynchronous" means
+} in this case, either. We seem to have spent chunks of the last twenty
+} years making process substitution less and less like an asynchronous
+} process; first we started waiting for it to finish, now we're passing
+} signals to it.)
+
+I just had a peek back at some really old code.  (Next paragraph may be
+indecipherable to anyone not on zsh-workers, and to some of them.)
+
+Mid-90s, job handling in entersubsh() was a lot simpler, and there was
+no distinction corresponding to the current meanings of the ESUB_PGRP
+and ESUB_ASYNC bitflags passed to entersubsh().  There was no provision
+for tracking the process substitution in the job table, and the only
+way to run process substitution in parallel with the foreground job
+that was writing to it, was to background it.  This is essential for
+doing things like "foo >>(bar) 2>>(baz)"; if the >>(bar) had not been
+backgrounded, 2>>(baz) could not have run until it finished.
+
+What has happened over time is that the shell has become capable of
+running those jobs in parallel without losing track of them, which I
+think means it's now OK to wait for them and make them interruptible,
+given that [as best I can tell] >>({...}&) provides the old behavior.
+
+However ...
+
+} Any reactions to the following patch?  This makes the substitution
+} process always get the same signal as the rest of the command line.
+[...]
+} -    entersubsh(ESUB_ASYNC|ESUB_PGRP);
+} +    entersubsh(ESUB_PGRP);
+
+I'm a little worried about this, because leaving off ESUB_ASYNC may
+cause entersubsh() to attempt to attach a new process group leader to
+the terminal, and I can't tell what consequences that may have for
+the foreground job.  Maybe there no circumstance in which this would
+happen, e.g. thisjob is always -1 when in this context.
+
+} The alternative is to make it synchronous only if the current job is
+} running within the shell.  I no longer really have any idea what the
+} intention is.
+
+Again we're confusing (or overloading?) the meaning of "synchronous".
+The process substitution can't really be synchronous in the sense of
+sequential with respect to the rest of the job.  The intention is to
+run in parallel so that multios can send data to many processes at
+once.  I think the rest of the behavior was ill-defined side-effect.
+
+} I'm assuming the other use of >(...), when not part of a redirection,
+} want identical treatment to whatever happens here.
+
+That makes sense to me at the moment ...
+
+On Aug 19, 11:17pm, Vincent Lefevre wrote:
+}
+} > The assumption is that process substitution consumes stdin and exits
+} > after its stdin is closed.  Otherwise, why would you need to redirect
+} > into it?
+} 
+} However there's a race condition, IMHO. In fact, even without a signal
+} to the main process. For instance, if you consider:
+} 
+}   ls >>(cat -n)
+} 
+} then the zsh prompt for the next command is displayed before "cat -n"
+} finishes. Does this mean that process substitution should not be used
+} for filtering, except when an end marker is used (as in the example
+} at the end of my message)?
+
+I'm not sure what question you're asking, but process substitutions
+share the stdout file descriptor of the command of which they are a
+part, so if you use them in one of the commands in a pipeline they
+become part of the stream feeding the right side of the pipe; and the
+fact that the command writing to *them* has exited does not affect
+what happens downstream.
+
+On the other hand foo >>(bar) | baz is a multio and baz will get as
+stdin the stdout of both foo and bar, in no particular order, so you
+have to be careful to use { foo >>(bar) } | baz or unsetopt multios.
+
+}   { ls } >>(cat -n)
+} 
+} seems to work (as you said)
+
+If I understand what you mean to exemplify, that isn't exactly the
+part of the behavior to which I was referring.
+
+} For instance:
+} 
+}   { ls } >>(while read line; do sleep 1; echo $line; done)
+} 
+} outputs one line each second, and the main process is blocked as
+} wanted; but if one does a Ctrl-C, the main process is terminated
+} and one gets the prompt while the substituted process still outputs
+} the remaining lines each second. I don't think this is the behavior
+} that one expects.
+
+As noted above, that's the only behavior that could be accomodated in
+the original code base ... so it _is_ what someone who has been using
+zsh since 1993-ish would expect. :-)
+

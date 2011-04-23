@@ -1,0 +1,144 @@
+From zsh-users-return-15442-mason-zsh=primenet.com.au@zsh.org Sat Oct 02 17:45:47 2010
+Return-Path: <zsh-users-return-15442-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 62 invoked by alias); 2 Oct 2010 17:45:47 -0000
+Mailing-List: contact zsh-users-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Users List <zsh-users.zsh.org>
+List-Post: <mailto:zsh-users@zsh.org>
+List-Help: <mailto:zsh-users-help@zsh.org>
+Delivered-To: mailing list zsh-users@zsh.org
+X-Seq: 15442
+Received: (qmail 29616 invoked from network); 2 Oct 2010 17:45:42 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at closedmail.com does not designate permitted sender hosts)
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-id: <101002104529.ZM3908@torch.brasslantern.com>
+Date: Sat, 02 Oct 2010 10:45:26 -0700
+In-reply-to: <AANLkTin8CdDMZFPTvVGTyCSx3qctWq+MVQ88fwpBO=Rh@mail.gmail.com>
+Comments: In reply to Paul Mertz <paul.mertz6@gmail.com>
+ "Re: SH_WORD_SPLIT, $* and null IFS" (Oct  1,  9:16am)
+References: <AANLkTikx9YPujdRz+u56CLcHcSkTVgoe4iYVDD1kbj9r@mail.gmail.com>
+	<100930092706.ZM10477@torch.brasslantern.com>
+	<AANLkTin8CdDMZFPTvVGTyCSx3qctWq+MVQ88fwpBO=Rh@mail.gmail.com>
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+To: zsh-users@zsh.org
+Subject: Re: SH_WORD_SPLIT, $* and null IFS
+MIME-version: 1.0
+Content-type: text/plain; charset=us-ascii
+
+On Oct 1,  9:16am, Paul Mertz wrote:
+}
+} What I meant by "$* don't care about the ifs" is that the IFS is not
+} expected to be involved in the joining of parameters when using $* not
+} enclosed by double quotes (it is however obviously used when expanding
+} each parameters).
+
+Aha!  So you meant *should not* care, not *does not*.
+
+} host# IFS=
+} host# set - "a b" "c   d" e$'\0'f 'gxh'
+} host# setopt sh_wordsplit
+} host# print -l $*
+} a bc   defgxh
+
+This might in fact be a bug.  Fix (?) below; everyone but PWS can stop
+reading when their eyes begin to glaze over, as this is zsh-workers
+material.  I took the approach of basing this on emulation mode rather
+than on the SH_WORD_SPLIT option, to minimize zsh-mode disruption, but
+that can easily be adjusted.
+
+The following implements the ksh-equivalent behavior by initializing the
+state of the (@) flag based upon the value of $IFS when we are in sh/ksh
+emulation mode, and then by requiring later joining to pay attention.
+However, it also has the side-effect of changing the behavior of ${=...}
+in a related way.  There is a comment about initalizing spbreak:
+
+     * Indicates spliting a string into an array.  There aren't
+     * actually that many special cases for this --- which may
+     * be why it doesn't work properly; we split in some cases
+     * where we shouldn't, in particular on the multsubs for
+     * handling embedded values for ${...=...} and the like.
+
+What I think may be going on here is that multsub() does the right thing
+but later the result gets joined and re-split unnecessarily.  This patch
+could sometimes prevent that.  Or I may just be wrong.  Follow along ...
+
+A bit later is the first place where multsub() is actually called:
+
+	 * This handles arrays.  TODO: this is not the most obscure call to
+	 * multsub() (see below) but even so it would be nicer to pass down
+	 * and back the arrayness more rationally.  In that case, we should
+	 * remove the aspar test and extract a value from an array, if
+	 * necessary, when we handle (P) lower down.
+
+In that case if multsub succeeds then isarr = -1.  The other place where
+isarr = -1 is when nojoin [the (@) flag] is true, for example here:
+
+     * Join arrays up if we're in quotes and there isn't some
+     * override such as (@).
+
+     * We do a separate stage of dearrayification in the YUK chunk,
+     * I think mostly because of the way we make array or scalar
+     * values appear to the caller.
+
+OK, so what does isarr == -1 mean?  (BTW, the fact that in another
+function isarr is a pointer is a source of endless entertainment.)
+
+     * The values -1 and 2 are special to isarr.  The value -1 is used
+     * to force us to keep an empty array.  It's tested in the YUK chunk
+     * (I mean the one explicitly marked as such).  The value 2
+     * indicates an array has come from splitting a scalar.
+
+There no longer is a chunk marked "YUK" that I can find so I'm not sure
+what either of these refers to.  PWS?  In any case isarr == -1 no longer
+seems to be *only* related to empty arrays; it seems to indicate that
+joining should not occur regardless of the initial state of nojoin.
+
+So checking isarr >= 0 in the patch, it's possible that I've fixed some
+long-standing bug at least in a subset of cases, but I'm not entirely
+sure how to test it.  It's also possible that I've horribly broken
+something and I ought to be testing nojoin directly; or some third
+thing I don't know about yet.  However, all tests pass when running
+"make check" so if something's broken it's obscure.
+
+I just spent something like an hour going over other possibilities and
+trying tweaks to the algorithm and ended up convincing myself I got it
+right (modulo the isarr question) in the first place, so here it is.
+
+I won't commit this without some feedback.  It also may need an update
+to the parameter "Rules" section of the manual
+
+Index: subst.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/subst.c,v
+retrieving revision 1.27
+diff -c -r1.27 subst.c
+--- subst.c	17 Apr 2009 18:57:22 -0000	1.27
++++ subst.c	2 Oct 2010 15:50:23 -0000
+@@ -1492,7 +1524,7 @@
+      * This is one of the things that decides whether multsub
+      * will produce an array, but in an extremely indirect fashion.
+      */
+-    int nojoin = 0;
++    int nojoin = EMULATION(EMULATE_SH|EMULATE_KSH) ? !(ifs && *ifs) : 0;
+     /*
+      * != 0 means ${...}, otherwise $...  What works without braces
+      * is largely a historical artefact (everything works with braces,
+@@ -2713,7 +2768,7 @@
+      * done any requested splitting of the word value with quoting preserved.
+      * "ssub" is true when we are called from singsub (via prefork):
+      * it means that we must join arrays and should not split words. */
+-    if (ssub || spbreak || spsep || sep) {
++    if (ssub || (spbreak && isarr >= 0) || spsep || sep) {
+ 	if (isarr) {
+ 	    val = sepjoin(aval, sep, 1);
+ 	    isarr = 0;
+
+
+-- 
+

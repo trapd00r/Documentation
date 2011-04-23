@@ -1,0 +1,128 @@
+From zsh-users-return-14723-mason-zsh=primenet.com.au@zsh.org Thu Jan 21 11:04:19 2010
+Return-Path: <zsh-users-return-14723-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14690 invoked by alias); 21 Jan 2010 11:04:19 -0000
+Mailing-List: contact zsh-users-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Users List <zsh-users.zsh.org>
+List-Post: <mailto:zsh-users@zsh.org>
+List-Help: <mailto:zsh-users-help@zsh.org>
+Delivered-To: mailing list zsh-users@zsh.org
+X-Seq: 14723
+Received: (qmail 27997 invoked from network); 21 Jan 2010 11:04:15 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-3.0 required=5.0 tests=AWL,BAYES_00,
+	RCVD_IN_DNSWL_LOW,SPF_HELO_PASS autolearn=ham version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Thu, 21 Jan 2010 10:58:49 +0000
+From: Peter Stephenson <pws@csr.com>
+To: zsh-users@zsh.org
+Subject: Re: Globbing autocorrects misencoded filenames?
+Message-ID: <20100121105849.29195707@news01>
+In-Reply-To: <20100119204916.GC29936@waba>
+References: <20100119204916.GC29936@waba>
+Organization: CSR
+X-Mailer: Claws Mail 3.5.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+X-OriginalArrivalTime: 21 Jan 2010 10:58:49.0747 (UTC) FILETIME=[B641B630:01CA9A88]
+X-Scanned-By: MailControl A-09-22-10 (www.mailcontrol.com) on 10.71.0.137
+
+On Tue, 19 Jan 2010 21:49:16 +0100
+waba@waba.be wrote:
+> IOW, I create a file named "=C3=A0bc" (a-grave b c) using latin1 encoding=
+ on
+> my utf8 system, but it still matches as utf8 during globbing.
+
+What's going on is that when the shell finds an invalid character in the
+current encoding it treats it as a single-byte "character" (really just a
+number) because it doesn't know what else to do.  Because Unicode imported
+ISO-8859-1 (or maybe -15, can't remember) as the 128 or so characters after
+ASCII, in this case the raw single-byte character matches the properly
+converted UTF-8 character.
+
+The fix is for the shell never to allow a properly converted character to
+match an invalid character, but to continue to allow two invalid characters
+(or, obviously, two valid characters) to match.
+
+Index: Src/pattern.c
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D
+RCS file: /cvsroot/zsh/zsh/Src/pattern.c,v
+retrieving revision 1.50
+diff -u -r1.50 pattern.c
+--- Src/pattern.c	29 May 2009 21:06:46 -0000	1.50
++++ Src/pattern.c	21 Jan 2010 10:54:31 -0000
+@@ -1795,9 +1795,9 @@
+=20
+=20
+ /* Get a character and increment */
+-#define CHARREFINC(x, y)	charrefinc(&(x), (y))
++#define CHARREFINC(x, y, z)	charrefinc(&(x), (y), (z))
+ static wchar_t
+-charrefinc(char **x, char *y)
++charrefinc(char **x, char *y, int *z)
+ {
+     wchar_t wc;
+     size_t ret;
+@@ -1808,7 +1808,8 @@
+     ret =3D mbrtowc(&wc, *x, y-*x, &shiftstate);
+=20
+     if (ret =3D=3D MB_INVALID || ret =3D=3D MB_INCOMPLETE) {
+-	/* Error.  Treat as single byte. */
++	/* Error.  Treat as single byte, but flag. */
++	*z =3D 1;
+ 	/* Reset the shift state for next time. */
+ 	memset(&shiftstate, 0, sizeof(shiftstate));
+ 	return (wchar_t) STOUC(*(*x)++);
+@@ -1865,7 +1866,7 @@
+ /* Increment a pointer past the current character. */
+ #define CHARINC(x, y)	((x)++)
+ /* Get a character and increment */
+-#define CHARREFINC(x, y)	(STOUC(*(x)++))
++#define CHARREFINC(x, y, z)	(STOUC(*(x)++))
+ /* Counter the number of characters between two pointers, smaller first */
+ #define CHARSUB(x,y)	((y) - (x))
+=20
+@@ -2419,9 +2420,21 @@
+ 	    while (chrop < chrend && patinput < patinend) {
+ 		char *savpatinput =3D patinput;
+ 		char *savchrop =3D chrop;
+-		patint_t chin =3D CHARREFINC(patinput, patinend);
+-		patint_t chpa =3D CHARREFINC(chrop, chrend);
+-		if (!CHARMATCH(chin, chpa)) {
++		int badin =3D 0, badpa =3D 0;
++		/*
++		 * Care with character matching:
++		 * We do need to convert the character to wide
++		 * representation if possible, because we may need
++		 * to do case transformation.  However, we should
++		 * be careful in case one, but not the other, wasn't
++		 * representable in the current locale---in that
++		 * case they don't match even if the returned
++		 * values (one properly converted, one raw) are
++		 * the same.
++		 */
++		patint_t chin =3D CHARREFINC(patinput, patinend, &badin);
++		patint_t chpa =3D CHARREFINC(chrop, chrend, &badpa);
++		if (!CHARMATCH(chin, chpa) || badin !=3D badpa) {
+ 		    fail =3D 1;
+ 		    patinput =3D savpatinput;
+ 		    chrop =3D savchrop;
+
+
+--=20
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, =
+UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and=
+ Wales, registered number 4187346, registered office Churchill House, Cambr=
+idge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

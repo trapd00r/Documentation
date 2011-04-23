@@ -1,0 +1,157 @@
+From zsh-users-return-4269-mason-zsh=primenet.com.au@sunsite.dk Thu Sep 20 16:36:58 2001
+Return-Path: <zsh-users-return-4269-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9581 invoked from network); 20 Sep 2001 16:36:56 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 20 Sep 2001 16:36:56 -0000
+Received: (qmail 14828 invoked by alias); 20 Sep 2001 16:36:34 -0000
+Mailing-List: contact zsh-users-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-users@sunsite.dk
+X-Seq: 4269
+Received: (qmail 14793 invoked from network); 20 Sep 2001 16:36:26 -0000
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-Id: <1010920163414.ZM16570@candle.brasslantern.com>
+Date: Thu, 20 Sep 2001 16:34:13 +0000
+In-Reply-To: <FLEKKKDFJJDCBMPOEGGPIEOOCBAA.c-Monty.Scroggins@wcom.com>
+Comments: In reply to Monty Scroggins <c-Monty.Scroggins@wcom.com>
+        "RE: zsh: fatal error: out of memory" (Sep 12, 11:11am)
+References: <FLEKKKDFJJDCBMPOEGGPIEOOCBAA.c-Monty.Scroggins@wcom.com> 
+	<20010919094606.A4972@lifebits.de>
+In-Reply-To: <20010919094606.A4972@lifebits.de>
+Comments: In reply to Dominik Vogt <dominik.vogt@gmx.de>
+        "zsh crash, unable to log in" (Sep 19,  9:46am)
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Monty Scroggins <c-Monty.Scroggins@wcom.com>, d.vogt@lifebits.de,
+        zsh-users@sunsite.dk
+Subject: PATCH: Re: zsh crash, unable to log in
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+Dominik Vogt wrote:
+} After a hard reboot, i.e. switching off
+} the machine, my ~/.zsh_history file was corrupt.  It only
+} contained 38k of binary trash.
+
+Monty Scroggins wrote:
+} each line starts with one or more <nul> characters followed
+} by the command strings.
+
+The problem is readhistfile() uses a nested loop on fgets()/strlen()
+to read full lines from the file.  After any '\0' byte is encountered,
+the result of strlen() becomes wrong, and the inner loop soon begins
+reading the file only one byte at a time, but doubling the size of the
+buffer after each read.  So even a relatively small file with a nul
+byte anywhere other than the first character can cause zsh to consume
+all available memory.
+
+Here's a patch that replaces the loops with a recursive descent.  It
+reports an error if a nul byte is encountered; otherwise it should
+behave just like the old code; possible discrepancies are on files
+that don't have a trailing newline or that end in backslash-newline.
+
+Index: Src/hist.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/hist.c,v
+retrieving revision 1.9
+diff -c -r1.9 hist.c
+--- Src/hist.c	2001/09/15 19:16:26	1.9
++++ Src/hist.c	2001/09/20 16:26:23
+@@ -1766,6 +1766,33 @@
+ 
+ static int histfile_linect;
+ 
++static int readhistline(int start, char **bufp, int *bufsiz, FILE *in)
++{
++    char *buf = *bufp;
++    if (fgets(buf + start, *bufsiz - start, in)) {
++	int l = strlen(buf);
++
++	if (start >= l)
++	    return -1;
++
++	if (l) {
++	    if (buf[l - 1] != '\n' && !feof(in)) {
++		*bufp = zrealloc(buf, 2 * (*bufsiz));
++		*bufsiz = 2 * (*bufsiz);
++		return readhistline(l, bufp, bufsiz, in);
++	    }
++	    buf[l - 1] = '\0';
++	    if (l > 1 && buf[l - 2] == '\\') {
++		buf[--l - 1] = '\n';
++		if (!feof(in))
++		    return readhistline(l, bufp, bufsiz, in);
++	    }
++	}
++	return l;
++    } else
++	return 0;
++}
++
+ /**/
+ void
+ readhistfile(char *fn, int err, int readflags)
+@@ -1778,7 +1805,7 @@
+     short *wordlist;
+     struct stat sb;
+     int nwordpos, nwordlist, bufsiz;
+-    int searching, newflags;
++    int searching, newflags, l;
+ 
+     if (!fn && !(fn = getsparam("HISTFILE")))
+ 	return;
+@@ -1816,30 +1843,13 @@
+ 	if (readflags & HFILE_SKIPOLD
+ 	 || (hist_ignore_all_dups && newflags & hist_skip_flags))
+ 	    newflags |= HIST_MAKEUNIQUE;
+-	while (fpos = ftell(in), fgets(buf, bufsiz, in)) {
+-	    int l = strlen(buf);
+-	    char *pt;
+-
+-	    while (l) {
+-		while (buf[l - 1] != '\n') {
+-		    buf = zrealloc(buf, 2 * bufsiz);
+-		    bufsiz = 2 * bufsiz;
+-		    if (!fgets(buf + l, bufsiz - l, in)) {
+-			l++;
+-			break;
+-		    }
+-		    l += strlen(buf+l);
+-		}
+-		buf[l - 1] = '\0';
+-		if (l > 1 && buf[l - 2] == '\\') {
+-		    buf[--l - 1] = '\n';
+-		    fgets(buf + l, bufsiz - l, in);
+-		    l += strlen(buf+l);
+-		} else
+-		    break;
+-	    }
++	while (fpos = ftell(in), (l = readhistline(0, &buf, &bufsiz, in))) {
++	    char *pt = buf;
+ 
+-	    pt = buf;
++	    if (l < 0) {
++		zerr("corrupt history file %s", fn, 0);
++		break;
++	    }
+ 	    if (*pt == ':') {
+ 		pt++;
+ 		stim = zstrtol(pt, NULL, 0);
+@@ -1933,7 +1943,7 @@
+ 
+ 	fclose(in);
+     } else if (err)
+-	zerr("can't read history file", fn, 0);
++	zerr("can't read history file %s", fn, 0);
+ 
+     unlockhistfile(fn);
+ }
+
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

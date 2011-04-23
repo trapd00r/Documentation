@@ -1,0 +1,139 @@
+From zsh-users-return-3506-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Nov 03 18:43:43 2000
+Return-Path: <zsh-users-return-3506-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3239 invoked from network); 3 Nov 2000 18:43:41 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Nov 2000 18:43:41 -0000
+Received: (qmail 24979 invoked by alias); 3 Nov 2000 18:43:19 -0000
+Mailing-List: contact zsh-users-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-users@sunsite.auc.dk
+X-Seq: 3506
+Received: (qmail 24972 invoked from network); 3 Nov 2000 18:43:17 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1001103184245.ZM20540@candle.brasslantern.com>
+Date: Fri, 3 Nov 2000 18:42:44 +0000
+In-Reply-To: <20001103001857.A4983@fruitcom.com>
+Comments: In reply to Eric Smith <eric@fruitcom.com>
+        "rotating the history file" (Nov  3, 12:18am)
+References: <20001103001857.A4983@fruitcom.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Eric Smith <eric@fruitcom.com>, zsh-users@sunsite.auc.dk
+Subject: Re: rotating the history file
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Nov 3, 12:18am, Eric Smith wrote:
+} Subject: rotating the history file
+}
+} however humungous history files are inelegant and I would like to
+} start rotating the file every few thousand entries or so.  Like log
+} files with log.1 .. log.2 .. log.3 .. log.n
+
+What would you eventually want to do with the old files?
+
+There are a whole lot of complications I can think of with attempting to
+rotate "every few thousand entries," involving interactions of multiple
+shells, the way history events expire when the runtime history exceeds
+$HISTSIZE and when the file size exceeds $SAVEHIST, and the unpredictable
+number of events that may occur in any given interactive session.  The
+conclusion I've come to after several failed attempts to explain all of
+it is that the only way to handle this request is to try to prevent the
+history from filling up, so that events normally leave the history only
+when you rotate the files.
+
+That means setting SAVEHIST much bigger than HISTSIZE, but then never
+letting the HISTFILE reach its maximum size.  How much bigger SAVEHIST
+needs to be depends on how many shells you run at once, how different the
+command histories are, and how many new commands you tend to run in any
+session.
+
+As I wrote back in August:
+
+>When zsh starts up, reading the history file is the very last thing that it
+>does before entering the main interaction loop.
+>
+>When zsh exits normally, it first writes the history, then reads .zlogout,
+>and finally runs the traps.
+
+So you probably want to rotate the files during shell startup, so that only
+one shell performs the rotation, and then if you exit from multiple shells
+their history is merged and used as the basis for the next rotation when
+another shell starts up.  (I hope that made sense.)  You'll need to have
+either append_history or inc_append_history set; things get more complex
+if you also want share_history, so I'm going to ignore that for now.
+
+This will all work best in 3.1.9 and later, where hist_save_no_dups can
+be set to avoid saving multiple copies of the same command in HISTFILE.
+Otherwise, if you do run multiple shells, you may find the file to be
+rotating more often than you like.
+
+Begin by defining a couple of variables:
+
+    ROTATEHIST=2000	# How many lines of growth before rotating
+    MAXHISTFILES=20	# However many rotations you want to keep
+
+Then rotating the file is pretty easy with `zmv':
+
+    zmv -Qf "($HISTFILE).(<->)(On)" '$1.$[$2+1]'
+    mv -f $HISTFILE $HISTFILE.0
+    rm -f $HISTFILE.$MAXHISTFILES
+
+The `(On)' qualifier (and hence -Q option) in the zmv command causes the
+file names to be ordered such that each will move out of the way before
+the next is renamed to replace it.  The -f is necessary because zmv
+checks the existence of all destination files before it actually moves
+any of them, so it can't tell that this ordering is safe.
+
+The tricky part is deciding when to rotate the files.  The most accurate
+way is simply to read in the history and see how many entries you end up
+with.  So:
+
+    rotate_history() {
+	autoload -U zmv
+	zmodload -i zsh/parameter || return 1
+
+	# Reset HISTSIZE to SAVEHIST so we can read the entire file
+	local histsize=$HISTSIZE HISTSIZE=$SAVEHIST
+
+	# Read the file and see how many entries we ended up with
+	fc -R
+	if (( ${#${(k)history}} >= histsize + ROTATEHIST ))
+	then
+	    # Rotate the files if we got this far
+	    zmv -Qf "($HISTFILE).(<->)(On)" '$1.$[$2+1]' || return 1
+	    mv -f $HISTFILE $HISTFILE.0 || return 1
+	    rm -f $HISTFILE.$MAXHISTFILES
+
+	    # Restore HISTSIZE to truncate the history, and write it out
+	    HISTSIZE=$histsize
+	    fc -W
+	fi
+
+	# Empty the history completely so it can be re-read later
+	HISTSIZE=0	# This is only safe from .zshrc or .zlogin!
+    }
+
+This assures that any time the HISTFILE is rotated, it's left with no
+more than HISTSIZE entries.  Using SAVEHIST larger than HISTSIZE in
+combination with append_history will assure that multiple shells can
+still merge their histories into the file without losing entries; but
+as no shell will retain more than HISTSIZE entries in any case, that's
+a safe size to leave HISTFILE after rotating.
+
+The final HISTSIZE=0 is to prevent the newly-rewritten history from
+being merged with the copy that was read by `fc -R'.  I.e., you can't
+prevent zsh from reading $HISTFILE just before it starts the main loop,
+so to avoid duplication the history has to be empty at that point.
+You could instead use `setopt hist_ignore_all_dups' but that's a bit
+less efficient.  Either way, a side-effect of this scheme is that your
+history event numbers (e.g. in your prompt) may be much larger than the
+actual number of history entries loaded.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

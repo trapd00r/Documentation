@@ -1,0 +1,121 @@
+From zsh-users-return-14839-mason-zsh=primenet.com.au@zsh.org Fri Feb 19 02:42:53 2010
+Return-Path: <zsh-users-return-14839-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12353 invoked by alias); 19 Feb 2010 02:42:53 -0000
+Mailing-List: contact zsh-users-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Users List <zsh-users.zsh.org>
+List-Post: <mailto:zsh-users@zsh.org>
+List-Help: <mailto:zsh-users-help@zsh.org>
+Delivered-To: mailing list zsh-users@zsh.org
+X-Seq: 14839
+Received: (qmail 13775 invoked from network); 19 Feb 2010 02:42:41 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-4.8 required=5.0 tests=AWL,BAYES_00,DKIM_SIGNED,
+	DKIM_VERIFIED,RCVD_IN_DNSWL_MED autolearn=ham version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at spodhuis.org does not designate permitted sender hosts)
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/relaxed; d=spodhuis.org; s=d200912;
+	h=In-Reply-To:Content-Type:MIME-Version:References:Message-ID:Subject:Cc:To:From:Date; bh=xNUjkdbwBwOwvMFqN+XtyYaxP0Eqdh/p1WJMUhI3SMc=;
+	b=DKkChZNFFLbp035J9B9SxuUILXqmzxoHfgyIASkAzf7op9Lpkon7YbnlTKxEnCtYa4RlRW9l/D7OCBMjGqfVNmBOKL3kCkX3eFqXYch0bEaony+FXJIgRIqGcZYoj1KeRK0IO7QAewbc/w+L80zOwuHjOPWlIK3qV+fkBfO8IY4=;
+Date: Fri, 19 Feb 2010 03:27:10 +0100
+From: Phil Pennock <zsh-workers+phil.pennock@spodhuis.org>
+To: Joke de Buhr <joke@seiken.de>
+Cc: zsh-users@zsh.org
+Subject: Re: Hugh number of file descriptor checks
+Message-ID: <20100219022710.GA71015@redoubt.spodhuis.org>
+Mail-Followup-To: Joke de Buhr <joke@seiken.de>, zsh-users@zsh.org
+References: <201002190000.27806.joke@seiken.de>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+In-Reply-To: <201002190000.27806.joke@seiken.de>
+
+On 2010-02-19 at 00:00 +0100, Joke de Buhr wrote:
+> I did some system call traces of a c program while I discovered zsh doing a 
+> large amount of file descriptor checks during startup which seem unnecessary.
+> 
+> Doing a simple strace like "strace zsh -c 'echo hello'" produces an output of 
+> about 4280 system calls which include a sequence of 4032 system calls like:
+> 
+>     fcntl(64, F_GETFL)      = -1 EBADF (Bad file descriptor)
+>     fcntl(65, F_GETFL)      = -1 EBADF (Bad file descriptor)
+
+This appears to be zopenmax():
+----------------------------8< cut here >8------------------------------
+#ifdef HAVE_SYSCONF
+/* This is replaced by a macro from system.h if not HAVE_SYSCONF.    *
+ * 0 is returned by sysconf if _SC_OPEN_MAX is unavailable;          *
+ * -1 is returned on error                                           *
+ *                                                                   *
+ * Neither of these should happen, but resort to OPEN_MAX rather     *
+ * than return 0 or -1 just in case.                                 */
+
+/**/
+mod_export long
+zopenmax(void)
+{
+    static long openmax = 0;
+
+    if (openmax < 1) {
+        if ((openmax = sysconf(_SC_OPEN_MAX)) < 1) {
+            openmax = OPEN_MAX;
+        } else if (openmax > OPEN_MAX) {
+            /* On some systems, "limit descriptors unlimited" or the  *
+             * equivalent will set openmax to a huge number.  Unless  *
+             * there actually is a file descriptor > OPEN_MAX already *
+             * open, nothing in zsh requires the true maximum, and in *
+             * fact it causes inefficiency elsewhere if we report it. *
+             * So, report the maximum of OPEN_MAX or the largest open *
+             * descriptor (is there a better way to find that?).      */
+            long i, j = OPEN_MAX;
+            for (i = j; i < openmax; i += (errno != EINTR)) {
+                errno = 0;
+                if (fcntl(i, F_GETFL, 0) < 0 &&
+                    (errno == EBADF || errno == EINTR))
+                    continue;
+                j = i;
+            }
+            openmax = j;
+        }
+    }
+
+    return (max_zsh_fd > openmax) ? max_zsh_fd : openmax;
+}
+#endif
+----------------------------8< cut here >8------------------------------
+
+On FreeBSD, sysconf(_SC_OPEN_MAX) calls getrlimit(RLIMIT_NOFILE); if
+that fails, or is RLIM_INFINITY or is larger than LONG_MAX, then it
+returns -1.  Otherwise, it returns the current rlimit value.
+
+So on my box, that's 11095.  Meanwhile, OPEN_MAX is 64.
+
+SUSv3 documents:
+----------------------------8< cut here >8------------------------------
+{OPEN_MAX}
+  Maximum number of files that one process can have open at any one time.
+  Minimum Acceptable Value: {_POSIX_OPEN_MAX}
+{_POSIX_OPEN_MAX}
+  Maximum number of files that one process can have open at any one time.
+  Value: 20
+----------------------------8< cut here >8------------------------------
+
+Meanwhile, max_zsh_fd is the largest fd that has been allocated by the
+shell itself, rather than inherited.
+
+zopenmax() is used to close all file-descriptors except some which are
+being kept, and to determine the size of the fdtable which is nominally
+what sets max_zsh_fd.  zopenmax() returns OPEN_MAX in the event that
+sysconf() isn't available.
+
+
+Questions for the list:
+ Why not just pick a magic value like 64 or 32 and, if
+ sysconf(_SC_OPEN_MAX) is larger than that, use the magic value?  Why do
+ we need to know the largest fd already in use?  Does fdtable have to be
+ able to handle the largest fd already open, if not opened by zsh?
+
+-Phil
+

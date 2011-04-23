@@ -1,0 +1,146 @@
+From zsh-users-return-15314-mason-zsh=primenet.com.au@zsh.org Sat Aug 21 18:41:43 2010
+Return-Path: <zsh-users-return-15314-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9352 invoked by alias); 21 Aug 2010 18:41:43 -0000
+Mailing-List: contact zsh-users-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Users List <zsh-users.zsh.org>
+List-Post: <mailto:zsh-users@zsh.org>
+List-Help: <mailto:zsh-users-help@zsh.org>
+Delivered-To: mailing list zsh-users@zsh.org
+X-Seq: 15314
+Received: (qmail 20416 invoked from network); 21 Aug 2010 18:41:39 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.48 as permitted sender)
+Date: Sat, 21 Aug 2010 19:41:22 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-users@zsh.org
+Subject: Re: Synchronous vs. Asynchronous
+Message-ID: <20100821194122.583e05e4@pws-pc>
+In-Reply-To: <100820103638.ZM29775@torch.brasslantern.com>
+References: <100820083501.ZM29362@torch.brasslantern.com>
+	<20100820164507.419dc0bc@csr.com>
+	<100820103638.ZM29775@torch.brasslantern.com>
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.20.1; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Cloudmark-Analysis: v=1.1 cv=4QByPj+6Iq2k/6L54d+eVKTdgQxdscpRskJJReCfdXo= c=1 sm=0 a=DogomfpGjd0A:10 a=kj9zAlcOel0A:10 a=q2GGsy2AAAAA:8 a=NLZqzBF-AAAA:8 a=N9FZlYaxqc-yfCBXG_YA:9 a=1tLy_v5bijwJoY6GOOsA:7 a=g6riadF2fhbw9SUn3zpvpuTGV6IA:4 a=CjuIK1q_8ugA:10 a=I6wTmPyJxzYA:10 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+On Fri, 20 Aug 2010 10:36:38 -0700
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> On Aug 20,  4:45pm, Peter Stephenson wrote:
+> } My big remaining worry is whether the >(...) could think it's in the
+> } foreground when it's actually in the background after the patch in the
+> } second subthread.
+> 
+> Yes, mine too.
+
+I think that's not a problem in the case of redirection, and I should
+have known... as already described in the manual, the reason
+"external_command > >(blah)" apparently executes "blah" asynchronously
+is because it forks "external_command" before starting the process
+substitution.  (Casual visitors should remember that the difference
+between starting a process in the background and the foreground is
+essentially that the shell doesn't wait for the former; the sequence of
+starting processes is otherwise the same, though the jiggery pokery with
+terminal handling is different.)  So there's no chance of >(blah)
+grabbing the terminal when it shouldn't because it's already associated
+with a job that's disconnected from the terminal; it's basically the
+same case as starting a new command in a list of commands that's been
+forked to the background.  (If it tried to talk to the terminal, having
+already been forked, the job would be stopped by SIGTTIN, so you'd find
+out straight away --- I think that would indicate in this case that the
+logic was screwy rather than what we were trying to do was wrong,
+however.)  The change I made simply means it grabs the terminal when it
+should, which is when it's in the foreground and there was no fork,
+which is exactly what we need to make it get ^C.
+
+People who read the zsh source code for fun(*) may be confused because
+prefork() documents process substitutions as happening at that point.
+That's the case of >(...) as an ordinary(**) command line argument, not
+redirection.  It turns out this is different enough that the change
+doesn't have any effect:
+
+cat >(sleep 100)
+
+is uninterruptible, while
+
+cat <(sleep 100)
+
+is interruptible but the sleep doesn't get killed.  Both these are true
+with and without the ESUB_ASYNC change (unless I'm even more confused
+than I think I am).
+
+I think the difference must be because with >(...) we add the PID to our
+job table of things to wait for, whereas with <(...) we don't (see
+getproc() in exec.c).  (My best guess as to why is that in the case of
+<(...) it will get SIGPIPE if the reader of the file goes away, so it
+will go away of its own accord, though I'm not at all sure that's
+guaranteed in all circumstances; although it may just be a hack to make
+it interruptible for all i know.)  Then presumably with >(...) we have
+the same problem that the process isn't attached to a suitable job to
+allow it to get the ^C but the shell still waits for it to finish (as it
+was created before forking the main command it's there in the job
+table).
+
+I'm tempted to back off the change for non-redirection process
+substitution and attack that separately, and commit the remaining
+shebang.
+
+
+Another piece of unfinished business is the reference to "asynchronous"
+process substitutions.  This is replaced by some circumlocution below.
+
+
+(*) "people who read the zsh source code for fun": This reminds me of
+those scenes where Krusty the Clown, standing up performing before an
+audience, makes a joke, and the only thing you can hear on the soundtrack
+in response is someone coughing at the back of the hall.
+
+(**) "the case of >(...) as an ordinary command line argument": This
+reminds of a sketch I can vaguely remember of a gorilla travelling on
+the Tube (London Underground to overseas visitors) and everyone ignoring
+it.  It might have been Monty Python.  Or I might just have invented it.
+
+
+(The book of the Collected Zsh Mailing List Posts On Process Management
+will soon be published by Fantasy Press, price several thousand dead
+brain cells.)
+
+
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.117
+diff -p -u -r1.117 expn.yo
+--- Doc/Zsh/expn.yo	13 Jun 2010 15:59:59 -0000	1.117
++++ Doc/Zsh/expn.yo	21 Aug 2010 17:45:19 -0000
+@@ -390,7 +390,8 @@ Process substitutions may be used follow
+ case, the substitution must appear with no trailing string.
+ 
+ In the case of the tt(<) or tt(>) forms, the shell runs the commands in
+-var(list) asynchronously.  If the system supports the tt(/dev/fd)
++var(list) as a subprocess of the job executing the shell command line.
++If the system supports the tt(/dev/fd)
+ mechanism, the command argument is the name of the device file
+ corresponding to a file descriptor; otherwise, if the system supports named
+ pipes (FIFOs), the command argument will be a named pipe.  If the form with
+@@ -456,7 +457,7 @@ version of the example above:
+ example(tt(paste <LPAR()cut -f1) var(file1)tt(RPAR() <LPAR()cut -f3) var(file2)tt(RPAR()) tt(> >LPAR())var(process)tt(RPAR()))
+ 
+ (note that no tt(MULTIOS) are involved), var(process) will be run
+-asynchronously.  The workaround is:
++asynchronously as far as the parent shell is concerned.  The workaround is:
+ 
+ example(tt({ paste <LPAR()cut -f1) var(file1)tt(RPAR() <LPAR()cut -f3) var(file2)tt(RPAR() }) tt(> >LPAR())var(process)tt(RPAR()))
+ 
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

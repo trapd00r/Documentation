@@ -1,0 +1,307 @@
+From zsh-users-return-14872-mason-zsh=primenet.com.au@zsh.org Tue Feb 23 22:06:29 2010
+Return-Path: <zsh-users-return-14872-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6422 invoked by alias); 23 Feb 2010 22:06:29 -0000
+Mailing-List: contact zsh-users-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Users List <zsh-users.zsh.org>
+List-Post: <mailto:zsh-users@zsh.org>
+List-Help: <mailto:zsh-users-help@zsh.org>
+Delivered-To: mailing list zsh-users@zsh.org
+X-Seq: 14872
+Received: (qmail 678 invoked from network); 23 Feb 2010 22:06:04 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.47 as permitted sender)
+Date: Tue, 23 Feb 2010 22:05:50 +0000
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-users@zsh.org
+Subject: Re: locking a file in zsh?
+Message-ID: <20100223220550.1d934b0c@pws-pc>
+In-Reply-To: <19331.60495.60802.575961@fisica.ufpr.br>
+References: <19331.60495.60802.575961@fisica.ufpr.br>
+X-Mailer: Claws Mail 3.7.4 (GTK+ 2.18.6; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Cloudmark-Analysis: v=1.1 cv=1ggfb5FlKZQUfF3vzm9UBYZ2uTfLsbs/8dSljwg5+mE= c=1 sm=0 a=NLZqzBF-AAAA:8 a=d09RG8A5tf-vY8fBcncA:9 a=4hnlS_EgT6RiKdbbvzQA:7 a=nfV1Iid2Tvwe6yT7TFw9swxwe7MA:4 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+On Tue, 23 Feb 2010 11:55:11 -0300
+carlos@fisica.ufpr.br (Carlos Carvalho) wrote:
+> Is it possible to do file locking like fcntl in zsh? There's an option
+> to do it for the history file. I'd like to do it for an arbitrary one.
+
+By default, history locking does some simple stuff by creating links
+(and probably one day symbolic links).  That's hardly worth implementing
+as a shell builtin.
+
+However, the "proper" file locking it can also optionally do probably is
+worth implementing as a builtin: the advantage is that as the lock is on
+a file descriptor within the shell, the lock is given up when the
+current process exits, and as you can do this with subshells it makes
+locking very simple.  (Note that some older network file locking
+implementations used to be very buggy.)
+
+Here's a *very* minimal implementation that basically copies Wayne's
+code from hist.c to a new builtin, "zsystem", in the zsh/system module, as
+the subcommand "flock".  These are POSIX advisory locks:  they only work
+if different processes collaborate.
+
+Basically, all you can do is give it a file name argument.  Three things
+can happen:
+
+- There's an error and it returns non-zero status.
+
+- It returns straight away with zero status.  The file is locked
+until the process that acquired it exits.
+
+- It hangs waiting to acquire a lock.  It will wait indefinitely.
+
+The only clever stuff in this example patch is to ensure that the shell
+doesn't "exec" another process when it knows the shell itself isn't
+going to be needed, since that loses the lock prematurely (I've made the
+file descriptor close-on-exec since I imagine you don't want a follow-on
+process that knows nothing about the lock to keep it).
+
+Lots of things could be added
+- a timeout for locking (a bit messy since I don't see any alternative
+to polling to try to get the lock every now and then)
+
+- a method to unlock---simply allowing the user to get the file
+descriptor for closing should be good enough, I tried to make the
+changes general enough that closing the fd via the usual shell
+mechanisms would do the right thing
+
+- different locking options i.e. read lock
+
+- make close-on-exec optional.
+
+Here's an example:
+
+
+# in .zshrc
+zmodload -aF zsh/system b:zsystem
+
+# in window A
+touch /tmp/zsystem_filelock
+(
+   zsystem /tmp/zsystem_filelock
+   print locked
+   sleep 10
+)
+
+# in window B
+zsystem /tmp/zsystem_filelock
+
+
+The code in window A should grab the lock and say so.  The code in
+window B should hang until the subshell in window A exits.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.176
+diff -p -u -r1.176 exec.c
+--- Src/exec.c	22 Feb 2010 10:12:31 -0000	1.176
++++ Src/exec.c	23 Feb 2010 21:56:14 -0000
+@@ -136,6 +136,12 @@ mod_export int coprocin;
+ /**/
+ mod_export int coprocout;
+ 
++/* count of file locks recorded in fdtable */
++
++/**/
++int fdtable_flocks;
++
++
+ /* != 0 if the line editor is active */
+ 
+ /**/
+@@ -2716,7 +2722,8 @@ execcmd(Estate state, int input, int out
+     if ((how & Z_ASYNC) ||
+ 	(!do_exec &&
+ 	 (((is_builtin || is_shfunc) && output) ||
+-	  (!is_cursh && (last1 != 1 || nsigtrapped || havefiles()))))) {
++	  (!is_cursh && (last1 != 1 || nsigtrapped || havefiles() ||
++			 fdtable_flocks))))) {
+ 
+ 	pid_t pid;
+ 	int synch[2], flags;
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.239
+diff -p -u -r1.239 utils.c
+--- Src/utils.c	22 Feb 2010 11:36:42 -0000	1.239
++++ Src/utils.c	23 Feb 2010 21:56:14 -0000
+@@ -1691,13 +1691,38 @@ redup(int x, int y)
+ 	} else {
+ 	    check_fd_table(y);
+ 	    fdtable[y] = fdtable[x];
++	    if (fdtable[y] == FDT_FLOCK)
++		fdtable[y] = FDT_INTERNAL;
+ 	}
++	/*
++	 * Closing any fd to the locked file releases the lock.
++	 * This isn't expected to happen, it's here for completeness.
++	 */
++	if (fdtable[x] == FDT_FLOCK)
++	    fdtable_flocks--;
+ 	zclose(x);
+     }
+ 
+     return ret;
+ }
+ 
++/*
++ * Indicate that an fd has a file lock.
++ * The fd should already be known to fdtable (e.g. by movefd).
++ * Note the fdtable code doesn't care what sort of lock
++ * is used; this simply prevents the main shell exiting prematurely
++ * when it holds a lock.
++ */
++
++/**/
++mod_export void
++addlockfd(int fd)
++{
++    if (fdtable[fd] != FDT_FLOCK)
++	fdtable_flocks++;
++    fdtable[fd] = FDT_FLOCK;
++}
++
+ /* Close the given fd, and clear it from fdtable. */
+ 
+ /**/
+@@ -1713,6 +1738,8 @@ zclose(int fd)
+ 	 */
+ 	DPUTS2(fd > max_zsh_fd && fdtable[fd] != FDT_UNUSED,
+ 	       "BUG: fd is %d, max_zsh_fd is %d", fd, max_zsh_fd);
++	if (fdtable[fd] == FDT_FLOCK)
++	    fdtable_flocks--;
+ 	fdtable[fd] = FDT_UNUSED;
+ 	while (max_zsh_fd > 0 && fdtable[max_zsh_fd] == FDT_UNUSED)
+ 	    max_zsh_fd--;
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.162
+diff -p -u -r1.162 zsh.h
+--- Src/zsh.h	27 Jan 2010 19:25:34 -0000	1.162
++++ Src/zsh.h	23 Feb 2010 21:56:15 -0000
+@@ -350,6 +350,10 @@ enum {
+  * Entry used by output from the XTRACE option.
+  */
+ #define FDT_XTRACE		3
++/*
++ * Entry used for file locking.
++ */
++#define FDT_FLOCK		4
+ #ifdef PATH_DEV_FD
+ /*
+  * Entry used by a process substition.
+@@ -357,7 +361,7 @@ enum {
+  * decremented on exit; we don't close entries greater than
+  * FDT_PROC_SUBST except when closing everything.
+  */
+-#define FDT_PROC_SUBST		4
++#define FDT_PROC_SUBST		5
+ #endif
+ 
+ /* Flags for input stack */
+Index: Src/Modules/system.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/system.c,v
+retrieving revision 1.9
+diff -p -u -r1.9 system.c
+--- Src/Modules/system.c	6 Jul 2007 21:52:40 -0000	1.9
++++ Src/Modules/system.c	23 Feb 2010 21:56:15 -0000
+@@ -340,10 +340,81 @@ bin_syserror(char *nam, char **args, Opt
+     return 0;
+ }
+ 
++/**/
++static int
++bin_zsystem_flock(char *nam, char **args, UNUSED(Options ops), UNUSED(int func))
++{
++#ifdef HAVE_FCNTL_H
++    struct flock lck;
++    int flock_fd;
++#endif
++
++    if (!args[0]) {
++	zwarnnam(nam, "flock: not enough arguments");
++	return 1;
++    }
++    if (args[1]) {
++	zwarnnam(nam, "flock: too many arguments");
++	return 1;
++    }
++#ifdef HAVE_FCNTL_H
++    if ((flock_fd = open(unmeta(args[0]), O_RDWR | O_NOCTTY
++#ifdef O_CLOEXEC
++			 | O_CLOEXEC
++#endif
++			 , 0666)) < 0) {
++	zwarnnam(nam, "failed to open %s for writing: %e", args[0], errno);
++	return 1;
++    }
++#if !defined(O_CLOEXEC) && defined(FD_CLOEXEC)
++    {
++	long fdflags = fcntl(flock_fd, F_GETFD, 0);
++	if (fdflags != (long)-1)
++	    fcntl(flock_fd, F_SETFD, fdflags | FD_CLOEXEC);
++    }    
++#endif
++    flock_fd = movefd(flock_fd);
++    if (flock_fd == -1)
++	return 1;
++    addlockfd(flock_fd);
++
++    lck.l_type = F_WRLCK;
++    lck.l_whence = SEEK_SET;
++    lck.l_start = 0;
++    lck.l_len = 0;  /* lock the whole file */
++
++    while (fcntl(flock_fd, F_SETLKW, &lck) < 0) {
++	if (errno == EINTR)
++	    continue;
++	zwarnnam(nam, "failed to lock file %s: %e", args[0], errno);
++	return 1;
++    }
++
++    return 0;
++#else /* HAVE_FCNTL_H */
++    zwarnnam(nam, "flock: not implemented on this system");
++    return 255;
++#endif /* HAVE_FCNTL_H */
++}
++
++
++/**/
++static int
++bin_zsystem(char *nam, char **args, Options ops, int func)
++{
++    /* If more commands are implemented, this can be more sophisticated */
++    if (!strcmp(*args, "flock")) {
++	return bin_zsystem_flock(nam, args+1, ops, func);
++    }
++    zwarnnam(nam, "unknown subcommand: %s", *args);
++    return 1;
++}
++
+ static struct builtin bintab[] = {
+     BUILTIN("syserror", 0, bin_syserror, 0, 1, 0, "e:p:", NULL),
+     BUILTIN("sysread", 0, bin_sysread, 0, 1, 0, "c:i:o:s:t:", NULL),
+     BUILTIN("syswrite", 0, bin_syswrite, 1, 1, 0, "c:o:", NULL),
++    BUILTIN("zsystem", 0, bin_zsystem, 1, -1, 0, NULL, NULL)
+ };
+ 
+ 
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

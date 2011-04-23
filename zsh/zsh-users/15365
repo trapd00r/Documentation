@@ -1,0 +1,195 @@
+From zsh-users-return-15365-mason-zsh=primenet.com.au@zsh.org Fri Sep 03 08:54:55 2010
+Return-Path: <zsh-users-return-15365-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27300 invoked by alias); 3 Sep 2010 08:54:55 -0000
+Mailing-List: contact zsh-users-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Users List <zsh-users.zsh.org>
+List-Post: <mailto:zsh-users@zsh.org>
+List-Help: <mailto:zsh-users-help@zsh.org>
+Delivered-To: mailing list zsh-users@zsh.org
+X-Seq: 15365
+Received: (qmail 13397 invoked from network); 3 Sep 2010 08:54:52 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Fri, 3 Sep 2010 09:54:44 +0100
+From: Peter Stephenson <Peter.Stephenson@csr.com>
+To: zsh-users@zsh.org
+Subject: Re: exporting environment variables to shell functions (maybe bug)
+Message-ID: <20100903095444.1a902d09@pwslap01u.europe.root.pri>
+In-Reply-To: <201009031034.47905.joke@seiken.de>
+References: <201009031034.47905.joke@seiken.de>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.18.9; i686-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 03 Sep 2010 08:54:44.0886 (UTC) FILETIME=[A7B7D360:01CB4B45]
+X-Scanned-By: MailControl A-10-90-03 (www.mailcontrol.com) on 10.68.0.152
+
+On Fri, 3 Sep 2010 10:34:30 +0200
+Joke de Buhr <joke@seiken.de> wrote:
+> I've ask this question a couple of days before but I didn't get any
+> response [1]. I think this may be a bug.
+
+It's a bug, so I sent a fix to zsh-workers, not realising you weren't
+on that list...  zsh-workers/28220
+
+pws
+
+
+On Tue, 31 Aug 2010 17:54:25 +0200
+Joke de Buhr <joke@seiken.de> wrote:
+> ## 4: HELLO not exported to shell function, different from 2 and 3
+> $ call() { env | grep '^HELLO' }
+> $ HELLO=world
+> $ HELLO=$HELLO call
+>     HELLO=      ## <-- empty  
+
+(Moved to zsh-workers immediately, this time.)
+
+That's a bug.  When HELLO needs to be restored explicitly because the
+code where it's set to something else is running in the main shell, we
+remove the parameter from the table to be restored later.  The
+assignment than can't see the value it's temporarily modifying.  You
+don't need to search the environment for this; zsh consistently screws
+up the parameter within the shell, too.
+
+I think we can just copy the parameter instead of removing it, so long
+as we copy it properly.
+
+valgrind says this doesn't cause any leaks.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.182
+diff -p -u -r1.182 exec.c
+--- Src/exec.c	22 Aug 2010 20:08:57 -0000	1.182
++++ Src/exec.c	31 Aug 2010 19:11:41 -0000
+@@ -3313,13 +3313,17 @@ save_params(Estate state, Wordcode pc, L
+     while (wc_code(ac = *pc) == WC_ASSIGN) {
+ 	s = ecrawstr(state->prog, pc + 1, NULL);
+ 	if ((pm = (Param) paramtab->getnode(paramtab, s))) {
++	    Param tpm;
+ 	    if (pm->env)
+ 		delenv(pm);
+ 	    if (!(pm->node.flags & PM_SPECIAL)) {
+-		paramtab->removenode(paramtab, s);
++		tpm = (Param) zshcalloc(sizeof *tpm);
++		tpm->node.nam = ztrdup(pm->node.nam);
++		copyparam(tpm, pm, 0);
++		pm = tpm;
+ 	    } else if (!(pm->node.flags & PM_READONLY) &&
+ 		       (unset(RESTRICTED) || !(pm->node.flags & PM_RESTRICTED))) {
+-		Param tpm = (Param) hcalloc(sizeof *tpm);
++		tpm = (Param) hcalloc(sizeof *tpm);
+ 		tpm->node.nam = pm->node.nam;
+ 		copyparam(tpm, pm, 1);
+ 		pm = tpm;
+@@ -3383,8 +3387,9 @@ restore_params(LinkList restorelist, Lin
+ 		    break;
+ 		}
+ 		pm = tpm;
+-	    } else
++	    } else {
+ 		paramtab->addnode(paramtab, pm->node.nam, pm);
++	    }
+ 	    if ((pm->node.flags & PM_EXPORTED) && ((s = getsparam(pm->node.nam))))
+ 		addenv(pm, s);
+ 	}
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.161
+diff -p -u -r1.161 params.c
+--- Src/params.c	3 Jun 2010 13:38:17 -0000	1.161
++++ Src/params.c	31 Aug 2010 19:11:41 -0000
+@@ -927,11 +927,17 @@ createspecialhash(char *name, GetNodeFun
+ }
+ 
+ 
+-/* Copy a parameter */
++/*
++ * Copy a parameter
++ *
++ * If fakecopy is set, we are just saving the details of a special
++ * parameter.  Otherwise, the result will be used as a real parameter
++ * and we need to do more work.
++ */
+ 
+ /**/
+ void
+-copyparam(Param tpm, Param pm, int toplevel)
++copyparam(Param tpm, Param pm, int fakecopy)
+ {
+     /*
+      * Note that tpm, into which we're copying, may not be in permanent
+@@ -942,7 +948,8 @@ copyparam(Param tpm, Param pm, int tople
+     tpm->node.flags = pm->node.flags;
+     tpm->base = pm->base;
+     tpm->width = pm->width;
+-    if (!toplevel)
++    tpm->level = pm->level;
++    if (!fakecopy)
+ 	tpm->node.flags &= ~PM_SPECIAL;
+     switch (PM_TYPE(pm->node.flags)) {
+     case PM_SCALAR:
+@@ -963,13 +970,15 @@ copyparam(Param tpm, Param pm, int tople
+ 	break;
+     }
+     /*
+-     * If called from inside an associative array, that array is later going
+-     * to be passed as a real parameter, so we need the gets and sets
+-     * functions to be useful.  However, the saved associated array is
+-     * not itself special, so we just use the standard ones.
+-     * This is also why we switch off PM_SPECIAL.
++     * If the value is going to be passed as a real parameter (e.g. this is
++     * called from inside an associative array), we need the gets and sets
++     * functions to be useful.
++     *
++     * In this case we assume the the saved parameter is not itself special,
++     * so we just use the standard functions.  This is also why we switch off
++     * PM_SPECIAL.
+      */
+-    if (!toplevel)
++    if (!fakecopy)
+ 	assigngetset(tpm);
+ }
+ 
+Index: Test/A06assign.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/A06assign.ztst,v
+retrieving revision 1.5
+diff -p -u -r1.5 A06assign.ztst
+--- Test/A06assign.ztst	23 Sep 2006 06:55:29 -0000	1.5
++++ Test/A06assign.ztst	31 Aug 2010 19:11:41 -0000
+@@ -277,3 +277,18 @@
+ >
+ >
+ >  
++
++  call() { print $HELLO; }
++  export HELLO=world
++  call
++  HELLO=universe call
++  call
++  HELLO=${HELLO}liness call
++  call
++  unset HELLO
++0:save and restore when using original value in temporary
++>world
++>universe
++>world
++>worldliness
++>world  
+
+
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

@@ -1,0 +1,162 @@
+From zsh-users-return-3124-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jun 07 11:14:51 2000
+Return-Path: <zsh-users-return-3124-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13243 invoked from network); 7 Jun 2000 11:14:47 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 7 Jun 2000 11:14:47 -0000
+Received: (qmail 28232 invoked by alias); 7 Jun 2000 11:14:08 -0000
+Mailing-List: contact zsh-users-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-users@sunsite.auc.dk
+X-Seq: 3124
+Received: (qmail 28223 invoked from network); 7 Jun 2000 11:14:07 -0000
+Date: Wed, 7 Jun 2000 13:13:52 +0200 (MET DST)
+Message-Id: <200006071113.NAA13051@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-users@sunsite.auc.dk
+In-reply-to: blackie@ifad.dk's message of 07 Jun 2000 12:30:32 +0200
+Subject: PATCH: Re: huge number of stats makes completion SLOOOW
+
+
+Jesper K. Pedersen wrote:
+
+> When I do the following:
+>   cd sp<TAB>
+> 
+> It takes most of ten seconds before it completes for me. I tried to do an
+> strace on it, and I saw the following:
+> 
+> [pid 22114] access("/home/blackie/bin/cd", X_OK) = -1 ENOENT (No such file or directory)
+> [pid 22114] access("/usr/X11R6/bin/cd", X_OK) = -1 ENOENT (No such file or directory)
+> ...
+> 
+> My path is quite long, so there is a huge number of directories it must go
+> through.
+> 
+> Is there an option I can set, which makes my cd command faster?
+
+No, sorry. You can try the patch below.
+
+
+To workers: the patch makes compctl first check if the command is a
+builtin or shell function and the patch for _normal adds the same
+optimisation to the new completion system (there it avoids accessing
+$commands until needed, which would fill the command hash table).
+
+Bye
+ Sven
+
+Index: Completion/Core/_normal
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_normal,v
+retrieving revision 1.2
+diff -u -r1.2 _normal
+--- Completion/Core/_normal	2000/05/16 11:44:57	1.2
++++ Completion/Core/_normal	2000/06/07 11:11:11
+@@ -23,11 +23,14 @@
+ 
+   return ret
+ else
+-  if [[ "$command[1]" == '=' ]]; then
++  if (( $+builtins[$command] + $+functions[$command] )); then
++    cmd1="$command"
++    curcontext="${curcontext%:*:*}:${cmd1}:"
++  elif [[ "$command[1]" = '=' ]]; then
+     eval cmd1\=$command
+     cmd2="$command[2,-1]"
+     curcontext="${curcontext%:*:*}:${cmd2}:"
+-  elif [[ "$command" == */* ]]; then
++  elif [[ "$command" = */* ]]; then
+     cmd1="$command"
+     cmd2="${command:t}"
+     curcontext="${curcontext%:*:*}:${cmd2}:"
+@@ -50,15 +53,17 @@
+       return ret
+     fi
+   done
+-  for i in "${(@)_patcomps[(K)$cmd2]}"; do
+-    "$i" && ret=0
+-    if [[ "$_compskip" = *patterns* ]]; then
+-      break
+-    elif [[ "$_compskip" = all ]]; then
+-      _compskip=''
+-      return ret
+-    fi
+-  done
++  if [[ -n "$cmd2" ]]; then
++    for i in "${(@)_patcomps[(K)$cmd2]}"; do
++      "$i" && ret=0
++      if [[ "$_compskip" = *patterns* ]]; then
++        break
++      elif [[ "$_compskip" = all ]]; then
++        _compskip=''
++        return ret
++      fi
++    done
++  fi
+ fi
+ 
+ # Now look up the two names in the normal completion array.
+@@ -90,16 +95,18 @@
+       return ret
+     fi
+   done
+-  for i in "${(@)_postpatcomps[(K)$cmd2]}"; do
+-    _compskip=default
+-    "$i" && ret=0
+-    if [[ "$_compskip" = *patterns* ]]; then
+-      break
+-    elif [[ "$_compskip" = all ]]; then
+-      _compskip=''
+-      return ret
+-    fi
+-  done
++  if [[ -n "$cmd2" ]]; then
++    for i in "${(@)_postpatcomps[(K)$cmd2]}"; do
++      _compskip=default
++      "$i" && ret=0
++      if [[ "$_compskip" = *patterns* ]]; then
++        break
++      elif [[ "$_compskip" = all ]]; then
++        _compskip=''
++        return ret
++      fi
++    done
++  fi
+ fi
+ 
+ [[ "$name" = -default- && -n "$comp" && "$_compskip" != (all|*default*) ]] &&
+Index: Src/Zle/compctl.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compctl.c,v
+retrieving revision 1.5
+diff -u -r1.5 compctl.c
+--- Src/Zle/compctl.c	2000/05/30 03:43:27	1.5
++++ Src/Zle/compctl.c	2000/06/07 11:11:18
+@@ -2469,7 +2469,7 @@
+     return ret;
+ }
+ 
+-/* This add the matches for the pattern compctls. */
++/* This adds the matches for the pattern compctls. */
+ 
+ /**/
+ static int
+@@ -2477,8 +2477,11 @@
+ {
+     Patcomp pc;
+     Patprog pat;
+-    char *s = findcmd(cmdstr, 1);
++    char *s;
+     int ret = 0;
++
++    s = ((shfunctab->getnode(shfunctab, cmdstr) ||
++	  builtintab->getnode(builtintab, cmdstr)) ? NULL : findcmd(cmdstr, 1));
+ 
+     for (pc = patcomps; pc; pc = pc->next) {
+ 	if ((pat = patcompile(pc->pat, PAT_STATIC, NULL)) &&
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

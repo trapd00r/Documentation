@@ -1,0 +1,192 @@
+From zsh-workers-request@math.gatech.edu Thu May 07 07:30:05 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26801 invoked from network); 7 May 1998 07:30:05 -0000
+Received: from ns2.primenet.com.au (HELO primenet.com.au) (7795@203.24.36.3)
+  by ns1.primenet.com.au with SMTP; 7 May 1998 07:30:05 -0000
+Received: (qmail 7422 invoked from network); 7 May 1998 07:29:52 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns2.primenet.com.au with SMTP; 7 May 1998 07:29:52 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id DAA07646;
+	Thu, 7 May 1998 03:18:45 -0400 (EDT)
+Resent-Date: Thu, 7 May 1998 03:18:34 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199805070717.CAA02705@hzoli.home>
+Subject: Re: zsh vs. ksh coproc redirection semantics
+In-Reply-To: <980506090047.ZM13585@candle.brasslantern.com> from Bart Schaefer at "May 6, 98 09:00:47 am"
+To: schaefer@brasslantern.com (Bart Schaefer)
+Date: Thu, 7 May 1998 02:17:16 -0500 (CDT)
+Cc: eggink@uni-hamburg.de, zsh-users@math.gatech.edu
+X-Mailer: ELM [version 2.4ME+ PL31 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=ISO-8859-1
+Content-Transfer-Encoding: 8bit
+Resent-Message-ID: <"Sv3Hc.0.3t1.91MKr"@math>
+Resent-From: zsh-users@math.gatech.edu
+X-Mailing-List: <zsh-users@math.gatech.edu> archive/latest/1521
+X-Loop: zsh-users@math.gatech.edu
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Let me quote the ksh manual:
+
+       <&digit       The standard input is duplicated  from  file
+                     descriptor  digit  (see  dup(2)).  Similarly
+                     for the standard output using >&digit.
+
+       <&digit-      The file descriptor given by digit is  moved
+                     to  standard input.  Similarly for the stan­
+                     dard output using >&digit-.
+
+       <&-           The standard input is closed.  Similarly for
+                     the standard output using >&-.
+
+       <&p           The  input  from  the co-process is moved to
+                     standard input.
+
+       >&p           The output to the  co-process  is  moved  to
+                     standard output.
+
+Zsh lack the <&digit- feature.  Note the difference between &digit and
+&p: &digit duplicates the file descriptor while &p moves it.  All of
+these manipulate the descriptos of the shell, since once the coprocess is
+started, it is a separate process, the shell does not have much control
+over it.  The shell keeps two descriptors, one write-only descriptor
+which is connectred to the input of the coprocess, and one read-only
+descriptor which is connected to the output of the coprocess.
+
+>&p moves the write descriptor, which writes to the co-process to
+standard output.  So in ksh (at least in pdksh and in ksh93) you can do
+
+echo foo >&p
+
+>&p itself does not close the write descriptor, but when the command
+whose output was redirected terminates, it brings down its file
+descriptors, which closes the last output to the coprocess.  echo is a
+bad example here, since it is a builtin, so it is handled specially.
+
+Similarily
+
+read <&p
+
+moves the descriptor which reads from the coprocessor output to the
+standard input, and when read terminates, its input is closes, which
+closes the coprocess output.
+
+Now that's theory, the practice is not that good.  It seems that both
+ksh93 and pdksh has a buggy coprocess implementation (the most recent
+pdksh may have a fix, I used one dated April 1996).  Before the coprocess
+starts, two pipes are created, which means four file descriptors.  The
+shell forks then:
+
+ipipe[0] - the read descriptor for the parent handled by <&p and read -p
+           closed in the child
+ipipe[1] - the output of the coprocess in the child
+           closed by the parent. ksh does not, zsh does close it
+opipe[0] - the input of the coprocess in the child
+           closed by the parent. ksh does, zsh does not close it
+opipe[1] - the write descriptor for the parent handled by >&p and print -p
+           closed by the child
+
+Ksh above stands for both ksh93 and pdksh.
+
+Zsh duplicates the descriptor on >&p and <&p unlike ksh which moves it.
+
+echo foo >&p
+
+On ksh this should move the write descriptor.  pdksh does the move.
+ksh93 duplicates the descriptor instead of closing it, and then forgets
+about it, so on ksh93 it is impossible to close the output to the
+coprocess (opipe[1] above) after this.
+
+read <&p
+
+Both ksh93 and pdksh moves ipipe[1] (which is wrong).
+
+Example ksh session (how it is supposed to work):
+
+% pdksh
+$ tr 'a-z' 'A-Z' |&
+[1] 2330
+$ echo foo >&p
+$ 
+[1] + Done                 tr a-z A-Z 
+$ read <&p
+$ echo $REPLY
+FOO
+
+This actually works on Linux with pdksh, but ls -l /proc/pid/fd when pid
+is the PID of pdksh reveals the unclosed descriptors.
+
+To fix the descriptor leak in zsh it is probably enough to add a
+zclose(opipe[0]) right after the zclose(ipipe[1]) in exec.c near line
+753.  I think it whould be preferable to modify zsh to match the
+documented ksh behavior, i.e. moving the descriptor instead of
+duplicating it.
+
+Bart wrote:
+> On May 6, 12:47pm, Bernd Eggink wrote:
+> } In ksh, the connection is done by 'read -p' and 'print -p'. You can't
+> } say "print foo >&p" or "read bar <&p", whereas in zsh you can say either
+
+You can do it in ksh too.
+
+> } "print -p foo" or "print foo >&p". What I meant by "inconsistency" is
+> } that in zsh >& and <& mean different things, depending on whether a 'p'
+> } or a digit follows.
+
+In fact, zsh is consistent, ksh isn't, since zsh always duplicates
+decriptors which ksh moves them then p is used.
+
+> descriptor 3.  3>&p means copy the shell's coproc output to descriptor
+> 3.  3<&0 means copy the shell's standard input to 3.  3<&p means copy the
+> shell's coproc input to 3 (not move the coproc's input to 3).
+
+That's correct provided that the term `shell's coproc output' means `the
+shells output to the input of the coprocess' and the term `shell's coproc
+input' menad `the shell's input from the output of the coprocess'.
+
+> Ksh, on the other hand, appears to treat <&p as "the coproc end of the
+> two-way pipe" and >&p as "the ksh end of the two-way pipe".  This isn't
+> the same as other descriptors, but then other descriptors aren't pipes.
+
+I'm not sure I understand what you mean here.  Looks like you are
+confused about terms.  The pipe is a virtual special file (virtual in a
+sense that it does not exists on any filesystem).  The pipe system call
+creates this virtual fifo device, and opens two file descriptors, one
+reading it and one writing it.  You can imagine that you are using a real
+named fifo in /tmp, and instead of pipe, you do an mkfifo and two opens.
+There is no real two-way pipe here, only two one-way pipe.  The coproc is
+a separate process, and the shell has no control over its descriptors.
+But when the shell closes its output to the coprocess, the coprocess
+may notice an eof on its stdin and may chose to exit.
+
+> close both 3 and p?  In ksh, if you do
+> 	exec 4>&p
+> can you later do
+> 	exec 5>&p
+> and end up having both 4 and 5 connected to the coproc pipe at the same
+> time?  My guess is that you can't -- that once you've done 4>&p, then p
+> is gone and you can't do 5>&p.
+
+That's correct.
+
+> Now, the question is, whether this particular inconsistency with p and
+> other fds is useful enough to emulate it.
+
+Probably is.  The other solution would be to inplement the >&digit-
+syntax and have >&p duplicate, >&p- move the coprocess descriptor.  This
+is consistent, but incompatible with ksh.  Since zsh is already not
+compatible with ksh when creating coprocesses, this might be acceptable,
+but this can greatly confuse people coming from ksh.
+
+About the job table: ksh places the coprocess to the job table similarily
+to zsh.  You can bring the coprocess to the foregroung with fg, which
+does not makes much sense, but works.  You can save $! after coproc and
+use kill to get rid of the coproc later.  In most cases kill %% works
+too.
+
+Zoltan
+

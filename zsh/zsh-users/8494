@@ -1,0 +1,131 @@
+From zsh-users-return-8494-mason-zsh=primenet.com.au@sunsite.dk Mon Feb 14 18:57:40 2005
+Return-Path: <zsh-users-return-8494-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8144 invoked from network); 14 Feb 2005 18:57:39 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 14 Feb 2005 18:57:39 -0000
+Received: (qmail 59097 invoked from network); 14 Feb 2005 18:57:33 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 14 Feb 2005 18:57:33 -0000
+Received: (qmail 19852 invoked by alias); 14 Feb 2005 18:57:14 -0000
+Mailing-List: contact zsh-users-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-users@sunsite.dk
+X-Seq: 8494
+Received: (qmail 19842 invoked from network); 14 Feb 2005 18:57:14 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 14 Feb 2005 18:57:14 -0000
+Received: (qmail 57685 invoked from network); 14 Feb 2005 18:57:11 -0000
+Received: from dsl3-63-249-88-2.cruzio.com (HELO binome.blorf.net) (63.249.88.2)
+  by a.mx.sunsite.dk with SMTP; 14 Feb 2005 18:57:07 -0000
+Received: by binome.blorf.net (Postfix, from userid 1000)
+	id A2F1A36A; Mon, 14 Feb 2005 10:57:05 -0800 (PST)
+Date: Mon, 14 Feb 2005 10:57:05 -0800
+From: Wayne Davison <wayned@users.sourceforge.net>
+To: zsh-users@sunsite.dk
+Subject: Re: History corruption (over NFS)
+Message-ID: <20050214185705.GC6444@blorf.net>
+References: <20050210165417.GG30487@ay.vinc17.org> <1050210184111.ZM22490@candle.brasslantern.com> <20050214155630.GB6395@ay.vinc17.org>
+Mime-Version: 1.0
+Content-Type: multipart/mixed; boundary="MGYHOYXEY6WxJCY8"
+Content-Disposition: inline
+In-Reply-To: <20050214155630.GB6395@ay.vinc17.org>
+User-Agent: Mutt/1.5.6+20040907i
+X-Spam-Checker-Version: SpamAssassin 3.0.2 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=6.0 tests=BAYES_00 autolearn=ham 
+	version=3.0.2
+X-Spam-Hits: -2.6
+
+
+--MGYHOYXEY6WxJCY8
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+On Mon, Feb 14, 2005 at 04:56:30PM +0100, Vincent Lefevre wrote:
+> Then the current zsh instances went on writing to the history file
+> without noticing that it had been truncated, hence the null bytes.
+
+I think this is an NFS problem, since the zsh instances do not keep the
+history file open -- they just open the file for appending, and add an
+item to the end.  When the file is rewritten, it is opened for writing
+with O_TRUNC, and the new contents output.
+
+A little while ago I wrote a patch that caused zsh to change its
+rewriting strategy to use a HISTORY_FILE.new file and then rename it
+into place.  The purpose of this patch is to avoid losing any history if
+zsh gets interrupted during the writing of the new history file.
+However, it should also be a friendlier update strategy for NFS dirs
+because the inode of the file changes.  The downside is that it can undo
+some user's use of symlinks, hardlinks, or special group permissions on
+their history file (because it is replacing the history file instead of
+rewriting it in-place).  Perhaps this algorithm should be made optional?
+
+I've attached a diff in case you want to try it out.
+
+..wayne..
+
+--MGYHOYXEY6WxJCY8
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="hist-dot-new.patch"
+
+--- orig/hist.c	2005-01-28 02:16:20 -0800
++++ hist.c	2004-10-18 15:21:54 -0700
+@@ -2004,7 +2004,7 @@
+ void
+ savehistfile(char *fn, int err, int writeflags)
+ {
+-    char *t, *start = NULL;
++    char *t, *tmpfile, *start = NULL;
+     FILE *out;
+     Histent he;
+     zlong xcurhist = curhist - !!(histactive & HA_ACTIVE);
+@@ -2041,12 +2041,14 @@
+ 	    extended_history = 1;
+     }
+     if (writeflags & HFILE_APPEND) {
++	tmpfile = NULL;
+ 	out = fdopen(open(unmeta(fn),
+ 			O_CREAT | O_WRONLY | O_APPEND | O_NOCTTY, 0600), "a");
+     }
+     else {
+-	out = fdopen(open(unmeta(fn),
+-			 O_CREAT | O_WRONLY | O_TRUNC | O_NOCTTY, 0600), "w");
++	tmpfile = bicat(unmeta(fn), ".new");
++	unlink(tmpfile);
++	out = fdopen(open(tmpfile, O_WRONLY | O_CREAT | O_EXCL, 0600), "w");
+     }
+     if (out) {
+ 	for (; he && he->histnum <= xcurhist; he = down_histent(he)) {
+@@ -2091,6 +2093,11 @@
+ 	    lasthist.text = ztrdup(start);
+ 	}
+ 	fclose(out);
++	if (tmpfile) {
++	    if (rename(tmpfile, unmeta(fn)) < 0)
++		zerr("can't rename %s.new to $HISTFILE", fn, 0);
++	    free(tmpfile);
++	}
+ 
+ 	if (writeflags & HFILE_SKIPOLD
+ 	 && !(writeflags & (HFILE_FAST | HFILE_NO_REWRITE))) {
+@@ -2110,8 +2117,13 @@
+ 	    pophiststack();
+ 	    histactive = remember_histactive;
+ 	}
+-    } else if (err)
+-	zerr("can't write history file %s", fn, 0);
++    } else if (err) {
++	if (tmpfile) {
++	    zerr("can't write history file %s.new", fn, 0);
++	    free(tmpfile);
++	} else
++	    zerr("can't write history file %s", fn, 0);
++    }
+ 
+     unlockhistfile(fn);
+ }
+
+--MGYHOYXEY6WxJCY8--
+

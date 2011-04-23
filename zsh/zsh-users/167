@@ -1,0 +1,176 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Sat Jan 27 07:04:24 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with ESMTP id HAA16503 for <mason@werple.mira.net.au>; Sat, 27 Jan 1996 07:04:16 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id OAA09356; Fri, 26 Jan 1996 14:42:40 -0500 (EST)
+Resent-Date: Fri, 26 Jan 1996 14:42:08 -0500 (EST)
+Message-Id: <9601261941.AA26216@ant.lexis-nexis.com>
+To: Justin Sheehy <dworkin@k2.ccs.neu.edu>
+Cc: zsh-users@math.gatech.edu
+Subject: Program for Mail-checking MH folders
+In-Reply-To: Your message of "Fri, 12 Jan 96 22:51:54 EST."
+             <199601130351.WAA10123@k2.ccs.neu.edu> 
+Date: Fri, 26 Jan 96 14:41:40 EST
+From: Pete Williams <petew@lexis-nexis.com>
+Resent-Message-ID: <"kpJRA2.0.iH2.GwI2n"@euclid>
+Resent-From: zsh-users@math.gatech.edu
+X-Mailing-List: <zsh-users@math.gatech.edu> archive/latest/167
+X-Loop: zsh-users@math.gatech.edu
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Justin Sheehy <dworkin@k2.ccs.neu.edu> writes:
+>>I'm trying to set up my mail variables within zsh 2.5.03 so that whenever
+>>mail arrives within one of my MH folders (it's been pre-filtered by mailagent
+>
+>As an mh user and a zsh user, I have had this same problem.
+>You cannot get zsh to work with mh without extreme kludginess. What I
+
+I had been trying to get the zsh "mail" variable to work with MH folders. 
+As all my mail is prefiltered, my spoolfile rarely has any mail.  As zsh
+has (apparently) no way of checking MH folders for new mail, I whipped up a
+perl script to do the job.
+
+What it does is build a "database" of you current MH folders (as a DBM
+file), and then every time it's called, it looks at the "Unseen-Sequence"
+line of each folder to see if there's anything new and prints out an
+appropriate message to the terminal.
+
+Additional notes head the program.
+ 
+It's a quick hack, but it works for my purposes.  Hope someone else will
+find it useful.
+
+Pete Williams <petew@lexis-nexis.com>
+
+--------------- SITUATION: Users Want Phone List Application ---------------
+ADMINISTRATIVE FASCIST: Oracle.  Users give up and go back to post-it notes.
+  -- Stephan Zielinski "KNOW YOUR UNIX SYSTEM ADMINISTRATOR - A Field Guide"
+
+#! /usr/local/bin/perl
+##############################################################################
+# CHECKMH
+#
+# To find MH folders with new mail and print out those that do.
+#
+#  Install:
+# 1. Change the $mailspool and $mailbox variables to point to your system
+#    mail spooling directory and the name of your home mailbox directory,
+#    respectively.
+# 2. Change $dbmbase, $dbmfile, and $dbmpag if you wish your dbm file to be
+#    something besides $maildir/.curfolders.
+# 3. Look at your .mh_profile and check the value of "Unseen-Sequence".  Set
+#    the variable $unseen_seq to this value.  If it's not there, add the line
+#    "Unseen-Sequence: unseen" to .mh_profile.
+# 4. If running under zsh, and you want to emulate the behavior of the 
+#    "mail" variable,
+#    -- add this line to ~/.zshenv: "export PERIOD=600"
+#    -- add this line to ~/.zshrc:  "periodic () { ~/bin/checkmh }"
+# 5. You should run this script with the "-i" option periodically so that
+#    your current (existing) folders are kept updated.  Add a crontab entry
+#    like the following:
+#    23 19 * * 0-5 /u/pete/bin/checkmh -i
+#
+###############################################################################
+
+$| = 1;
+
+$mailspool = '/var/spool/mail';
+$mailbox   = 'Mail';
+$dbmbase   = '.curfolders';
+$unseen_seq= 'unseen';
+
+($name,$homedir) = (getpwuid($<))[0,7];
+
+$spool   = "${mailspool}/$name";
+$maildir = "${homedir}/$mailbox";
+$dbmfile = "${maildir}/$dbmbase";
+$dbmpag  = "${maildir}/${dbmbase}.pag";
+
+$0 =~ s:^.*/::;
+
+if ($_ = $ARGV[0]) {
+	if (/^-i/) { 
+		&update_mhfolders;
+	} else {
+		die <<"UrGgGh!";
+usage: $0 [-i]
+       $0   : check MH folders
+       $0 -i: update folder list in folder database
+UrGgGh!
+	}
+} else {
+	&check_mail;
+}
+
+##############################################################################
+# CHECK_MAIL
+#
+# Check system mailbox first, then all the MH folders
+# Report results to STDOUT
+##############################################################################
+
+sub check_mail {
+	&update_mhfolders unless -e $dbmpag;
+
+	dbmopen(FOLDERDBM,$dbmfile,0666) || die "Can't open $dbmfile: $!";
+
+	foreach $folder (sort keys %FOLDERDBM) {
+		($basename = $folder) =~ s:^${maildir}/::;
+		substr($basename,0,0) = '+';
+		$seqfile = join('/',$folder,'.mh_sequences');
+		open(SEQ,$seqfile); # No warning, but probably not a problem!
+		while (<SEQ>) {
+			next unless /^$unseen_seq:/;
+			print "New mail in $basename.\n";
+		}
+		close SEQ;
+	}
+
+	dbmclose FOLDERDBM;
+}
+
+##############################################################################
+# UPDATE_MHFOLDERS
+#
+# Initialize (-i)/update the mhfolders database.
+# Updates a dbm file on the current folders in the MAIL directory.
+# Normally run once at setup time and then added to the user's crontab file.
+##############################################################################
+
+sub update_mhfolders {
+	local(%tmparray);
+	require "find.pl";
+
+	dbmopen(FOLDERDBM,$dbmfile,0666) || die "Can't open $dbmfile: $!";
+
+	foreach $key (keys %FOLDERDBM) { delete $FOLDERDBM{$key}; }
+
+	&find($maildir);
+
+	warn "MH folders added to $dbmfile:\n";
+
+	foreach $key (keys %tmparray) {
+		unless ($key eq $maildir) {
+			# If run by cron, this line should send you info about
+			# new folders added to the dbm file.
+			warn "    $key\n";
+			$FOLDERDBM{$key}++;
+		}
+	}
+
+	dbmclose FOLDERDBM;
+	exit;
+}
+
+##############################################################################
+# WANTED
+# Traverse desired filesystems
+##############################################################################
+
+sub wanted {
+	if ((($dev,$ino,$mode,$nlink,$uid,$gid) = lstat($_)) && -d _) {
+		$name =~ s:^//:/:;
+		$tmparray{$name}++;
+	}
+}
+

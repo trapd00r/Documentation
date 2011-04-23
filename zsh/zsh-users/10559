@@ -1,0 +1,160 @@
+From zsh-users-return-10559-mason-zsh=primenet.com.au@sunsite.dk Sun Jul 30 06:30:04 2006
+Return-Path: <zsh-users-return-10559-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12784 invoked from network); 30 Jul 2006 06:30:02 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.3 (2006-06-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.3
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 30 Jul 2006 06:30:02 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 18047 invoked from network); 30 Jul 2006 06:29:54 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 30 Jul 2006 06:29:54 -0000
+Received: (qmail 8519 invoked by alias); 30 Jul 2006 06:29:47 -0000
+Mailing-List: contact zsh-users-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-users@sunsite.dk
+X-Seq: 10559
+Received: (qmail 8510 invoked from network); 30 Jul 2006 06:29:46 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 30 Jul 2006 06:29:46 -0000
+Received: (qmail 16997 invoked from network); 30 Jul 2006 06:29:46 -0000
+Received: from vms048pub.verizon.net (206.46.252.48)
+  by a.mx.sunsite.dk with SMTP; 30 Jul 2006 06:29:44 -0000
+Received: from torch.brasslantern.com ([71.116.116.250])
+ by vms048.mailsrvcs.net
+ (Sun Java System Messaging Server 6.2-4.02 (built Sep  9 2005))
+ with ESMTPA id <0J370077AE1IQ096@vms048.mailsrvcs.net> for
+ zsh-users@sunsite.dk; Sun, 30 Jul 2006 01:29:43 -0500 (CDT)
+Received: from torch.brasslantern.com (localhost.localdomain [127.0.0.1])
+	by torch.brasslantern.com (8.13.1/8.13.1) with ESMTP id k6U6TfcB012666	for
+ <zsh-users@sunsite.dk>; Sat, 29 Jul 2006 23:29:42 -0700
+Received: (from schaefer@localhost)	by torch.brasslantern.com
+ (8.13.1/8.13.1/Submit) id k6U6TfiK012665	for zsh-users@sunsite.dk; Sat,
+ 29 Jul 2006 23:29:41 -0700
+Date: Sat, 29 Jul 2006 23:29:39 -0700
+From: Bart Schaefer <schaefer@brasslantern.com>
+Subject: Rebinding a widget within a keymap
+To: zsh-users@sunsite.dk
+Message-id: <060729232941.ZM12664@torch.brasslantern.com>
+MIME-version: 1.0
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+Content-type: text/plain; charset=us-ascii
+
+The zsh bindkey and zle commands allow one to do most things one might
+want to do with keymaps, such as copying one, setting bindings, etc.
+However, there isn't a straightforward way to express transformations
+such as "temporarily change all keys bound to 'self-insert' to instead
+be bound to 'frob'".
+
+This leads to workarounds such as
+
+	zle -N self-insert frob
+	zle recursive-edit
+	zle -A .self-insert self-insert
+
+This is unsatisfactory, as it's sometimes difficult to guarantee that
+the "zle -A" step occurs; and if it doesn't, you're left frobbing in
+a context where you should be inserting.  Furthermore, this fails if
+self-insert was previously replaced by yet some other widget, so to get
+that handled properly it's necessary to do
+
+	zle -A self-insert saved-self-insert
+	zle -N self-insert frob
+	zle recursive-edit
+	zle -A saved-self-insert self-insert
+	zle -D saved-self-insert
+
+This introduces possible name clashes on saved-self-insert; e.g., it
+can't be invoked again from inside recursive-edit, and every added bit
+of code to repair such a problem makes the unwinding more precarious.
+Automatically saving and restoring keymaps with
+
+	bindkey -N frobber main
+	zle recursive-edit -K frobber
+
+was meant to help with this, but without doing some sort of processing
+on $(bindkey -L) it's not possible to determine which keys are already
+bound to self-insert and thus need rebinding in frobber, and we're back
+where we started.
+
+Having given you all that background, I'm obviously about to propose a
+solution.  Here it is.
+
+  zmodload -i zsh/zleparameter
+
+  for k in $keymaps
+  do
+    if (( $+widgets[self-insert-$k] == 0 ))
+    then zle -A self-insert self-insert-$k
+    fi
+  done
+
+  self-insert-by-keymap() {
+    if (( $+widgets[$WIDGET-$KEYMAP] == 1 ))
+    then zle $WIDGET-$KEYMAP "$@"
+    else zle .$WIDGET "$@"
+    fi
+  }
+  zle -N self-insert self-insert-by-keymap
+
+This can of course be extended to any/all other widgets; just put a loop
+"for w in ${(k)widgets}" around the whole thing and replace "self-insert"
+with "$w" throughout.  (It's at that point that the lack of control over
+autoremoval, which I've mentioned in other threads, becomes an issue, so
+if you want to go beyond self-insert you'll have to write it out yourself.)
+
+With this in place, you should rarely need "zle -N self-insert frob" again.
+Instead you do this:
+
+	bindkey -N frobber main
+	zle -N self-insert-frobber frob
+
+Then, whenever you wish to replace self-insert with frob, change keymaps:
+
+	zle recursive-edit -K frobber
+
+Here's a simple example, which improves upon the caps-lock example in the
+zsh manual entry for recursive-edit:
+
+  # Assumes self-insert-by-keymap installed as self-insert!
+
+  self-insert-ucase() {
+    LBUFFER+=${(U)KEYS[-1]}
+  }
+  zle -N self-insert-ucase
+  caps-lock() {
+    bindkey -N ucase $KEYMAP
+    bindkey -M ucase "$KEYS" .accept-line
+    zle recursive-edit -K ucase || zle send-break
+  }
+  zle -N caps-lock
+
+To turn this on, pick a key sequence (I've chosen ctrl-x shift-L) and
+bind the caps-lock widget to it:
+
+  bindkey -M main '^XL' caps-lock
+
+An obvious extension to this scheme is to create a variant of accept-line
+that notifies the caller of recursive-edit as to whether it should treat
+the end of the recursive-edit as final acceptance of the buffer, so that
+it's possible e.g. to execute a command without first explicitly leaving
+caps-lock "mode".
+
+The other remaining drawback to this scheme is that it can't be employed
+at the topmost level of ZLE, because the value of $KEYMAP is always "main"
+(or "vicmd" as a special case) at that level.
+
+Note that for builtin widgets the "for k in $keymaps" loop is extraneous;
+so it would be possible to embed this widget-name-by-keymap logic in the
+C code in ZLE, thereby making it possible to insert an "override" widget
+into any specific keymap simply by creating a new widget with the keymap
+name appended.  Old code that uses "zle -N builtin-widget user-function"
+would continue to work, but would break new code that relies on the by-
+keymap technique.
+
+-- 
+

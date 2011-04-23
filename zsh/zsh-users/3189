@@ -1,0 +1,151 @@
+From zsh-users-return-3189-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jun 19 09:09:04 2000
+Return-Path: <zsh-users-return-3189-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9297 invoked from network); 19 Jun 2000 09:09:02 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Jun 2000 09:09:02 -0000
+Received: (qmail 16633 invoked by alias); 19 Jun 2000 09:08:45 -0000
+Mailing-List: contact zsh-users-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-users@sunsite.auc.dk
+X-Seq: 3189
+Received: (qmail 16624 invoked from network); 19 Jun 2000 09:08:44 -0000
+Date: Mon, 19 Jun 2000 10:08:16 +0100
+From: Peter Stephenson <pws@cambridgesiliconradio.com>
+Subject: Re: more fun with parameter expansion
+In-reply-to: "Your message of Sun, 18 Jun 2000 23:02:03 BST."
+ <E133n8a-00040G-00.2000-06-18-23-01-52@cmailg5.svr.pol.co.uk>
+To: zsh-users@sunsite.auc.dk (Zsh users list)
+Message-id: <0FWE001GB9DRKU@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+I wrote:
+> Clint Adams wrote:
+> > This is for someone who wants to take a directory tree and convert all
+> > the filenames (and directory names) to lowercase, replacing spaces
+> > with underscores.
+> 
+> See zmv in the Functions/Misc directory of 3.1.9 (this version is needed
+> for it to work).
+> 
+> zmv '(**/)(*[ A-Z]*)' '${1}${(L)2/ /_}'
+> 
+> works on a simple test case (use the option -n just to test what it would
+> do).
+
+However, it didn't do depth-first matching, so things like `MYDIR/MYFILE'
+were screwed up because it tried to rename MYDIR to mydir, then
+MYDIR/MYFILE (which didn't exist) to MYDIR/myfile.
+
+Luckily, there are now glob qualifiers to do depth-first ordering: **/*(odon)
+orders first by depth under a given directory, then by name.
+
+> Looks
+> like zmv needs the option to ignore files whose names didn't change (it's a
+> pain having to make the LH pattern so specific).
+
+I've made this the default.  I can't see why you would want the error.
+
+Now you should be able to do
+
+  zmv '(**/)(*)' '${1}${(L)2// /_}'
+
+(I should have put the doubled slash in last time).
+
+I'm sending this to zsh-users, because you can always copy an installed zmv
+and patch it yourself.
+
+Index: Functions/Misc/zmv
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/Misc/zmv,v
+retrieving revision 1.2
+diff -u -r1.2 zmv
+--- Functions/Misc/zmv	2000/05/05 14:14:12	1.2
++++ Functions/Misc/zmv	2000/06/19 09:02:41
+@@ -61,10 +61,11 @@
+ # other words, parenthesising of wildcards is independent of any existing
+ # parentheses.
+ #
+-# Any error --- a substitution resulted in an empty string, a
+-# substitution did not change the file name, two substitutions gave the
+-# same result, the destination was an existing regular file and -f was not
+-# given --- causes the entire function to abort without doing anything.
++# Any file whose name is not changed by the substitution is simply ignored.
++# Any error --- a substitution resulted in an empty string, two
++# substitutions gave the same result, the destination was an existing
++# regular file and -f was not given --- causes the entire function to abort
++# without doing anything.
+ #
+ # Options:
+ #  -f  force overwriting of destination files.  Not currently passed
+@@ -76,7 +77,8 @@
+ #  -n  no execution: print what would happen, but don't do it.
+ #  -q  Turn bare glob qualifiers off:  now assumed by default, so this
+ #      has no effect.
+-#  -Q  Force bare glob qualifiers on.
++#  -Q  Force bare glob qualifiers on.  Don't turn this on unless you are
++#      actually using glob qualifiers in a pattern (see below).
+ #  -s  symbolic, passed down to ln; only works with zln or z?? -L.
+ #  -v  verbose: print line as it's being executed.
+ #  -o <optstring>
+@@ -119,7 +121,7 @@
+ local f g args match mbegin mend files action myname tmpf opt exec
+ local opt_f opt_i opt_n opt_q opt_Q opt_s opt_M opt_C opt_L 
+ local opt_o opt_p opt_v opt_w MATCH MBEGIN MEND
+-local pat repl errstr fpat
++local pat repl errstr fpat hasglobqual opat
+ typeset -A from to
+ integer stat
+ 
+@@ -190,17 +192,29 @@
+   fi
+ fi
+ 
++if [[ -n $opt_Q && $pat = (#b)(*)\([^\)\|\~]##\) ]]; then
++  hasglobqual=q
++  # strip off qualifiers for use as ordinary pattern
++  opat=$match[1]
++fi
++
+ if [[ $pat = (#b)(*)\((\*\*##/)\)(*) ]]; then
+   fpat="$match[1]$match[2]$match[3]"
++  # Now make sure we do depth-first searching.
++  # This is so that the names of any files are altered before the
++  # names of the directories they are in.
++  if [[ -n $opt_Q && -n $hasglobqual ]]; then
++    fpat[-1]="odon)"
++  else
++    setopt bareglobqual
++    fpat="${fpat}(odon)"
++  fi
+ else
+   fpat=$pat
+ fi
+ files=(${~fpat})
+ 
+-if [[ -o bareglobqual && $pat = (#b)(*)\([^\)\|\~]##\) ]]; then
+-  # strip off qualifiers for use as ordinary pattern
+-  pat=$match[1]
+-fi
++[[ -n $hasglobqual ]] && pat=$opat
+ 
+ errs=()
+ 
+@@ -219,7 +233,9 @@
+   if [[ -z $g ]]; then
+     errs=($errs "$f expanded to empty string")
+   elif [[ $f = $g ]]; then
+-    errs=($errs "$f not altered by substitution")
++    # don't cause error: more useful just to skip
++    #   errs=($errs "$f not altered by substitution")
++    continue
+   elif [[ -n $from[$g] && ! -d $g ]]; then
+     errs=($errs "$f and $from[$g] both map to $g")
+   elif [[ -f $g && -z $opt_f ]]; then
+
+-- 
+Peter Stephenson <pws@cambridgesiliconradio.com>
+Cambridge Silicon Radio, Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+

@@ -1,0 +1,121 @@
+From schaefer@candle.brasslantern.com Fri Jul 19 04:38:38 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id EAA15939 for <mason@werple.mira.net.au>; Fri, 19 Jul 1996 04:38:37 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id OAA08693; Thu, 18 Jul 1996 14:28:07 -0400 (EDT)
+Resent-Date: Thu, 18 Jul 1996 14:26:53 -0400 (EDT)
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <9607181127.ZM13011@candle.brasslantern.com>
+Date: Thu, 18 Jul 1996 11:27:51 -0700
+In-Reply-To: segal@morgan.com (Morris M. Siegel)
+        "Bug in case stmt with '('" (Jul 17,  5:01pm)
+References: <9607171701.ZM10684@morgan.com>
+Reply-To: schaefer@nbn.com
+X-Mailer: Z-Mail (3.2.1 24feb96 Caldera)
+To: segal@morgan.com (Morris M. Siegel), zsh-users@math.gatech.edu
+Subject: Re: Bug in case stmt with '('
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"1dLaL1.0.672.d7exn"@euclid>
+Resent-From: zsh-users@math.gatech.edu
+X-Mailing-List: <zsh-users@math.gatech.edu> archive/latest/311
+X-Loop: zsh-users@math.gatech.edu
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 2887
+Status: O
+
+On Jul 17,  5:01pm, Morris M. Siegel wrote:
+> Subject: Bug in case stmt with '('
+> It seems that when a pattern in a case statement is preceded by the optional
+> '(', the parser is in the wrong state when parsing the statement following
+> the pattern.
+
+Yup.  Here's the problem:
+
+To parse the case pattern, zsh attempts to lex a STRING token.  In old
+case syntax, this stops before either the next "|" or the ")".  With the
+fully-parenthesized syntax, it lexes the entire (...) expression.
+
+Zsh then reads another token, and looks to see whether it's a "|" (in
+which case it loops) or a ")" (in which case the parse is finished).
+With the new syntax, neither of these is true, which means zsh has
+lexed the next word (in this case, "gigo=...") instead of the OUTPAR.
+Problem is, it needs to lex that word with incmdpos=1 to get an
+ENVSTRING token, but instead it's lexing with incmdpos=0,incasepat=1
+and getting a STRING token.
+
+In the old syntax, where the token was OUTPAR, zsh sets incmdpos=1 and
+then lexes again, getting ENVSTRING as it should.  When zsh notices that
+the token is not OUTPAR, it attempts to fix the situation by skipping
+that lex; but the damage has already been done.  Zsh needs to look for
+the matched parens sooner.
+
+There's one additional complication: zsh glob syntax uses parens, so zsh
+has previously accepted this sort of thing:
+
+    case $foo in
+    (v|w)|x)	echo 'case (v|w)|x';;
+    (y|z))	echo 'case (y|z)';;
+    *)		echo 'default';;
+    esac
+
+That means it can't look only for matching parens, but also has to look
+for matching parens followed by a closing paren or vertical bar.
+
+I'm unsure of this patch, so the pre3 stuff is still there #ifdef OLD.
+There may be a better way to deal with it.
+
+*** Src/parse.c.orig	Mon Jul 15 00:07:21 1996
+--- Src/parse.c	Thu Jul 18 11:12:14 1996
+***************
+*** 502,508 ****
+--- 502,527 ----
+  	    break;
+  	}
+  	str = tokstr;
++ #ifdef OLD
+  	yylex();
++ #else
++ 	/* POSIX allows (foo*) patterns */
++ 	if (skipparens(Inpar, Outpar, &str) || *str) {
++ 	    /* Not fully parenthesized, look for a token */
++ 	    str = tokstr;
++ 	    yylex();
++ 	} else {
++ 	    /* Fully parenthesized, but zsh glob syntax permits
++ 	     * parens in (x|y) patterns, so check for that too. */
++ 	    int c;
++ 	    str = tokstr;
++ 	    c = hgetc();
++ 	    if (c == /*(*/ ')' || c == '|') {
++ 		hungetc(c);
++ 		yylex();
++ 	    }
++ 	}
++ #endif
+  	while (tok == BAR) {
+  	    char *str2;
+  	    int sl = strlen(str);
+***************
+*** 527,532 ****
+--- 546,552 ----
+  	}
+  	incasepat = 0;
+  	incmdpos = 1;
++ #ifdef OLD
+  	if (tok != OUTPAR) {
+  	    /* POSIX allows (foo*) patterns */
+  	    char *s = str;
+***************
+*** 534,539 ****
+--- 554,560 ----
+  	    if (skipparens(Inpar, Outpar, &s) || *s)
+  		YYERRORV;
+  	} else
++ #endif
+  	    yylex();
+  	addlinknode(pats, str);
+  	addlinknode(lists, par_list());
+***************
+
+
