@@ -1,0 +1,172 @@
+From pws@ifh.de Tue Jul 23 22:37:17 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id WAA04311 for <mason@werple.mira.net.au>; Tue, 23 Jul 1996 22:37:14 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id IAA10923; Tue, 23 Jul 1996 08:18:10 -0400 (EDT)
+Resent-Date: Tue, 23 Jul 1996 08:18:10 -0400 (EDT)
+Message-Id: <199607231217.OAA16524@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: "Array" variables that aren't set, and NO_UNSET 
+In-reply-to: "schaefer@candle.brasslantern.com"'s message of "Mon, 22 Jul 1996 12:35:29 MET."
+             <960722123529.ZM9604@candle.brasslantern.com> 
+Date: Tue, 23 Jul 1996 14:17:00 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"jgot32.0.bg2.2CCzn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1741
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 3722
+Status: O
+
+schaefer@candle.brasslantern.com wrote:
+> Consider:
+> 
+> zsh% setopt | grep set
+> nounset             off
+> zsh% echo ${thisisnotavariable}
+> 
+> zsh% echo ${thisisnotavariable[1]}
+> zsh: closing brace expected
+> zsh% 
+> 
+> Why is it a *syntax* error to subscript a variable that's not set, when
+> it is not a syntax error to refer to the string value of such a variable?
+
+This does seem inconsistent.  The problem is that getvalue() doesn't
+bother parsing any further if it finds the variable is unset.
+
+This patch is one suggestion, though I suspect there may be others.
+Parsing continues (that's the first hunk), and one then has to be
+careful that the parameter struct v->pm is not dereferenced since it
+may now be null (that's all the rest).  The change to check this in
+getstrvalue() is necessary; the changes in getintvalue() and
+getarrvalue() shouldn't be if everything is going according to plan,
+but I have made them anyway.
+
+It's very intricate, so it's rather hard to be completely certain
+v->pm won't get dereferenced.  Perhaps there's a better way of doing
+it.  Make v->pm instead reference a dummy scalar?  That's hard too,
+since if getvalue() returns non-zero then v->pm is liable to be
+hijacked and altered.  I'm not sure there's currently any way of making
+readonlyness watertight.
+
+*** Src/params.c~	Mon Jul  1 19:10:53 1996
+--- Src/params.c	Tue Jul 23 13:49:28 1996
+***************
+*** 549,560 ****
+  	if (sav)
+  	    *s = sav;
+  	*pptr = s;
+- 	if (!pm || (pm->flags & PM_UNSET))
+- 	    return NULL;
+  	v = (Value) hcalloc(sizeof *v);
+! 	if (PM_TYPE(pm->flags) == PM_ARRAY)
+  	    v->isarr = isvarat ? -1 : 1;
+! 	v->pm = pm;
+  	v->inv = 0;
+  	v->a = 0;
+  	v->b = -1;
+--- 549,558 ----
+  	if (sav)
+  	    *s = sav;
+  	*pptr = s;
+  	v = (Value) hcalloc(sizeof *v);
+! 	if (pm && PM_TYPE(pm->flags) == PM_ARRAY)
+  	    v->isarr = isvarat ? -1 : 1;
+! 	v->pm = (pm && !(pm->flags & PM_UNSET)) ? pm : NULL;
+  	v->inv = 0;
+  	v->a = 0;
+  	v->b = -1;
+***************
+*** 602,608 ****
+  			while (*s != ']' && *s != Outbrack)
+  			    s++;
+  			*pptr = s;
+! 			return v;
+  		    }
+  		} else {
+  		    if (a > 0)
+--- 600,606 ----
+  			while (*s != ']' && *s != Outbrack)
+  			    s++;
+  			*pptr = s;
+! 			return v->pm ? v : NULL;
+  		    }
+  		} else {
+  		    if (a > 0)
+***************
+*** 642,648 ****
+  	zerr("subscript to %s: %d", (v->b < 0) ? "small" : "big", v->b);
+  	return NULL;
+      }
+!     return v;
+  }
+  
+  /**/
+--- 640,646 ----
+  	zerr("subscript to %s: %d", (v->b < 0) ? "small" : "big", v->b);
+  	return NULL;
+      }
+!     return v->pm ? v : NULL;
+  }
+  
+  /**/
+***************
+*** 652,658 ****
+      char *s, **ss;
+      static char buf[(SIZEOF_LONG * 8) + 4];
+  
+!     if (!v)
+  	return "";
+      if (v->inv) {
+  	sprintf(buf, "%d", v->a);
+--- 650,656 ----
+      char *s, **ss;
+      static char buf[(SIZEOF_LONG * 8) + 4];
+  
+!     if (!v || !v->pm)
+  	return "";
+      if (v->inv) {
+  	sprintf(buf, "%d", v->a);
+***************
+*** 704,710 ****
+  {
+      char **s;
+  
+!     if (!v)
+  	return arrdup(nular);
+      if (v->inv) {
+  	char buf[DIGBUFSIZE];
+--- 702,708 ----
+  {
+      char **s;
+  
+!     if (!v || !v->pm)
+  	return arrdup(nular);
+      if (v->inv) {
+  	char buf[DIGBUFSIZE];
+***************
+*** 736,742 ****
+  long
+  getintvalue(Value v)
+  {
+!     if (!v || v->isarr)
+  	return 0;
+      if (v->inv)
+  	return v->a;
+--- 734,740 ----
+  long
+  getintvalue(Value v)
+  {
+!     if (!v || !v->pm || v->isarr)
+  	return 0;
+      if (v->inv)
+  	return v->a;
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+
+

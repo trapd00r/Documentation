@@ -1,0 +1,290 @@
+From zsh-workers-return-10756-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Apr 14 11:28:32 2000
+Return-Path: <zsh-workers-return-10756-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21234 invoked from network); 14 Apr 2000 11:28:17 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Apr 2000 11:28:17 -0000
+Received: (qmail 23821 invoked by alias); 14 Apr 2000 11:28:05 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10756
+Received: (qmail 23641 invoked from network); 14 Apr 2000 11:27:37 -0000
+Date: Fri, 14 Apr 2000 12:27:09 +0100
+From: Peter Stephenson <pws@cambridgesiliconradio.com>
+Subject: PATCH: fix for (#s) and (#e) in param substs
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Message-id: <0FT000MKM7T8D3@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+This wasn't as bad as it could have been.  Things like
+
+${foo//(#s)d*time(#e)/d fight/}
+
+are all now supposed to work.  One thing I like about this is it allows you
+to forget about not only anchor characters in / and //, but even ## and %%,
+and with the (S) parameter flag # and % too --- the /-forms together with
+the start and end assertions present a single consistent interface for
+pattern substitutions.
+
+It's amazing what I can get excited about nowadays.
+
+By the way, I inserted a hostage to fortune in the manual by claiming that
+`(^(#s))' etc. also work, i.e. you can assert that you are not at the start
+of the string.  I believe this to be the case, but it is a good deal more
+hairy as it relies on the exclusion code, which is a bit stomach-turning.
+I've caught another potential bug that exclusions in groups pretend the
+string ends at the end of the group, which could have made (#e) match
+erroneously.  I don't claim that's the end of the matter.
+
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.4
+diff -u -r1.4 expn.yo
+--- Doc/Zsh/expn.yo	2000/04/06 18:44:01	1.4
++++ Doc/Zsh/expn.yo	2000/04/14 11:26:05
+@@ -1309,6 +1309,16 @@
+ `tt(*((#s)|/)test((#e)|/)*)' matches a path segment `tt(test)' in any of
+ the following strings: tt(test), tt(test/at/start), tt(at/end/test),
+ tt(in/test/middle).
++
++Another use is in parameter substitution; for example
++`tt(${array/(#s)A*Z(#e)})' will remove only elements of an array which
++match the complete pattern `tt(A*Z)'.  There are other ways of performing
++many operations of this type, however the combination of the substitution
++operations `tt(/)' and `tt(//)' with the `tt((#s))' and `tt((#e))' flags
++provides a single simple and memorable method.
++
++Note that assertions of the form `tt((^(#s)))' also work, i.e. match
++anywhere except at the start of the string.
+ )
+ enditem()
+ 
+Index: Src/glob.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/glob.c,v
+retrieving revision 1.3
+diff -u -r1.3 glob.c
+--- Src/glob.c	2000/04/07 02:27:44	1.3
++++ Src/glob.c	2000/04/14 11:26:05
+@@ -2056,6 +2056,39 @@
+ }
+ 
+ /**/
++static void
++set_pat_start(Patprog p, int offs)
++{
++    /*
++     * If we are messing around with the test string by advancing up
++     * it from the start, we need to tell the pattern matcher that
++     * a start-of-string assertion, i.e. (#s), should fail.  Hence
++     * we test whether the offset of the real start of string from
++     * the actual start, passed as offs, is zero.
++     */
++    if (offs)
++	p->flags |= PAT_NOTSTART;
++    else
++	p->flags &= ~PAT_NOTSTART;
++}
++
++/**/
++static void
++set_pat_end(Patprog p, char null_me)
++{
++    /*
++     * If we are messing around with the string by shortening it at the
++     * tail, we need to tell the pattern matcher that an end-of-string
++     * assertion, i.e. (#e), should fail.  Hence we test whether
++     * the character null_me about to be zapped is or is not already a null.
++     */
++    if (null_me)
++	p->flags |= PAT_NOTEND;
++    else
++	p->flags &= ~PAT_NOTEND;
++}
++
++/**/
+ static int
+ igetmatch(char **sp, Patprog p, int fl, int n, char *replstr)
+ {
+@@ -2068,6 +2101,9 @@
+     if (p->mustoff && !strstr((char *)s, (char *)p + p->mustoff))
+ 	matched = 0;
+ 
++    /* in case we used the prog before... */
++    p->flags &= ~(PAT_NOTSTART|PAT_NOTEND);
++
+     if (fl & SUB_ALL) {
+ 	i = matched && pattry(p, s);
+ 	*sp = get_match_ret(*sp, 0, i ? l : 0, fl, i ? replstr : 0);
+@@ -2092,6 +2128,7 @@
+ 		     */
+ 		    for (t = s; t < mpos; METAINC(t)) {
+ 			sav = *t;
++			set_pat_end(p, sav);
+ 			*t = '\0';
+ 			if (pattry(p, s)) {
+ 			    mpos = patinput;
+@@ -2112,6 +2149,7 @@
+ 	     * There's no optimization here.               */
+ 	    patoffset = ml;
+ 	    for (t = s + l; t >= s; t--, patoffset--) {
++		set_pat_start(p, t-s);
+ 		if (pattry(p, t)) {
+ 		    *sp = get_match_ret(*sp, t - s, l, fl, replstr);
+ 		    patoffset = 0;
+@@ -2128,6 +2166,7 @@
+ 	     * move forward along string until we get a match. *
+ 	     * Again there's no optimisation.                  */
+ 	    for (i = 0, t = s; i < l; i++, t++, patoffset++) {
++		set_pat_start(p, t-s);
+ 		if (pattry(p, t)) {
+ 		    *sp = get_match_ret(*sp, i, l, fl, replstr);
+ 		    patoffset = 0;
+@@ -2141,6 +2180,7 @@
+ 
+ 	case SUB_SUBSTR:
+ 	    /* Smallest at start, but matching substrings. */
++	    set_pat_start(p, l);
+ 	    if (!(fl & SUB_GLOBAL) && pattry(p, s + l) && !--n) {
+ 		*sp = get_match_ret(*sp, 0, 0, fl, replstr);
+ 		return 1;
+@@ -2155,12 +2195,14 @@
+ 		matched = 0;
+ 		for (; t < s + l; t++, patoffset++) {
+ 		    /* Find the longest match from this position. */
++		    set_pat_start(p, t-s);
+ 		    if (pattry(p, t) && patinput > t) {
+ 			char *mpos = patinput;
+ 			if (!(fl & SUB_LONG) && !(p->flags & PAT_PURES)) {
+ 			    char *ptr;
+ 			    for (ptr = t; ptr < mpos; METAINC(ptr)) {
+ 				sav = *ptr;
++				set_pat_end(p, sav);
+ 				*ptr = '\0';
+ 				if (pattry(p, t)) {
+ 				    mpos = patinput;
+@@ -2209,6 +2251,7 @@
+ 	     * at the start.  Goodness knows if this is a good idea
+ 	     * with global substitution, so it doesn't happen.
+ 	     */
++	    set_pat_start(p, l);
+ 	    if ((fl & (SUB_LONG|SUB_GLOBAL)) == SUB_LONG &&
+ 		pattry(p, s + l) && !--n) {
+ 		*sp = get_match_ret(*sp, 0, 0, fl, replstr);
+@@ -2219,6 +2262,7 @@
+ 	case (SUB_END|SUB_SUBSTR):
+ 	    /* Shortest at end with substrings */
+ 	    patoffset = ml;
++	    set_pat_start(p, l);
+ 	    if (pattry(p, s + l) && !--n) {
+ 		*sp = get_match_ret(*sp, l, l, fl, replstr);
+ 		patoffset = 0;
+@@ -2230,6 +2274,7 @@
+ 	    for (t = s + l - 1; t >= s; t--, patoffset--) {
+ 		if (t > s && t[-1] == Meta)
+ 		    t--;
++		set_pat_start(p, t-s);
+ 		if (pattry(p, t) && patinput > t && !--n) {
+ 		    /* Found the longest match */
+ 		    char *mpos = patinput;
+@@ -2237,6 +2282,7 @@
+ 			char *ptr;
+ 			for (ptr = t; ptr < mpos; METAINC(ptr)) {
+ 			    sav = *ptr;
++			    set_pat_end(p, sav);
+ 			    *ptr = '\0';
+ 			    if (pattry(p, t)) {
+ 				mpos = patinput;
+@@ -2252,6 +2298,7 @@
+ 		}
+ 	    }
+ 	    patoffset = ml;
++	    set_pat_start(p, l);
+ 	    if ((fl & SUB_LONG) && pattry(p, s + l) && !--n) {
+ 		*sp = get_match_ret(*sp, l, l, fl, replstr);
+ 		patoffset = 0;
+Index: Src/pattern.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/pattern.c,v
+retrieving revision 1.4
+diff -u -r1.4 pattern.c
+--- Src/pattern.c	2000/04/06 18:44:01	1.4
++++ Src/pattern.c	2000/04/14 11:26:05
+@@ -1757,6 +1757,9 @@
+ 			 * over, that doesn't matter:  we should fail anyway.
+ 			 * The pointer also tells us where the asserted
+ 			 * pattern matched for use by the exclusion.
++			 *
++			 * P.S. in case you were wondering, this code
++			 * is horrible.
+ 			 */
+ 			Upat syncstrp;
+ 			unsigned char *oldsyncstr;
+@@ -1782,6 +1785,7 @@
+ 			    char savchar, *testptr;
+ 			    char *savpatinstart = patinstart;
+ 			    int savforce = forceerrs, savpatinlen = patinlen;
++			    int savpatflags = patflags;
+ 			    forceerrs = -1;
+ 			    savglobdots = globdots;
+ 			    matchederrs = errsfound;
+@@ -1800,6 +1804,12 @@
+ 			    testptr = patinstart + (syncpt - syncstrp->p);
+ 			    DPUTS(testptr > matchpt, "BUG: EXCSYNC failed");
+ 			    savchar = *testptr;
++			    /*
++			     * If this isn't really the end of the string,
++			     * remember this for the (#e) assertion.
++			     */
++			    if (savchar)
++				patflags |= PAT_NOTEND;
+ 			    *testptr = '\0';
+ 			    next = PATNEXT(scan);
+ 			    while (next && P_ISEXCLUDE(next)) {
+@@ -1848,6 +1858,7 @@
+ 				next = PATNEXT(next);
+ 			    }
+ 			    *testptr = savchar;
++			    patflags = savpatflags;
+ 			    globdots = savglobdots;
+ 			    forceerrs = savforce;
+ 			    if (ret)
+@@ -2015,11 +2026,11 @@
+ 	     */
+ 	    return 0;
+ 	case P_ISSTART:
+-	    if (patinput != patinstart)
++	    if (patinput != patinstart || (patflags & PAT_NOTSTART))
+ 		fail = 1;
+ 	    break;
+ 	case P_ISEND:
+-	    if (*patinput)
++	    if (*patinput || (patflags & PAT_NOTEND))
+ 		fail = 1;
+ 	    break;
+ 	case P_END:
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.5
+diff -u -r1.5 zsh.h
+--- Src/zsh.h	2000/04/13 22:25:04	1.5
++++ Src/zsh.h	2000/04/14 11:26:05
+@@ -1024,6 +1024,8 @@
+ #define PAT_STATIC	0x0040	/* Don't copy pattern to heap as per default */
+ #define PAT_SCAN	0x0080	/* Scanning, so don't try must-match test */
+ #define PAT_ZDUP        0x0100  /* Copy pattern in real memory */
++#define PAT_NOTSTART	0x0200	/* Start of string is not real start */
++#define PAT_NOTEND	0x0400	/* End of string is not real end */
+ 
+ /* Globbing flags: lower 8 bits gives approx count */
+ #define GF_LCMATCHUC	0x0100
+
+-- 
+Peter Stephenson <pws@cambridgesiliconradio.com>
+Cambridge Silicon Radio, Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+

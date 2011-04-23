@@ -1,0 +1,157 @@
+From zsh-workers-return-28771-mason-zsh=primenet.com.au@zsh.org Fri Feb 18 11:16:15 2011
+Return-Path: <zsh-workers-return-28771-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16169 invoked by alias); 18 Feb 2011 11:16:14 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28771
+Received: (qmail 25658 invoked from network); 18 Feb 2011 11:16:01 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Fri, 18 Feb 2011 10:30:12 +0000
+From: Peter Stephenson <Peter.Stephenson@csr.com>
+To: <zsh-workers@zsh.org>
+Subject: Re: sh compatibility issue
+Message-ID: <20110218103012.27fd1869@pwslap01u.europe.root.pri>
+In-Reply-To: <20110218035507.GA55814@quark.hightek.org>
+References: <20110218035507.GA55814@quark.hightek.org>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.8 (GTK+ 2.22.0; i386-redhat-linux-gnu)
+MIME-Version: 1.0
+Content-Type: text/plain; charset="US-ASCII"
+Content-Transfer-Encoding: 7bit
+X-Originating-IP: [10.103.11.49]
+X-Scanned-By: MailControl A_10_80_00 (www.mailcontrol.com) on 10.68.0.120
+
+On Thu, 17 Feb 2011 21:55:07 -0600
+Vincent Stemen <vince.lists@hightek.org> wrote:
+> I have encountered a minor compatibility issue when using zsh in place
+> of /bin/sh on FreeBSD.
+> The error comes from this piece of code in genscripts.sh
+> 
+>     # XXX: arm hack : until those file are merged back into the FSF
+> repo, # just
+>     # use the version in this directory.
+>     if !(test -f ${CUSTOMIZER_SCRIPT}"";) then
+>     CUSTOMIZER_SCRIPT="${srcdir}/emulparams/${EMULATION_NAME}.sh"
+>     fi
+> 
+> What is happening is that zsh does not like the '!' being next to the
+> opening '(' without a space in the if condition.  In my opinion, this
+> is kind of an unorthodox syntax.  I'm not even sure if it is
+> traditionally legal sh or ksh syntax.  Nevertheless, it works with
+> BSD sh and bash. A simple test is
+> 
+>     if !(echo hello); then echo "XXXX"; fi
+>     if ! (echo hello); then echo "XXXX"; fi
+> 
+> Zsh works fine in the second case, with a space after the '!'.
+
+I don't think it is standard for this to work.  POSIX defines "!" as a
+"reserved word", and if it's not followed by whitespace it's not a
+word.
+
+However, it looks like it's possible to get this to work specially in
+this case without disrupting anything else; because the parentheses are
+always special in one way another to zsh, the only other meaning (with
+the exception below) would be a string "!" followed by something like a
+globbing expression.  I can't think of a case where that other meaning
+is useful (and it's sure as heck thoroughly confusing if you use it,
+given all there are at least three meanings for "!" when not used
+as a plain string).
+
+The slightly odd handling is down to the fact ! isn't treated as
+a token at this point since it's usually handled as a reserved word.
+
+> I also tested without the space under ksh on NetBSD and got a strange
+> result.  It ran the mail utility.  Weird.
+
+That's because !(...) is globbing syntax in ksh.  It means "find all
+files not matching the pattern in the parentheses".  So that can do
+pretty much anything in command position.  So we need to avoid doing
+this if the KSH_GLOB option is set (although the result isn't
+particularly useful in practice).  Luckily KSH_GLOB isn't set for
+emulating sh.
+
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.63
+diff -p -u -r1.63 lex.c
+--- Src/lex.c	19 Dec 2010 17:42:10 -0000	1.63
++++ Src/lex.c	18 Feb 2011 10:18:13 -0000
+@@ -487,6 +487,7 @@ ctxtlex(void)
+ #define LX1_COMMENT 1
+ #define LX1_NEWLIN 2
+ #define LX1_SEMI 3
++#define LX1_BANG 4
+ #define LX1_AMPER 5
+ #define LX1_BAR 6
+ #define LX1_INPAR 7
+@@ -835,6 +836,30 @@ gettok(void)
+ 	hungetc(d);
+ 	lexstop = 0;
+ 	return SEMI;
++    case LX1_BANG:
++	/*
++	 * In command position, treat "!(" or "!{"
++	 * as "! (" or "! {".  "!" is a reserved word,
++	 * so not handled as a token at this level.
++	 * This is for compatibility; a "real"
++	 * reserved word wouldn't behave like this.
++	 *
++	 * With ksh globbing, !(...) is a special syntax.
++	 * Although it doesn't do anything very useful
++	 * in command position, we shouldn't disrupt it.
++	 */
++	if (incmdpos && !isset(KSHGLOB) && reswdtab->getnode(reswdtab, "!")) {
++	    d = hgetc();
++	    hungetc(d);
++	    lexstop = 0;
++	    if (d == '(' || d == '{') {
++		bptr = tokstr = (char *)hcalloc(2);
++		*bptr++ = '!';
++		*bptr++ = '\0';
++		return STRING;
++	    }
++	}
++	break;
+     case LX1_AMPER:
+ 	d = hgetc();
+ 	if (d == '&')
+Index: Test/A01grammar.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/A01grammar.ztst,v
+retrieving revision 1.27
+diff -p -u -r1.27 A01grammar.ztst
+--- Test/A01grammar.ztst	18 Mar 2010 16:30:58 -0000	1.27
++++ Test/A01grammar.ztst	18 Feb 2011 10:18:13 -0000
+@@ -577,3 +577,11 @@
+ 0:$0 is traditionally if bizarrely set to the first argument with -c
+ >myargzero
+ >myargone
++
++  if ! (echo success1); then echo failure1; fi
++  if !(echo success2); then echo failure2; fi
++  if !{echo success3}; then echo failure3; fi
++0:Special handling of ! in command position.
++>success1
++>success2
++>success3
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

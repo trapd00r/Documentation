@@ -1,0 +1,331 @@
+From zsh-workers-return-10025-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Mar 09 14:41:32 2000
+Return-Path: <zsh-workers-return-10025-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24423 invoked from network); 9 Mar 2000 14:41:26 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 9 Mar 2000 14:41:26 -0000
+Received: (qmail 3370 invoked by alias); 9 Mar 2000 14:41:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10025
+Received: (qmail 3325 invoked from network); 9 Mar 2000 14:41:13 -0000
+Date: Thu, 9 Mar 2000 15:39:06 +0100 (MET)
+Message-Id: <200003091439.PAA30697@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Sat, 4 Mar 2000 06:19:43 +0000
+Subject: PATCH: Re: Questions about zpty module.
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> It's a bit strange.  Because of the tight read-one-byte loop, zsh will
+> consume data from the PTY slave side as fast as the slave produces it,
+> and will attempt to buffer it all up before it does anything else with
+> it.  This seems rather dangerous to me; the slave could simply spew an
+> endless stream and zsh would eat all available memory.
+
+The patch below adds several ways to get out of the (only remaining)
+loop in ptyread():
+
+- the pattern is tested after every byte read -- that was actually a
+  thinko
+- one can ^C such a loop (the test for errflag)
+- for reads without a pattern, the maximum number of bytes read per
+  call is now READ_LEN (currently 1024 bytes)
+- for reads with a pattern, there is now a maximum number of bytes
+  read, too: READ_MAX (currently 1MB)
+
+I'm not too happy with the last one -- what's a good value for that
+threshold? Or is it ok to rely on the other ways out of the loop?
+
+> ...
+> 
+> Once again the answer is "most of the time."  If the slave spits out the
+> bytes faster than zsh can read them, it'll read straight past the first
+> newline before it ever gets around to testing the pattern.
+
+See above: fixed.
+
+> } - is it possible to know, if write was successful (or how many characters
+> } were actually written)? In case of non-blocking fd and full pipe write()
+> } can return with only partial buffer (or none at all) written
+> 
+> Yes, that looks like another potential bug to me: ptywrite() doesn't do
+> anything to make sure the write succeeded or wrote all of its data.  A
+> PTY isn't a "pipe" so the buffering is somewhat different, but still ...
+
+ptywrite() now uses ptywritestr() to (hopefully) ensure that the whole 
+string is written.
+
+> } - what about read/write with timeout? It can avoid problems with
+> } non-blocking mode while providing safe way to detect external program
+> } failure.
+> 
+> That's not really necessary.  Ideally, the PTY slave jobs would use the
+> regular zsh job table so zsh could detect their exits.  I suppose this
+> was not done to isolate handling to the zpty module -- it'd require
+> special handling because those jobs should never be brought into the
+> foreground.
+
+... and the job stuff is already complicated enough.
+
+The loops in ptyread() and ptywritestr() now also check the status of
+the command when the read/write returned with an error, so...
+
+> As it stands, there's a race condition in the handling of those jobs;
+> if the PTY slave is alive before zsh enters ptyread() but dies before
+> zsh reads something to match the pattern, ptyread() loops forever.
+
+this should be fixed, too.
+
+
+Andrej Borsenkow wrote:
+
+>  at one point while trying the changes below one of the zsh
+> > running inside zpty exited prematurely, and the result was that comptest
+> > locked up and had to be killed.  I didn't know how long to wait before
+> > giving up on it.
+> >
+> 
+> Yes. Playing with zpty I found, that there is no way to kill zpty read. I
+> tried
+> 
+> zpty -r cmd foo pat
+> 
+> with wrong (as it turned out) pattern. It was in interactive shell, and
+> neither of ^C, ^\, ^Z helped.
+> 
+> Exactly for this reason we need either read with timeout or general purpose
+> select (nice to have independently of zpty).
+
+Yes, it would be nice to have. Probably even more important for the
+read builtin (ksh has that, doesn't it?).
+
+> Also, I'm not sure what happens when child exits. I tried something simple
+> as
+> 
+> zsh cat cat /etc/profile
+> zsh -r cat
+> 
+> but got nothing. Looks like pty was flushed in this case. Child did not
+> exist anymore, but zsh still insisted on valid `cat' handle. I'd expect it
+> to detect dead pty - not sure, how to do it in general case.
+
+zpty tries (and already did so before this patch) to find out if the
+child is dead. In that case the command handle isn't considered to be
+valid anymore and zpty should return immediatly with status != 0. And
+that's what it does (and did) for me.
+
+
+
+The patch also makes pty commands put themselves into their own
+process group. Before, a ^C in the calling shell killed the pty
+commands, too.
+
+And it makes the string read be correctly metafied when it is assigned 
+to a parameter.
+
+The hunks in nslookup, finally, change the patterns because due to the 
+corrected way they are tested now, this matched too early for the
+output of the help command (at least for the nslookup I have here).
+
+
+
+
+
+Bye
+ Sven
+
+diff -ru ../z.old/Functions/Misc/nslookup Functions/Misc/nslookup
+--- ../z.old/Functions/Misc/nslookup	Thu Mar  9 11:42:24 2000
++++ Functions/Misc/nslookup	Thu Mar  9 14:26:56 2000
+@@ -17,7 +17,8 @@
+ 
+ zpty nslookup nslookup
+ 
+-zpty -r nslookup line '*> '
++zpty -r nslookup line '*
++> '
+ print -nr "$line"
+ 
+ while line=''; vared -he "$pmpt[@]" line; do
+@@ -26,7 +27,8 @@
+ 
+   zpty -w nslookup "$line"
+ 
+-  zpty -r nslookup line '*> ' || break
++  zpty -r nslookup line '*
++> '
+   print -nr "$line"
+ done
+ 
+diff -ru ../z.old/Src/Modules/zpty.c Src/Modules/zpty.c
+--- ../z.old/Src/Modules/zpty.c	Thu Mar  9 11:41:46 2000
++++ Src/Modules/zpty.c	Thu Mar  9 15:27:29 2000
+@@ -30,6 +30,13 @@
+ #include "zpty.mdh"
+ #include "zpty.pro"
+ 
++/* The number of bytes we normally read when given no pattern and the
++ * upper bound on the number of bytes we read (even if we are give a
++ * pattern). */
++
++#define READ_LEN 1024
++#define READ_MAX (1024 * 1024)
++
+ typedef struct ptycmd *Ptycmd;
+ 
+ struct ptycmd {
+@@ -310,6 +317,8 @@
+ 
+ 	close(slave);
+ 
++	setpgrp(0L, getpid());
++
+ 	execve(cmd, args, environ);
+ 	exit(0);
+     }
+@@ -353,7 +362,9 @@
+     zsfree(p->name);
+     freearray(p->args);
+ 
+-    kill(p->pid, SIGHUP);
++    /* We kill the process group the command put itself in. */
++
++    kill(-(p->pid), SIGHUP);
+ 
+     zclose(cmd->fd);
+ 
+@@ -385,7 +396,7 @@
+ static int
+ ptyread(char *nam, Ptycmd cmd, char **args)
+ {
+-    int blen = 256, used = 0, ret;
++    int blen = 256, used = 0, ret = 1;
+     char *buf = (char *) zhalloc(blen + 1);
+     Patprog prog = NULL;
+ 
+@@ -405,45 +416,101 @@
+ 	}
+     }
+     do {
+-	while ((ret = read(cmd->fd, buf + used, 1)) == 1) {
++	if (!ret) {
++	    checkptycmd(cmd);
++	    if (cmd->fin)
++		break;
++	}
++	if ((ret = read(cmd->fd, buf + used, 1)) == 1) {
+ 	    if (++used == blen) {
+ 		buf = hrealloc(buf, blen, blen << 1);
+ 		blen <<= 1;
+ 	    }
+ 	}
+ 	buf[used] = '\0';
+-    } while (prog && !pattry(prog, buf));
+ 
+-    if (*args)
+-	setsparam(*args, ztrdup(buf));
+-    else
+-	printf("%s", buf);
++	/**** Hm. If we leave the loop when ret < 0 the user would have
++	 *    to make sure that `zpty -r' is tried more than once if
++	 *    there will be some output and we only got the ret == -1
++	 *    because the output is not yet available.
++	 *    The same for the `write' below. */
++
++	if (ret < 0 && (cmd->block
++#ifdef EWOULDBLOCK
++			|| errno != EWOULDBLOCK
++#else
++#ifdef EAGAIN
++			|| errno != EAGAIN
++#endif
++#endif
++			))
++	    break;
+ 
++	if (!prog && !ret)
++	    break;
++    } while (!errflag &&
++	     (prog ? (used < READ_MAX && (!ret || !pattry(prog, buf))) :
++	      (used < READ_LEN)));
++
++    if (*args)
++	setsparam(*args, ztrdup(metafy(buf, used, META_HREALLOC)));
++    else {
++	fflush(stdout);
++	write(1, buf, used);
++    }
+     return !used;
+ }
+ 
+ static int
++ptywritestr(Ptycmd cmd, char *s, int len)
++{
++    int written;
++
++    for (; len; len -= written, s += written) {
++	if ((written = write(cmd->fd, s, len)) < 0 &&
++	    (cmd->block
++#ifdef EWOULDBLOCK
++			|| errno != EWOULDBLOCK
++#else
++#ifdef EAGAIN
++			|| errno != EAGAIN
++#endif
++#endif
++	     ))
++	    return 1;
++	if (written < 0) {
++	    checkptycmd(cmd);
++	    if (cmd->fin)
++		break;
++	    written = 0;
++	}
++    }
++    return 0;
++}
++
++static int
+ ptywrite(Ptycmd cmd, char **args, int nonl)
+ {
+     if (*args) {
+ 	char sp = ' ';
+ 
+-	while (*args) {
+-	    write(cmd->fd, *args, strlen(*args));
++	while (*args)
++	    if (ptywritestr(cmd, *args, strlen(*args)) ||
++		(*++args && ptywritestr(cmd, &sp, 1)))
++		return 1;
+ 
+-	    if (*++args)
+-		write(cmd->fd, &sp, 1);
+-	}
+ 	if (!nonl) {
+ 	    sp = '\n';
+-	    write(cmd->fd, &sp, 1);
++	    if (ptywritestr(cmd, &sp, 1))
++		return 1;
+ 	}
+     } else {
+ 	int n;
+ 	char buf[BUFSIZ];
+ 
+ 	while ((n = read(0, buf, BUFSIZ)) > 0)
+-	    write(cmd->fd, buf, n);
++	    if (ptywritestr(cmd, buf, n))
++		return 1;
+     }
+     return 0;
+ }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

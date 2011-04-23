@@ -1,0 +1,214 @@
+From zsh-workers-return-19311-mason-zsh=primenet.com.au@sunsite.dk Thu Dec 18 17:10:20 2003
+Return-Path: <zsh-workers-return-19311-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1033 invoked from network); 18 Dec 2003 17:10:20 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 18 Dec 2003 17:10:20 -0000
+Received: (qmail 29154 invoked by alias); 18 Dec 2003 17:10:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19311
+Received: (qmail 29129 invoked from network); 18 Dec 2003 17:10:11 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 18 Dec 2003 17:10:10 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.183.235] by sunsite.dk (MessageWall 1.0.8) with SMTP; 18 Dec 2003 17:10:10 -0000
+Received: from EXCHANGE02.csr.com (unverified) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T6696b541bdc0a88d0145c@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Thu, 18 Dec 2003 17:05:25 +0000
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.5329);
+	 Thu, 18 Dec 2003 17:07:09 +0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: terminfo horor
+Date: Thu, 18 Dec 2003 17:05:30 +0000
+Message-ID: <27087.1071767130@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 18 Dec 2003 17:07:09.0941 (UTC) FILETIME=[5F783250:01C3C589]
+
+Here's a first attempt.
+
+1. Always check libraries for both basic termcap and terminfo operation.
+There could possibly be problems where both are found and the linker
+ends up with -ltermcap -lcurses.  If so, making --with-curses-terminfo
+the default might help.  Please report experiences.  (All the systems
+I've tested were happy with just one of the two.)
+
+2. Always check for curses-related headers.  This should be benign.
+
+3. Only compile the internals of terminfo if both curses.h and the
+terminfo functions are available.  This is the neatest way of fixing
+the ERR problems.  Cases where this doesn't work can be considered on
+their own merit, as long as they can be tested for in configure.
+
+4. Only compile, link and install the terminfo module at all if we
+are going to make it useful.  There is no point in installing a
+dynamically loaded module whose sole effect is to print "not available"
+when loaded.  zmodload provides a portable way of testing for
+the presence of modules, this is the right way to do it.
+
+Successfully tested on Solaris 2.6, Solaris 8, Debian woody-ish (half
+cocked distribution from the a magazine cover disk where it looks like
+they just copied anything they could find, mumble), all with
+curses and terminfo, and RedHat 9, without the appropriate curses
+package, so no curses/terminfo.
+
+Index: zshconfig.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/zshconfig.ac,v
+retrieving revision 1.42
+diff -u -r1.42 zshconfig.ac
+--- zshconfig.ac	13 Nov 2003 14:34:34 -0000	1.42
++++ zshconfig.ac	18 Dec 2003 16:39:15 -0000
+@@ -542,8 +542,7 @@
+ esac])dnl
+ 
+ AC_SEARCH_LIBS(tgetent, [$termcap_curses_order])
+-case "$LIBS" in
+-*curses*)
++AC_SEARCH_LIBS(tigetflag, [$termcap_curses_order])
+ AC_CHECK_HEADERS(curses.h, [],
+ [AC_CACHE_CHECK(for Solaris 8 curses.h mistake, ac_cv_header_curses_solaris,
+ AC_TRY_COMPILE([#include <curses.h>], [],
+@@ -605,8 +604,7 @@
+ #include <term.h>], [char **test = strnames; printf(*test);],
+ AC_DEFINE(HAVE_STRNAMES) strnames=yes, strnames=no)
+ AC_MSG_RESULT($strnames)
+-]);;
+-esac
++])
+ 
+ dnl Some systems (Solaris 2.x, Linux Redhat 5.x) require
+ dnl libnsl (Network Services Library) to find yp_all
+Index: Src/Modules/terminfo.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/terminfo.c,v
+retrieving revision 1.22
+diff -u -r1.22 terminfo.c
+--- Src/Modules/terminfo.c	14 Sep 2003 05:10:09 -0000	1.22
++++ Src/Modules/terminfo.c	18 Dec 2003 16:39:15 -0000
+@@ -29,12 +29,18 @@
+ 
+ #define USES_TERM_H 1
+ #include "terminfo.mdh"
+-#include "terminfo.pro"
+ 
++#if defined(HAVE_TIGETSTR) && defined(HAVE_CURSES_H)
++# define USE_TERMINFO_MODULE 1
++#else
++# undef USE_TERMINFO_MODULE
++#endif
++
++#include "terminfo.pro"
+ static char terminfo_nam[] = "terminfo";
+ 
+ /**/
+-#ifdef HAVE_TIGETSTR
++#ifdef USE_TERMINFO_MODULE
+ 
+ /* The following two undefs are needed for Solaris 2.6 */
+ # ifdef VINTR
+@@ -44,9 +50,7 @@
+ #  undef offsetof
+ # endif
+ 
+-# ifdef HAVE_CURSES_H
+-#  include <curses.h>
+-# endif
++# include <curses.h>
+ # ifdef HAVE_TERM_H
+ #  include <term.h>
+ # endif
+@@ -123,19 +127,19 @@
+ }
+ 
+ /**/
+-#else /* !HAVE_TIGETSTR */
++#else /* !USE_TERMINFO_MODULE */
+ 
+ #define bin_echoti bin_notavail
+ 
+ /**/
+-#endif /* !HAVE_TIGETSTR */
++#endif /* !USE_TERMINFO_MODULE */
+ 
+ static struct builtin bintab[] = {
+     BUILTIN("echoti", 0, bin_echoti, 1, -1, 0, NULL, NULL),
+ };
+ 
+ /**/
+-#ifdef HAVE_TIGETSTR
++#ifdef USE_TERMINFO_MODULE
+ 
+ /* Empty dummy function for special hash parameters. */
+ 
+@@ -361,7 +365,7 @@
+ }
+ 
+ /**/
+-#endif /* HAVE_TIGETSTR */
++#endif /* USE_TERMINFO_MODULE */
+ 
+ /**/
+ int
+@@ -374,7 +378,7 @@
+ int
+ boot_(Module m)
+ {
+-#ifdef HAVE_TIGETSTR
++#ifdef USE_TERMINFO_MODULE
+ # ifdef HAVE_SETUPTERM
+     int errret;
+ 
+@@ -394,7 +398,7 @@
+ int
+ cleanup_(Module m)
+ {
+-#ifdef HAVE_TIGETSTR
++#ifdef USE_TERMINFO_MODULE
+     Param pm;
+ 
+     if ((pm = (Param) paramtab->getnode(paramtab, terminfo_nam)) &&
+Index: Src/Modules/terminfo.mdd
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/terminfo.mdd,v
+retrieving revision 1.10
+diff -u -r1.10 terminfo.mdd
+--- Src/Modules/terminfo.mdd	23 Apr 2001 19:59:04 -0000	1.10
++++ Src/Modules/terminfo.mdd	18 Dec 2003 16:39:15 -0000
+@@ -1,13 +1,13 @@
+ name=zsh/terminfo
+ 
+-link='if test "x$ac_cv_func_tigetstr" = xyes; then
++link='if test "x$ac_cv_func_tigetstr" = xyes -a "x$ac_cv_header_curses_h"; then
+           if test "x$zsh_cv_shared_tigetstr" = xyes; then
+ 	      echo either
+ 	  else
+ 	      echo static
+ 	  fi
+       else
+-          echo either;
++          echo no;
+       fi
+ '
+ load=yes
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

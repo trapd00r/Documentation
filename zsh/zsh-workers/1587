@@ -1,0 +1,160 @@
+From schaefer@candle.brasslantern.com Tue Jul  9 19:23:06 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id TAA22896 for <mason@werple.mira.net.au>; Tue, 9 Jul 1996 19:22:36 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id FAA20149; Tue, 9 Jul 1996 05:08:10 -0400 (EDT)
+Resent-Date: Tue, 9 Jul 1996 05:08:10 -0400 (EDT)
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <960709020813.ZM30009@candle.brasslantern.com>
+Date: Tue, 9 Jul 1996 02:08:11 -0700
+In-Reply-To: Zoltan Hidvegi <hzoli@cs.elte.hu>
+        "Re: Remaining zsh3.0-pre2 bugs" (Jul  9,  3:32am)
+References: <199607090132.DAA01331@hzoli.ppp.cs.elte.hu>
+Reply-To: schaefer@nbn.com
+X-Mailer: Z-Mail (4.0b.702 02jul96)
+To: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Subject: Re: Remaining zsh3.0-pre2 bugs
+Cc: A.Main@dcs.warwick.ac.uk, zsh-workers@math.gatech.edu
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"zWwqb1.0.lw4.v5Yun"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1587
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 4313
+Status: OR
+
+On Jul 9,  3:32am, Zoltan Hidvegi wrote:
+} Subject: Re: Remaining zsh3.0-pre2 bugs
+}
+} Bart and Zefram discussing a loop in get_comp_string:
+} > } >Anyway, cs decrements down to 8 because of the two \230 in qword; but
+} > } >"echo 'a;b'" of course has 10 characters.
+} > } 
+} > } Bingo.  That loop has special code for handling backslashes, but not
+} > } quotes.  I think it needs to handle quotes too.
+} 
+} There is nothing wrong with get_comp_string here.  It works well if there
+} is just one line containing embeded newlines and quotes etc.  The problem
+} starts when we are in a multi-line command structure.
+
+Er, yeah, but that seems like an odd definition of "works".
+
+} > But that doesn't work for completions with embedded newlines, even when
+} > a successful completion is possible:
+} 
+} It fails because zsh sees that the current word starts in the previous
+} already entered line.
+
+Where's that happening?  Not in get_comp_string() ...
+
+} In that case zsh simply gives up the completion
+} attempt, restores the original line and returns.
+
+Why is that necessary?  Maybe it's necessary if the word *ends* in the
+previous line for some reason, but ...
+
+} Unfortunately the cursor
+} position is not always restored correctly.  The patch below fixes that.
+
+Hmm.  Your patch does a couple of things.  One, it removes the loop that
+folds embedded newlines into semicolons; two, it attempts to save and
+restore the cursor position.  There's one bogus compiler warning:
+
+zle_tricky.c: In function `docomplete':
+zle_tricky.c:500: warning: `ocs' might be used uninitialized in this function
+
+I cleared this by initializing ocs = 0 in the declaration.
+
+*** Src/zle_tricky.c.orig	1996/07/09 00:50:55 1996
+--- Src/zle_tricky.c	1996/07/09 01:00:32 1996
+***************
+*** 497,503 ****
+  docomplete(int lst)
+  {
+      char *s, *ol;
+!     int olst = lst, chl = 0, ne = noerrs, ocs;
+  
+      /* If we are doing a menu-completion... */
+  
+--- 497,503 ----
+  docomplete(int lst)
+  {
+      char *s, *ol;
+!     int olst = lst, chl = 0, ne = noerrs, ocs = 0;
+  
+      /* If we are doing a menu-completion... */
+  
+***************
+
+By the way, there are block-locals named ocs and ol used in various
+places in docomplete(), which could lead to confusion.  I didn't try
+to fix that, though.
+
+Anyway, after the newlines-to-semicolons thing is removed, it doesn't
+seem to make any difference whether (wb < 0 || we < 0 || cs < 0).  I
+commented out that entire if(){} block, and was then able to complete
+file names containing embedded newlines just fine.  So do you see any
+problem with the following patch, which moves that block to after the
+completion is attempted (thus fixing up failure cases)?
+
+*** Src/zle_tricky.c.orig	Tue Jul  9 00:50:55 1996
+--- Src/zle_tricky.c	Tue Jul  9 01:58:06 1996
+***************
+*** 573,592 ****
+  	viinsbegin = ztrsub((char *) line + wb, (char *) line);
+      /* If we added chline to the line buffer, reset the original contents. */
+      if (ol) {
+! 	cs -= chl;
+  	wb -= chl;
+  	we -= chl;
+- 	if (wb < 0 || we < 0 || cs < 0) {
+- 	    strcpy((char *) line, ol);
+- 	    ll = strlen((char *) line);
+- 	    cs = ocs;
+- 	    unmetafy_line();
+- 	    return;
+- 	}
+- 	ocs = cs;
+  	cs = 0;
+  	foredel(chl);
+! 	cs = ocs;
+      }
+      freeheap();
+      /* Save the lexer state, in case the completion code uses the lexer *
+--- 573,584 ----
+  	viinsbegin = ztrsub((char *) line + wb, (char *) line);
+      /* If we added chline to the line buffer, reset the original contents. */
+      if (ol) {
+! 	int tcs = (cs -= chl);
+  	wb -= chl;
+  	we -= chl;
+  	cs = 0;
+  	foredel(chl);
+! 	cs = tcs;
+      }
+      freeheap();
+      /* Save the lexer state, in case the completion code uses the lexer *
+***************
+*** 740,745 ****
+--- 732,742 ----
+  	    /* Just do completion. */
+  	    docompletion(s, lst, lincmd);
+  	zsfree(s);
++     }
++     if (ol && !nmatches && (wb < 0 || we < 0 || cs < 0)) {
++ 	strcpy((char *) line, ol);
++ 	ll = strlen((char *) line);
++ 	cs = ocs;
+      }
+      /* Reset the lexer state, pop the heap. */
+      lexrestore();
+
+-- 
+Bart Schaefer                             Brass Lantern Enterprises
+http://www.well.com/user/barts            http://www.nbn.com/people/lantern
+
+New male in /home/schaefer:
+>N  2 Justin William Schaefer  Sat May 11 03:43  53/4040  "Happy Birthday"
+
+

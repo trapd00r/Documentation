@@ -1,0 +1,175 @@
+From zsh-workers-return-7628-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Sep 02 09:35:25 1999
+Return-Path: <zsh-workers-return-7628-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19144 invoked from network); 2 Sep 1999 09:35:23 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 2 Sep 1999 09:35:23 -0000
+Received: (qmail 16308 invoked by alias); 2 Sep 1999 09:35:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7628
+Received: (qmail 16301 invoked from network); 2 Sep 1999 09:35:10 -0000
+Date: Thu, 2 Sep 1999 11:35:08 +0200 (MET DST)
+Message-Id: <199909020935.LAA02481@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Wed, 01 Sep 1999 18:09:50 +0200
+Subject: Re: Bug with _parameters and zmodload
+
+
+Peter Stephenson wrote:
+
+> Oliver Kiddle wrote:
+> > When I upgraded to 3.1.6-pws-2 (from 3.1.6-test-2 - I've been busy recently s
+> > o haven't upgraded for a while), I got a number of error messages of the foll
+> > owing form:
+> > 
+> > _parameters: mapfile: autoload failed [43]
+> > 
+> > I get it for each of parameters, functions, options, commands and mapfile the
+> >  first time I try to expand a variable after running zsh.
+> 
+> This should fix this part.  The modules were trying to unset any existing
+> parameters when they installed their own.  The existing parameters were the
+> autoloadable ones, and it tried to autoload the parameter to unset it, which
+> it was already in the middle of doing so it couldn't.  The simplest fix is
+> to retrieve the existing param struct without autoloading and unset that.
+
+This didn't work for me, I still got the error message. The changed
+test in params.c fixed that.
+Then I changed the parameter module to report `undefined' parameters
+like `typeset' does.
+
+> I haven't touched the completion functions.  Probably there's no harm in
+> _parameters loading the parameter module to use to check the parameters,
+> since if it's autoloadable that should mean it's available for use in this
+> sort of context, but that's different from the real problem.
+
+Yes. I didn't do that because we don't have a easy way to find out if
+a parameter/builtin/whatever is defined to be autoloaded (and I didn't 
+want to fiddle with ${$(zmodload -ap)}).
+
+Otherwise, I'm with Oliver here -- modules shouldn't be loaded just
+because someone does `$<TAB>'. The hunks in `_parameters' should make
+this.
+
+Oliver Kiddle wrote:
+
+> Another unrelated problem I have found is that the completion matching control to complete partial directories doesn't work when variables are used:
+> I'd expect:
+> cd $code[ai]/R/drop.1.34<tab>
+> to complete to:
+> cd $code[ai]/Releases/drop.1.34.0.rel/
+> but it doesn't.
+
+The patch also contains some hunks in `_path_files' which contain my
+first attempt for this. Note that partial paths are only completed
+after the parameter expansion (i.e. `f/$foo/b<TAB>' doesn't work if
+`f' is only a prefix).
+
+Bye
+ Sven
+
+diff -u os/params.c Src/params.c
+--- os/params.c	Thu Sep  2 09:15:59 1999
++++ Src/params.c	Thu Sep  2 10:38:30 1999
+@@ -292,7 +292,7 @@
+ 	if (!load_module(mn))
+ 	    return NULL;
+ 	hn = gethashnode2(ht, nam);
+-	if (((Param) hn) == pm) {
++	if (((Param) hn) == pm && (pm->flags & PM_AUTOLOAD)) {
+ 	    pm->flags &= ~PM_AUTOLOAD;
+ 	    zwarnnam(nam, "autoload failed", NULL, 0);
+ 	}
+diff -u os/Modules/parameter.c Src/Modules/parameter.c
+--- os/Modules/parameter.c	Thu Sep  2 10:42:03 1999
++++ Src/Modules/parameter.c	Thu Sep  2 11:23:17 1999
+@@ -83,6 +83,9 @@
+     int f = pm->flags;
+ 
+     if (!(f & PM_UNSET)) {
++	if (pm->flags & PM_AUTOLOAD)
++	    return dupstring("undefined");
++
+ 	switch (PM_TYPE(f)) {
+ 	case PM_SCALAR:  val = "scalar"; break;
+ 	case PM_ARRAY:   val = "array"; break;
+diff -u -r Completion.old/Core/_parameters Completion/Core/_parameters
+--- Completion.old/Core/_parameters	Wed Sep  1 14:24:54 1999
++++ Completion/Core/_parameters	Thu Sep  2 10:58:04 1999
+@@ -27,18 +27,21 @@
+ 
+ _description expl parameter
+ 
+-if zmodload -e parameter; then
+-  setopt localoptions extendedglob
+-  pars=( ${(k)parameters[(R)^*local*]} )
+-else
+-  pars=( ${${${(f)"$(typeset +)"}:#*local *}##* } )
+-fi
+-
+ if [[ -n "$slash" && -o autoparamslash ]]; then
+   local i dirs nodirs ret=1
+ 
+   dirs=()
+   nodirs=()
++
++  if zmodload -e parameter; then
++    setopt localoptions extendedglob
++    nodirs=( ${(k)parameters[(R)undefined]} )
++    pars=( ${(k)parameters[(R)^*(local|undefined)*]} )
++  else
++    nodirs=( ${${(M)${(f)"$(typeset +)"}:#undefined *}##* } )
++    pars=( ${${${(f)"$(typeset +)"}:#*(local|undefined) *}##* } )
++  fi
++
+   for i in $pars; do
+     if [[ -d "${(P)i}" ]]; then
+       dirs=( $dirs $i )
+@@ -57,6 +60,13 @@
+ 
+   return ret
+ else
++  if zmodload -e parameter; then
++    setopt localoptions extendedglob
++    pars=( ${(k)parameters[(R)^*local*]} )
++  else
++    pars=( ${${${(f)"$(typeset +)"}:#*local *}##* } )
++  fi
++
+   if [[ "$slash" = normal ]]; then
+     compadd -S "$suf" -r ' [:' "$expl[@]" "$@" - $pars
+   elif [[ "$slash" = brace ]]; then
+diff -u -r Completion.old/Core/_path_files Completion/Core/_path_files
+--- Completion.old/Core/_path_files	Wed Sep  1 14:24:54 1999
++++ Completion/Core/_path_files	Thu Sep  2 11:11:53 1999
+@@ -173,6 +173,22 @@
+   orig="${orig#*/}"
+   donepath=''
+   prepaths=( '' )
++elif [[ "$pre" = *\$*/* ]]; then
++
++  # If there is a parameter expansion in the word from the line, we try
++  # to complete the beast by expanding the prefix and completing anything
++  # after the first slash after the parameter expansion.
++  # This fails for things like `f/$foo/b/<TAB>' where the first `f' is
++  # meant as a partial path.
++
++  linepath="${(M)pre##*\$[^/]##/}"
++  realpath=${(e)~linepath}
++  [[ "$realpath" = "$linepath" ]] && return 1
++  pre="${pre#${linepath}}"
++  i="${#linepath//[^\\/]}"
++  orig="${orig[1,(in:i:)/][1,-2]}"
++  donepath=''
++  prepaths=( '' )
+ else
+   # If the string does not start with a `~' we don't remove a prefix from the
+   # string.
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

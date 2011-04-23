@@ -1,0 +1,107 @@
+From zsh-workers-request@math.gatech.edu Mon Oct 12 12:36:25 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29157 invoked from network); 12 Oct 1998 12:36:24 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 12 Oct 1998 12:36:24 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id IAA26118;
+	Mon, 12 Oct 1998 08:28:11 -0400 (EDT)
+Resent-Date: Mon, 12 Oct 1998 08:28:11 -0400 (EDT)
+Message-Id: <9810121218.AA21544@ibmth.df.unipi.it>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: PATCH: 3.1.4: autocd to directory in $PATH (2)
+In-Reply-To: ""Bart Schaefer""'s message of "Fri, 09 Oct 1998 10:16:01 DFT."
+             <981009101601.ZM25272@candle.brasslantern.com> 
+Date: Mon, 12 Oct 1998 14:18:37 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"Ys6qx2.0.1O6.RNV8s"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4426
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+"Bart Schaefer" wrote:
+> I haven't actually walked through this with a debugger, but it looks to
+> me as though hn = NULL at that point is going to trigger the call to
+> hashcmd(cmdarg, pathchecked), which in turn is going to call iscom() a
+> second time; so you end up stat()ing the directory twice.
+
+It does call hashcmd() again, but that's right... consider what can
+happen otherwise:
+
+% ./zsh -f
+% mkdir ~/foo1 ~/foo2
+% path=(~/foo1 ~/foo2 $path)
+% cdpath=(~/foo1 .)      
+% mkdir ~/foo1/file1
+% echo "#\!/bin/sh\necho This is \$0" >~/foo2/file1
+% chmod +x ~/foo2/file1
+% setopt autocd
+% file1                         # problem here:  cd's to ~/foo1/file1
+~/foo1/file1
+% pwd
+/home/user2/pws/foo1/file1
+% which file1
+/home/user2/pws/foo2/file1
+% file1                         # correct this time:  call ~/foo2/file1
+This is /home/user2/pws/foo2/file1
+
+
+The directory does get stat'ed twice, but it's hard to avoid without
+more fiddling around with special cases.  The next fix does at least
+mean it's restricted to twice altogether.
+
+> Also, what about removing the improperly hashed directory from cmdnamtab
+> once you've discovered that it isn't a command?  That would (I think) get
+> any real command with the same name put into the table the next time that
+> name was used, so that you'll never needlessly stat() again.
+
+I meant to do that, there were only vague historical reasons why I
+didn't.  Here's another replacement patch, this time for 4404.  I've
+expunged an uncessary statbuf declaration, too.
+
+*** Src/exec.c.hc	Mon Sep 28 10:37:43 1998
+--- Src/exec.c	Mon Oct 12 14:10:37 1998
+***************
+*** 524,529 ****
+--- 524,541 ----
+  
+  /**/
+  int
++ isreallycom(Cmdnam cn)
++ {
++     char fullnam[MAXCMDLEN];
++ 
++     strcpy(fullnam, cn->u.name ? *(cn->u.name) : "");
++     strcat(fullnam, "/");
++     strcat(fullnam, cn->nam);
++     return iscom(fullnam);
++ }
++ 
++ /**/
++ int
+  isrelative(char *s)
+  {
+      if (*s != '/')
+***************
+*** 1489,1494 ****
+--- 1501,1511 ----
+  	    char *cmdarg = (char *) peekfirst(args);
+  
+  	    hn = cmdnamtab->getnode(cmdnamtab, cmdarg);
++ 	    if (hn && !isreallycom((Cmdnam)hn)) {
++ 		cmdnamtab->removenode(cmdnamtab, cmdarg);
++ 		cmdnamtab->freenode(hn);
++ 		hn = NULL;
++ 	    }
+  	    if (!hn && isset(HASHCMDS) && strcmp(cmdarg, "..")) {
+  		for (s = cmdarg; *s && *s != '/'; s++);
+  		if (!*s)
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarotti 2, 56100 Pisa, Italy
+

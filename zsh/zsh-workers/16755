@@ -1,0 +1,1303 @@
+From zsh-workers-return-16755-mason-zsh=primenet.com.au@sunsite.dk Mon Mar 04 08:52:19 2002
+Return-Path: <zsh-workers-return-16755-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20551 invoked from network); 4 Mar 2002 08:52:17 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 4 Mar 2002 08:52:17 -0000
+Received: (qmail 18840 invoked by alias); 4 Mar 2002 08:52:09 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16755
+Received: (qmail 18824 invoked from network); 4 Mar 2002 08:52:08 -0000
+From: Sven Wischnowsky <wischnow@berkom.de>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+Message-ID: <15491.13650.342803.179558@wischnow.berkom.de>
+Date: Mon, 4 Mar 2002 09:50:26 +0100
+To: zsh-workers@sunsite.dk
+Subject: Re: Per command _redirect completion
+In-Reply-To: <1020301054724.ZM17887@candle.brasslantern.com>
+References: <20020225094729.25283.qmail@web9303.mail.yahoo.com>
+	<20020226065605.35661.qmail@web10401.mail.yahoo.com>
+	<15483.19190.263748.990476@wischnow.berkom.de>
+	<15484.43079.6831.412868@wischnow.berkom.de>
+	<20020228063522.62366.qmail@web10403.mail.yahoo.com>
+	<15485.60818.216400.965143@wischnow.berkom.de>
+	<1020301054724.ZM17887@candle.brasslantern.com>
+X-Mailer: VM 6.95 under 21.5 (patch 3) "asparagus" XEmacs Lucid
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> I like this idea a lot, now that I've had a chance to digest it fully.
+
+Yes, me too.  Thanks to Oliver for bringing this up.
+
+> } - I wished there were an easier way than to use `${(e):-...}' in so
+> }   many places. Sigh.
+> 
+> We'd need namerefs; ${(P)...} doesn't cut it for hashes.  You could use
+> `eval' in a few places, I think, but not all of them.
+
+Which isn't much nicer anyway...
+
+
+Felix Rosencrantz wrote:
+
+> Still having problem with the latest uncommitted patch:  When trying to
+> complete TZ I get:
+> _do_type:31: ':' without '?'
+> 
+> Which only happens from a shell where .zcompdump didn't pre-exist.  Subsequent
+> shells seem to work.
+
+Yep, I had introduced that in another way. I found and fixed this, so
+it should be working now with the patch below.
+
+> Also, completion for command flags/args doesn't work.  The command's completion
+> function is not being called.
+> I try:
+>  gzip -<TAB> 
+> 
+> in an empty directory and get "no match for: `file'".
+
+I have no problems with this.
+
+> I like the new changes a lot (assuming they work).  It wasn't clear to me how
+> completion for different redirection operators will work.  It seems that you
+> can only specify one redirection completer.  Which will have to do the
+> remaining work of figuring what completion function to use, if you want one for
+> input and one for output.  (And another for stderr, etc.)  It seems like that
+> information should be part of the compdef call.  All my command specific
+> redirection completers  currently are for commands that provide output, the
+> input comes from command line args, so it didn't matter.  But I can easily see
+> there being commands where input and output files from redirection are
+> completely different.  So the user will want to use different functions.
+
+See the comments in _redirection and _value. Of course the redirection
+operator is part of the string searched.  E.g.:
+
+  % compdef 'compadd a b c' 'foo:>'
+  % foo > <TAB>
+  a  b  c
+
+
+I'm now going to commit this change so that everyone can easily try
+it.  I've renamed _do_type to _dispatch and removed _contexts (it's
+functionality is now in _dispatch).  I'd be thankful if someone could
+have a look at the changes in the docs.  I'm almost sure that this
+should be described better, somewhere else and that the strings looked
+up for each type of completion should be described somewhere (we never
+had this for normal commands either).  And whoever wrote the functions
+for completing the values of CPPFLAGS and LDFLAGS might want to look
+at _gcc to see if that's ok (I followed Oliver's suggestion to put
+completion for these paramter-values there).
+
+
+Bye
+  Sven
+
+Index: Completion/compdump
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/compdump,v
+retrieving revision 1.2
+diff -u -r1.2 compdump
+--- Completion/compdump	29 May 2001 17:54:08 -0000	1.2
++++ Completion/compdump	4 Mar 2002 08:50:44 -0000
+@@ -16,7 +16,7 @@
+ emulate -L zsh
+ setopt extendedglob noshglob
+ 
+-typeset _d_file _d_f _d_bks _d_line _d_als _d_files
++typeset _d_file _d_f _d_bks _d_line _d_als _d_files _d_name _d_tmp
+ 
+ _d_file=${_comp_dumpfile-${0:h}/compinit.dump}.$HOST.$$
+ [[ $_d_file = //* ]] && _d_file=${_d_file[2,-1]}
+@@ -35,33 +35,43 @@
+ 
+ print "#files: $#_d_files" > $_d_file
+ 
+-# First dump the arrays _comps, _services and _patcomps.  The quoting
++# First dump the arrays _comps, _servicecomps and _patcomps.  The quoting
+ # hieroglyphics ensure that a single quote inside a variable is itself
+ # correctly quoted.
+ 
+-print "_comps=(" >> $_d_file
+-for _d_f in ${(ok)_comps}; do
+-    print -r - "${(q)_d_f}" "${(q)_comps[$_d_f]}"
+-done  >> $_d_file
+-print ")" >> $_d_file
++for _d_name in $_comp_assocs; do
+ 
+-print "_services=(" >> $_d_file
+-for _d_f in ${(ok)_services}; do
+-    print -r - "${(q)_d_f}" "${(q)_services[$_d_f]}"
+-done  >> $_d_file
+-print ")" >> $_d_file
++  print "\n\ntypeset -gA _$_d_name _service$_d_name _pat$_d_name _postpat$_d_name"
+ 
+-print "\n_patcomps=(" >> $_d_file
+-for _d_f in "${(ok@)_patcomps}"; do
+-  print -r - "${(q)_d_f}" "${(q)_patcomps[$_d_f]}"
+-done >> $_d_file
+-print ")" >> $_d_file
++  _d_tmp="_${_d_name}"
++  print "\n_${_d_name}=("
++  for _d_f in ${(Pok)_d_tmp}; do
++    print -r - "${(q)_d_f}" "${(q)${(e):-\$${_d_tmp}[$_d_f]}}"
++  done
++  print ")"
++
++  _d_tmp="_service${_d_name}"
++  print "\n_service${_d_name}=("
++  for _d_f in ${(Pok)_d_tmp}; do
++    print -r - "${(q)_d_f}" "${(q)${(e):-\$${_d_tmp}[$_d_f]}}"
++  done
++  print ")"
++
++  _d_tmp="_pat${_d_name}"
++  print "\n_pat${_d_name}=("
++  for _d_f in ${(Pok)_d_tmp}; do
++    print -r - "${(q)_d_f}" "${(q)${(e):-\$${_d_tmp}[$_d_f]}}"
++  done
++  print ")"
++
++  _d_tmp="_postpat${_d_name}"
++  print "\n_postpat${_d_name}=("
++  for _d_f in ${(Pok)_d_tmp}; do
++    print -r - "${(q)_d_f}" "${(q)${(e):-\$${_d_tmp}[$_d_f]}}"
++  done
++  print ")"
+ 
+-print "\n_postpatcomps=(" >> $_d_file
+-for _d_f in "${(ok@)_postpatcomps}"; do
+-  print -r - "${(q)_d_f}" "${(q)_postpatcomps[$_d_f]}"
+ done >> $_d_file
+-print ")" >> $_d_file
+ 
+ print "\n_compautos=(" >> $_d_file
+ for _d_f in "${(ok@)_compautos}"; do
+@@ -128,6 +138,11 @@
+ for _i in "${(ok@)_compautos}"; do
+   print "autoload -U $_compautos[$_i] $_i" >> $_d_file
+ done
++
++print >> $_d_file
++
++print "typeset -gUa _comp_assocs" >> $_d_file
++print "_comp_assocs=( ${(q)_comp_assocs} )" >> $_d_file
+ 
+ mv $_d_file ${_d_file%.$HOST.$$}
+ 
+Index: Completion/compinit
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/compinit,v
+retrieving revision 1.6
+diff -u -r1.6 compinit
+--- Completion/compinit	21 Jun 2001 09:24:39 -0000	1.6
++++ Completion/compinit	4 Mar 2002 08:50:44 -0000
+@@ -11,8 +11,10 @@
+ #     If the first line looks like this, the file is autoloaded as a
+ #     function and that function will be called to generate the matches
+ #     when completing for one of the commands whose <names> are given.
++#     The names may also be interspersed with `-T <assoc>' options
++#     specifying for which set of functions this should be added.
+ #
+-#   `#compdef -p <pattern>'
++#   `#compdef -[pP] <patterns ...>'
+ #     This defines a function that should be called to generate matches
+ #     for commands whose name matches <pattern>. Note that only one pattern
+ #     may be given.
+@@ -100,13 +102,26 @@
+   esac
+ done
+ 
+-# The associative array containing the definitions for the commands and
++# The name suffixes for the associative arrays containing the functions
++# to call.
++
++typeset -gUa _comp_assocs
++
++_comp_assocs=(comps)
++
++# The associative arrays containing the definitions for the commands and
+ # services.
+-# Definitions for patterns will be stored in the associations `_patcomps'
+-# and `_postpatcomps'. `_compautos' contains the names and options
+-# for autoloaded functions that get options.
++# Definitions for patterns will be stored in the associations `_pat*'
++# and `_postpat*'.
++# The assocs for the other function types are created automatically by
++# compdef.
++
++typeset -gA _comps _servicecomps _patcomps _postpatcomps
+ 
+-typeset -gA _comps _services _patcomps _postpatcomps _compautos
++# `_compautos' contains the names and options for autoloaded functions
++# that get options.
++
++typeset -gA _compautos
+ 
+ # The associative array use to report information about the last
+ # completion to the outside.
+@@ -176,6 +191,9 @@
+ # The option `-P' is like `-p', but the function will be called after
+ # trying to find a function defined for the command on the line if no
+ # such function could be found.
++# In each of these cases the argument list may also contain `-T assoc'
++# options to specify the associactive arrays to which the following
++# definitions should be added.
+ # With the `-k' option a function for a special completion keys is 
+ # defined and immediately bound to those keys. Here, the extra arguments
+ # are the name of one of the builtin completion widgets and any number
+@@ -191,7 +209,8 @@
+ # whose names are given as arguments. If combined with the `-p' option
+ # it deletes the definitions for the patterns given as argument.
+ # The `-d' option may not be combined with the `-k' option, i.e.
+-# definitions for key function can not be removed.
++# definitions for key function can not be removed. But one `-T assoc'
++# option may follow the `-d' to say which definitions should be removed.
+ #
+ # Examples:
+ #
+@@ -213,12 +232,12 @@
+ #   delete the definitions for the command names `bar' and `baz'
+ 
+ compdef() {
+-  local opt autol type func delete new i ret=0 cmd svc
++  local opt autol type func delete new i ret=0 cmd svc assoc=comps
+ 
+   # Get the options.
+ 
+-  if [[ $#* -eq 0 ]]; then
+-    echo "$0: I needs arguments"
++  if (( ! $# )); then
++    echo "$0: I need arguments"
+     return 1
+   fi
+ 
+@@ -247,8 +266,8 @@
+   done
+   shift OPTIND-1
+ 
+-  if [[ $#* -eq 0 ]]; then
+-    echo "$0: I needs arguments"
++  if (( ! $# )); then
++    echo "$0: I need arguments"
+     return 1
+   fi
+ 
+@@ -257,25 +276,39 @@
+     # and we define which services to use for the commands.
+ 
+     if [[ "$1" = *\=* ]]; then
+-      for i; do
+-        if [[ "$i" = *\=* ]]; then
+-	  cmd="${i%%\=*}"
+-	  svc="${i#*\=}"
+-          func="$_comps[${(k)_services[(R)$svc]:-$svc}]"
+-          (( $+_services[$svc] )) && svc=$_services[$svc]
+-	  [[ -z "$func" ]] &&
+-	    func="${_patcomps[(K)$svc][1]:-${_postpatcomps[(K)$svc][1]}}"
+-          if [[ -n "$func" ]]; then
+-	    _comps[$cmd]="$func"
+-	    _services[$cmd]="$svc"
++      while (( $# )); do
++        if [[ $1 = -T ]]; then
++          shift
++          if (( ! $# )); then
++            echo "$0: missing type"
++            return 1
++          fi
++          _comp_assocs=( "$_comp_assocs[@]" "$1" )
++          typeset -gA _$1 _service$1 _pat$1 _postpat$1
++          assoc="$1"
++          shift
++        else
++          if [[ "$1" = *\=* ]]; then
++	    cmd="${1%%\=*}"
++	    svc="${1#*\=}"
++            func="$_comps[${(e):-\${(k)_service${assoc}[(R)$svc]:-$svc}}]"
++            [[ -n ${(e):-\$_service${assoc}[$svc]} ]] &&
++                svc=${(e):-\$_service${assoc}[$svc]}
++	    [[ -z "$func" ]] &&
++	        func="${${(e):-\$_pat${assoc}[(K)$svc][1]}:-${(e):-\$_postpat${assoc}[(K)$svc][1]}}"
++            if [[ -n "$func" ]]; then
++	      eval "_${assoc}"'[$cmd]="$func"'
++	      eval "_service${assoc}"'[$cmd]="$svc"'
++	    else
++	      echo "$0: unknown command or service: $svc"
++	      ret=1
++	    fi
+ 	  else
+-	    echo "$0: unknown command or service: $svc"
++	    echo "$0: invalid argument: $1"
+ 	    ret=1
+ 	  fi
+-	else
+-	  echo "$0: invalid argument: $i"
+-	  ret=1
+-	fi
++          shift
++        fi
+       done
+ 
+       return ret
+@@ -290,18 +323,40 @@
+ 
+     case "$type" in
+     pattern)
+-      if [[ $# -gt 1 ]]; then
+-        echo "$0: only one pattern allowed"
+-	return 1
+-      fi
+-      _patcomps[$1]="$func"
++      while (( $# )); do
++        if [[ $1 = -T ]]; then
++          shift
++          if (( ! $# )); then
++            echo "$0: missing type"
++            return 1
++          fi
++          _comp_assocs=( "$_comp_assocs[@]" "$1" )
++          typeset -gA _$1 _service$1 _pat$1 _postpat$1
++          assoc="$1"
++          shift
++        else
++          eval "_pat${assoc}"'[$1]="$func"'
++          shift
++        fi
++      done
+       ;;
+     postpattern)
+-      if [[ $# -gt 1 ]]; then
+-        echo "$0: only one pattern allowed"
+-	return 1
+-      fi
+-      _postpatcomps[$1]="$func"
++      while (( $# )); do
++        if [[ $1 = -T ]]; then
++          shift
++          if (( ! $# )); then
++            echo "$0: missing type"
++            return 1
++          fi
++          _comp_assocs=( "$_comp_assocs[@]" "$1" )
++          typeset -gA _$1 _service$1 _pat$1 _postpat$1
++          assoc="$1"
++          shift
++        else
++          eval "_postpat${assoc}"'[$1]="$func"'
++          shift
++        fi
++      done
+       ;;
+     widgetkey)
+       while [[ -n $1 ]]; do
+@@ -321,7 +376,7 @@
+ 	fi
+ 	shift 3
+       done
+-      ;;	 
++      ;;
+     key)
+       if [[ $# -lt 2 ]]; then
+         echo "$0: missing keys"
+@@ -348,40 +403,66 @@
+       done
+       ;;
+     *)
+-      # For commands store the function name in the `_comps'
++      # For commands store the function name in the
+       # associative array, command names as keys.
+-      for i; do
+-        if [[ "$i" = *\=* ]]; then
+-	  cmd="${i%%\=*}"
+-	  svc=yes
++      while (( $# )); do
++        if [[ $1 = -T ]]; then
++          shift
++          if (( ! $# )); then
++            echo "$0: missing type"
++            return 1
++          fi
++          _comp_assocs=( "$_comp_assocs[@]" "$1" )
++          typeset -gA _$1 _service$1 _pat$1 _postpat$1
++          assoc="$1"
++          shift
+         else
+-	  cmd="$i"
+-	  svc=
++          if [[ "$1" = *\=* ]]; then
++	    cmd="${1%%\=*}"
++	    svc=yes
++          else
++	    cmd="$1"
++	    svc=
++          fi
++          if [[ -z "$new" || -z "${(e):-\$_${assoc}[$1]}" ]]; then
++            eval "_${assoc}"'[$cmd]="$func"'
++	    [[ -n "$svc" ]] && eval "_service${assoc}"'[$cmd]="${1#*\=}"'
++	  fi
++          shift
+         fi
+-        if [[ -z "$new" || "${+_comps[$i]}" -eq 0 ]]; then
+-          _comps[$cmd]="$func"
+-	  if [[ -n "$svc" ]]; then _services[$cmd]="${i#*\=}"; fi
+-	fi
+       done
+       ;;
+     esac
+   else
+     # Handle the `-d' option, deleting.
++
++    if [[ $1 = -T ]]; then
++      shift
++      if (( ! $# )); then
++        echo "$0: missing type"
++        return 1
++      fi
++      _comp_assocs=( "$_comp_assocs[@]" "$1" )
++      typeset -gA _$1 _service$1 _pat$1 _postpat$1
++      assoc="$1"
++      shift
++    fi
++
+     case "$type" in
+     pattern)
+-      unset "_patcomps[$^@]"
++      unset "_pat${assoc}[$^@]"
+       ;;
+     postpattern)
+-      unset "_postpatcomps[$^@]"
++      unset "_postpat${assoc}[$^@]"
+       ;;
+     key)
+       # Oops, cannot do that yet.
+ 
+       echo "$0: cannot restore key bindings"
+-      return 1v
++      return 1
+       ;;
+     *)
+-      unset "_comps[$^@]"
++      unset "_${assoc}[$^@]"
+     esac
+   fi
+ }
+Index: Completion/Base/Completer/_complete
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/Completer/_complete,v
+retrieving revision 1.3
+diff -u -r1.3 _complete
+--- Completion/Base/Completer/_complete	22 Jan 2002 10:22:48 -0000	1.3
++++ Completion/Base/Completer/_complete	4 Mar 2002 08:50:44 -0000
+@@ -95,7 +95,7 @@
+ 
+ comp="$_comps[-first-]"
+ if [[ -n "$comp" ]]; then
+-  service="${_services[-first-]:--first-}"
++  service="${_servicecomps[-first-]:--first-}"
+   ccarray[3]=-first-
+   eval "$comp" && ret=0
+   if [[ "$_compskip" = all ]]; then
+@@ -124,7 +124,7 @@
+   ccarray[3]="$cname"
+ 
+   comp="$_comps[$cname]"
+-  service="${_services[$cname]:-$cname}"
++  service="${_servicecomps[$cname]:-$cname}"
+ 
+   # If not, we use default completion, if any.
+ 
+@@ -134,9 +134,9 @@
+       return 1
+     fi
+     comp="$_comps[-default-]"
++    service="${_servicecomps[-default-]:--default-}"
+   fi
+-  [[ -n "$comp" ]] &&
+-      service="${_services[-default-]:--default-}" && eval "$comp" && ret=0
++  [[ -n "$comp" ]] && eval "$comp" && ret=0
+ fi
+ 
+ _compskip=
+Index: Completion/Base/Core/_dispatch
+===================================================================
+RCS file: Completion/Base/Core/_dispatch
+diff -N Completion/Base/Core/_dispatch
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Completion/Base/Core/_dispatch	4 Mar 2002 08:50:44 -0000
+@@ -0,0 +1,98 @@
++#autoload
++
++local comp pat val name i ret=1 _compskip="$_compskip"
++local curcontext="$curcontext" service str comptype noskip def
++local __comps __patcomps __postpatcomps __services
++
++# If we get the option `-s', we don't reset `_compskip'.
++
++while [[ "$1" = -[sd] ]]; do
++  if [[ "$1" = -s ]]; then
++    noskip=yes
++  else
++    def=yes
++  fi
++  shift
++done
++
++[[ -z "$noskip" ]] && _compskip=
++
++comptype=$1
++
++__comps=_$1
++
++(( ${(P)+__comps} )) || return 1
++
++__patcomps=_pat$1
++__postpatcomps=_postpat$1
++__services=_service$1
++
++shift
++
++# See if there are any matching pattern completions.
++
++if [[ "$_compskip" != (all|*patterns*) ]]; then
++
++  for str in "$@"; do
++    [[ -n "$str" ]] || continue
++    service="${${(e):-\$${__services}[\$str]}:-$str}"
++    for i in "${(@e):-\$${__patcomps}[(K)\$str]}"; do
++      "$i" && ret=0
++      if [[ "$_compskip" = *patterns* ]]; then
++        break
++      elif [[ "$_compskip" = all ]]; then
++        _compskip=''
++        return ret
++      fi
++    done
++  done
++fi
++
++# Now look up the names in the normal completion array.
++
++ret=1
++for str in "$@"; do
++  [[ -n "$str" ]] || continue
++  name="$str"
++  comp="${(e):-\$${__comps}[\$str]}"
++  service="${${(e):-\$${__services}[\$str]}:-$str}"
++
++  [[ -z "$comp" ]] || break
++done
++
++# And generate the matches, probably using default completion.
++
++if [[ -n "$comp" ]]; then
++  _compskip=patterns
++  eval "$comp" && ret=0
++  [[ "$_compskip" = (all|*patterns*) ]] && return ret
++elif [[ "$_compskip" != *default* ]]; then
++  name=-default-
++  comp="${(e):-\$${__comps}[-default-]}"
++fi
++
++if [[ "$_compskip" != (all|*patterns*) ]]; then
++  for str; do
++    [[ -n "$str" ]] || continue
++    service="${${(e):-\$${__services}[\$str]}:-$str}"
++    for i in "${(@e):-\$${__postpatcomps}[(K)\$str]}"; do
++      _compskip=default
++      "$i" && ret=0
++      if [[ "$_compskip" = *patterns* ]]; then
++        break
++      elif [[ "$_compskip" = all ]]; then
++        _compskip=''
++        return ret
++      fi
++    done
++  done
++fi
++
++[[ "$name" = -default- && -n "$comp" &&
++   "$_compskip" != (all|*default*) ]] &&
++  service="${${(e):-\$${__services}[-default-]}:--default-}" &&
++   eval "$comp" && ret=0
++
++_compskip=''
++
++return ret
+Index: Completion/Base/Core/_normal
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/Core/_normal,v
+retrieving revision 1.2
+diff -u -r1.2 _normal
+--- Completion/Base/Core/_normal	21 Jan 2002 16:13:18 -0000	1.2
++++ Completion/Base/Core/_normal	4 Mar 2002 08:50:44 -0000
+@@ -1,20 +1,16 @@
+ #compdef -command-line-
+ 
+-local comp command cmd1 cmd2 pat val name i ret=1 _compskip="$_compskip"
+-local curcontext="$curcontext" service
++local _comp_command1 _comp_command2 skip
+ 
+-# If we get the option `-s', we don't reset `_compskip'. This ensures
+-# that a value set in the function for the `-first-' context is kept,
+-# but that we still use pattern functions when we were called form
+-# another completion function.
+-
+-[[ "$1" = -s ]] || _compskip=''
++if [[ "$1" = -s ]]; then
++  skip=(-s)
++else
++  skip=()
++  _compskip=''
++fi
+ 
+-# Completing in command position? If not we set up `cmd1' and `cmd2' as
+-# two strings we have to search in the completion definition arrays (e.g.
+-# a path and the last path name component).
++# Completing in command position?
+ 
+-command="$words[1]"
+ if [[ CURRENT -eq 1 ]]; then
+   curcontext="${curcontext%:*:*}:-command-:"
+ 
+@@ -22,107 +18,8 @@
+   [[ -n "$comp" ]] && eval "$comp" && ret=0
+ 
+   return ret
+-else
+-  if (( $+builtins[$command] + $+functions[$command] )); then
+-    cmd1="$command"
+-    curcontext="${curcontext%:*:*}:${cmd1}:"
+-  elif [[ "$command[1]" = '=' ]]; then
+-    eval cmd1\=$command
+-    cmd2="$command[2,-1]"
+-    curcontext="${curcontext%:*:*}:${cmd2}:"
+-  elif [[ "$command" = ..#/* ]]; then
+-    cmd1="${PWD}/$command"
+-    cmd2="${command:t}"
+-    curcontext="${curcontext%:*:*}:${cmd2}:"
+-  elif [[ "$command" = */* ]]; then
+-    cmd1="$command"
+-    cmd2="${command:t}"
+-    curcontext="${curcontext%:*:*}:${cmd2}:"
+-  else
+-    cmd1="$command"
+-    cmd2="$commands[$command]"
+-    curcontext="${curcontext%:*:*}:${cmd1}:"
+-  fi
+-fi
+-
+-# See if there are any matching pattern completions.
+-
+-if [[ "$_compskip" != (all|*patterns*) ]]; then
+-  service="${_services[$cmd1]:-$cmd1}"
+-  for i in "${(@)_patcomps[(K)$cmd1]}"; do
+-    "$i" && ret=0
+-    if [[ "$_compskip" = *patterns* ]]; then
+-      break
+-    elif [[ "$_compskip" = all ]]; then
+-      _compskip=''
+-      return ret
+-    fi
+-  done
+-  if [[ -n "$cmd2" ]]; then
+-    service="${_services[$cmd2]:-$cmd2}"
+-    for i in "${(@)_patcomps[(K)$cmd2]}"; do
+-      "$i" && ret=0
+-      if [[ "$_compskip" = *patterns* ]]; then
+-        break
+-      elif [[ "$_compskip" = all ]]; then
+-        _compskip=''
+-        return ret
+-      fi
+-    done
+-  fi
+ fi
+ 
+-# Now look up the two names in the normal completion array.
+-
+-ret=1
+-name="$cmd1"
+-comp="$_comps[$cmd1]"
+-service="${_services[$cmd1]:-$cmd1}"
+-
+-[[ -z "$comp" ]] &&
+-    name="$cmd2" comp="$_comps[$cmd2]" service="${_services[$cmd2]:-$cmd2}"
+-
+-# And generate the matches, probably using default completion.
+-
+-if [[ -n "$comp" ]]; then
+-  _compskip=patterns
+-  eval "$comp" && ret=0
+-  [[ "$_compskip" = (all|*patterns*) ]] && return ret
+-elif [[ "$_compskip" != *default* ]]; then
+-  name=-default-
+-  comp="$_comps[-default-]"
+-fi
+-
+-if [[ "$_compskip" != (all|*patterns*) ]]; then
+-  service="${_services[$cmd1]:-$cmd1}"
+-  for i in "${(@)_postpatcomps[(K)$cmd1]}"; do
+-    _compskip=default
+-    "$i" && ret=0
+-    if [[ "$_compskip" = *patterns* ]]; then
+-      break
+-    elif [[ "$_compskip" = all ]]; then
+-      _compskip=''
+-      return ret
+-    fi
+-  done
+-  if [[ -n "$cmd2" ]]; then
+-    service="${_services[$cmd2]:-$cmd2}"
+-    for i in "${(@)_postpatcomps[(K)$cmd2]}"; do
+-      _compskip=default
+-      "$i" && ret=0
+-      if [[ "$_compskip" = *patterns* ]]; then
+-        break
+-      elif [[ "$_compskip" = all ]]; then
+-        _compskip=''
+-        return ret
+-      fi
+-    done
+-  fi
+-fi
+-
+-[[ "$name" = -default- && -n "$comp" && "$_compskip" != (all|*default*) ]] &&
+-  service="${_services[-default-]:--default-}" && eval "$comp" && ret=0
+-
+-_compskip=''
++_set_command
+ 
+-return ret
++_dispatch -d "$skip[@]" comps "$_comp_command1" "$_comp_command2"
+Index: Completion/Base/Utility/_contexts
+===================================================================
+RCS file: Completion/Base/Utility/_contexts
+diff -N Completion/Base/Utility/_contexts
+--- Completion/Base/Utility/_contexts	21 Jan 2002 16:13:18 -0000	1.2
++++ /dev/null	1 Jan 1970 00:00:00 -0000
+@@ -1,23 +0,0 @@
+-#autoload
+-
+-# This searches $* in the array for normal completions and calls the result.
+-# It is used to include completions for another command or special context
+-# into the list generated by the calling function.
+-# For example the function for `-subscript-' could call this as in
+-# `_contexts -math-' to get the completions that would be generated for a
+-# mathematical context.
+-
+-local i tmp ret=1 service or
+-
+-if [[ $1 = -o ]]; then
+-  or=yes
+-  shift
+-fi
+-
+-for i; do
+-  tmp="$_comps[$i]"
+-  [[ -n "$tmp" ]] && service="${_services[$i]:-$i}" && eval "$tmp" && ret=0
+-  [[ -n "$or" && ret -eq 0 ]] && return 0
+-done
+-
+-return ret
+Index: Completion/Base/Utility/_set_command
+===================================================================
+RCS file: Completion/Base/Utility/_set_command
+diff -N Completion/Base/Utility/_set_command
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Completion/Base/Utility/_set_command	4 Mar 2002 08:50:44 -0000
+@@ -0,0 +1,31 @@
++#autoload
++
++# This sets the parameters _comp_command1 and _comp_command2 in the
++# calling function.
++
++local command
++
++command="$words[1]"
++
++[[ -z "$command" ]] && return
++
++if (( $+builtins[$command] + $+functions[$command] )); then
++  _comp_command1="$command"
++  curcontext="${curcontext%:*:*}:${_comp_command1}:"
++elif [[ "$command[1]" = '=' ]]; then
++  eval _comp_command2\=$command
++  _comp_command1="$command[2,-1]"
++  curcontext="${curcontext%:*:*}:${_comp_command2}:"
++elif [[ "$command" = ..#/* ]]; then
++  _comp_command1="${PWD}/$command"
++  _comp_command2="${command:t}"
++  curcontext="${curcontext%:*:*}:${_comp_command2}:"
++elif [[ "$command" = */* ]]; then
++  _comp_command1="$command"
++  _comp_command2="${command:t}"
++  curcontext="${curcontext%:*:*}:${_comp_command2}:"
++else
++  _comp_command1="$command"
++  _comp_command2="$commands[$command]"
++  curcontext="${curcontext%:*:*}:${_comp_command1}:"
++fi
+Index: Completion/Unix/Command/_gcc
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Unix/Command/_gcc,v
+retrieving revision 1.2
+diff -u -r1.2 _gcc
+--- Completion/Unix/Command/_gcc	7 Dec 2001 12:43:33 -0000	1.2
++++ Completion/Unix/Command/_gcc	4 Mar 2002 08:50:44 -0000
+@@ -1,8 +1,21 @@
+-#compdef gcc
++#compdef gcc g++ -T values LDFLAGS CFLAGS CPPFLAGS
+ 
+-local curcontext="$curcontext" state line ret=1 expl args
++local curcontext="$curcontext" state line ret=1 expl args args2
+ typeset -A opt_args
+ 
++if [[ "$comptype" = values ]]; then
++  compset -q
++  words=( fake "$words[@]" )
++  (( CURRENT++ ))
++  if ("$service" = LDFLAGS ]]; then
++    args2=( '-R:runtime path:->rundir' )
++  else
++    args2=()
++  fi
++else
++  args2=( '*:input file:_files -g \*.\(\[cCmisSoak\]\|cc\|cxx\|ii\|k\[ih\]\)' )
++fi
++
+ args=()
+ case $MACHTYPE in
+ m68*)
+@@ -243,7 +256,7 @@
+   -freg-struct-return -fshared-data -fshort-enums \
+   -fshort-double -fvolatile -fvolatile-global \
+   -fverbose-asm -fpack-struct \
+-  '*:input file:_files -g \*.\(\[cCmisSoak\]\|cc\|cxx\|ii\|k\[ih\]\)' && ret=0
++  "$args2[@]" && ret=0
+ 
+ 
+ case "$state" in
+@@ -275,6 +288,11 @@
+ library)
+   _wanted libraries expl library \
+       compadd - ${^=LD_LIBRARY_PATH:-/usr/lib /usr/local/lib}/lib*.(a|so*)(:t:fr:s/lib//) && ret=0
++  ;;
++rundir)
++  compset -P '*:'
++  compset -S ':*'
++  _files -/ -S/ -r '\n\t\- /:' "$@"
+   ;;
+ esac
+ 
+Index: Completion/Unix/Command/_su
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Unix/Command/_su,v
+retrieving revision 1.2
+diff -u -r1.2 _su
+--- Completion/Unix/Command/_su	21 Jan 2002 16:13:18 -0000	1.2
++++ Completion/Unix/Command/_su	4 Mar 2002 08:50:44 -0000
+@@ -17,4 +17,4 @@
+ shell="${${(M@)${(@f)$(</etc/passwd)}:#$usr*}##*:}"
+ compset -n $base
+ 
+-_contexts -o $shell $shell:t -default-
++_dispatch comps $shell $shell:t -default-
+Index: Completion/Unix/Type/_files
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Unix/Type/_files,v
+retrieving revision 1.5
+diff -u -r1.5 _files
+--- Completion/Unix/Type/_files	9 Oct 2001 12:56:03 -0000	1.5
++++ Completion/Unix/Type/_files	4 Mar 2002 08:50:44 -0000
+@@ -1,4 +1,4 @@
+-#autoload
++#compdef -T redirs -default-
+ 
+ local opts tmp glob pat pats expl tag i def descr end ign ret=1 match tried
+ local type sdef
+Index: Completion/Unix/Type/_printers
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Unix/Type/_printers,v
+retrieving revision 1.2
+diff -u -r1.2 _printers
+--- Completion/Unix/Type/_printers	25 Jul 2001 12:18:24 -0000	1.2
++++ Completion/Unix/Type/_printers	4 Mar 2002 08:50:44 -0000
+@@ -1,4 +1,4 @@
+-#autoload
++#compdef -T values PRINTER LPDEST
+ 
+ local expl ret=1 list disp sep
+ 
+Index: Completion/Unix/Type/_terminals
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Unix/Type/_terminals,v
+retrieving revision 1.1
+diff -u -r1.1 _terminals
+--- Completion/Unix/Type/_terminals	16 Jan 2002 16:29:52 -0000	1.1
++++ Completion/Unix/Type/_terminals	4 Mar 2002 08:50:44 -0000
+@@ -1,4 +1,4 @@
+-#compdef infocmp
++#compdef infocmp -T values TERM
+ 
+ local desc expl
+ 
+Index: Completion/Unix/Type/_time_zone
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Unix/Type/_time_zone,v
+retrieving revision 1.3
+diff -u -r1.3 _time_zone
+--- Completion/Unix/Type/_time_zone	4 Jan 2002 12:09:30 -0000	1.3
++++ Completion/Unix/Type/_time_zone	4 Mar 2002 08:50:44 -0000
+@@ -1,4 +1,4 @@
+-#compdef
++#compdef -T values TZ
+ 
+ local expl
+ 
+Index: Completion/X/Type/_x_display
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/X/Type/_x_display,v
+retrieving revision 1.1
+diff -u -r1.1 _x_display
+--- Completion/X/Type/_x_display	2 Apr 2001 12:09:25 -0000	1.1
++++ Completion/X/Type/_x_display	4 Mar 2002 08:50:44 -0000
+@@ -1,3 +1,3 @@
+-#autoload
++#compdef -T values DISPLAY
+ 
+ _tags displays && _hosts -S ':0 ' -r :
+Index: Completion/Zsh/Command/_compdef
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Zsh/Command/_compdef,v
+retrieving revision 1.1
+diff -u -r1.1 _compdef
+--- Completion/Zsh/Command/_compdef	2 Apr 2001 11:27:07 -0000	1.1
++++ Completion/Zsh/Command/_compdef	4 Mar 2002 08:50:44 -0000
+@@ -6,6 +6,7 @@
+ _arguments -C -s -A "-*" -S \
+   '(-d)-a[make function autoloadable]' \
+   '(-d -p -P)-n[leave existing definitions intact]' \
++  "*-T[select type of completion function]:completion function type:($_comp_assocs)" \
+   ':completion function:->cfun' \
+   '*:commands: _command_names' \
+  - d \
+Index: Completion/Zsh/Context/_default
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Zsh/Context/_default,v
+retrieving revision 1.1
+diff -u -r1.1 _default
+--- Completion/Zsh/Context/_default	2 Apr 2001 11:22:38 -0000	1.1
++++ Completion/Zsh/Context/_default	4 Mar 2002 08:50:44 -0000
+@@ -19,7 +19,7 @@
+ # allow completion to handle file names after any equals sign.
+ 
+ if [[ -o magicequalsubst && "$PREFIX" = *\=* ]]; then
+-  compstate[parameter]="${words[1]:t}-${PREFIX%%\=*}"
++  compstate[parameter]="${PREFIX%%\=*}"
+   compset -P 1 '*='
+   _value "$@"
+ else
+Index: Completion/Zsh/Context/_in_vared
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Zsh/Context/_in_vared,v
+retrieving revision 1.1
+diff -u -r1.1 _in_vared
+--- Completion/Zsh/Context/_in_vared	2 Apr 2001 11:23:29 -0000	1.1
++++ Completion/Zsh/Context/_in_vared	4 Mar 2002 08:50:44 -0000
+@@ -32,4 +32,4 @@
+ 
+ compstate[insert]="${compstate[insert]//tab /}"
+ 
+-_contexts "$also"
++_dispatch comps "$also"
+Index: Completion/Zsh/Context/_redirect
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Zsh/Context/_redirect,v
+retrieving revision 1.1
+diff -u -r1.1 _redirect
+--- Completion/Zsh/Context/_redirect	2 Apr 2001 11:24:17 -0000	1.1
++++ Completion/Zsh/Context/_redirect	4 Mar 2002 08:50:44 -0000
+@@ -1,3 +1,17 @@
+ #compdef -redirect-
+ 
+-_files
++# This searches for `<command-name>:<redir-op>' and `<redir-op>', where
++# `<redir-op>' is something like `<' or `2>'.
++
++local strs _comp_command1 _comp_command2
++
++_set_command
++
++strs=( "$compstate[redirect]" )
++
++if [[ -n "$_comp_command1" ]]; then
++  strs=( "${_comp_command1}:$strs[-1]" "$strs[@]" )
++  [[ -n "$_comp_command2" ]] && strs=( "${_comp_command2}:$strs[1]" "$strs[@]" )
++fi
++
++_dispatch -d redirs "$strs[@]"
+Index: Completion/Zsh/Context/_subscript
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Zsh/Context/_subscript,v
+retrieving revision 1.8
+diff -u -r1.8 _subscript
+--- Completion/Zsh/Context/_subscript	11 Sep 2001 09:35:55 -0000	1.8
++++ Completion/Zsh/Context/_subscript	4 Mar 2002 08:50:44 -0000
+@@ -113,5 +113,5 @@
+ 
+   return 1
+ else
+-  _contexts -math-
++  _dispatch comps -math-
+ fi
+Index: Completion/Zsh/Context/_value
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Zsh/Context/_value,v
+retrieving revision 1.4
+diff -u -r1.4 _value
+--- Completion/Zsh/Context/_value	16 Jan 2002 16:29:52 -0000	1.4
++++ Completion/Zsh/Context/_value	4 Mar 2002 08:50:44 -0000
+@@ -1,19 +1,39 @@
+-#compdef -value- -array-value-
++#compdef -value- -array-value- -T values -default-
+ 
+-_value () {
+-  # You can customize completion for different parameters by writing a
+-  # function `_value:<name>', where <name> is the name of the parameter.
+-  # When completing values of elements of associative arrays, we first
+-  # search for a function `_value:<assoc>-<key>' and then for 
+-  # `_value:<assoc>', so it's simple to define different functions
+-  # for different keys or one function for a whole association.
+-
+-  if (( $+functions[_value:$compstate[parameter]] )); then
+-    "_value:$compstate[parameter]" "$@"
+-  elif (( $+functions[_value:${compstate[parameter]%%-*}] )); then
+-    "_value:${compstate[parameter]%%-*}" "$@"
+-  elif [[ "$compstate[parameter]" != *-* &&
+-          "${(Pt)${compstate[parameter]}}" = assoc* ]]; then
++# You can customize completion for different parameters by writing
++# functions with the tag-line `#compdef -T value <name>'.
++# The function searches for the strings `<param-name>:<param-type>'
++# and `<param-name>'. If the line contains a command (as in `make foo=<TAB>')
++# the string `<command>:<param-name>:<param-type>' is also searched for.
++
++if [[ "$service" != -default- ]]; then
++  local strs type
++
++  type="${(Pt)compstate[parameter]}"
++
++  if [[ -z "$type" ]]; then
++    if [[ "$compstate[parameter]" = *-* ]]; then
++      type=association-value
++    elif [[ "$compstate[context]" = value ]]; then
++      type=scalar
++    else
++      type=array
++    fi
++  fi
++
++  strs=( "${compstate[parameter]}:$type" "$compstate[parameter]" )
++
++  if [[ "$compstate[context]" != *value && -n "$_comp_command1" ]]; then
++    strs=( "${_comp_command1}:$^strs[@]" "$strs[@]" )
++    [[ -n "$_comp_command2" ]] &&
++        strs=( "${_comp_command2}:${(@)^strs[-2,-1]}" "$strs[@]" )
++  fi
++
++  _dispatch -d values "$strs[@]"
++else
++  if [[ "$compstate[parameter]" != *-* &&
++        "$compstate[context]" = *value &&
++        "${(Pt)${compstate[parameter]}}" = assoc* ]]; then
+     if (( CURRENT & 1 )); then
+       _wanted association-keys expl 'association key' \
+           compadd -k "$compstate[parameter]"
+@@ -34,37 +54,4 @@
+       _default "$@"
+     fi
+   fi
+-}
+-
+-_value:CPPFLAGS () {
+-  compset -q
+-  if compset -P '-I'; then
+-    _files -/ "$@"
+-  else
+-    _default "$@"
+-  fi
+-}
+-
+-_value:LDFLAGS () {
+-  compset -q
+-  if compset -P '-L'; then
+-    _files -/ "$@"
+-  elif compset -P '-R'; then
+-    compset -P '*:'
+-    compset -S ':*'
+-    _files -/ -S/ -r '\n\t\- /:' "$@"
+-  else
+-    _default "$@"
+-  fi
+-}
+-
+-_value:DISPLAY() { _x_display "$@" }
+-
+-_value:PRINTER() { _printers "$@" }
+-_value:LPDEST() { _printers "$@" }
+-
+-_value:TERM() { _terminals "$@" }
+-
+-_value:TZ() { _time_zone "$@" }
+-
+-_value "$@"
++fi
+Index: Doc/Zsh/compsys.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compsys.yo,v
+retrieving revision 1.146
+diff -u -r1.146 compsys.yo
+--- Doc/Zsh/compsys.yo	25 Feb 2002 09:09:36 -0000	1.146
++++ Doc/Zsh/compsys.yo	4 Mar 2002 08:50:45 -0000
+@@ -173,14 +173,32 @@
+ arguments for the command `tt(cmd)', setting the parameter tt($service) 
+ to the string `tt(service)'.  The function can then use that parameter 
+ to decide what to complete.
++
++Finally, the list of var(names) may contain tt(-T) options, each
++followed by a type name.  These type names describe in which set of
++completion function definitions the function is to be stored.  The
++default without a tt(-T) option is `tt(comps)', saying that the
++function is a normal completion function.  Other type names currently
++understood by the completion system are tt(redirs) and tt(values).
++The first is used to define specialised completion functions for
++use after redirection operators for certain commands and the latter is
++used to define functions used when completing values of parameters.
++For example, to define the function that should be used when
++completing after `tt(foo=<TAB>)' one would use the tag line:
++
++example(#compdef -T values foo)
++
++When the function is called, the parameter tt($comptype) will be set
++to the type name, making it easy to distinguish what should be
++completed.
+ )
+-item(tt(#compdef -p) var(pattern))(
++item(tt(#compdef -p) var(patterns...))(
+ The file will be made autoloadable and the function defined in it will be
+ called when completing for a command whose name matches the given
+-var(pattern) (a standard globbing pattern).  Note that only one
+-var(pattern) may be given.
++var(pattern) (a standard globbing pattern).  As in the first case, the
++list of var(patterns) may contain tt(-T) options.
+ )
+-item(tt(#compdef -P) var(pattern))(
++item(tt(#compdef -P) var(patterns...))(
+ Like the previous one, but the function will be called only if no
+ completion function for the command on the line could be found.
+ )
+@@ -254,10 +272,10 @@
+ findex(compdef)
+ cindex(completion system, adding definitions)
+ startitem()
+-xitem(tt(compdef) [ tt(-an) ] var(function names...))
+-xitem(tt(compdef -d) var(names...))
+-xitem(tt(compdef -p) [ tt(-a) ] var(function pattern))
+-xitem(tt(compdef -P) [ tt(-a) ] var(function pattern))
++xitem(tt(compdef) [ tt(-an) ] var(function names) [ tt(-T) var(type) ] ...))
++xitem(tt(compdef -d) [ tt(-T) var(type) ] var(names...))
++xitem(tt(compdef -p) [ tt(-a) ] var(function patterns) [ tt(-T) var(type) ] ...)
++xitem(tt(compdef -P) [ tt(-a) ] var(function patterns) [ tt(-T) var(type) ] ...)
+ xitem(tt(compdef -k) [ tt(-an) ] var(function style key-sequences...))
+ item(tt(compdef -K) [ tt(-an) ] var(function name style key-sequences ...))(
+ The first form tells the completion system to call the given
+@@ -279,6 +297,14 @@
+ 
+ example(compdef '_files -g "*.h"' foo)
+ 
++The tt(-T) options in the list of var(names) define for which type of
++completions the function is to be used, i.e. in which set of
++completion functions definitions it should be added.  Currently used
++tt(type)s are tt(comps) (the default, for normal completion functions
++for command completion), tt(values) for completion of parameter values
++in assignments and tt(redirs) for completion after redirection
++operators.
++
+ If the
+ tt(-n) option is given, any existing completion behaviour for particular
+ contexts or commands will not be altered.  These definitions can be deleted
+@@ -3552,19 +3578,6 @@
+ tt(compadd) when generating matches from the style value, or to 
+ the functions for the fields if they are called.
+ )
+-findex(_contexts)
+-item(tt(_contexts) [ tt(-o) ] var(names) ...)(
+-This function looks up the definitions for the context and command
+-names given as arguments and calls the handler functions for them if
+-there is a definition (given with the tt(compdef) function).  For
+-example, the function completing inside subscripts might use
+-`tt(_contexts -math-)' to include the completions generated for
+-mathematical environments.
+-
+-If the tt(-o) option is given, tt(_contexts) returns after the first
+-context for which completions could be generated, without trying the
+-other contexts.
+-)
+ findex(_describe)
+ item(tt(_describe) [ tt(-o) ] var(descr) var(name1) [ var(name2) ] var(opts) ... tt(-)tt(-) ...)(
+ This function is useful for preparing a list of command options or
+@@ -3643,6 +3656,19 @@
+ a similar format; this ensures that user-specified styles are correctly
+ passed down to the builtins which implement the internals of completion.
+ )
++findex(_dispatch)
++item(tt(_dispatch) [ tt(-d) ] var(type strings ...))(
++This function looks up the function defined for the first var(string)
++in the set of definitions named var(type) (these are those definitions
++defined with `tt(-T )var(type)').  If one is found, it is called to
++generate completions.  Otherwise the definition for the second
++var(string) is looked up and so on.  If none is found and the tt(-d)
++option is given, the definition for the special name tt(-default-) is
++used.
++
++This function is the one responsible for setting the parameters
++tt($service) and tt($comptype).
++)
+ findex(_files)
+ item(tt(_files))(
+ The function tt(_files) uses the tt(file-patterns) style and calls
+@@ -3789,7 +3815,7 @@
+ )
+ )
+ findex(_normal)
+-item(tt(_normal))(
++item(tt(_normal) [ var(type) ])(
+ This function is used for normal command completion.  It has two tasks:
+ completing the first word on the command line as the name of a command, and
+ completing the arguments to this command.  In the second case, the name of
+@@ -3808,6 +3834,13 @@
+ checked after the call to the corresponding completion function.  This has
+ the same effect here as in the tt(-first-) context: if it is set, no more
+ completion functions are called even if there are no matches so far.
++
++If the optional var(type) argument is given, tt(_normal) does not use
++the normal associative arrays for its lookup but instead uses the ones
++defined for the given var(type), which may currently be one of
++tt(comps) for normal completion, tt(redirs) for completion of
++command-specific redirections or tt(values) to complete on the right
++hand side of parameter assignments.
+ )
+ findex(_options)
+ item(tt(_options))(
+
+-- 
+Sven Wischnowsky                          wischnow@berkom.de
+

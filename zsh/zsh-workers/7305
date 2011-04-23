@@ -1,0 +1,220 @@
+From zsh-workers-return-7305-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jul 28 14:51:53 1999
+Return-Path: <zsh-workers-return-7305-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2050 invoked from network); 28 Jul 1999 14:51:52 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 Jul 1999 14:51:52 -0000
+Received: (qmail 21903 invoked by alias); 28 Jul 1999 14:51:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7305
+Received: (qmail 21896 invoked from network); 28 Jul 1999 14:51:42 -0000
+Message-Id: <9907281420.AA21076@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.6-test-3: small zftp function additions
+Date: Wed, 28 Jul 1999 16:20:43 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Here are some small changes for the zftp functions, which I've been using
+myself, so they should work.  In addition to the documented changes of
+URL-style paths for opening (not yet for getting, though I should really
+have done that) and the -c option for zfget, there is also a change allowing
+zftp_chpwd to be called other than when a directory really changes without
+causing mayhem.
+
+--- Doc/Zsh/zftpsys.yo.bak	Tue Jul 20 12:15:54 1999
++++ Doc/Zsh/zftpsys.yo	Wed Jul 28 16:08:56 1999
+@@ -99,6 +99,14 @@
+ recorded for later re-opening, either by a tt(zfopen) with no arguments, or
+ automatically (see below).  With the option `tt(-1)', no information is
+ stored.
++
++Both tt(zfopen) and tt(zfanon) (but not tt(zfparams)) understand URLs of
++the form tt(ftp://)var(host)/var(path...) as meaning to connect to the
++var(host), then change directory to var(path) (which must be a directory,
++not a file).  The `tt(ftp://)' can be omitted; the trailing `tt(/)' is enough
++to trigger recognition of the var(path).  Note prefixes other than
++`tt(ftp:)' are not recognized, and that all characters after the first
++slash beyond tt(host) are significant in var(path).
+ )
+ findex(zfanon)
+ item(tt(zfanon [ -1 ] var(host)))(
+@@ -204,11 +212,13 @@
+ 
+ startitem()
+ findex(zfget)
+-item(tt(zfget [ -Gt ] var(file1) ...))(
++item(tt(zfget [ -Gtc ] var(file1) ...))(
+ Retrieve all the listed files var(file1) ... one at a time from the remote
+ server.  If a file contains a `tt(/)', the full name is passed to the
+ remote server, but the file is stored locally under the name given by the
+-part after the final `tt(/)'.
++part after the final `tt(/)'.  The option tt(-c) (cat) forces all files to
++be sent as a single stream to standard output; in this case the tt(-t)
++option has no effect.
+ )
+ findex(zfuget)
+ item(tt(zfuget [ -Gvst ] var(file1) ...))(
+--- Functions/Zftp/zfanon.bak	Wed Jul 28 15:58:42 1999
++++ Functions/Zftp/zfanon	Wed Jul 28 15:58:52 1999
+@@ -2,7 +2,7 @@
+ 
+ emulate -L zsh
+ 
+-local opt optlist once
++local opt optlist once dir
+ 
+ while [[ $1 = -* ]]; do
+   if [[ $1 = - || $1 = -- ]]; then
+@@ -61,10 +61,20 @@
+   print "Using $EMAIL_ADDR as anonymous FTP password."
+ fi
+ 
++if [[ $1 = */* ]]; then
++  1=${1##ftp://}
++  dir=${1#*/}
++  1=${1%%/*}
++fi
++
+ if [[ $once = 1 ]]; then
+-  zftp open $1 anonymous $EMAIL_ADDR
++  zftp open $1 anonymous $EMAIL_ADDR || return 1
+ else
+   zftp params $1 anonymous $EMAIL_ADDR
+-  zftp open
++  zftp open || return 1
++fi
++
++if [[ -n $dir ]]; then
++  zfcd $dir
+ fi
+ # }
+--- Functions/Zftp/zfget.bak	Wed Jul 28 15:58:42 1999
++++ Functions/Zftp/zfget	Wed Jul 28 15:58:52 1999
+@@ -1,10 +1,16 @@
+ # function zfget {
+ # Get files from remote server.  Options:
++#   -c   cat: dump files to stdout.
++#          alias zfcat="zfget -c"
++#          zfpage() { zfget -c "$@" | eval $PAGER }
++#        are sensible things to do, but aren't done for you.  Note the
++#        second doesn't work on all OS's.
+ #   -G   don't to remote globbing, else do
+ #   -t   update the local file times to the same time as the remote.
+ #        Currently this only works if you have the `perl' command,
+ #        and that perl is version 5 with the standard library.
+-#        See the function zfrtime for more gory details.
++#        See the function zfrtime for more gory details.  This has
++#        no effect with the -c option.
+ #
+ # If the connection is not currently open, try to open it with the current
+ # parameters (set by a previous zfopen or zfparams), then close it after
+@@ -13,7 +19,7 @@
+ 
+ emulate -L zsh
+ 
+-local loc rem optlist opt nglob remlist time
++local loc rem optlist opt nglob remlist time cat
+ integer stat do_close
+ 
+ while [[ $1 == -* ]]; do
+@@ -29,6 +35,8 @@
+ 	 ;;
+       t) time=1
+ 	 ;;
++      c) cat=1
++	 ;;
+       *) print option $opt not recognised >&2
+ 	 ;;
+     esac
+@@ -48,11 +56,16 @@
+   fi
+   if (( $#remlist )); then
+     for rem in $remlist; do
+-      loc=${rem:t}
+-      if zftp get $rem >$loc; then
+-	[[ $time = 1 ]] && zfrtime $rem $loc
++      if [[ -n $cat ]]; then
++	zftp get $rem
++	stat=$?
+       else
+-	stat=1
++	loc=${rem:t}
++	if zftp get $rem >$loc; then
++	  [[ $time = 1 ]] && zfrtime $rem $loc
++	else
++	  stat=1
++	fi
+       fi
+     done
+   fi
+--- Functions/Zftp/zfopen.bak	Wed Jul 28 15:58:42 1999
++++ Functions/Zftp/zfopen	Wed Jul 28 15:58:52 1999
+@@ -7,7 +7,7 @@
+ 
+ emulate -L zsh
+ 
+-local optlist opt once
++local optlist opt once dir
+ 
+ while [[ $1 = -* ]]; do
+   if [[ $1 = - || $1 = -- ]]; then
+@@ -31,12 +31,22 @@
+ # both .netrc and .ncftp/bookmarks .  We could even try saving
+ # the info in their for new hosts, like ncftp does.
+ 
++if [[ $1 = */* ]]; then
++  1=${1##ftp://}
++  dir=${1#*/}
++  1=${1%%/*}
++fi
++
+ if [[ $once = 1 ]]; then
+-  zftp open $*
++  zftp open $* || return 1
+ else
+   # set parameters, but only if there was at least a host
+   (( $# > 0 )) && zfparams $*
+   # now call with no parameters
+-  zftp open
++  zftp open || return 1
++fi
++
++if [[ -n $dir ]]; then
++  zfcd $dir
+ fi
+ # }
+--- Functions/Zftp/zftp_chpwd.bak	Wed Jul 28 15:58:42 1999
++++ Functions/Zftp/zftp_chpwd	Wed Jul 28 15:59:36 1999
+@@ -1,13 +1,16 @@
+ # function zftp_chpwd {
+ # You may want to alter chpwd to call this when $ZFTP_USER is set.
+ 
+-# Cancel the filename cache for the current directory.
+-zftp_fcache=()
+-# ...and also empty the stored directory listing cache.
+-# As this function is called when we close the connection, this
+-# is the only place we need to do these two things.
+-[[ -n $zfcurdir && -f $zfcurdir ]] && rm -f $zfcurdir
+-zfotherargs=
++# If the directory really changed...
++if [[ $ZFTP_PWD != $zflastdir ]]; then
++  # Cancel the filename cache for the current directory.
++  zftp_fcache=()
++  # ...and also empty the stored directory listing cache.
++  # As this function is called when we close the connection, this
++  # is the only place we need to do these two things.
++  [[ -n $zfcurdir && -f $zfcurdir ]] && rm -f $zfcurdir
++  zfotherargs=
++fi
+ 
+ if [[ -z $ZFTP_USER ]]; then
+   # last call, after an FTP logout
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

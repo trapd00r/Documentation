@@ -1,0 +1,127 @@
+From zsh-workers-return-6285-mason-zsh=primenet.com.au@sunsite.auc.dk Fri May 14 12:29:44 1999
+Return-Path: <zsh-workers-return-6285-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29732 invoked from network); 14 May 1999 12:29:43 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 May 1999 12:29:43 -0000
+Received: (qmail 10883 invoked by alias); 14 May 1999 12:29:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6285
+Received: (qmail 10876 invoked from network); 14 May 1999 12:29:20 -0000
+Date: Fri, 14 May 1999 14:29:19 +0200 (MET DST)
+Message-Id: <199905141229.OAA08355@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Tue, 11 May 1999 15:15:17 +0200
+Subject: Re: tty pgrp and execution and jobs and...
+
+
+Peter Stephenson wrote:
+
+> Nope, that's no good.  In something like
+> 
+> % zcat foo.gz | if true; less; fi
+> 
+> the zcat can exit, in which case the test for messing around with the pgrp
+> comes up.  The code in update_job (called asynchronously as soon as zcat
+> finishes) doesn't know that the shell part of the code hasn't yet finished,
+> so it calls attachtty(mypgrp), with the consequence that the end of the
+> pipeline fails disastrously.
+> 
+> The best I can think of is simply marking the fact when we can't reattach
+> the tty, and the calling it when we know its safe, which is when the job
+> that's executing is finally deleted.  At least this seems to fix up the
+> problem without destroying the previous fixes (which still need applying).
+
+I've played with this execution stuff yesterday and haven't found a
+way to make it fail, so I think we better keep it until we run into
+problems (hm, that's normal behavior w.r.t the job/execution code on
+this list, right?).
+
+I wrote:
+
+> But while playing a bit, I found at least one more bug. If you do:
+> `ls | if true; then sleep 10; cat; fi' and ^Z the sleep, then fg the
+> whole thing again, the shell doesn't get hold of the terminal again
+> after the cat finishes. If you bg before the fg, the cat doesn't get
+> control (and neither does the shell).
+
+I think I found the reason(s) for this one: in exec.c, list_pipe_pid
+was reset to zero before reaching line 808 where it is stored in the
+process list of the super-job. With the zero stored there findproc()
+couldn't find the job when the sub-shell finished and thus the parent
+shell didn't realise that it's foreground job had just finished.
+Another problem was that waitjob() deleted the sub-job as soon as the
+sleep was stopped. With that the parent shell couldn't continue the
+sub-job any more.
+
+As a reply to 6277: this seems to be fixed in pws-18, but sometimes I
+need to type ^Z twice to get the thing stopped. Currently I have no
+idea whence this comes and I won't have time to look at it again until 
+next week.
+
+Bye
+ Sven
+
+P.S.: This patch also works with 3.0.6.
+
+
+diff -u os/exec.c Src/exec.c
+--- os/exec.c	Tue May 11 13:40:33 1999
++++ Src/exec.c	Thu May 13 15:35:39 1999
+@@ -761,13 +761,17 @@
+ 	coprocout = opipe[1];
+ 	fdtable[coprocin] = fdtable[coprocout] = 0;
+     }
++    /* This used to set list_pipe_pid=0 unconditionally, but in things
++     * like `ls|if true; then sleep 20; cat; fi' where the sleep was
++     * stopped, the top-level execpline() didn't get the pid for the
++     * sub-shell because it was overwritten. */
+     if (!pline_level++) {
+ 	list_pipe_job = newjob;
++        list_pipe_pid = 0;
+ 	nowait = 0;
+-    }
+-    list_pipe_pid = lastwj = 0;
+-    if (pline_level == 1)
+ 	simple_pline = (l->left->type == END);
++    }
++    lastwj = 0;
+     execpline2(l->left, how, opipe[0], ipipe[1], last1);
+     pline_level--;
+     if (how & Z_ASYNC) {
+@@ -800,6 +804,7 @@
+ 		    struct process *pn, *qn;
+ 
+ 		    curjob = newjob;
++		    DPUTS(!list_pipe_pid, "invalid list_pipe_pid");
+ 		    addproc(list_pipe_pid, list_pipe_text);
+ 
+ 		    for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+diff -u os/jobs.c Src/jobs.c
+--- os/jobs.c	Tue May 11 15:01:35 1999
++++ Src/jobs.c	Thu May 13 15:46:02 1999
+@@ -765,8 +765,15 @@
+ 			}
+ 		    if (!p) {
+ 			jn->stat &= ~STAT_SUPERJOB;
++			/* This deleted the job too early if the parent
++			   shell waited for a command in list that will
++			   be executed by the sub-shell (e.g.: if we have
++			   `ls|if true;then sleep 20;cat;fi' and ^Z the
++			   sleep, the rest will be executed by a sub-shell,
++			   but the parent shell gets notified for the
++			   sleep.
++			   deletejob(sj); */
+ 			kill(sj->other, SIGCONT);
+-			deletejob(sj);
+ 		    }
+ 		    curjob = jn - jobtab;
+ 		}
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

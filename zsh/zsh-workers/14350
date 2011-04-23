@@ -1,0 +1,177 @@
+From zsh-workers-return-14350-mason-zsh=primenet.com.au@sunsite.dk Tue May 15 13:48:57 2001
+Return-Path: <zsh-workers-return-14350-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12376 invoked from network); 15 May 2001 13:48:56 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 May 2001 13:48:56 -0000
+Received: (qmail 20848 invoked by alias); 15 May 2001 13:48:50 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14350
+Received: (qmail 20815 invoked from network); 15 May 2001 13:48:49 -0000
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+Date: Tue, 15 May 2001 15:48:20 +0200 (MET DST)
+Message-Id: <200105151348.PAA10174@beta.informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+Subject: Re: destructive list-expand
+In-Reply-To: <200105150928.LAA09646@beta.informatik.hu-berlin.de>
+
+I wrote:
+
+> ...
+> 
+> All this is so disgusting... sigh.
+
+Agreed.
+
+> That code is there to turn turn null tokens inside parameter expansions
+> into their original forms (single or double quotes) so that later code
+> can use them correctly because they won't be removed in the following
+> loop.
+
+The patch makes it keep all quotes *inside* parameter expansions when
+*not* completing a parameter name.  For the simple things I tried, this
+worked.  And for the case we were discussing, this gives the right
+string to the shell code.
+
+> ...
+> 
+> But even with that there's still something fishy with list-expand which
+> I haven't any further into yet. And with _expand and functions that call
+> it:
+> 
+>   beta% e=( '${(M)${(f)"$(<x)"}:#*2*}' )
+>   beta% echo ${(e)e}
+>    
+>   beta% echo ${(e)~e}
+>   111 222 333
+>   beta%
+
+This is the reason why, even with this patch, the test case still
+doesn't work.
+
+That mighty hunk in _expand is a fix for our brace expansion handling. 
+Once I got the right string reported to the shell code I had to find out
+that the code blindly expanded braces -- even those from a `${foo}'. 
+But they were not expanded as a parameter expansion by that code, they
+were expanded like a brace expansion (with braceccl set that gave me the
+expansions `$f' and `$o').  There is now a loop that protects parameter
+expansions from brace expansion (adding one more backslash before their
+braces) -- can someone think of a better way?
+
+
+Bye
+  Sven
+
+Index: Completion/Base/Completer/_expand
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/Completer/_expand,v
+retrieving revision 1.6
+diff -u -r1.6 _expand
+--- Completion/Base/Completer/_expand	2001/05/09 12:06:10	1.6
++++ Completion/Base/Completer/_expand	2001/05/15 13:37:00
+@@ -55,8 +55,31 @@
+ 
+ if [[ "$force" = *s* ]] ||
+    zstyle -T ":completion:${curcontext}:" substitute; then
+-  [[ ! -o ignorebraces && "${#${exp}//[^\{]}" = "${#${exp}//[^\}]}" ]] &&
+-      eval exp\=\( ${${(q)exp}:gs/\\{/\{/:gs/\\}/\}/} \) 2>/dev/null
++
++###  We once used this:
++###
++###  [[ ! -o ignorebraces && "${#${exp}//[^\{]}" = "${#${exp}//[^\}]}" ]] &&
++###      eval exp\=\( ${${(q)exp}:gs/\\{/\{/:gs/\\}/\}/} \) 2>/dev/null
++###
++###  instead of the following loop to expand braces.  But that made
++###  parameter expressions such as ${foo} be expanded like brace
++###  expansions, too (and with braceccl set...).
++
++   if [[ ! -o ignorebraces && "${#${exp}//[^\{]}" = "${#${exp}//[^\}]}" ]]; then
++     local otmp
++
++     tmp=${(q)word}
++     while [[ $#tmp != $#otmp ]]; do
++       otmp=$tmp
++       tmp=${tmp//(#b)\\\$\\\{(([^\{\}]|\\\\{|\\\\})#)([^\\])\\\}/\\$\\\\{${match[1]}${match[3]}\\\\}}
++     done
++     eval exp\=\( ${tmp:gs/\\{/\{/:gs/\\}/\}/} \) 2>/dev/null
++   fi
++
++###  There's a bug: spaces resulting from brace expansion are quoted in
++###  the following expression, too.  We don't want that, but I have no
++###  idea how to fix it.
++
+   eval 'exp=( ${${(e)exp//\\[ 	
+ ]/ }//(#b)([ 	
+ ])/\\$match[1]} )' 2>/dev/null
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_tricky.c,v
+retrieving revision 1.25
+diff -u -r1.25 zle_tricky.c
+--- Src/Zle/zle_tricky.c	2001/05/08 08:14:34	1.25
++++ Src/Zle/zle_tricky.c	2001/05/15 13:37:01
+@@ -1020,13 +1020,10 @@
+      * the previously massaged command line using the lexer.  It stores *
+      * each token in each command (commands being regarded, roughly, as *
+      * being separated by tokens | & &! |& || &&).  The loop stops when *
+-     * the end of the command containing the cursor is reached.  It's a *
+-     * simple way to do things, but suffers from an inability to        *
+-     * distinguish actual command arguments from, for example,          *
+-     * filenames in redirections.  (But note that code elsewhere checks *
+-     * if we are completing *in* a redirection.)  The only way to fix   *
+-     * this would be to pass the command line through the parser too,   *
+-     * and get the arguments that way.  Maybe in 3.1...                 */
++     * the end of the command containing the cursor is reached.  What   *
++     * makes this messy is checking for things like redirections, loops *
++    * and whatnot. */
++
+     do {
+ 	lincmd = ((incmdpos && !ins && !incond) || (oins == 2 && i == 2) ||
+ 		  (ins == 3 && i == 1));
+@@ -1343,6 +1340,19 @@
+ 		*p = '"';
+ 	    else if (*p == Snull)
+ 		*p = '\'';
++    } else {
++        int level = 0;
++
++        for (p = s; *p; p++) {
++            if (level && *p == Snull)
++                *p = '\'';
++            else if (level && *p == Dnull)
++                *p = '"';
++            else if (*p == String && p[1] == Inbrace)
++                level++;
++            else if (*p == Outbrace)
++                level--;
++        }
+     }
+     if ((*s == Snull || *s == Dnull) && !has_real_token(s + 1)) {
+ 	char *q = (*s == Snull ? "'" : "\""), *n = tricat(qipre, q, "");
+@@ -1673,11 +1683,18 @@
+ {
+     int ret = 1, first = 1;
+     LinkList vl;
+-    char *ss;
++    char *ss, *ts;
+ 
+     pushheap();
+     vl = newlinklist();
+     ss = dupstring(s);
++    /* get_comp_string() leaves these quotes unchanged when they are
++     * inside parameter expansions. */
++    for (ts = ss; *ts; ts++)
++        if (*ts == '"')
++            *ts = Dnull;
++        else if (*ts == '\'')
++            *ts = Snull;
+     addlinknode(vl, ss);
+     prefork(vl, 0);
+     if (errflag)
+
+-- 
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

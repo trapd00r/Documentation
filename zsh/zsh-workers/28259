@@ -1,0 +1,450 @@
+From zsh-workers-return-28259-mason-zsh=primenet.com.au@zsh.org Tue Sep 14 14:36:54 2010
+Return-Path: <zsh-workers-return-28259-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18560 invoked by alias); 14 Sep 2010 14:36:54 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28259
+Received: (qmail 4450 invoked from network); 14 Sep 2010 14:36:48 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Tue, 14 Sep 2010 15:36:13 +0100
+From: Peter Stephenson <Peter.Stephenson@csr.com>
+To: Ralf Wildenhues <Ralf.Wildenhues@gmx.de>, zsh-workers@zsh.org
+Subject: Re: empty here-document bug in zsh 4.3.10
+Message-ID: <20100914153613.1b45c016@pwslap01u.europe.root.pri>
+In-Reply-To: <loom.20100913T201249-95@post.gmane.org>
+References: <loom.20100913T201249-95@post.gmane.org>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.18.9; i686-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 14 Sep 2010 14:36:13.0699 (UTC) FILETIME=[2E8BD530:01CB541A]
+X-Scanned-By: MailControl A-10-90-03 (www.mailcontrol.com) on 10.68.1.162
+
+On Mon, 13 Sep 2010 18:13:19 +0000 (UTC)
+Ralf Wildenhues <Ralf.Wildenhues@gmx.de> wrote:
+> Hello zsh maintainers,
+> 
+> cat >file <<EOF
+> EOF
+> 
+> produces an empty file with all Bourne-descending shells I know of,
+> except for zsh (even in 'emulate sh' mode) which puts a single newline
+> in the file.  Spotted on FreeBSD.
+
+This is an ancient problem based on the fact the we turn here-documents
+internally into here-strings, and here-strings are treated as having an
+implicit newline at the end.  here-documents shouldn't be, but we fudge the
+issue by stripping any newline and adding it back, so if there really
+wasn't one we're in trouble in this one case.
+
+We already have enough information to fix the basic problem fairly easily.
+The real nightmare is the knock on effect that if you output a function
+definition with a here document it comes back as a here string, and then
+you're stuck with the limitations of here strings.
+
+The nice fix is to output real here documents from function defintions etc.
+That takes a bit more work but is probably worth doing.
+
+What I haven't done is add back tabs stripped with the <<-HERE syntax.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.183
+diff -p -u -r1.183 exec.c
+--- Src/exec.c	31 Aug 2010 19:32:57 -0000	1.183
++++ Src/exec.c	14 Sep 2010 12:56:30 -0000
+@@ -3449,11 +3449,12 @@ closem(int how)
+ 
+ /**/
+ char *
+-gethere(char *str, int typ)
++gethere(char **strp, int typ)
+ {
+     char *buf;
+     int bsiz, qt = 0, strip = 0;
+     char *s, *t, *bptr, c;
++    char *str = *strp;
+ 
+     for (s = str; *s; s++)
+ 	if (inull(*s)) {
+@@ -3467,6 +3468,7 @@ gethere(char *str, int typ)
+ 	while (*str == '\t')
+ 	    str++;
+     }
++    *strp = str;
+     bptr = buf = zalloc(bsiz = 256);
+     for (;;) {
+ 	t = bptr;
+@@ -3500,8 +3502,6 @@ gethere(char *str, int typ)
+ 	}
+ 	*bptr++ = '\n';
+     }
+-    if (t > buf && t[-1] == '\n')
+-	t--;
+     *t = '\0';
+     if (!qt) {
+ 	int ef = errflag;
+@@ -3529,7 +3529,15 @@ getherestr(struct redir *fn)
+     singsub(&t);
+     untokenize(t);
+     unmetafy(t, &len);
+-    t[len++] = '\n';
++    /*
++     * For real here-strings we append a newline, as if the
++     * string given was a complete command line.
++     *
++     * For here-strings from here documents, we use the original
++     * text exactly.
++     */
++    if (!(fn->flags & REDIRF_FROM_HEREDOC))
++	t[len++] = '\n';
+     if ((fd = gettempfile(NULL, 1, &s)) < 0)
+ 	return -1;
+     write_loop(fd, t, len);
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.55
+diff -p -u -r1.55 lex.c
+--- Src/lex.c	28 Apr 2010 08:55:35 -0000	1.55
++++ Src/lex.c	14 Sep 2010 12:56:30 -0000
+@@ -384,16 +384,17 @@ zshlex(void)
+     if (tok == NEWLIN || tok == ENDINPUT) {
+ 	while (hdocs) {
+ 	    struct heredocs *next = hdocs->next;
+-	    char *name;
++	    char *doc, *munged_term;
+ 
+ 	    hwbegin(0);
+ 	    cmdpush(hdocs->type == REDIR_HEREDOC ? CS_HEREDOC : CS_HEREDOCD);
++	    munged_term = dupstring(hdocs->str);
+ 	    STOPHIST
+-	    name = gethere(hdocs->str, hdocs->type);
++	    doc = gethere(&munged_term, hdocs->type);
+ 	    ALLOWHIST
+ 	    cmdpop();
+ 	    hwend();
+-	    if (!name) {
++	    if (!doc) {
+ 		zerr("here document too large");
+ 		while (hdocs) {
+ 		    next = hdocs->next;
+@@ -403,7 +404,8 @@ zshlex(void)
+ 		tok = LEXERR;
+ 		break;
+ 	    }
+-	    setheredoc(hdocs->pc, REDIR_HERESTR, name);
++	    setheredoc(hdocs->pc, REDIR_HERESTR, doc, hdocs->str,
++		       munged_term);
+ 	    zfree(hdocs, sizeof(struct heredocs));
+ 	    hdocs = next;
+ 	}
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.83
+diff -p -u -r1.83 parse.c
+--- Src/parse.c	16 Dec 2009 18:39:07 -0000	1.83
++++ Src/parse.c	14 Sep 2010 12:56:30 -0000
+@@ -1813,13 +1813,17 @@ par_redir(int *rp, char *idstring)
+ 	struct heredocs **hd;
+ 	int htype = type;
+ 
++	/*
++	 * Add two here for the string to remember the HERE
++	 * terminator in raw and munged form.
++	 */
+ 	if (idstring)
+ 	{
+ 	    type |= REDIR_VARID_MASK;
+-	    ncodes = 4;
++	    ncodes = 6;
+ 	}
+ 	else
+-	    ncodes = 3;
++	    ncodes = 5;
+ 
+ 	/* If we ever to change the number of codes, we have to change
+ 	 * the definition of WC_REDIR_WORDS. */
+@@ -1828,10 +1832,16 @@ par_redir(int *rp, char *idstring)
+ 	ecbuf[r] = WCB_REDIR(type);
+ 	ecbuf[r + 1] = fd1;
+ 
++	/*
++	 * r + 2: the HERE string we recover
++	 * r + 3: the HERE document terminator, raw
++	 * r + 4: the HERE document terminator, munged
++	 */
+ 	if (idstring)
+-	    ecbuf[r + 3] = ecstrcode(idstring);
++	    ecbuf[r + 5] = ecstrcode(idstring);
+ 
+-	for (hd = &hdocs; *hd; hd = &(*hd)->next);
++	for (hd = &hdocs; *hd; hd = &(*hd)->next)
++	    ;
+ 	*hd = zalloc(sizeof(struct heredocs));
+ 	(*hd)->next = NULL;
+ 	(*hd)->type = htype;
+@@ -1887,10 +1897,12 @@ par_redir(int *rp, char *idstring)
+ 
+ /**/
+ void
+-setheredoc(int pc, int type, char *str)
++setheredoc(int pc, int type, char *str, char *termstr, char *munged_termstr)
+ {
+     ecbuf[pc] = WCB_REDIR(type | REDIR_FROM_HEREDOC_MASK);
+     ecbuf[pc + 2] = ecstrcode(str);
++    ecbuf[pc + 3] = ecstrcode(termstr);
++    ecbuf[pc + 4] = ecstrcode(munged_termstr);
+ }
+ 
+ /*
+@@ -2439,10 +2451,15 @@ ecgetredirs(Estate s)
+ 	r->type = WC_REDIR_TYPE(code);
+ 	r->fd1 = *s->pc++;
+ 	r->name = ecgetstr(s, EC_DUP, NULL);
+-	if (WC_REDIR_FROM_HEREDOC(code))
++	if (WC_REDIR_FROM_HEREDOC(code)) {
+ 	    r->flags = REDIRF_FROM_HEREDOC;
+-	else
++	    r->here_terminator = ecgetstr(s, EC_DUP, NULL);
++	    r->munged_here_terminator = ecgetstr(s, EC_DUP, NULL);
++	} else {
+ 	    r->flags = 0;
++	    r->here_terminator = NULL;
++	    r->munged_here_terminator = NULL;
++	}
+ 	if (WC_REDIR_VARID(code))
+ 	    r->varid = ecgetstr(s, EC_DUP, NULL);
+ 	else
+Index: Src/text.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/text.c,v
+retrieving revision 1.25
+diff -p -u -r1.25 text.c
+--- Src/text.c	13 Feb 2010 20:28:36 -0000	1.25
++++ Src/text.c	14 Sep 2010 12:56:30 -0000
+@@ -30,7 +30,7 @@
+ #include "zsh.mdh"
+ #include "text.pro"
+ 
+-static char *tptr, *tbuf, *tlim;
++static char *tptr, *tbuf, *tlim, *tpending;
+ static int tsiz, tindent, tnewlins, tjob;
+ 
+ static void
+@@ -41,6 +41,53 @@ dec_tindent(void)
+ 	tindent--;
+ }
+ 
++/*
++ * Add a pair of pending strings and a newline.
++ * This is used for here documents.  It will be output when
++ * we have a lexically significant newline.
++ *
++ * This isn't that common and a multiple use on the same line is *very*
++ * uncommon; we don't try to optimise it.
++ *
++ * This is not used for job text; there we bear the inaccuracy
++ * of turning this into a here-string.
++ */
++static void
++taddpending(char *str1, char *str2)
++{
++    int len = strlen(str1) + strlen(str2) + 1;
++
++    /*
++     * We don't strip newlines from here-documents converted
++     * to here-strings, so no munging is required except to
++     * add a newline after the here-document terminator.
++     * However, because the job text doesn't automatically
++     * have a newline right at the end, we handle that
++     * specially.
++     */
++    if (tpending) {
++	int oldlen = strlen(tpending);
++	tpending = realloc(tpending, len + oldlen);
++	sprintf(tpending + oldlen, "%s%s", str1, str2);
++    } else {
++	tpending = (char *)zalloc(len);
++	sprintf(tpending, "%s%s", str1, str2);
++    }
++}
++
++/* Output the pending string where appropriate */
++
++static void
++tdopending(void)
++{
++    if (tpending) {
++	taddchr('\n');
++	taddstr(tpending);
++	zsfree(tpending);
++	tpending = NULL;
++    }
++}
++
+ /* add a character to the text buffer */
+ 
+ /**/
+@@ -107,6 +154,7 @@ taddnl(int no_semicolon)
+     int t0;
+ 
+     if (tnewlins) {
++	tdopending();
+ 	taddchr('\n');
+ 	for (t0 = 0; t0 != tindent; t0++)
+ 	    taddchr('\t');
+@@ -253,7 +301,7 @@ gettext2(Estate state)
+     while (1) {
+ 	if (stack) {
+ 	    if (!(s = tstack))
+-		return;
++		break;
+ 	    if (s->pop) {
+ 		tstack = s->prev;
+ 		s->prev = tfree;
+@@ -795,6 +843,7 @@ gettext2(Estate state)
+ 	    return;
+ 	}
+     }
++    tdopending();
+ }
+ 
+ /**/
+@@ -833,27 +882,53 @@ getredirs(LinkList redirs)
+ 		taddchr('}');
+ 	    } else if (f->fd1 != (IS_READFD(f->type) ? 0 : 1))
+ 		taddchr('0' + f->fd1);
+-	    taddstr(fstr[f->type]);
+-	    if (f->type != REDIR_MERGEIN && f->type != REDIR_MERGEOUT)
+-		taddchr(' ');
+ 	    if (f->type == REDIR_HERESTR &&
+ 		(f->flags & REDIRF_FROM_HEREDOC)) {
+-		/*
+-		 * Strings that came from here-documents are converted
+-		 * to here strings without quotation, so add that
+-		 * now.  If tokens are present we need to do double quoting.
+-		 */
+-		if (!has_token(f->name)) {
+-		    taddchr('\'');
+-		    taddstr(quotestring(f->name, NULL, QT_SINGLE));
+-		    taddchr('\'');
++		if (tnewlins) {
++		    /*
++		     * Strings that came from here-documents are converted
++		     * to here strings without quotation, so convert them
++		     * back.
++		     */
++		    taddstr(fstr[REDIR_HEREDOC]);
++		    taddstr(f->here_terminator);
++		    taddpending(f->name, f->munged_here_terminator);
+ 		} else {
+-		    taddchr('"');
+-		    taddstr(quotestring(f->name, NULL, QT_DOUBLE));
+-		    taddchr('"');
++		    taddstr(fstr[REDIR_HERESTR]);
++		    /*
++		     * Just a quick and dirty representation.
++		     * Remove a terminating newline, if any.
++		     */
++		    int fnamelen = strlen(f->name);
++		    int sav;
++		    if (fnamelen > 0 && f->name[fnamelen-1] == '\n') {
++			sav = 1;
++			f->name[fnamelen-1] = '\0';
++		    } else
++			sav = 0;
++		    /*
++		     * Strings that came from here-documents are converted
++		     * to here strings without quotation, so add that
++		     * now.  If tokens are present we need to do double quoting.
++		     */
++		    if (!has_token(f->name)) {
++			taddchr('\'');
++			taddstr(quotestring(f->name, NULL, QT_SINGLE));
++			taddchr('\'');
++		    } else {
++			taddchr('"');
++			taddstr(quotestring(f->name, NULL, QT_DOUBLE));
++			taddchr('"');
++		    }
++		    if (sav)
++			f->name[fnamelen-1] = '\n';
+ 		}
+-	    } else
++	    } else {
++		taddstr(fstr[f->type]);
++		if (f->type != REDIR_MERGEIN && f->type != REDIR_MERGEOUT)
++		    taddchr(' ');
+ 		taddstr(f->name);
++	    }
+ 	    taddchr(' ');
+ 	    break;
+ #ifdef DEBUG
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.167
+diff -p -u -r1.167 zsh.h
+--- Src/zsh.h	12 Sep 2010 18:56:41 -0000	1.167
++++ Src/zsh.h	14 Sep 2010 12:56:30 -0000
+@@ -597,6 +597,8 @@ struct redir {
+     int fd1, fd2;
+     char *name;
+     char *varid;
++    char *here_terminator;
++    char *munged_here_terminator;
+ };
+ 
+ /* The number of fds space is allocated for  *
+@@ -787,7 +789,9 @@ struct eccstr {
+ #define WC_REDIR_FROM_HEREDOC(C) ((int)(wc_data(C) & REDIR_FROM_HEREDOC_MASK))
+ #define WCB_REDIR(T)        wc_bld(WC_REDIR, (T))
+ /* Size of redir is 4 words if REDIR_VARID_MASK is set, else 3 */
+-#define WC_REDIR_WORDS(C)   (WC_REDIR_VARID(C) ? 4 : 3)
++#define WC_REDIR_WORDS(C)			\
++    ((WC_REDIR_VARID(C) ? 4 : 3) +		\
++     (WC_REDIR_FROM_HEREDOC(C) ? 2 : 0))
+ 
+ #define WC_ASSIGN_TYPE(C)   (wc_data(C) & ((wordcode) 1))
+ #define WC_ASSIGN_TYPE2(C)  ((wc_data(C) & ((wordcode) 2)) >> 1)
+Index: Test/A04redirect.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/A04redirect.ztst,v
+retrieving revision 1.14
+diff -p -u -r1.14 A04redirect.ztst
+--- Test/A04redirect.ztst	12 Nov 2008 10:55:18 -0000	1.14
++++ Test/A04redirect.ztst	14 Sep 2010 12:56:30 -0000
+@@ -134,6 +134,10 @@
+ >    $foo$foo met celeste  'but with extra'  "stuff to test quoting"
+ >Last line
+ 
++  read -r line <<'  HERE'
++  HERE
++1:No input, not even newline, from empty here document.
++
+   #
+   # exec tests: perform these in subshells so if they fail the
+   # shell won't exit.
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

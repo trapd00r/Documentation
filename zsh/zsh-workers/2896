@@ -1,0 +1,242 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Tue Feb 11 13:36:23 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 9284 invoked from network); 11 Feb 1997 13:36:19 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 11 Feb 1997 13:36:18 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id IAA00145; Tue, 11 Feb 1997 08:24:06 -0500 (EST)
+Resent-Date: Tue, 11 Feb 1997 08:24:06 -0500 (EST)
+Message-Id: <199702111325.OAA17807@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Fix for EXIT traps
+Date: Tue, 11 Feb 1997 14:25:28 +0100
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"x2vMJ.0.92.rB70p"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2896
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+A trap for SIGEXIT is supposed to be sprung in the calling
+environment; this is its primary use for functions.  To make this
+consistent, that means that the trap for SIGEXIT should itself reflect
+the caller when the trap is sprung.  For example,
+
+% fn() { trap 'trap "Exit trap for calling shell" EXIT' EXIT }
+% fn
+
+is the way to set an EXIT trap in the parent shell of a function.
+Currently zsh doesn't handle this correctly.  
+
+This patch fixes this.  In fact, it's only been worth handling
+correctly seen Zoltan fixed traps in the form given above; before
+that, all traps ran as a separate function and these subtleties were
+lost (and debugging was a lot more difficult).  Much of the patch is a
+minor rewrite to dotrap() which allows the code to be called for
+signal functions which are not currently installed.
+
+I have also been careful to make code like:
+
+% trap 'echo The original exit trap' EXIT
+% fn() { trap 'trap >storeoldtraps' EXIT; }
+% fn
+% cat storeoldtraps
+trap -- 'echo The original exit trap' EXIT
+
+work too.  (Unfortunately, `storeoldtraps=$(trap)' doesn't work,
+although it does in ksh.  Whether this is the right effect in a
+subshell is not clear.)
+
+If anyone can think of a workaround for setting an EXIT trap for a
+shell from within a function, I'd be interested to hear it anyway.  I
+can only think of some rather brutal asynchronous possibilities.
+
+
+*** Src/exec.c.se	Wed Feb  5 15:53:02 1997
+--- Src/exec.c	Tue Feb 11 13:53:00 1997
+***************
+*** 2515,2524 ****
+  {
+      Param pm;
+      char **tab, **x, *oargv0 = NULL;
+!     int xexittr, oldzoptind, oldlastval;
+      LinkList olist;
+      char *s, *ou;
+!     void *xexitfn;
+      char saveopts[OPT_SIZE];
+      int obreaks = breaks;
+  
+--- 2515,2524 ----
+  {
+      Param pm;
+      char **tab, **x, *oargv0 = NULL;
+!     int xexittr, newexittr, oldzoptind, oldlastval;
+      LinkList olist;
+      char *s, *ou;
+!     void *xexitfn, *newexitfn;
+      char saveopts[OPT_SIZE];
+      int obreaks = breaks;
+  
+***************
+*** 2610,2620 ****
+  	    opts[LOCALOPTIONS] = saveopts[LOCALOPTIONS];
+  	}
+  
+! 	/* Did the shell function define a trap on SIGEXIT? */
+! 	if (sigfuncs[SIGEXIT]) {
+! 	    dotrap(SIGEXIT);
+! 	    unsettrap(SIGEXIT);
+! 	}
+  
+  	sigtrapped[SIGEXIT] = xexittr;
+  	if (xexittr & ZSIG_FUNC) {
+--- 2610,2624 ----
+  	    opts[LOCALOPTIONS] = saveopts[LOCALOPTIONS];
+  	}
+  
+! 	/*
+! 	 * The trap '...' EXIT runs in the environment of the caller,
+! 	 * so remember it here but run it after resetting the
+! 	 * traps for the parent.
+! 	 */
+! 	newexittr = sigtrapped[SIGEXIT];
+! 	newexitfn = sigfuncs[SIGEXIT];
+! 	if (newexittr & ZSIG_FUNC)
+! 	    shfunctab->removenode(shfunctab, "TRAPEXIT");
+  
+  	sigtrapped[SIGEXIT] = xexittr;
+  	if (xexittr & ZSIG_FUNC) {
+***************
+*** 2622,2627 ****
+--- 2626,2637 ----
+  	    sigfuncs[SIGEXIT] = ((Shfunc) xexitfn)->funcdef;
+  	} else
+  	    sigfuncs[SIGEXIT] = (List) xexitfn;
++ 
++ 	if (newexitfn) {
++ 	    dotrapargs(SIGEXIT, &newexittr, newexitfn);
++ 	    freestruct(newexitfn);
++ 	}
++ 
+  	if (trapreturn < -1)
+  	    trapreturn++;
+  	if (noreturnval)
+*** Src/signals.c.se	Tue Feb 11 13:27:46 1997
+--- Src/signals.c	Tue Feb 11 13:49:50 1997
+***************
+*** 655,665 ****
+      }
+  }
+  
+! /* Execute a trap function for a given signal */
+  
+  /**/
+  void
+! dotrap(int sig)
+  {
+      LinkList args;
+      char *name, num[4];
+--- 655,667 ----
+      }
+  }
+  
+! /* Execute a trap function for a given signal, possibly
+!  * with non-standard sigtrapped & sigfuncs values
+!  */
+  
+  /**/
+  void
+! dotrapargs(int sig, int *sigtr, void *sigfn)
+  {
+      LinkList args;
+      char *name, num[4];
+***************
+*** 674,688 ****
+       * intact without working too hard.  Special cases (e.g. calling  *
+       * a trap for SIGINT after the error flag was set) are handled    *
+       * by the calling code.  (PWS 1995/06/08).			      */
+!     if ((sigtrapped[sig] & ZSIG_IGNORED) || !sigfuncs[sig] || errflag)
+          return;
+  
+!     sigtrapped[sig] |= ZSIG_IGNORED;
+  
+      lexsave();
+      execsave();
+      breaks = 0;
+!     if (sigtrapped[sig] & ZSIG_FUNC) {
+  	PERMALLOC {
+  	    args = newlinklist();
+  	    name = (char *) zalloc(5 + strlen(sigs[sig]));
+--- 676,690 ----
+       * intact without working too hard.  Special cases (e.g. calling  *
+       * a trap for SIGINT after the error flag was set) are handled    *
+       * by the calling code.  (PWS 1995/06/08).			      */
+!     if ((*sigtr & ZSIG_IGNORED) || !sigfn || errflag)
+          return;
+  
+!     *sigtr |= ZSIG_IGNORED;
+  
+      lexsave();
+      execsave();
+      breaks = 0;
+!     if (*sigtr & ZSIG_FUNC) {
+  	PERMALLOC {
+  	    args = newlinklist();
+  	    name = (char *) zalloc(5 + strlen(sigs[sig]));
+***************
+*** 692,702 ****
+  	    addlinknode(args, num);
+  	} LASTALLOC;
+  	trapreturn = -1;
+! 	doshfunc(sigfuncs[sig], args, 0, 1);
+  	freelinklist(args, (FreeFunc) NULL);
+  	zsfree(name);
+      } else HEAPALLOC {
+! 	execlist(dupstruct(sigfuncs[sig]), 1, 0);
+      } LASTALLOC;
+      if (trapreturn > 0)
+  	trapret = trapreturn;
+--- 694,704 ----
+  	    addlinknode(args, num);
+  	} LASTALLOC;
+  	trapreturn = -1;
+! 	doshfunc(sigfn, args, 0, 1);
+  	freelinklist(args, (FreeFunc) NULL);
+  	zsfree(name);
+      } else HEAPALLOC {
+! 	execlist(dupstruct(sigfn), 1, 0);
+      } LASTALLOC;
+      if (trapreturn > 0)
+  	trapret = trapreturn;
+***************
+*** 714,719 ****
+  	    breaks = loops;
+      }
+  
+!     if (sigtrapped[sig] != ZSIG_IGNORED)
+! 	sigtrapped[sig] &= ~ZSIG_IGNORED;
+  }
+--- 716,730 ----
+  	    breaks = loops;
+      }
+  
+!     if (*sigtr != ZSIG_IGNORED)
+! 	*sigtr &= ~ZSIG_IGNORED;
+! }
+! 
+! /* Standard call to execute a trap for a given signal */
+! 
+! /**/
+! void
+! dotrap(int sig)
+! {
+!     dotrapargs(sig, sigtrapped+sig, sigfuncs[sig]);
+  }
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

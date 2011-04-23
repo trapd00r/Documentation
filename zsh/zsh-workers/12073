@@ -1,0 +1,357 @@
+From zsh-workers-return-12073-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jun 26 14:55:37 2000
+Return-Path: <zsh-workers-return-12073-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22036 invoked from network); 26 Jun 2000 14:55:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 26 Jun 2000 14:55:35 -0000
+Received: (qmail 14472 invoked by alias); 26 Jun 2000 14:55:01 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12073
+Received: (qmail 14461 invoked from network); 26 Jun 2000 14:54:55 -0000
+Date: Mon, 26 Jun 2000 15:54:26 +0100
+From: Peter Stephenson <pws@cambridgesiliconradio.com>
+Subject: PATCH: `read -t' tests for available input before reading.
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Message-id: <0FWR004DUO2PW8@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+I implemented this because I need it for a set of commands which will
+mediate between the user and data on the serial port; I would be glad to
+consider a better way of doing it, but it does not mean I am willing to
+implement random changes to read (particularly after the hassle with this
+one).
+
+The -t option to read tests for input before performing the read; if there
+is none, read does nothing and returns status 1.  With an ordinary read the
+terminal is in canonical mode and nothing happens unless you have typed in
+a complete line.
+
+However, it works with the -k option outside zle (which is a different
+kettle of fish altogether) to poll for a character being available.  This
+is where the fun really started.  Solaris, it eventually transpired, needed
+to use the termio mechanism for polling (setting the minimum number of
+characters in the termio struct to zero) and wouldn't take any notice of
+any other way of doing it.  Cygwin, which I need to use because the rest of
+the world has backward ideas about operating systems, has the
+infrastructure for this but it doesn't seem to work; the only thing that
+works there is setting non-blocking read and attempting to read a
+character.
+
+Consequently I have no particular confidence that it will work without
+tweaking on other people's systems.  I would hope, however, that one of the
+two ways round should work.  I wouldn't expect problems without -k present.
+
+It's quite possible that some of the other options could use `-t' to test
+before returning even if the input isn't coming from an fd.  It's also
+possible $PENDING in zle could usefully use something like read_poll()
+(together with the input queue) if FIONREAD doesn't do the job, so that
+you know that at least one character is available.
+
+Index: Doc/Zsh/builtins.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/builtins.yo,v
+retrieving revision 1.12
+diff -u -r1.12 builtins.yo
+--- Doc/Zsh/builtins.yo	2000/06/25 20:17:33	1.12
++++ Doc/Zsh/builtins.yo	2000/06/26 14:48:31
+@@ -751,7 +751,7 @@
+ alias(r)(fc -e -)
+ findex(read)
+ vindex(IFS, use of)
+-item(tt(read) [ tt(-rzpqAclneE) ] [ tt(-k) [ var(num) ] ] \
++item(tt(read) [ tt(-rzpqAclneEt) ] [ tt(-k) [ var(num) ] ] \
+ [ tt(-u)var(n) ] [ var(name)[tt(?)var(prompt)] ] [ var(name) ...  ])(
+ Read one line and break it into fields using the characters
+ in tt($IFS) as separators, except as noted below.
+@@ -821,6 +821,22 @@
+ )
+ item(tt(-p))(
+ Input is read from the coprocess.
++)
++item(tt(-t))(
++Test if input is available before attempting to read; if none is, return
++status 1 and do not set any variables.  This is not available when reading
++from the editor buffer with tt(-z), when called from within completion
++with tt(-c) or tt(-l), with tt(-q) which clears the input queue before
++reading, or within zle where other mechanisms should be used to test for
++input.
++
++Note that read does not attempt to alter the input processing mode.  The
++default mode is canonical input, in which an entire line is read at a time,
++so usually `tt(read -t)' will not read anything until an entire line has
++been typed.  However, when reading from the terminal with tt(-k)
++this is automatically handled; note that only availablity of the first
++character is tested, so that e.g. `tt(read -t -k 2)' can still block on the
++second character.
+ )
+ enditem()
+ 
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.25
+diff -u -r1.25 builtin.c
+--- Src/builtin.c	2000/06/23 09:45:39	1.25
++++ Src/builtin.c	2000/06/26 14:48:31
+@@ -97,7 +97,7 @@
+     BUILTIN("pushln", BINF_PRINTOPTS, bin_print, 0, -1, BIN_PRINT, NULL, "-nz"),
+     BUILTIN("pwd", 0, bin_pwd, 0, 0, 0, "rLP", NULL),
+     BUILTIN("r", BINF_R, bin_fc, 0, -1, BIN_FC, "nrl", NULL),
+-    BUILTIN("read", 0, bin_read, 0, -1, 0, "rzu0123456789pkqecnAlE", NULL),
++    BUILTIN("read", 0, bin_read, 0, -1, 0, "ceklnpqrtzuAE0123456789", NULL),
+     BUILTIN("readonly", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "AEFHLRTUZafghiltux", "r"),
+     BUILTIN("rehash", 0, bin_hash, 0, 0, 0, "df", "r"),
+     BUILTIN("return", BINF_PSPECIAL, bin_break, 0, 1, BIN_RETURN, NULL, NULL),
+@@ -3361,6 +3361,94 @@
+ /* Read a character from readfd, or from the buffer zbuf.  Return EOF on end of
+ file/buffer. */
+ 
++/**/
++static int
++read_poll(int *readchar, int polltty)
++{
++    int ret = 0;
++    long mode = -1;
++    char c;
++#ifdef FIONREAD
++    int val;
++#endif
++#ifdef HAVE_SELECT
++    fd_set foofd;
++    struct timeval expire_tv;
++#endif
++#ifdef HAS_TIO
++    struct ttyinfo ti;
++#endif
++
++
++#if defined(HAS_TIO) && !defined(__CYGWIN__)
++    /*
++     * Under Solaris, at least, reading from the terminal in non-canonical
++     * mode requires that we use the VMIN mechanism to poll.  Any attempt
++     * to check any other way, or to set the terminal to non-blocking mode
++     * and poll that way, fails; it will just for canonical mode input.
++     * We should probably use this mechanism if the user has set non-canonical
++     * mode, in which case testing here for isatty() and ~ICANON would be
++     * better than testing whether bin_read() set it, but for now we've got
++     * enough problems.
++     *
++     * Under Cygwin, you won't be surprised to here, this mechanism,
++     * although present, doesn't work, and we *have* to use ordinary
++     * non-blocking reads to find out if there is a character present
++     * in non-canonical mode.
++     *
++     * I am assuming Solaris is nearer the UNIX norm.  This is not necessarily
++     * as plausible as it sounds, but it seems the right way to guess.
++     *		pws 2000/06/26
++     */
++    if (polltty) {
++	gettyinfo(&ti);
++	ti.tio.c_cc[VMIN] = 0;
++	settyinfo(&ti);
++    }
++#else
++    polltty = 0;
++#endif
++#ifdef HAVE_SELECT
++    if (!ret) {
++	expire_tv.tv_sec = expire_tv.tv_usec = 0;
++	FD_ZERO(&foofd);
++	FD_SET(readfd, &foofd);
++	if (select(readfd+1, (SELECT_ARG_2_T) &foofd, NULL, NULL, &expire_tv)
++	    > 1)
++	    ret = 1;
++    }
++#else
++#ifdef FIONREAD
++    if (!ret) {
++	ioctl(readfd, FIONREAD, (char *)&val);
++	if (val)
++	    ret = 1;
++    }
++#endif
++#endif
++
++    if (!ret) {
++	/*
++	 * Final attempt: set non-blocking read and try to read a character.
++	 * Praise Bill, this works under Cygwin (nothing else seems to).
++	 */
++	if ((polltty || setblock_fd(0, readfd, &mode))
++	    && read(readfd, &c, 1) > 0) {
++	    *readchar = STOUC(c);
++	    ret = 1;
++	}
++	if (mode != -1)
++	    fcntl(readfd, F_SETFL, mode);
++    }
++#ifdef HAS_TIO
++    if (polltty) {
++	ti.tio.c_cc[VMIN] = 1;
++	settyinfo(&ti);
++    }
++#endif
++    return ret;
++}
++
+ /* read: get a line of input, or (for compctl functions) return some *
+  * useful data about the state of the editing line.  The -E and -e   *
+  * options mean that the result should be sent to stdout.  -e means, *
+@@ -3378,6 +3466,9 @@
+     char *buf, *bptr, *firstarg, *zbuforig;
+     LinkList readll = newlinklist();
+     FILE *oshout = NULL;
++    int readchar = -1, val;
++    char d;
++
+ 
+     if ((ops['k'] || ops['b']) && *args && idigit(**args)) {
+ 	if (!(nchars = atoi(*args)))
+@@ -3438,6 +3529,17 @@
+     } else
+ 	readfd = izle = 0;
+ 
++    if (ops['t'] && !read_poll(&readchar, keys && !zleactive)) {
++	if (ops['k'] && !zleactive && !isem)
++	    settyinfo(&shttyinfo);
++	if (haso) {
++	    fclose(shout);
++	    shout = oshout;
++	    SHTTY = -1;
++	}
++	return 1;
++    }
++
+     /* handle prompt */
+     if (firstarg) {
+ 	for (readpmpt = firstarg;
+@@ -3453,9 +3555,6 @@
+ 
+     /* option -k means read only a given number of characters (default 1) */
+     if (ops['k']) {
+-	int val;
+-	char d;
+-
+ 	/* allocate buffer space for result */
+ 	bptr = buf = (char *)zalloc(nchars+1);
+ 
+@@ -3467,7 +3566,11 @@
+ 		nchars--;
+ 	    } else {
+ 		/* If read returns 0, is end of file */
+-		if ((val = read(readfd, bptr, nchars)) <= 0)
++		if (readchar >= 0) {
++		    *bptr = readchar;
++		    val = 1;
++		    readchar = -1;
++		} else if ((val = read(readfd, bptr, nchars)) <= 0)
+ 		    break;
+ 	    
+ 		/* decrement number of characters read from number required */
+@@ -3544,7 +3647,7 @@
+ 	buf = bptr = (char *)zalloc(bsiz = 64);
+ 	/* get input, a character at a time */
+ 	while (!gotnl) {
+-	    c = zread(izle);
++	    c = zread(izle, &readchar);
+ 	    /* \ at the end of a line indicates a continuation *
+ 	     * line, except in raw mode (-r option)            */
+ 	    if (bslash && c == '\n') {
+@@ -3645,7 +3748,7 @@
+     if (!gotnl) {
+ 	sigset_t s = child_unblock();
+ 	for (;;) {
+-	    c = zread(izle);
++	    c = zread(izle, &readchar);
+ 	    /* \ at the end of a line introduces a continuation line, except in
+ 	    raw mode (-r option) */
+ 	    if (bslash && c == '\n') {
+@@ -3711,7 +3814,7 @@
+ 
+ /**/
+ static int
+-zread(int izle)
++zread(int izle, int *readchar)
+ {
+     char cc, retry = 0;
+ 
+@@ -3729,6 +3832,11 @@
+ 	    return zbuf++, STOUC(*zbuf++ ^ 32);
+ 	else
+ 	    return (*zbuf) ? STOUC(*zbuf++) : EOF;
++    }
++    if (*readchar >= 0) {
++	cc = *readchar;
++	*readchar = -1;
++	return STOUC(cc);
+     }
+     for (;;) {
+ 	/* read a character from readfd */
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.7
+diff -u -r1.7 utils.c
+--- Src/utils.c	2000/06/01 09:10:17	1.7
++++ Src/utils.c	2000/06/26 14:48:32
+@@ -1249,7 +1249,7 @@
+ 
+ /**/
+ int
+-setblock_stdin(void)
++setblock_fd(int turnonblocking, int fd, long *modep)
+ {
+ #ifdef O_NDELAY
+ # ifdef O_NONBLOCK
+@@ -1267,18 +1267,35 @@
+ 
+ #if NONBLOCK
+     struct stat st;
+-    long mode;
+ 
+-    if (!fstat(0, &st) && !S_ISREG(st.st_mode)) {
+-	mode = fcntl(0, F_GETFL, 0);
+-	if (mode != -1 && (mode & NONBLOCK) &&
+-	    !fcntl(0, F_SETFL, mode & ~NONBLOCK))
+-	    return 1;
+-    }
++    if (!fstat(fd, &st) && !S_ISREG(st.st_mode)) {
++	*modep = fcntl(fd, F_GETFL, 0);
++	if (*modep != -1) {
++	    if (!turnonblocking) {
++		/* We want to know if blocking was off */
++		if ((*modep & NONBLOCK) ||
++		    !fcntl(fd, F_SETFL, *modep | NONBLOCK))
++		    return 1;
++	    } else if ((*modep & NONBLOCK) &&
++		       !fcntl(fd, F_SETFL, *modep & ~NONBLOCK)) {
++		/* Here we want to know if the state changed */
++		return 1;
++	    }
++	}
++    } else
+ #endif /* NONBLOCK */
++	*modep = -1;
+     return 0;
+ 
+ #undef NONBLOCK
++}
++
++/**/
++int
++setblock_stdin(void)
++{
++    long mode;
++    return setblock_fd(1, 0, &mode);
+ }
+ 
+ /**/
+
+-- 
+Peter Stephenson <pws@cambridgesiliconradio.com>
+Cambridge Silicon Radio, Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+

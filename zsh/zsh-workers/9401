@@ -1,0 +1,191 @@
+From zsh-workers-return-9401-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jan 21 12:01:17 2000
+Return-Path: <zsh-workers-return-9401-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16824 invoked from network); 21 Jan 2000 12:01:16 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Jan 2000 12:01:16 -0000
+Received: (qmail 10594 invoked by alias); 21 Jan 2000 12:01:05 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9401
+Received: (qmail 10587 invoked from network); 21 Jan 2000 12:01:05 -0000
+Date: Fri, 21 Jan 2000 13:01:03 +0100 (MET)
+Message-Id: <200001211201.NAA04726@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Fri, 21 Jan 2000 10:09:52 +0100
+	(MET)
+Subject: Re: PATCH: Re: Two more wordcode problems, probably
+
+
+I wrote:
+
+> I'd also
+> like to get rid of the func_wrapper() wrapper. I was really tempted to 
+> make the core keep a simple stack-allocated stack of functions
+> currently active (func_wrapper() only keeps track of the function
+> names for the $funcstack array).
+
+Does anyone object to me doing this?
+
+We could also make the args and flags for the function available this
+way but I don't see any uses for that yet...
+
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/Modules/parameter.c Src/Modules/parameter.c
+--- ../z.old/Src/Modules/parameter.c	Fri Jan 21 12:35:23 2000
++++ Src/Modules/parameter.c	Fri Jan 21 12:51:32 2000
+@@ -555,42 +555,25 @@
+ 
+ /* Functions for the funcstack special parameter. */
+ 
+-static LinkList funcstack;
+-
+ /**/
+ static char **
+ funcstackgetfn(Param pm)
+ {
++    Funcstack f;
++    int num;
+     char **ret, **p;
+-    LinkNode node;
+ 
+-    ret = (char **) zhalloc((countlinknodes(funcstack) + 1) * sizeof(char *));
++    for (f = funcstack, num = 0; f; f = f->prev, num++);
++
++    ret = (char **) zhalloc((num + 1) * sizeof(char *));
+ 
+-    for (node = firstnode(funcstack), p = ret; node; incnode(node), p++)
+-	*p = (char *) getdata(node);
++    for (f = funcstack, p = ret; f; f = f->prev, p++)
++	*p = f->name;
+     *p = NULL;
+ 
+     return ret;
+ }
+ 
+-/**/
+-static int
+-func_wrapper(Eprog prog, FuncWrap w, char *name)
+-{
+-    PERMALLOC {
+-	pushnode(funcstack, ztrdup(name));
+-    } LASTALLOC;
+-
+-    runshfunc(prog, w, name);
+-
+-    DPUTS(strcmp(name, (char *) getdata(firstnode(funcstack))),
+-	  "funcstack wrapper with wrong function");
+-
+-    zsfree((char *) remnode(funcstack, firstnode(funcstack)));
+-
+-    return 0;
+-}
+-
+ /* Functions for the builtins special parameter. */
+ 
+ /**/
+@@ -1937,10 +1920,6 @@
+     { NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL }
+ };
+ 
+-static struct funcwrap wrapper[] = {
+-    WRAPDEF(func_wrapper),
+-};
+-
+ /**/
+ int
+ setup_(Module m)
+@@ -1980,12 +1959,6 @@
+ 	    def->pm->unsetfn = def->unsetfn;
+ 	}
+     }
+-    PERMALLOC {
+-	funcstack = newlinklist();
+-    } LASTALLOC;
+-
+-    addwrapper(m, wrapper);
+-
+     return 0;
+ }
+ 
+@@ -2005,9 +1978,6 @@
+ 	    unsetparam_pm(pm, 0, 1);
+ 	}
+     }
+-    deletewrapper(m, wrapper);
+-    freelinklist(funcstack, freestr);
+-
+     return 0;
+ }
+ 
+diff -ru ../z.old/Src/exec.c Src/exec.c
+--- ../z.old/Src/exec.c	Fri Jan 21 12:35:14 2000
++++ Src/exec.c	Fri Jan 21 12:40:57 2000
+@@ -124,6 +124,11 @@
+ /**/
+ struct execstack *exstack;
+ 
++/* Stack with names of functions currently active. */
++
++/**/
++mod_export Funcstack funcstack;
++
+ #define execerr() if (!forked) { lastval = 1; return; } else _exit(1)
+ 
+ static LinkList args;
+@@ -3107,6 +3112,7 @@
+     int oldzoptind, oldlastval, oldoptcind;
+     char saveopts[OPT_SIZE], *oldscriptname;
+     int obreaks = breaks;
++    struct funcstack fstack;
+ 
+     HEAPALLOC {
+ 	pushheap();
+@@ -3152,7 +3158,11 @@
+ 		argzero = ztrdup(argzero);
+ 	    }
+ 	}
+-	runshfunc(prog, wrappers, dupstring(name));
++	fstack.name = dupstring(name);
++	fstack.prev = funcstack;
++	funcstack = &fstack;
++	runshfunc(prog, wrappers, fstack.name);
++	funcstack = fstack.prev;
+ 	if (retflag) {
+ 	    retflag = 0;
+ 	    breaks = obreaks;
+diff -ru ../z.old/Src/zsh.h Src/zsh.h
+--- ../z.old/Src/zsh.h	Fri Jan 21 12:35:18 2000
++++ Src/zsh.h	Fri Jan 21 12:37:45 2000
+@@ -296,6 +296,7 @@
+ typedef struct paramdef  *Paramdef;
+ typedef struct cmdnam    *Cmdnam;
+ typedef struct shfunc    *Shfunc;
++typedef struct funcstack *Funcstack;
+ typedef struct funcwrap  *FuncWrap;
+ typedef struct builtin   *Builtin;
+ typedef struct nameddir  *Nameddir;
+@@ -822,6 +823,13 @@
+ #define SFC_WIDGET   4		/* user defined widget */
+ #define SFC_COMPLETE 5		/* called from completion code */
+ #define SFC_CWIDGET  6		/* new style completion widget */
++
++/* node in function stack */
++
++struct funcstack {
++    Funcstack prev;		/* previous in stack */
++    char *name;			/* name of function called */
++};
+ 
+ /* node in list of function call wrappers */
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

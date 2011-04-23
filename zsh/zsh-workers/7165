@@ -1,0 +1,156 @@
+From zsh-workers-return-7165-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jul 15 17:28:11 1999
+Return-Path: <zsh-workers-return-7165-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 204 invoked from network); 15 Jul 1999 17:28:09 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 Jul 1999 17:28:09 -0000
+Received: (qmail 28325 invoked by alias); 15 Jul 1999 17:27:56 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7165
+Received: (qmail 28318 invoked from network); 15 Jul 1999 17:27:53 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <990715172747.ZM2370@candle.brasslantern.com>
+Date: Thu, 15 Jul 1999 17:27:47 +0000
+References: <9907140915.AA13464@ibmth.df.unipi.it> 
+	<9907141232.AA36925@ibmth.df.unipi.it> 
+	<000901beceb9$48b6be40$21c9ca95@mow.siemens.ru> 
+	<9907151223.AA35531@ibmth.df.unipi.it>
+In-Reply-To: <9907151223.AA35531@ibmth.df.unipi.it>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: "ZSH workers mailing list" <zsh-workers@sunsite.auc.dk>
+Subject: Re: 3.1.6-test-1: strange cd behaviour
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Jul 14, 11:15am, Peter Stephenson wrote:
+} Subject: Re: 3.1.6-test-1: strange cd behaviour
+}
+} > It worked (and still works) in 3.0.  What changed?
+} 
+} 3.0 relative paths are handled differently from absolute ones, while in 3.1
+} the existing pwd is tacked on the front and all are handled together.  In
+} 3.0, to make this work, ..'s behave differently if they are going up
+} further than the start of the current pwd.  In the case of `cd dummy/..',
+} it didn't and instead performed a chdir() on the whole thing, so that was
+} tested properly.  On the other hand, cd .. works by examining and
+} modifiying the current pwd, so you could cd from a non-existent directory.
+
+Even with chaselinks set?  That would seem to me to be a bug.  And indeed
+(in raw 3.0.5, but 3.0.6-pre-5 and 3.1.6-test-1 are the same):
+
+zagzig[24] mkdir /tmp/bar /tmp/foo
+zagzig[25] mkdir /tmp/bar/subdir
+zagzig[26] cd /tmp/foo
+zagzig[27] ln -s /tmp/bar/subdir .
+zagzig[28] cd subdir
+zagzig[29] setopt chaselinks
+zagzig[30] cd ..
+zagzig[31] pwd
+/tmp/foo
+
+} 3.1 is more integrated: it takes a complete path and operates on that.
+} This has the effects previously reported.  Without restoring the 3.0
+} behaviour, the fix would be
+} 
+} - If $PWD is a prefix, rationalize away any immediately following ..'s
+}   (and .'s, to be on the safe side) before doing any testing.
+
+So my first suggestion is that no rationalization should happen when
+chaselinks is set.
+
+} - At that point, even if $PWD is a prefix, look at the path and see if it
+}   contains any /../ or finishes with /.. . If so, stat() it and check
+}   that it exists.  If not, return and let the chdir code handle errors.
+
+When chaselinks is NOT set, this approach mail fail due to permissions on
+intermediate path elements when in fact it would succeed if the path were
+rationalized first.  On the other hand, I suppose that if you want it to
+fail because of nonexistent directories you probably want it to fail for
+permissions as well.
+
+However, it's also that case that you can't test the entire path once
+and then assume it's OK to rationalize it, because stat() will follow
+intermediate symlinks whereas rationalization will not.  (You pointed
+this out yourself in the message excerpted below.)
+
+As a third point, the correct way to test every component would in at
+least some case be to actually chdir() there, not to stat() it.
+
+} - If everything's OK so far (i.e. no ..'s, or the directory exists)
+}   rationalize the rest of the path.
+
+On Jul 15,  2:23pm, Peter Stephenson wrote:
+} Subject: Re: PATCH: 3.1.6-test-1: strange cd behaviour
+}
+} "Andrej Borsenkow" wrote:
+} > Yes. Completely remove this. If current dir no more exists, the
+} > error message here is more of a feature - it indicates, that
+} > somethig went wrong.
+} 
+} Actually, that's not completely removing it, that's including about half
+} the code, just not the stuff that allows the PWD to be backtracked
+} automatically.  (Unless you are suggesting going back to not testing for a
+} non-existent directory at all?  But then you don't get the error message
+} with `cd ..'.)
+
+Here's what I propose, in more detail:
+
+(1) When chaselinks is set, don't rationalize, simply attempt the cd and
+either get the new directory if it succeeds or issue an error if it fails.
+I'm going to peer at 3.0.6-pre; hopefully it isn't too hard to add this
+one bit.
+
+(2) When chaselinks is not set, either:
+(2a) keep the pre-7139 behavior, or
+(2b) add a "chasedots" option or some such that means zsh should act as
+though chaselinks is set iff the path contains ".." anywhere.
+
+} Furthermore, whether PWD is a prefix of the *physical* current directory is
+} a different issue entirely, depending on the option CHASELINKS.  Without
+} that set, zsh will always try to turn $PWD/.. into ${PWD:h}, wherever that
+} lands you up.
+
+I just tried this in pre-7139 3.1.6-test-1, and found that zsh *always*
+turns $PWD/.. into $PWD:h, completely independent of chaselinks.
+
+zagzig% pwd       
+/tmp/foo/subdir
+zagzig% setopt chaselinks
+zagzig% echo $PWD
+/tmp/foo/subdir
+zagzig% pwd
+/tmp/bar/subdir
+zagzig% echo $PWD
+/tmp/foo/subdir
+zagzig% cd $PWD/..
+zagzig% pwd
+/tmp/foo
+
+} Which opens another kettle of fish: if the .. is not at the end, then
+} /foo/bar/../rod might not be the same physical path as /foo/rod.
+
+Yes, that's the same point I made above about stat().
+
+} (Although with AUTOCD `../rod' on its own already fails,
+} because it tests for a physical directory, since cancd() doesn't call
+} fixdir() --- anyone want that fixed?)
+
+Only if you add the "chasedots" option.
+
+} Maybe this is already going too far when CHASELINKS is unset.  (I could
+} change it to stat every occurrence of <dir>/.. , which was my first
+} thought, and which should get round this.)
+
+This is definitely going too far.
+
+} I would be perfectly happy to back off the patch altogether, too.
+
+That plus (1) above would make me comfortable.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

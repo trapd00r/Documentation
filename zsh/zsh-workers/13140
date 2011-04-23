@@ -1,0 +1,122 @@
+From zsh-workers-return-13140-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Nov 08 15:58:41 2000
+Return-Path: <zsh-workers-return-13140-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3008 invoked from network); 8 Nov 2000 15:58:40 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 Nov 2000 15:58:40 -0000
+Received: (qmail 12966 invoked by alias); 8 Nov 2000 15:58:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13140
+Received: (qmail 12958 invoked from network); 8 Nov 2000 15:58:31 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1001108155814.ZM14060@candle.brasslantern.com>
+Date: Wed, 8 Nov 2000 15:58:13 +0000
+In-Reply-To: <200011081020.LAA20686@beta.informatik.hu-berlin.de>
+Comments: In reply to Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+        "Re: PATCH: Zpty cleanup (merge 13061 with 13116)" (Nov  8, 11:20am)
+References: <200011081020.LAA20686@beta.informatik.hu-berlin.de> 
+	<001a01c04970$948d58f0$21c9ca95@mow.siemens.ru> 
+	<001c01c0498c$a152ef70$21c9ca95@mow.siemens.ru> 
+	<000101c04992$a0657370$21c9ca95@mow.siemens.ru>
+In-Reply-To: <001a01c04970$948d58f0$21c9ca95@mow.siemens.ru>
+Comments: In reply to "Andrej Borsenkow" <Andrej.Borsenkow@mow.siemens.ru>
+        "RE: PATCH: Zpty cleanup (merge 13061 with 13116)" (Nov  8,  1:42pm)
+In-Reply-To: <001c01c0498c$a152ef70$21c9ca95@mow.siemens.ru>
+Comments: In reply to "Andrej Borsenkow" <Andrej.Borsenkow@mow.siemens.ru>
+        "read_poll RE: PATCH: Zpty cleanup (merge 13061 with 13116)" (Nov  8,  5:03pm)
+In-Reply-To: <000101c04992$a0657370$21c9ca95@mow.siemens.ru>
+Comments: In reply to "Andrej Borsenkow" <Andrej.Borsenkow@mow.siemens.ru>
+        "RE: read_poll RE: PATCH: Zpty cleanup (merge 13061 with 13116)" (Nov  8,  5:46pm)
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: read_poll Re: PATCH: Zpty cleanup (merge 13061 with 13116)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Nov 8, 11:20am, Sven Wischnowsky wrote:
+}
+} Bart Schaefer wrote:
+} 
+} > However, that does not mean that the rest of the tests should be skipped
+} > when select() returns 0.  A return of 0 means the select() timed out,
+} > which (apparently) might happen under Cygwin even if there actually are
+} > characters available to be read.  Peter/Andrej, is that the case?
+} 
+} I don't know about Cygwin, but that blocking read (line 1381) is
+} exactly the test I wanted to avoid.
+
+The read on line 1381 is *non-*blocking.  Since polltty is now always zero
+when called from zpty, the setblock_fd() call is made before the read() is
+attempted.  That was the patch I first committed which started me down the
+road of merging in your changes.
+
+On Nov 8,  1:42pm, Andrej Borsenkow wrote:
+} Subject: RE: PATCH: Zpty cleanup (merge 13061 with 13116)
+}
+} I had not much time recently. Casual test shows, that zpty is currently
+} completely broken on current Cygwin (1.1.5-4 as of this writing); I do not
+} claim that it is zsh problem, but recent changes may have made it worse.
+
+More on this in the other zpty thread ...
+
+} About select - so far there seems to be no known problems under cygwin
+} (that does not mean, there are no problems).
+
+OK, if there are no known problems with select, then the test on line
+1376 can change from `ret <= 0' to `ret < 0' -- and in that case it's
+possible that we could split read_poll() into two cases, HAVE_SELECT v.
+all the other code that's there.  I won't do that for now, though.
+
+This still doesn't address my complaint that select() on my linux box
+returns "ready for reading" when in fact the result of read() will be
+an I/O error.  That makes no difference to `read -t' (for which the
+read_poll() code was originally written) but it screws up the return
+value of `zpty -r'.
+
+On Nov 8,  5:03pm, Andrej Borsenkow wrote:
+} Subject: read_poll RE: PATCH: Zpty cleanup (merge 13061 with 13116)
+}
+} read_poll tries to read from fd and stores the character it has read in
+} readchar; that is cmd->read when called from checkptycmd. But this value does
+} not seem to be used anywhere in read loop that looks like read_poll simply
+} eats up this readahead char ...
+
+You're correct.  The code Sven referenced at line 474 needs to be repeated
+after line 484.
+
+Index: Src/utils.c
+===================================================================
+@@ -1373,7 +1373,7 @@
+ #endif
+ #endif
+ 
+-    if (ret <= 0) {
++    if (ret < 0) {
+ 	/*
+ 	 * Final attempt: set non-blocking read and try to read a character.
+ 	 * Praise Bill, this works under Cygwin (nothing else seems to).
+Index: Src/Modules/zpty.c
+===================================================================
+@@ -482,6 +482,11 @@
+ 	    checkptycmd(cmd);
+ 	    if (cmd->fin)
+ 		break;
++	    if (cmd->read != -1) {
++		buf[++used] = (char) cmd->read;
++		seen = 1;
++		cmd->read = -1;
++	    }
+ 	}
+ 	if ((ret = read(cmd->fd, buf + used, 1)) == 1) {
+ 	    seen = 1;
+
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,202 @@
+From zsh-workers-return-21678-mason-zsh=primenet.com.au@sunsite.dk Mon Aug 22 11:40:55 2005
+Return-Path: <zsh-workers-return-21678-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25801 invoked from network); 22 Aug 2005 11:40:49 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 22 Aug 2005 11:40:49 -0000
+Received: (qmail 41731 invoked from network); 22 Aug 2005 11:40:42 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 22 Aug 2005 11:40:42 -0000
+Received: (qmail 4284 invoked by alias); 22 Aug 2005 11:40:39 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 21678
+Received: (qmail 4275 invoked from network); 22 Aug 2005 11:40:38 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 22 Aug 2005 11:40:38 -0000
+Received: (qmail 41425 invoked from network); 22 Aug 2005 11:40:38 -0000
+Received: from mailhost1.csr.com (HELO MAILSWEEPER01.csr.com) (81.105.217.43)
+  by a.mx.sunsite.dk with SMTP; 22 Aug 2005 11:40:33 -0000
+Received: from exchange03.csr.com (unverified [10.100.137.60]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T72ea9b05170a6c8d012e8@MAILSWEEPER01.csr.com>;
+ Mon, 22 Aug 2005 12:38:19 +0100
+Received: from news01.csr.com ([10.103.143.38]) by exchange03.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Mon, 22 Aug 2005 12:40:49 +0100
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.13.1/8.12.11) with ESMTP id j7MBeVsq001768;
+	Mon, 22 Aug 2005 12:40:31 +0100
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.13.1/8.13.1/Submit) with ESMTP id j7MBeUJv001763;
+	Mon, 22 Aug 2005 12:40:30 +0100
+Message-Id: <200508221140.j7MBeUJv001763@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: John Reese <john.reese@gmail.com>, zsh-workers <zsh-workers@sunsite.dk>
+Subject: Re: Segfault in zsh 4.2.5 in assignment to array variable tied to unset scalar. 
+In-reply-to: <48803072050819144774459984@mail.gmail.com> 
+References: <48803072050819144774459984@mail.gmail.com>
+Date: Mon, 22 Aug 2005 12:40:28 +0100
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 22 Aug 2005 11:40:49.0947 (UTC) FILETIME=[581AF6B0:01C5A70E]
+X-Spam-Checker-Version: SpamAssassin 3.0.4 (2005-06-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham 
+	version=3.0.4
+
+John Reese wrote:
+> Howdy.
+> 
+> ofb:3% zsh --version                                                14:40 o=
+> fb:~
+> zsh 4.2.5 (i686-pc-linux-gnu)
+> ofb:3% STRING=3Da:b                                                   14:40=
+>  ofb:~
+> ofb:3% typeset -T STRING string                                     14:40 o=
+> fb:~
+> ofb:3% unset STRING                                                 14:40 o=
+> fb:~
+> ofb:3% set -A string x y z                                          14:40 o=
+> fb:~
+> zsh: 18569 segmentation fault  zsh
+
+Thanks for reporting this.
+
+Unfortunately tied parameters are a bit hairy.  This fixes this and a
+few other bugs that turned up with the new test.  I've been conservative
+to reduce the risk of introducing memory leaks.  (I think there was a
+leak caused by the same problem that the parameter didn't get unset
+under it's alternative name.)  The patch is actually against the head of
+4.3 but I'll apply it to the 4.2 branch.
+
+I've sent this to zsh-workers since there doesn't seem to be anything of
+user interest (apart from the existence of the fix).
+
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.100
+diff -u -r1.100 params.c
+--- Src/params.c	8 Aug 2005 16:49:10 -0000	1.100
++++ Src/params.c	22 Aug 2005 11:34:56 -0000
+@@ -2342,6 +2342,7 @@
+ unsetparam_pm(Param pm, int altflag, int exp)
+ {
+     Param oldpm, altpm;
++    char *altremove;
+ 
+     if ((pm->flags & PM_READONLY) && pm->level <= locallevel) {
+ 	zerr("read-only variable: %s", pm->nam, 0);
+@@ -2351,13 +2352,20 @@
+ 	zerr("%s: restricted", pm->nam, 0);
+ 	return 1;
+     }
+-    pm->gsu.s->unsetfn(pm, exp);
++
++    if (pm->ename && !altflag)
++	altremove = ztrdup(pm->ename);
++    else
++	altremove = NULL;
++
++    if (!(pm->flags & PM_UNSET))
++	pm->gsu.s->unsetfn(pm, exp);
+     if (pm->env)
+ 	delenv(pm);
+ 
+     /* remove it under its alternate name if necessary */
+-    if (pm->ename && !altflag) {
+-	altpm = (Param) paramtab->getnode(paramtab, pm->ename);
++    if (altremove) {
++	altpm = (Param) paramtab->getnode(paramtab, altremove);
+ 	/* tied parameters are at the same local level as each other */
+ 	oldpm = NULL;
+ 	while (altpm && altpm->level > pm->level) {
+@@ -2373,6 +2381,8 @@
+ 	    }
+ 	    unsetparam_pm(altpm, 1, exp);
+ 	}
++
++	zsfree(altremove);
+     }
+ 
+     /*
+@@ -2438,6 +2448,8 @@
+ 	    	pm->u.str = NULL;
+ 	    break;
+     }
++    if (!(pm->flags & PM_SPECIAL))
++	pm->flags &= ~PM_TIED;
+     pm->flags |= PM_UNSET;
+ }
+ 
+@@ -2815,6 +2827,7 @@
+     zsfree(pm->ename);
+     pm->ename = NULL;
+     pm->flags &= ~PM_TIED;
++    pm->flags |= PM_UNSET;
+ }
+ 
+ /**/
+Index: Test/D04parameter.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D04parameter.ztst,v
+retrieving revision 1.11
+diff -u -r1.11 D04parameter.ztst
+--- Test/D04parameter.ztst	17 Aug 2005 23:45:33 -0000	1.11
++++ Test/D04parameter.ztst	22 Aug 2005 11:34:56 -0000
+@@ -568,6 +568,40 @@
+ >0
+ >/elsewhere /somewhere
+ 
++  local STRING=a:b
++  typeset -T STRING string
++  print $STRING $string
++  unset STRING
++  set -A string x y z
++  print $STRING $string
++  STRING=a:b
++  typeset -T STRING string
++  print $STRING $string
++  unset STRING
++  set -A string x y z
++  print $STRING $string
++  STRING=a:b
++  typeset -T STRING string
++  print $STRING $string
++  unset string
++  STRING=x:y:z
++  print $STRING $string
++  STRING=a:b
++  typeset -T STRING string
++  print $STRING $string
++  unset string
++  STRING=x:y:z
++  print $STRING $string
++0:Unsetting and recreation of tied normal parameters
++>a:b a b
++>x y z
++>a:b a b
++>x y z
++>a:b a b
++>x:y:z
++>a:b a b
++>x:y:z
++
+   string='look for a match in here'
+   if [[ ${string%%(#b)(match)*} = "look for a " ]]; then
+     print $match[1] $mbegin[1] $mend[1] $string[$mbegin[1],$mend[1]]
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+**********************************************************************
+

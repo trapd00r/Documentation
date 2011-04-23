@@ -1,0 +1,183 @@
+From zsh-workers-return-19339-mason-zsh=primenet.com.au@sunsite.dk Tue Jan 06 13:12:19 2004
+Return-Path: <zsh-workers-return-19339-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9655 invoked from network); 6 Jan 2004 13:12:19 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 6 Jan 2004 13:12:19 -0000
+Received: (qmail 26675 invoked by alias); 6 Jan 2004 13:12:12 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19339
+Received: (qmail 26573 invoked from network); 6 Jan 2004 13:12:11 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 6 Jan 2004 13:12:11 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.183.235] by sunsite.dk (MessageWall 1.0.8) with SMTP; 6 Jan 2004 13:12:11 -0000
+Received: from EXCHANGE02.csr.com (unverified) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T66f7a793dac0a88d01374@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Tue, 6 Jan 2004 12:53:38 +0000
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.5329);
+	 Tue, 6 Jan 2004 12:52:18 +0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: minor improvements to TCP suite
+Date: Tue, 06 Jan 2004 12:50:22 +0000
+Message-ID: <7495.1073393422@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 06 Jan 2004 12:52:18.0339 (UTC) FILETIME=[EAD02730:01C3D453]
+
+Here are a couple of improvements to the TCP function suite which I've
+been using for a while but haven't committed.
+
+Hope this gets through.  The mail seems to be very flakey at the moment.
+If it doesn't, I will just commit these.
+
+Index: Doc/Zsh/tcpsys.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/tcpsys.yo,v
+retrieving revision 1.5
+diff -u -r1.5 tcpsys.yo
+--- Doc/Zsh/tcpsys.yo	30 Aug 2003 18:57:26 -0000	1.5
++++ Doc/Zsh/tcpsys.yo	6 Jan 2004 12:47:20 -0000
+@@ -506,6 +506,11 @@
+ ifnzman(\
+ noderef(Zle Builtins)
+ ).
++
++While active, the function sets the parameter tt(TCP_HANDLER_ACTIVE) to 1.
++This allows shell code called internally (for example, by setting
++tt(tcp_on_read)) to tell if is being called when the shell is otherwise
++idle at the editor prompt.
+ )
+ findex(tcp_output)
+ item(tt(tcp_output [ -q ] -P) var(prompt) tt(-F) var(fd) tt(-S) var(sess))(
+@@ -571,6 +576,12 @@
+ standard output.  The patterns should be defined as described for the
+ arguments to tt(tcp_expect).  Output of line to log files is not affected.
+ )
++vindex(TCP_HANDLER_ACTIVE)
++item(tt(TCP_HANDLER_ACTIVE))(
++Scalar.  Set to 1 within tt(tcp_fd_handler) to indicate to functions
++called recursively that they have been called during an editor session.
++Otherwise unset.
++)
+ vindex(TCP_LINE)
+ item(tt(TCP_LINE))(
+ The last line read by tt(tcp_read), and hence also tt(tcp_expect).
+@@ -691,6 +702,13 @@
+ against the pattern.  If the line matches, the command given in the key is
+ called with two arguments: the name of the session from which the line was
+ read, and the line itself.
++
++If any function called to handle a line returns a non-zero status, the
++line is not output.  Thus a tt(tcp_on_read) handler containing only
++the instruction `tt(return 1)' can be used to suppress output of
++particular lines (see, however, tt(tcp_filter) above).  However, the line
++is still stored in tt(TCP_LINE) and tt(tcp_lines); this occurs after all
++tt(tcp_on_read) processing.
+ )
+ enditem()
+ 
+Index: Functions/TCP/tcp_fd_handler
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/TCP/tcp_fd_handler,v
+retrieving revision 1.2
+diff -u -r1.2 tcp_fd_handler
+--- Functions/TCP/tcp_fd_handler	25 Jul 2003 10:53:45 -0000	1.2
++++ Functions/TCP/tcp_fd_handler	6 Jan 2004 12:47:20 -0000
+@@ -1,4 +1,5 @@
+ local line name=${tcp_by_fd[$1]}
++local TCP_HANDLER_ACTIVE=1
+ if [[ -n $name ]]
+ then
+   local TCP_INVALIDATE_ZLE
+Index: Functions/TCP/tcp_read
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/TCP/tcp_read,v
+retrieving revision 1.4
+diff -u -r1.4 tcp_read
+--- Functions/TCP/tcp_read	25 Jul 2003 10:53:45 -0000	1.4
++++ Functions/TCP/tcp_read	6 Jan 2004 12:47:20 -0000
+@@ -60,7 +60,7 @@
+ 
+ zmodload -i zsh/mathfunc
+ 
+-local opt drain line quiet block read_fd all sess key val
++local opt drain line quiet block read_fd all sess key val noprint
+ local -A read_fds
+ read_fds=()
+ float timeout timeout_all endtime
+@@ -140,10 +140,10 @@
+ float newtimeout
+ 
+ if [[ ${(t)SECONDS} != float* ]]; then
+-    # If called from another function, don't override
+-    typeset -F TCP_SECONDS_START=$SECONDS
+-    # Get extra accuracy by making SECONDS floating point locally
+-    typeset -F SECONDS
++  # If called from another function, don't override
++  typeset -F TCP_SECONDS_START=$SECONDS
++  # Get extra accuracy by making SECONDS floating point locally
++  typeset -F SECONDS
+ fi
+ 
+ if (( timeout_all )); then
+@@ -198,22 +198,26 @@
+ 
+     helper_stat=0
+     sess=${tcp_by_fd[$read_fd]}
+-    tcp_output -P "${TCP_PROMPT=<-[%s] }" -S $sess -F $read_fd \
+-      ${TCP_SILENT:+-q} "$line"
+-    # REPLY is now set to the line with an appropriate prompt.
+-    tcp_lines+=($REPLY)
+-    TCP_LINE=$REPLY TCP_LINE_FD=$read_fd
+ 
+     # Handle user-defined triggers
++    noprint=${TCP_SILENT:+-q}
+     if (( ${+tcp_on_read} )); then
+-	# Call the function given in the key for each matching value.
+-	# It is this way round because function names must be
+-	# unique, while patterns do not need to be.  Furthermore,
+-	# this keeps the use of subscripting under control.
+-	for key val in ${(kv)tcp_on_read}; do
+-	    [[ $line = ${~val} ]] && $key "$sess" "$line"
+-	done
++      # Call the function given in the key for each matching value.
++      # It is this way round because function names must be
++      # unique, while patterns do not need to be.  Furthermore,
++      # this keeps the use of subscripting under control.
++      for key val in ${(kv)tcp_on_read}; do
++	if [[ $line = ${~val} ]]; then
++	  $key "$sess" "$line" || noprint=-q
++	fi
++      done
+     fi
++
++    tcp_output -P "${TCP_PROMPT=<-[%s] }" -S $sess -F $read_fd \
++        $noprint "$line"
++    # REPLY is now set to the line with an appropriate prompt.
++    tcp_lines+=($REPLY)
++    TCP_LINE=$REPLY TCP_LINE_FD=$read_fd
+ 
+     # Only handle one line from one device at a time unless draining.
+     [[ -z $drain ]] && return $stat
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

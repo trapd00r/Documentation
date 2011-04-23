@@ -1,0 +1,253 @@
+From zsh-workers-return-28149-mason-zsh=primenet.com.au@zsh.org Wed Aug 11 19:59:29 2010
+Return-Path: <zsh-workers-return-28149-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20632 invoked by alias); 11 Aug 2010 19:59:29 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28149
+Received: (qmail 28168 invoked from network); 11 Aug 2010 19:59:26 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at klanderman.net does not designate permitted sender hosts)
+From: Greg Klanderman <gak@klanderman.net>
+To: zsh-workers@zsh.org
+Subject: Re: ztcp should not pick fd 0
+Reply-To: gak@klanderman.net
+Date: Wed, 11 Aug 2010 15:50:55 -0400
+In-Reply-To: <m3k4nx5b4s.fsf@klanderman.net> (Greg Klanderman's message of "Wed, 11 Aug 2010 13:09:55 -0400")
+Message-ID: <m3hbj153og.fsf@klanderman.net>
+User-Agent: Gnus/5.1008 (Gnus v5.10.8) XEmacs/21.4.17 (linux)
+References: <19554.52743.499270.657398@gargle.gargle.HOWL>
+	<20100811174454.5923a2fc@csr.com> <m3k4nx5b4s.fsf@klanderman.net>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+
+Peter, how's this look?
+
+greg
+
+
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.236
+diff -u -r1.236 utils.c
+--- Src/utils.c	16 Dec 2009 18:38:44 -0000	1.236
++++ Src/utils.c	11 Aug 2010 19:46:00 -0000
+@@ -1621,6 +1621,34 @@
+     }
+ }
+ 
++/* Add an entry for fd to the fdtable with the given value. */
++
++/**/
++mod_export void
++fdtable_add(int fd, int fdtval)
++{
++    if (fd != -1 && fdtval != FDT_UNUSED) {
++	if (fd > max_zsh_fd) {
++	    while (fd >= fdtable_size)
++		fdtable = zrealloc(fdtable,
++				   (fdtable_size *= 2)*sizeof(*fdtable));
++	    max_zsh_fd = fd;
++	}
++	fdtable[fd] = fdtval;
++    }
++}
++
++/* Clear the entry for fd in the fdtable. */
++
++/**/
++mod_export void
++fdtable_clear(int fd)
++{
++    fdtable[fd] = FDT_UNUSED;
++    while (max_zsh_fd > 0 && fdtable[max_zsh_fd] == FDT_UNUSED)
++        max_zsh_fd--;
++}
++
+ /* Move a fd to a place >= 10 and mark the new fd in fdtable.  If the fd *
+  * is already >= 10, it is not moved.  If it is invalid, -1 is returned. */
+ 
+@@ -1643,15 +1671,12 @@
+ 	zclose(fd);
+ 	fd = fe;
+     }
+-    if(fd != -1) {
+-	if (fd > max_zsh_fd) {
+-	    while (fd >= fdtable_size)
+-		fdtable = zrealloc(fdtable,
+-				   (fdtable_size *= 2)*sizeof(*fdtable));
+-	    max_zsh_fd = fd;
+-	}
+-	fdtable[fd] = FDT_INTERNAL;
+-    }
++
++    /* FIXME: setting the entry to FDT_INTERNAL is pretty bogus; it would be
++     * better to copy the value from the old fd (as redup below does), but
++     * changing that would require auditing all uses of this function. */
++    fdtable_add(fd, FDT_INTERNAL);
++
+     return fd;
+ }
+ 
+@@ -1669,12 +1694,9 @@
+     if(x < 0)
+ 	zclose(y);
+     else if (x != y) {
+-	while (y >= fdtable_size)
+-	    fdtable = zrealloc(fdtable, (fdtable_size *= 2)*sizeof(*fdtable));
+ 	if (dup2(x, y) == -1)
+ 	    ret = -1;
+-	if ((fdtable[y] = fdtable[x]) && y > max_zsh_fd)
+-	    max_zsh_fd = y;
++        fdtable_add(y, fdtable[x]);
+ 	zclose(x);
+     }
+ 
+@@ -1688,9 +1710,7 @@
+ zclose(int fd)
+ {
+     if (fd >= 0) {
+-	fdtable[fd] = FDT_UNUSED;
+-	while (max_zsh_fd > 0 && fdtable[max_zsh_fd] == FDT_UNUSED)
+-	    max_zsh_fd--;
++        fdtable_clear(fd);
+ 	if (fd == coprocin)
+ 	    coprocin = -1;
+ 	if (fd == coprocout)
+Index: Src/Modules/tcp.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/tcp.c,v
+retrieving revision 1.51
+diff -u -r1.51 tcp.c
+--- Src/Modules/tcp.c	22 Sep 2009 16:04:16 -0000	1.51
++++ Src/Modules/tcp.c	11 Aug 2010 19:46:00 -0000
+@@ -236,6 +236,7 @@
+     if (!sess) return NULL;
+ 
+     sess->fd = socket(domain, type, protocol);
++    fdtable_add(sess->fd, FDT_EXTERNAL);
+     return sess;
+ }
+ 
+@@ -298,6 +299,7 @@
+     {  
+ 	if (sess->fd != -1)
+ 	{
++            fdtable_clear(sess->fd);
+ 	    err = close(sess->fd);
+ 	    if (err)
+ 		zwarn("connection close failed: %e", errno);
+@@ -337,6 +339,29 @@
+ }
+ 
+ static int
++maybe_move_fd(char *nam, Tcp_session sess, int targetfd)
++{
++    if (targetfd) {
++        sess->fd = redup(sess->fd, targetfd);
++        if (sess->fd < 0) {
++            zerrnam(nam, "could not duplicate socket fd to %d: %e", targetfd, errno);
++            return 1;
++        }
++    }
++    else {
++        /* if necessary, move the fd to one >= 10 */
++        int oldfd = sess->fd;
++        sess->fd = movefd(sess->fd);
++        fdtable_add(sess->fd, FDT_EXTERNAL); /* FIXME: see comment in movefd() */
++        if (sess->fd < 0) {
++            zerrnam(nam, "could not move socket fd %d: %e", oldfd, errno);
++            return 1;
++        }
++    }
++    return 0;
++}
++
++static int
+ bin_ztcp(char *nam, char **args, Options ops, UNUSED(int func))
+ {
+     int herrno, err=1, destport, force=0, verbose=0, test=0, targetfd=0;
+@@ -445,19 +470,8 @@
+ 	    return 1;
+ 	}
+ 
+-	if (targetfd) {
+-	    sess->fd = redup(sess->fd, targetfd);
+-	}
+-	else {
+-	    /* move the fd since no one will want to read from it */
+-	    sess->fd = movefd(sess->fd);
+-	}
+-
+-	if (sess->fd == -1) {
+-	    zwarnnam(nam, "cannot duplicate fd %d: %e", sess->fd, errno);
+-	    tcp_close(sess);
+-	    return 1;
+-	}
++        if (maybe_move_fd(nam, sess, targetfd))
++            return 1;
+ 
+ 	setiparam("REPLY", sess->fd);
+ 
+@@ -543,16 +557,11 @@
+ 	    return 1;
+ 	}
+ 
+-	if (targetfd) {
+-	    sess->fd = redup(rfd, targetfd);
+-	    if (sess->fd < 0) {
+-		zerrnam(nam, "could not duplicate socket fd to %d: %e", targetfd, errno);
+-		return 1;
+-	    }
+-	}
+-	else {
+-	    sess->fd = rfd;
+-	}
++        sess->fd = rfd;
++        fdtable_add(rfd, FDT_EXTERNAL);
++
++        if (maybe_move_fd(nam, sess, targetfd))
++            return 1;
+ 
+ 	setiparam("REPLY", sess->fd);
+ 
+@@ -659,22 +668,14 @@
+ 	    zsfree(desthost);
+ 	    return 1;
+ 	}
+-	else
+-	{
+-	    if (targetfd) {
+-		sess->fd = redup(sess->fd, targetfd);
+-		if (sess->fd < 0) {
+-		    zerrnam(nam, "could not duplicate socket fd to %d: %e", targetfd, errno);
+-		    return 1;
+-		}
+-	    }
+ 
+-	    setiparam("REPLY", sess->fd);
++        if (maybe_move_fd(nam, sess, targetfd))
++            return 1;
+ 
+-	    if (verbose)
+-		printf("%s:%d is now on fd %d\n",
+-			desthost, destport, sess->fd);
+-	}
++        setiparam("REPLY", sess->fd);
++
++        if (verbose)
++            printf("%s:%d is now on fd %d\n", desthost, destport, sess->fd);
+ 	
+ 	zsfree(desthost);
+     }
+

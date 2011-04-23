@@ -1,0 +1,218 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Tue Aug 12 15:38:19 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 18092 invoked from network); 12 Aug 1997 15:38:16 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 12 Aug 1997 15:38:16 -0000
+Received: (from list@localhost)
+	by euclid.skiles.gatech.edu (8.8.5/8.8.5) id LAA25326;
+	Tue, 12 Aug 1997 11:30:36 -0400 (EDT)
+Resent-Date: Tue, 12 Aug 1997 11:30:36 -0400 (EDT)
+Message-Id: <199708121530.RAA24395@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Completion for brace expansion (zsh 3.1.2)
+Date: Tue, 12 Aug 1997 17:30:56 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"11cLg3.0.cB6.R68yp"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3438
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Here's some code to allow completion of expressions being expanded by
+brace expansion, something I've wanted for ages.  It was much simpler
+and neater than I'd expected, which is a tribute to all the tidying up
+that's been done on the completion code.  It seems to work like a
+charm and I've adapted the AUTO_PARAM_KEYS code to help it along.
+
+For example, in the zsh source directory (with AUTO_PARAM_KEYS set):
+
+% ls mk*
+mkbltnmlst.sh  mkstamp.sh
+% echo mk{bl<TAB>                --->      mk{bltnmlst.sh _
+% echo mk{bltnmlst.sh,st<TAB>    --->      mk{bltnmlst.sh,stamp.sh _
+                     ^comma is magic, space deleted
+% echo mk{bltnmlst.sh,stamp.sh}
+                              ^ likewise with closing brace
+
+COMPLETE_IN_WORD also works well (e.g. try mk{bl<TAB>}.sh and see what
+happens).  The most significant limitation is that only one layer of
+braces is handled.  The real problem comes when there is already a
+complete brace expansion elsewhere in the string, then it becomes much
+harder.
+
+*** Doc/Zsh/options.yo.brace	Thu Jun 26 18:33:51 1997
+--- Doc/Zsh/options.yo	Tue Aug 12 17:01:04 1997
+***************
+*** 99,105 ****
+  (normally a space) automatically
+  inserted, and the next character typed is one
+  of those that have to come directly after the name (like `tt(})', `tt(:)',
+! etc.), the character is inserted em(before) the space rather than after.
+  )
+  pindex(AUTO_PARAM_SLASH)
+  item(tt(AUTO_PARAM_SLASH))(
+--- 99,109 ----
+  (normally a space) automatically
+  inserted, and the next character typed is one
+  of those that have to come directly after the name (like `tt(})', `tt(:)',
+! etc.), the character is inserted em(before) the space rather than
+! after.  Brace expansion is handled similarly, assuming
+! tt(IGNORE_BRACES) is not set: if a completion was made in an
+! unfinished brace expansion, then typing a comma or closing brace will
+! cause it to be added before the space.
+  )
+  pindex(AUTO_PARAM_SLASH)
+  item(tt(AUTO_PARAM_SLASH))(
+*** Src/Zle/zle_misc.c.brace	Fri Jul  4 14:55:07 1997
+--- Src/Zle/zle_misc.c	Tue Aug 12 16:53:26 1997
+***************
+*** 67,77 ****
+  	if (complexpect == 2 && /*{*/ c1 == '}') {
+  		cs -= ks = addedsuffix;
+  		complexpect = 0;
+! 	} else if (c1 == ':' || c1 == '[' || (complexpect == 2 &&
+  		    (c1 == '#' || c1 == '%' || c1 == '-' ||
+! 		     c1 == '?' || c1 == '+' || c1 == '=')))
+  	    /* Otherwise, if the character being added needs to come    *
+! 	     * immediately after the parameter name, remove the suffix. */
+  	    removesuffix();
+      }
+      ncs = neg ? cs : cs + m * len;
+--- 67,80 ----
+  	if (complexpect == 2 && /*{*/ c1 == '}') {
+  		cs -= ks = addedsuffix;
+  		complexpect = 0;
+! 	} else if ((complexpect < 3 && (c1 == ':' || c1 == '[')) ||
+! 		   (complexpect == 2 &&
+  		    (c1 == '#' || c1 == '%' || c1 == '-' ||
+! 		     c1 == '?' || c1 == '+' || c1 == '=')) ||
+! 		   (complexpect == 3 && (c1 == '}' || c1 == ',')))
+  	    /* Otherwise, if the character being added needs to come    *
+! 	     * immediately after the parameter name, remove the suffix. *
+! 	     * We also deal with brace expansion (no '$') here.	        */
+  	    removesuffix();
+      }
+      ncs = neg ? cs : cs + m * len;
+*** Src/Zle/zle_tricky.c.brace	Tue Aug  5 09:35:40 1997
+--- Src/Zle/zle_tricky.c	Tue Aug 12 16:50:26 1997
+***************
+*** 104,109 ****
+--- 104,114 ----
+  
+  static int menuce;
+  
++ /* This is used as a flag from get_comp_string() that we are doing *
++  * completion inside a brace expansion.                          */
++ 
++ static int complinbrace;
++ 
+  /* The list of matches.  fmatches contains the matches we first ignore *
+   * because of fignore.                                                 */
+  
+***************
+*** 847,852 ****
+--- 852,858 ----
+      int t0, tt0, i, j, k, cp, rd, sl, ocs;
+      char *s = NULL, *linptr, *tmp, *p, *tt = NULL;
+  
++     complinbrace = 0;
+      /* This global flag is used to signal the lexer code if it should *
+       * expand aliases or not.                                         */
+      noaliases = isset(COMPLETEALIASES);
+***************
+*** 1120,1125 ****
+--- 1126,1199 ----
+  		}
+  		chuck(p--);
+  	    }
++ 
++ 	if (!isset(IGNOREBRACES)) {
++ 	    /* Try and deal with foo{xxx etc.; only simple cases
++ 	     * (only one inbrace, completion after inbrace and before outbrace
++ 	     * if present).
++ 	     */
++ 	    int myoffs = isset(COMPLETEINWORD) ? offs : strlen(s);
++ 	    tt = NULL;
++ 	    /* First check the conditions mentioned above
++ 	     * and locate opening brace
++ 	     */
++ 	    for (i = 0, p = s; *p; p++, i++) {
++ 		/* careful, ${... is not a brace expansion...
++ 		 * in fact, if it's got a substitution in it's too
++ 		 * hard for us anyway.  sorry.
++ 		 */
++ 		if (*p == String || *p == Qstring) {
++ 		    tt = NULL;
++ 		    break;
++ 		} else if (*p == Inbrace) {
++ 		    if (tt) {
++ 			/* too many inbraces */
++ 			tt = NULL;
++ 			break;
++ 		    }
++ 		    tt = p;
++ 		} else if (*p == Outbrace && i < myoffs) {
++ 		    /* outbrace is before cursor pos, so nothing to complete */
++ 		    tt = NULL;
++ 		    break;
++ 		}
++ 	    }
++ 
++ 	    if (tt && tt < s + myoffs) {
++ 		/* Braces are go:  delete opening brace */
++ 		char *com = NULL;
++ 		chuck(tt);
++ 		offs--;
++ 		myoffs--;
++ 
++ 		/* Look for text up to comma before cursor and delete it */
++ 		for (i = tt - s, p = tt; *p && i < myoffs; p++, i++)
++ 		    if (*p == Comma)
++ 			com = p;
++ 		if (com) {
++ 		    i = com - tt + 1;
++ 		    while (i--)
++ 			chuck(tt), offs--, myoffs--;
++ 		}
++ 
++ 		/* Look for text between subsequent comma
++ 		 * and closing brace or end of string and delete it
++ 		 */
++ 		for (p = s + myoffs; *p && *p != Outbrace; p++)
++ 		    if (*p == Comma) {
++ 			while (*p && *p != Outbrace)
++ 			    chuck(p);
++ 			break;
++ 		    }
++ 		if (*p == Outbrace)
++ 		    chuck(p);
++ 		else {
++ 		    /* we are still waiting for an outbrace and maybe commas */
++ 		    complinbrace = 1;
++ 		}
++ 	    }
++ 	}
++ 
+      } LASTALLOC;
+      lexrestore();
+  
+***************
+*** 2335,2340 ****
+--- 2409,2416 ----
+  	    cc_dummy.mask = CC_PARAMS | CC_ENVVARS;
+  	} else
+  	    complexpect = 0;
++     } else if (complinbrace) {
++ 	complexpect = 3;
+      }
+      ooffs = offs;
+      /* If we have to ignore the word, do that. */
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, Platanenallee 6, 15738 Zeuthen, Germany.
+

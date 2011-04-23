@@ -1,0 +1,267 @@
+From zsh-workers-return-15848-mason-zsh=primenet.com.au@sunsite.dk Thu Sep 20 19:11:15 2001
+Return-Path: <zsh-workers-return-15848-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20325 invoked from network); 20 Sep 2001 19:11:14 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 20 Sep 2001 19:11:14 -0000
+Received: (qmail 22555 invoked by alias); 20 Sep 2001 19:11:04 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15848
+Received: (qmail 22540 invoked from network); 20 Sep 2001 19:11:02 -0000
+X-VirusChecked: Checked
+Sender: kiddleo@cav.logica.co.uk
+Message-ID: <3BAA3F2A.86D73181@yahoo.co.uk>
+Date: Thu, 20 Sep 2001 20:10:35 +0100
+From: Oliver Kiddle <okiddle@yahoo.co.uk>
+X-Mailer: Mozilla 4.77 [en] (X11; U; Linux 2.2.15 i686)
+X-Accept-Language: en
+MIME-Version: 1.0
+To: zsh-workers@sunsite.dk
+Subject: PATCH: printf builtin
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+
+Ksh and bash both have a printf builtin. This adds one to zsh.
+
+I'm inclined to think this should be in a loadable module - it isn't
+that useful interactively but then it isn't particularly large either.
+Any views on that? If it should be a module, should it be compiled in
+by default for a static zsh?
+
+There seems to be a bit of inconsistency over what the \c escape means.
+In zsh it cancels a trailing newline but in most other things, it
+cancels all following output.
+
+I've not used zstrtol because it doesn't set errno to ERANGE for
+overflows. POSIX requires the user to be notified of such errors.
+Someone more familiar with the zsh source and with C should maybe have
+a quick look through: I'm not sure whether there shouldn't be a free()
+or two in there and if so which one. I intend to do a bit more testing
+and tidying on it tomorrow anyway. We don't seem to have any tests of
+builtins so where in the tests should I stick tests for this?
+
+I have included the bash and ksh %b and %q extensions to the format
+which are like %s but interpret posix escapes and shell quote the
+argument respectively. Note that you can't specify a width or precision
+with %b because I wanted to allow \0 to be used to output a null
+character and printf(3) would stop at the null.
+
+I've not included ksh's %H (HTML quoting) or %R/%P (regex/glob
+conversion) because I don't think they have any place being there. ksh
+also has %(...)T which is like date(1). And, I've not worked out what
+ksh's %Z does.
+
+Let me know if you have any other ideas for extensions or any thoughts
+on whether I should add the following:
+
+    Support for %n would be easily doable taking the argument as the
+    name of a parameter.
+
+    Allow the argument to be specified by writing `%m$' in place of '%'
+    so '%3$s' will print the third argument. IRIX's printf(1) does
+    this. It would involve disabling the feature of reusing the format
+    for remaining arguments to avoid infinite loops.
+
+Oliver
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.53
+diff -u -r1.53 builtin.c
+--- Src/builtin.c	2001/09/18 17:50:26	1.53
++++ Src/builtin.c	2001/09/20 18:49:33
+@@ -92,6 +92,7 @@
+ 
+     BUILTIN("popd", 0, bin_cd, 0, 2, BIN_POPD, NULL, NULL),
+     BUILTIN("print", BINF_PRINTOPTS, bin_print, 0, -1, BIN_PRINT, "RDPbnrslzNu0123456789pioOcm-", NULL),
++    BUILTIN("printf", 0, bin_printf, 1, -1, 0, NULL, NULL),
+     BUILTIN("pushd", 0, bin_cd, 0, 2, BIN_PUSHD, NULL, NULL),
+     BUILTIN("pushln", BINF_PRINTOPTS, bin_print, 0, -1, BIN_PRINT, NULL, "-nz"),
+     BUILTIN("pwd", 0, bin_pwd, 0, 0, 0, "rLP", NULL),
+@@ -3051,6 +3052,176 @@
+     if (fout != stdout)
+ 	fclose(fout);
+     return 0;
++}
++
++/* printf */
++
++/**/
++int
++bin_printf(char *name, char **args, char *ops, int func)
++{
++    int len, nnl, width, prec, type, ret = 0;
++    char *start, *endptr, *c, *fmt = getkeystring(*args, &len, 0, &nnl);
++    char **first = ++args;
++    char save;
++    union {
++	zlong l;
++	double d;
++	unsigned long u;
++	char *s;
++	int c;
++    } val;
++    
++    do {
++
++        for (c = fmt;c-fmt < len;c++) {
++	    type = prec = width = -1;
++
++	    if (*c != '%') {
++        	putchar(*c);
++		continue;
++	    }
++
++	    start = c++;
++	    if (*c == '%') {
++		putchar('%');
++		continue;
++	    }
++	    
++	    if (strchr("+- #", *c)) c++;
++	    
++	    if (*c == '*') {
++		width = (*args) ? strtoul(*args++, NULL, 0) : 0;
++		c++;
++	    } else {
++		while (idigit(*c)) c++;
++	    }
++	    
++	    if (*c == '.') {
++		c++;
++		if (*c == '*') {
++		    prec = (*args) ? strtoul(*args++, NULL, 0) : 0;
++		    c++;
++	    	} else {
++		    while (idigit(*c)) c++;
++		}
++	    }
++	    
++	    if (*c == 'l' || *c == 'L' || *c == 'h') c++;
++    	    
++	    switch (*c) {
++	    case 'c':
++		if (*args) {
++		    if (**args == Meta)
++		        val.c = (*args)[1] ^ 32;
++		    else
++		        val.c = **args;
++		    args++;
++		} else
++		    val.c = 0;
++		break;
++	    case 's':
++		if (*args)
++		    val.s = unmetafy(*args++, NULL);
++		else
++		    continue;
++		break;
++	    case 'b':
++		if (*args) {
++		    int l;
++		    char *b = getkeystring(*args++, &l, 0, &nnl);
++		    fwrite(b, l, 1, stdout);
++		}
++		continue;
++	    case 'q':
++		if (*args) {
++		    *c = 's';
++		    val.s = bslashquote(unmetafy(*args++, NULL), NULL, 0);
++		} else
++		    continue;
++		break;
++    	    case 'd':
++	    case 'i':
++	    	type=1;
++		break;
++    	    case 'e':
++	    case 'E':
++	    case 'f':
++	    case 'g':
++	    case 'G':
++	    	type=2;
++		break;
++	    case 'o':
++	    case 'u':
++	    case 'x':
++	    case 'X':
++		type=3;
++		break;
++	    default:
++		if (*c) {
++		    save = c[1];
++		    c[1] = '\0';
++		}
++	    	zerrnam(name, "%s: invalid directive", start, 0);
++	    	if (*c) c[1] = save;
++	    	ret = 1;
++		continue;
++	    }
++	    
++	    if (type > 0) {
++		if (*args && (**args == '\'' || **args == '"' )) {
++		    if (type == 2)
++		    	val.d = (*args)[1];
++		    else
++		    	val.l = (*args)[1];
++		    args++;
++		} else {
++	    	    switch (type) {
++		    case 1:
++			val.l = (*args) ? strtol(*args, &endptr, 0) : 0;
++			break;
++    	    	    case 2:
++			val.d = (*args) ? strtod(*args, &endptr) : 0;
++			break;
++		    case 3:
++			val.u = (*args) ? strtoul(*args, &endptr, 0) : 0;
++		    }
++		    if (*args) {
++			if (errno == ERANGE) {
++			    zerrnam(name, "`%s' arithmetic overflow", *args, 0);
++			    ret = 1;
++			} else if (**args && endptr == *args) {
++			    zerrnam(name, "`%s' expected numeric value", endptr, 0);
++			    ret = 1;
++			} else if (*endptr) {
++			    zerrnam(name, "`%s' not completely converted", *args, 0);
++			    ret = 1;
++			}
++			args++;
++		    }
++		}
++	    }
++	    save = c[1];
++	    c[1] = '\0';
++	    if (width >= 0) {
++		if (prec >= 0)
++		    printf(start, width, prec, val);
++		else
++		    printf(start, width, val);
++	    } else {
++		if (prec >= 0)
++		    printf(start, prec, val);
++		else
++		    printf(start, val);
++	    }
++	    c[1] = save;
++	
++	}
++
++    /* if there are remaining args, reuse format string */
++    } while (*args && args != first);
++
++    return ret;
+ }
+ 
+ /* shift builtin */
+
+_____________________________________________________________________
+This message has been checked for all known viruses by the 
+MessageLabs Virus Scanning Service. For further information visit
+http://www.messagelabs.com/stats.asp
+

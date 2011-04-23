@@ -1,0 +1,220 @@
+From zsh-workers-request@math.gatech.edu Wed Nov 11 18:22:20 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8598 invoked from network); 11 Nov 1998 18:22:18 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 11 Nov 1998 18:22:18 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id NAA04856;
+	Wed, 11 Nov 1998 13:19:17 -0500 (EST)
+Resent-Date: Wed, 11 Nov 1998 13:19:17 -0500 (EST)
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <981111101622.ZM32551@candle.brasslantern.com>
+Date: Wed, 11 Nov 1998 10:16:21 -0800
+In-Reply-To: <9811111358.AA51361@ibmth.df.unipi.it>
+Comments: In reply to Peter Stephenson <pws@ibmth.df.unipi.it>
+        "Re: PATCH: 3.1.5 - sample associative array implementation" (Nov 11,  2:58pm)
+References: <9811111358.AA51361@ibmth.df.unipi.it>
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: Peter Stephenson <pws@ibmth.df.unipi.it>,
+        zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: PATCH: 3.1.5 - sample associative array implementation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"78iKt3.0.mB1.aKTIs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4602
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Thanks for looking at this, Peter.
+
+On Nov 11,  2:58pm, Peter Stephenson wrote:
+} Subject: Re: PATCH: 3.1.5 - sample associative array implementation
+}
+} "Bart Schaefer" wrote:
+} > However, there are some caveats:  (1) You can't assign to multiple elements
+} > of an associative array in a single expression; you must always use the
+} > subscript syntax.
+} 
+} One question is whether
+}   hash=(key1 val1 key2 val2)
+} replaces the array entirely, or just adds/replaces those elements.
+
+The problem with that syntax is that you can't tell whether `hash' is
+intended to be an associative array, so you still have to declare it
+first.  (Perl handles this by always prefixing variable names with $
+@ or % even when assigning.)
+
+The more lispy
+    hash=((key1 val1) (key2 val2))
+appears to be syntactically invalid at present ("number expected" ??).
+However, it appears that it WAS valid in 3.0.5, so perhaps that's a bug
+in 3.1.5.
+
+} In
+} the former case it's difficult to think of a way of replacing multiple
+} elements at once [...]
+} Another thing:  there's no way of getting the keys of the hash.
+
+What's needed is a syntax to have the hash produce its key/value pairs
+in the appropriate form so that you can do e.g.
+
+    hash=(${(kv)hash} key1 newval1 key2 newval2)
+
+(where ${(k)hash} means substitute the keys, and ${(v)hash} the values,
+which is also the default when (k) is not present).
+
+Then simply decree that, after the whole hash is replaced, elements are
+assigned in left-to-right order, replacing duplicates.  Then you can do
+
+    hash=(key 1 newval1 key2 newval2 ${(kv)hash})
+
+to insert key1 and key2 only if they were not already present.
+
+} Something like $hash[(k)*] would be OK, except that * and @ don't seem
+} to work with flags at the moment.
+
+I think an expansion flag rather than a subscription flag is the way,
+see sample above.
+
+} > I'm afraid there may be some memory leaks in the code to form
+} > arrays from the values.
+} 
+} I put in a MUSTUSEHEAP to check for this.  It hasn't printed a message
+} so far.
+
+What I'm worried about is that copyparam() uses PERMALLOC, but I think
+the pointers that it returns are being placed in a heap-allocated array
+in some cases.  There's also a ztrdup() in scancopyparams().  MUSTUSEHEAP
+wouldn't report either problem.  This would come up e.g. when you have a
+local with the same name as an existing hash, so you have to save and
+restore the hash.
+
+} > When an associative array element is referenced, it's hash table slot is
+} > created and initially marked PM_UNSET.
+} 
+} This means (post patch):
+} 
+} % typeset -H hash
+} % hash[one]=eins
+} % print $hash[two]
+} 
+} % print -l "$hash[@]"
+} one
+}                        <- $hash[two] was created unset
+} % 
+} 
+} Is this really correct?
+
+We can fix that by changing the way the hashtable scan happens, so it
+ignores unset parameters.  The patch below fixes this, and adds some
+support for the ${(k)hash} substitution flag, but I didn't actually put
+in those flags themselves.
+
+Will v->pm->flags &= ~PM_UNSET hurt anything in setstrvalue()?  It didn't
+seem as if it should, but there are many details I don't understand.
+
+} > (5) $assoc[bread,3] produces "but" (the first 3 characters of the
+} > value) which I think is because getarg() doesn't return soon enough; it
+} > really ought to either ignore or gripe about what comes after the comma.
+} 
+} I haven't touched this.
+
+I no longer think it's as simple as I previously thought, so I didn't do
+any more with it either.
+
+This patch of course requires both my previous one and Peter's.
+
+Index: Src/params.c
+===================================================================
+--- params.c	1998/11/11 17:40:25	1.5
++++ params.c	1998/11/11 18:14:34
+@@ -295,13 +295,21 @@
+     return nht;
+ }
+ 
++#define SCANPM_WANTVALS   (1<<0)
++#define SCANPM_WANTKEYS   (1<<1)
++#define SCANPM_WANTINDEX  (1<<2)
++
+ static unsigned numparamvals;
+ 
+ /**/
+ static void
+ scancountparams(HashNode hn, int flags)
+ {
+-    ++numparamvals;
++    if (!(((Param)hn)->flags & PM_UNSET)) {
++	++numparamvals;
++	if ((flags & SCANPM_WANTKEYS) && (flags & SCANPM_WANTVALS))
++	    ++numparamvals;
++    }
+ }
+ 
+ static char **paramvals;
+@@ -311,26 +319,33 @@
+ scanparamvals(HashNode hn, int flags)
+ {
+     struct value v;
+-    v.isarr = (flags & 1);
+     v.pm = (Param)hn;
+-    v.inv = (flags & 2);
+-    v.a = 0;
+-    v.b = -1;
+-    paramvals[numparamvals++] = getstrvalue(&v);
++    if (!(v.pm->flags & PM_UNSET)) {
++	if (flags & SCANPM_WANTKEYS) {
++	    paramvals[numparamvals++] = v.pm->nam;
++	    if (!(flags & SCANPM_WANTVALS))
++		return;
++	}
++	v.isarr = (PM_TYPE(v.pm->flags) & (PM_ARRAY|PM_HASHED));
++	v.inv = (flags & SCANPM_WANTINDEX);
++	v.a = 0;
++	v.b = -1;
++	paramvals[numparamvals++] = getstrvalue(&v);
++    }
+ }
+ 
+ /**/
+ char **
+-paramvalarr(HashTable ht)
++paramvalarr(HashTable ht, unsigned flags)
+ {
+     MUSTUSEHEAP("paramvalarr");
+     numparamvals = 0;
+     if (ht)
+-	scanhashtable(ht, 0, 0, 0, scancountparams, 0);
++	scanhashtable(ht, 0, 0, 0, scancountparams, flags);
+     paramvals = (char **) alloc(numparamvals * sizeof(char **) + 1);
+     if (ht) {
+ 	numparamvals = 0;
+-	scanhashtable(ht, 0, 0, 0, scanparamvals, 0);
++	scanhashtable(ht, 0, 0, 0, scanparamvals, flags);
+     }
+     paramvals[numparamvals] = 0;
+     return paramvals;
+@@ -348,7 +363,7 @@
+     else if (PM_TYPE(v->pm->flags) == PM_ARRAY)
+ 	return v->arr = v->pm->gets.afn(v->pm);
+     else if (PM_TYPE(v->pm->flags) == PM_HASHED)
+-	return v->arr = paramvalarr(v->pm->gets.hfn(v->pm));
++	return v->arr = paramvalarr(v->pm->gets.hfn(v->pm), 0);
+     else
+ 	return NULL;
+ }
+@@ -1133,6 +1148,7 @@
+ 	zsfree(val);
+ 	return;
+     }
++    v->pm->flags &= ~PM_UNSET;
+     switch (PM_TYPE(v->pm->flags)) {
+     case PM_SCALAR:
+ 	MUSTUSEHEAP("setstrvalue");
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

@@ -1,0 +1,292 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Mon Jun 16 09:22:52 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 20564 invoked from network); 16 Jun 1997 09:22:48 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 16 Jun 1997 09:22:48 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id FAA10919; Mon, 16 Jun 1997 05:11:31 -0400 (EDT)
+Resent-Date: Mon, 16 Jun 1997 05:11:31 -0400 (EDT)
+Message-Id: <199706160915.LAA06612@sgi.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list), mito@sprynet.com
+Subject: Re: bug or feature? 
+In-reply-to: "Louis-David Mitterrand"'s message of "Fri, 13 Jun 1997 18:20:10 MET."
+             <19970613182010.48585@retriever> 
+Date: Mon, 16 Jun 1997 11:15:24 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"Y7jw33.0.Yg2.3DGfp"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3249
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Louis-David Mitterrand wrote:
+> Something strange in filename generation:
+> 
+> % ls JBC*a
+> JBClockView.java*    JBCodesSICOVAM.java
+> JBCode.java          JBConfig.java
+> 
+> so far so good... then:
+> 
+> % ls JBC*a~JBCo*
+> zsh: no matches found: JBC*a~JBCo*
+
+This is a genuine bug (as opposed to...?  well, never mind).
+
+When parsing the pattern, the parser arrives at the ~ and stops the main
+pattern because it knows an exclusion is coming.  However, it isn't smart
+enough to know that the 'a' just before should be the last thing matched.
+Later, when scanning JBClockView.java, everything is fine until it gets as
+far as matching 'lockView.j' against the *, and finds that the next
+character 'a' matches the last part of the pattern.  It knows there are no
+more patterns to match in the list passed... but it also notes that the 'a'
+was not marked as the final part of the pattern, and that there is
+still a part of the string ('va') left, and concludes that this is OK
+since it must be backtracking or something.  Therefore it wrongly
+claims that the string matched without the last 'va' and the rest of
+the scanner gets confused.  (Alles klar?)
+
+The solution seems to be to keep track of whether a (lexically active)
+~ matched at a particular point should be taken as ending the main
+string being scanned, which (due to the precedence of ~) is true
+unless we are in parentheses.  The following code is supposed to do
+this.  It fixes the basic bug, but probably could do with some
+checking... it would be nice to have a standard set of glob tests.
+Anyway, I've installed it and I can still log in.
+
+*** Src/glob.c.last	Mon Jun  2 06:18:07 1997
+--- Src/glob.c	Mon Jun 16 10:45:58 1997
+***************
+*** 111,116 ****
+--- 111,120 ----
+  #define LASTP(c)	(c->stat & C_LAST)
+  #define PATHADDP(c)	(c->stat & C_PATHADD)
+  
++ /* Flags passed down to guts when compiling */
++ #define GF_PATHADD	1	/* file glob, adding path components */
++ #define GF_TOPLEV	2	/* outside (), so ~ ends main match */
++ 
+  static char *pptr;		/* current place in string being matched */
+  static Comp tail = 0;
+  static int first;		/* are leading dots special? */
+***************
+*** 451,457 ****
+  
+  /**/
+  static Comp
+! parsecomp(void)
+  {
+      Comp c = (Comp) alloc(sizeof *c), c1, c2;
+      char *cstr, *ls = NULL;
+--- 455,461 ----
+  
+  /**/
+  static Comp
+! parsecomp(int gflag)
+  {
+      Comp c = (Comp) alloc(sizeof *c), c1, c2;
+      char *cstr, *ls = NULL;
+***************
+*** 471,477 ****
+  	    /* negate remaining pattern */
+  	    pptr++;
+  	    c->str = dupstrpfx(cstr, pptr - cstr);
+! 	    if (!(c->next = parsecomp()))
+  		return NULL;
+  	    return c;
+  	}
+--- 475,481 ----
+  	    /* negate remaining pattern */
+  	    pptr++;
+  	    c->str = dupstrpfx(cstr, pptr - cstr);
+! 	    if (!(c->next = parsecomp(gflag)))
+  		return NULL;
+  	    return c;
+  	}
+***************
+*** 488,494 ****
+  	    c1 = (Comp) alloc(sizeof *c1);
+  	    *(c1->str = dupstring("?")) = Quest;
+  	    c1->stat |= C_ONEHASH;
+! 	    if (!(c2 = parsecomp()))
+  		return NULL;
+  	    c1->next = c2;
+  	    c->next = c1;
+--- 492,498 ----
+  	    c1 = (Comp) alloc(sizeof *c1);
+  	    *(c1->str = dupstring("?")) = Quest;
+  	    c1->stat |= C_ONEHASH;
+! 	    if (!(c2 = parsecomp(gflag)))
+  		return NULL;
+  	    c1->next = c2;
+  	    c->next = c1;
+***************
+*** 515,521 ****
+  		}
+  	    }
+  	    /* Parse the remaining pattern following the group... */
+! 	    if (!(c1 = parsecomp()))
+  		return NULL;
+  	    /* ...remembering what comes after it... */
+  	    tail = dpnd ? NULL : c1;
+--- 519,525 ----
+  		}
+  	    }
+  	    /* Parse the remaining pattern following the group... */
+! 	    if (!(c1 = parsecomp(gflag)))
+  		return NULL;
+  	    /* ...remembering what comes after it... */
+  	    tail = dpnd ? NULL : c1;
+***************
+*** 552,558 ****
+  	    c1->next = c2;
+  	    c2->stat |= C_ONEHASH;
+  	    /* parse the rest of the pattern and return. */
+! 	    c2->next = parsecomp();
+  	    if (!c2->next)
+  		return NULL;
+  	    c->str = dupstrpfx(cstr, ls - cstr);
+--- 556,562 ----
+  	    c1->next = c2;
+  	    c2->stat |= C_ONEHASH;
+  	    /* parse the rest of the pattern and return. */
+! 	    c2->next = parsecomp(gflag);
+  	    if (!c2->next)
+  		return NULL;
+  	    c->str = dupstrpfx(cstr, ls - cstr);
+***************
+*** 584,590 ****
+  	pptr++;
+      }
+      /* mark if last pattern component in path component or pattern */
+!     if (*pptr == '/' || !*pptr)
+  	c->stat |= C_LAST;
+      c->str = dupstrpfx(cstr, pptr - cstr);
+      return c;
+--- 588,595 ----
+  	pptr++;
+      }
+      /* mark if last pattern component in path component or pattern */
+!     if (*pptr == '/' || !*pptr ||
+! 	(isset(EXTENDEDGLOB) && *pptr == Tilde && (gflag & GF_TOPLEV)))
+  	c->stat |= C_LAST;
+      c->str = dupstrpfx(cstr, pptr - cstr);
+      return c;
+***************
+*** 594,604 ****
+  
+  /**/
+  static Comp
+! parsecompsw(int pathadd)
+  {
+      Comp c1, c2, c3, excl = NULL;
+  
+!     c1 = parsecomp();
+      if (!c1)
+  	return NULL;
+      if (isset(EXTENDEDGLOB) && *pptr == Tilde) {
+--- 599,609 ----
+  
+  /**/
+  static Comp
+! parsecompsw(int gflag)
+  {
+      Comp c1, c2, c3, excl = NULL;
+  
+!     c1 = parsecomp(gflag);
+      if (!c1)
+  	return NULL;
+      if (isset(EXTENDEDGLOB) && *pptr == Tilde) {
+***************
+*** 607,613 ****
+  
+  	mode = 1;
+  	pptr++;
+! 	excl = parsecomp();
+  	mode = oldmode;
+  	if (!excl)
+  	    return NULL;
+--- 612,618 ----
+  
+  	mode = 1;
+  	pptr++;
+! 	excl = parsecomp(gflag);
+  	mode = oldmode;
+  	if (!excl)
+  	    return NULL;
+***************
+*** 618,624 ****
+  	if (*pptr == Bar) {
+  	    /* get the next alternative after the | */
+  	    pptr++;
+! 	    c3 = parsecompsw(pathadd);
+  	    if (!c3)
+  		return NULL;
+  	} else {
+--- 623,629 ----
+  	if (*pptr == Bar) {
+  	    /* get the next alternative after the | */
+  	    pptr++;
+! 	    c3 = parsecompsw(gflag);
+  	    if (!c3)
+  		return NULL;
+  	} else {
+***************
+*** 631,637 ****
+  	c2->left = c1;
+  	c2->right = c3;
+  	c2->exclude = excl;
+! 	if (pathadd)
+  	    c2->stat |= C_PATHADD;
+  	return c2;
+      }
+--- 636,642 ----
+  	c2->left = c1;
+  	c2->right = c3;
+  	c2->exclude = excl;
+! 	if (gflag & GF_PATHADD)
+  	    c2->stat |= C_PATHADD;
+  	return c2;
+      }
+***************
+*** 695,701 ****
+  	}
+      } else {
+  	/* parse single path component */
+! 	if (!(c1 = parsecompsw(1)))
+  	    return NULL;
+  	/* then do the remaining path compoents */
+  	if (*pptr == '/' || !*pptr) {
+--- 700,706 ----
+  	}
+      } else {
+  	/* parse single path component */
+! 	if (!(c1 = parsecompsw(GF_PATHADD|GF_TOPLEV)))
+  	    return NULL;
+  	/* then do the remaining path compoents */
+  	if (*pptr == '/' || !*pptr) {
+***************
+*** 2148,2154 ****
+      remnulargs(str);
+      mode = 1;			/* no path components */
+      pptr = str;
+!     return parsecompsw(0);
+  }
+  
+  /* blindly turn a string into a tokenised expression without lexing */
+--- 2153,2159 ----
+      remnulargs(str);
+      mode = 1;			/* no path components */
+      pptr = str;
+!     return parsecompsw(GF_TOPLEV);
+  }
+  
+  /* blindly turn a string into a tokenised expression without lexing */
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

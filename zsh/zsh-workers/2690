@@ -1,0 +1,410 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Tue Dec 31 12:48:31 1996
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 6630 invoked from network); 31 Dec 1996 12:48:24 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 31 Dec 1996 12:48:24 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA06436; Tue, 31 Dec 1996 07:50:35 -0500 (EST)
+Resent-Date: Tue, 31 Dec 1996 07:50:35 -0500 (EST)
+From: Zefram <zefram@dcs.warwick.ac.uk>
+Message-Id: <29389.199612311251@stone.dcs.warwick.ac.uk>
+Subject: files module improvements
+To: zsh-workers@math.gatech.edu (Z Shell workers mailing list)
+Date: Tue, 31 Dec 1996 12:51:43 +0000 (GMT)
+X-Patch: 172
+X-Loop: zefram@dcs.warwick.ac.uk
+X-Stardate: [-31]8657.67
+X-US-Congress: Moronic fuckers
+Content-Type: text
+Resent-Message-ID: <"CQkR91.0.Ta1.PmGoo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2690
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+This patch makes some improvements to the files module.  The static
+buffers are removed, to make it reentrant.  rm -r is made safer, and
+can now handle arbitrarily long pathnames.
+
+There are some remaining problems:
+
+* Interrupt signals are not handled.  I'll do another patch for this.
+
+* rm -r can run out of file descriptors in deep trees.  Fixing this would
+  require going back up the tree with chdir("..") and then checking that
+  the tree wasn't moved while we were deleting it; it makes it easier for
+  rm to fail.  I think this needs to be done, but I don't like it.
+
+* rm -r can now lose the current directory.  This is particularly easy
+  in unreadable directories.  There's no avoiding this, as it's a design
+  flaw in Unix.  There is a need for zsh to cope with unexpected changes
+  of directory: some failure modes of cd can already do a chdir("/")
+  and leave $PWD as something else.
+
+This patch adds a function lchdir() that does a paranoid directory change,
+not following symlinks (or at least not without noticing).  It would be
+nice to make this functionality available directly to the user, via an
+option to cd (cd -l?).
+
+ -zefram
+
+      *** Src/utils.c	1996/12/30 15:13:52	1.48
+      --- Src/utils.c	1996/12/31 05:42:56
+      ***************
+      *** 3308,3313 ****
+      --- 3308,3371 ----
+            return r;
+        }
+        
+      + /* Change directory, without following symlinks.  Returns 0 on success, -1 *
+      +  * on failure.  Sets errno to ENOTDIR if any symlinks are encountered.  If *
+      +  * fchdir() fails, or the current directory is unreadable, we might end up *
+      +  * in an unwanted directory in case of failure.                            */
+      + 
+      + /**/
+      + int
+      + lchdir(char const *path)
+      + {
+      + #ifndef HAVE_LSTAT
+      +     return zchdir(path);
+      + #else /* HAVE_LSTAT */
+      +     char buf[PATH_MAX + 1], *ptr;
+      +     char const *pptr;
+      +     int olddir = open(".", O_RDONLY), err;
+      +     struct stat st1, st2;
+      + 
+      +     if(*path == '/')
+      + 	chdir("/");
+      +     for(;;) {
+      + 	while(*path == '/')
+      + 	    path++;
+      + 	if(!*path) {
+      + 	    close(olddir);
+      + 	    return 0;
+      + 	}
+      + 	for(pptr = path; *++pptr && *pptr != '/'; ) ;
+      + 	if(pptr - path > PATH_MAX) {
+      + 	    err = ENAMETOOLONG;
+      + 	    break;
+      + 	}
+      + 	for(ptr = buf; path != pptr; )
+      + 	    *ptr++ = *path++;
+      + 	*ptr = 0;
+      + 	if(lstat(buf, &st1)) {
+      + 	    err = errno;
+      + 	    break;
+      + 	}
+      + 	if(!S_ISDIR(st1.st_mode)) {
+      + 	    err = ENOTDIR;
+      + 	    break;
+      + 	}
+      + 	if(chdir(buf) || lstat(".", &st2)) {
+      + 	    err = errno;
+      + 	    break;
+      + 	}
+      + 	if(st1.st_dev != st2.st_dev || st1.st_ino != st2.st_ino) {
+      + 	    err = ENOTDIR;
+      + 	    break;
+      + 	}
+      +     }
+      +     fchdir(olddir);
+      +     close(olddir);
+      +     errno = err;
+      +     return -1;
+      + #endif /* HAVE_LSTAT */
+      + }
+      + 
+        #ifdef DEBUG
+        
+        /**/
+      *** Src/Modules/files.c	1996/12/24 17:07:33	1.6
+      --- Src/Modules/files.c	1996/12/31 05:42:09
+      ***************
+      *** 35,43 ****
+        
+        #include "files.pro"
+        
+      - static char buf[PATH_MAX * 2];
+      - static char rbuf[PATH_MAX];
+      - 
+        /**/
+        static int
+        ask(void)
+      --- 35,40 ----
+      ***************
+      *** 132,138 ****
+            if(p) {
+        	struct stat st;
+        
+      ! 	if(!stat(rpath, &st) && S_ISDIR(st.st_mode))
+        	    return 0;
+            }
+            oumask = umask(0);
+      --- 129,135 ----
+            if(p) {
+        	struct stat st;
+        
+      ! 	if(!lstat(rpath, &st) && S_ISDIR(st.st_mode))
+        	    return 0;
+            }
+            oumask = umask(0);
+      ***************
+      *** 189,194 ****
+      --- 186,193 ----
+            int flags, space, err = 0;
+            char **a, *ptr, *rp;
+            struct stat st;
+      +     char buf[PATH_MAX * 2 + 1];
+      + 
+        
+            if(func == BIN_MV) {
+        	move = rename;
+      ***************
+      *** 229,239 ****
+            havedir:
+            strcpy(buf, *a);
+            *a = NULL;
+      !     space = PATH_MAX - 2 - ztrlen(buf);
+            rp = strchr(buf, 0);
+            *rp++ = '/';
+            for(; *args; args++) {
+      ! 	if(ztrlen(*args) > PATH_MAX - 1) {
+        	    zwarnnam(nam, "%s: %e", *args, ENAMETOOLONG);
+        	    err = 1;
+        	    continue;
+      --- 228,238 ----
+            havedir:
+            strcpy(buf, *a);
+            *a = NULL;
+      !     space = PATH_MAX - 1 - ztrlen(buf);
+            rp = strchr(buf, 0);
+            *rp++ = '/';
+            for(; *args; args++) {
+      ! 	if(ztrlen(*args) > PATH_MAX) {
+        	    zwarnnam(nam, "%s: %e", *args, ENAMETOOLONG);
+        	    err = 1;
+        	    continue;
+      ***************
+      *** 260,270 ****
+        {
+            struct stat st;
+            char *qbuf;
+      !     strcpy(rbuf, unmeta(p));
+            qbuf = unmeta(q);
+            if(flags & MV_NODIRS) {
+        	errno = EISDIR;
+      ! 	if(lstat(rbuf, &st) || S_ISDIR(st.st_mode)) {
+        	    zwarnnam(nam, "%s: %e", p, errno);
+        	    return 1;
+        	}
+      --- 259,270 ----
+        {
+            struct stat st;
+            char *qbuf;
+      !     char pbuf[PATH_MAX + 1];
+      !     strcpy(pbuf, unmeta(p));
+            qbuf = unmeta(q);
+            if(flags & MV_NODIRS) {
+        	errno = EISDIR;
+      ! 	if(lstat(pbuf, &st) || S_ISDIR(st.st_mode)) {
+        	    zwarnnam(nam, "%s: %e", p, errno);
+        	    return 1;
+        	}
+      ***************
+      *** 293,299 ****
+        	if(flags & MV_FORCE)
+        	    unlink(qbuf);
+            }
+      !     if(move(rbuf, qbuf)) {
+        	zwarnnam(nam, "%s: %e", p, errno);
+        	return 1;
+            }
+      --- 293,299 ----
+        	if(flags & MV_FORCE)
+        	    unlink(qbuf);
+            }
+      !     if(move(pbuf, qbuf)) {
+        	zwarnnam(nam, "%s: %e", p, errno);
+        	return 1;
+            }
+      ***************
+      *** 306,374 ****
+        static int
+        bin_rm(char *nam, char **args, char *ops, int func)
+        {
+      !     int err = 0;
+        
+      !     for(; *args; args++)
+      ! 	err |= dorm(nam, *args, ops);
+      !     return ops['f'] ? 0 : err;
+        }
+        
+        /**/
+        static int
+      ! dorm(char *nam, char *arg, char *ops)
+        {
+            struct stat st;
+      -     char *rp = unmeta(arg);
+        
+      !     if(!rp) {
+      ! 	if(!ops['f'])
+      ! 	    zwarnnam(nam, "%s: %e", arg, ENAMETOOLONG);
+      ! 	return 1;
+      !     }
+      !     if((!ops['d'] || !ops['f']) && !stat(rp, &st)) {
+        	if(!ops['d'] && S_ISDIR(st.st_mode)) {
+      ! 	    if(ops['r']) {
+      ! 		DIR *d;
+      ! 		char *pos, *fn;
+      ! 		int err = 0, space;
+      ! 		d = opendir(rp);
+      ! 		if(!d) {
+      ! 		    if(!ops['f'])
+      ! 			zwarnnam(nam, "%s: %e", arg, errno);
+      ! 		    return 1;
+      ! 		}
+      ! 		if(arg != buf)
+      ! 		    strcpy(buf, arg);
+      ! 		space = PATH_MAX - 2 - ztrlen(buf);
+      ! 		pos = strchr(buf, 0);
+      ! 		*pos++ = '/';
+      ! 		while((fn = zreaddir(d, 1))) {
+      ! 		    if(ztrlen(fn) > space) {
+      ! 			pos[-1] = 0;
+      ! 			zwarnnam(nam, "%s: %e", buf, ENAMETOOLONG);
+      ! 			err = 1;
+      ! 			continue;
+      ! 		    }
+      ! 		    strcpy(pos, fn);
+      ! 		    err |= dorm(nam, buf, ops);
+      ! 		}
+      ! 		closedir(d);
+      ! 		pos[-1] = 0;
+      ! 		if(!ops['f'] && ops['i']) {
+      ! 		    nicezputs(nam, stderr);
+      ! 		    fputs(": remove `", stderr);
+      ! 		    nicezputs(buf, stderr);
+      ! 		    fputs("'? ", stderr);
+      ! 		    fflush(stderr);
+      ! 		    if(!ask())
+      ! 			return err;
+      ! 		}
+      ! 		if(!rmdir(unmeta(buf)))
+      ! 		    return err;
+      ! 		if(!ops['f'])
+      ! 		    zwarnnam(nam, "%s: %e", buf, errno);
+      ! 		return 1;
+      ! 	    }
+        	    if(!ops['f'])
+        		zwarnnam(nam, "%s: %e", arg, EISDIR);
+        	    return 1;
+      --- 306,334 ----
+        static int
+        bin_rm(char *nam, char **args, char *ops, int func)
+        {
+      !     int err = 0, len;
+      !     char *rp;
+        
+      !     for(; !(err & 2) && *args; args++) {
+      ! 	rp = ztrdup(*args);
+      ! 	len = strlen(rp + 1);
+      ! 	unmetafy(rp, NULL);
+      ! 	err |= dorm(nam, *args, rp, ops, 1);
+      ! 	zfree(rp, len);
+      !     }
+      !     return ops['f'] ? 0 : !!err;
+        }
+        
+        /**/
+        static int
+      ! dorm(char *nam, char *arg, char *rp, char *ops, int first)
+        {
+            struct stat st;
+        
+      !     if((!ops['d'] || !ops['f']) && !lstat(rp, &st)) {
+        	if(!ops['d'] && S_ISDIR(st.st_mode)) {
+      ! 	    if(ops['r'])
+      ! 		return dormr(nam, arg, rp, ops, first);
+        	    if(!ops['f'])
+        		zwarnnam(nam, "%s: %e", arg, EISDIR);
+        	    return 1;
+      ***************
+      *** 393,398 ****
+      --- 353,415 ----
+            }
+            if(!unlink(rp))
+        	return 0;
+      +     if(!ops['f'])
+      + 	zwarnnam(nam, "%s: %e", arg, errno);
+      +     return 1;
+      + }
+      + 
+      + /**/
+      + static int
+      + dormr(char *nam, char *arg, char *rp, char *ops, int first)
+      + {
+      +     char *fn;
+      +     DIR *d;
+      +     int err = 0;
+      +     int pwd = open(".", O_RDONLY);
+      + 
+      +     if(first ? zchdir(rp) : lchdir(rp)) {
+      + 	if(!ops['f'])
+      + 	    zwarnnam(nam, "%s: %e", arg, errno);
+      + 	return 1;
+      +     }
+      + 
+      +     d = opendir(".");
+      +     if(!d) {
+      + 	if(!ops['f'])
+      + 	    zwarnnam(nam, "%s: %e", arg, errno);
+      + 	return 1 - fchdir(pwd);
+      +     }
+      +     while((fn = zreaddir(d, 1))) {
+      + 	char *narg = tricat(arg, "/", fn);
+      + 
+      + 	err |= dorm(nam, narg, unmeta(fn), ops, 0);
+      + 	zsfree(narg);
+      + 	if(err & 2) {
+      + 	    closedir(d);
+      + 	    close(pwd);
+      + 	    return 2;
+      + 	}
+      +     }
+      +     closedir(d);
+      +     if(fchdir(pwd)) {
+      + 	close(pwd);
+      + 	if(!ops['f'])
+      + 	    zwarnnam(nam, "failed to return to previous directory: %e",
+      + 		NULL, errno);
+      + 	return 2;
+      +     }
+      +     close(pwd);
+      +     if(!ops['f'] && ops['i']) {
+      + 	nicezputs(nam, stderr);
+      + 	fputs(": remove `", stderr);
+      + 	nicezputs(arg, stderr);
+      + 	fputs("'? ", stderr);
+      + 	fflush(stderr);
+      + 	if(!ask())
+      + 	    return err;
+      +     }
+      +     if(!rmdir(rp))
+      + 	return err;
+            if(!ops['f'])
+        	zwarnnam(nam, "%s: %e", arg, errno);
+            return 1;
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.2
+
+iQCVAwUBMsit9XD/+HJTpU/hAQE3ZQQAoa+URUNR6PouSElz1yJT4Ll2ggUnbqP1
+Gb1AoKNmTtMwVyLCC0BpmyYFx8T2H8gEHoP6K+/hQQFoay2Vwe7/yu9aeLeaCeMK
+f2QBrQ5kl2ZlFDuahRTyvrD3DsAmPuSbfCbbCjLAFZ0vbelPrZ/mftZfsE6Qe9sg
+bjj348W3dzY=
+=IKT+
+-----END PGP SIGNATURE-----
+

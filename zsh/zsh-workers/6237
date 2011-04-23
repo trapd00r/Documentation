@@ -1,0 +1,179 @@
+From zsh-workers-return-6237-mason-zsh=primenet.com.au@sunsite.auc.dk Sat May 08 13:51:25 1999
+Return-Path: <zsh-workers-return-6237-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12917 invoked from network); 8 May 1999 13:51:21 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 May 1999 13:51:21 -0000
+Received: (qmail 6584 invoked by alias); 8 May 1999 13:51:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6237
+Received: (qmail 6577 invoked from network); 8 May 1999 13:51:09 -0000
+Message-Id: <9905081326.AA09167@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.5-pws-17: window size
+Date: Sat, 08 May 1999 15:26:41 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+This is supposed to bring the 3.1.5 code up to the 3.0.6 code for window
+changing.  It seems to fix the bug reported by Tatsuo Furukawa in 6148, or
+at least it doesn't crash for me any more.  Unsetting COLUMNS, then setting
+it to 0, then sending a SIGWINCH to the current process does seem to get
+COLUMNS correct again.
+
+--- Src/init.c.winsize	Sat May  8 14:48:41 1999
++++ Src/init.c	Sat May  8 14:48:46 1999
+@@ -641,11 +641,13 @@
+     wrappers = NULL;
+ 
+ #ifdef TIOCGWINSZ
+-    adjustwinsize();
++    adjustwinsize(0);
+ #else
+-    /* Using zero below sets the defaults from termcap */
+-    setiparam("COLUMNS", 0);
+-    setiparam("LINES", 0);
++    /* columns and lines are normally zero, unless something different *
++     * was inhereted from the environment.  If either of them are zero *
++     * the setiparam calls below set them to the defaults from termcap */
++    setiparam("COLUMNS", columns);
++    setiparam("LINES", lines);
+ #endif
+ 
+ #ifdef HAVE_GETRLIMIT
+--- Src/jobs.c.winsize	Fri Mar 12 12:19:35 1999
++++ Src/jobs.c	Sat May  8 14:50:27 1999
+@@ -199,7 +199,7 @@
+ 	if (mypgrp != pgrp && inforeground &&
+ 	    (jn->gleader == pgrp || (pgrp > 1 && kill(-pgrp, 0) == -1))) {
+ 	    attachtty(mypgrp);
+-	    adjustwinsize();   /* check window size and adjust if necessary */
++	    adjustwinsize(0);   /* check window size and adjust if necessary */
+ 	}
+     }
+ 
+--- Src/params.c.winsize	Sat May  8 14:31:51 1999
++++ Src/params.c	Sat May  8 15:06:04 1999
+@@ -1966,23 +1966,11 @@
+ void
+ zlevarsetfn(Param pm, long x)
+ {
+-    if ((long *)pm->u.data == & columns) {
+-	if(x <= 0)
+-	    x = tccolumns > 0 ? tccolumns : 80;
+-	if (x > 2)
+-	    termflags &= ~TERM_NARROW;
+-	else
+-	    termflags |= TERM_NARROW;
+-    } else if ((long *)pm->u.data == & lines) {
+-	if(x <= 0)
+-	    x = tclines > 0 ? tclines : 24;
+-	if (x > 2)
+-	    termflags &= ~TERM_SHORT;
+-	else
+-	    termflags |= TERM_SHORT;
+-    }
++    long *p = (long *)pm->u.data;
+ 
+-    *((long *)pm->u.data) = x;
++    *p = x;
++    if (p == &lines || p == &columns)
++	adjustwinsize(2 + (p == &columns));
+ }
+ 
+ /* Function to set value of generic special scalar    *
+--- Src/signals.c.winsize	Sat May  8 14:51:21 1999
++++ Src/signals.c	Sat May  8 14:51:32 1999
+@@ -504,7 +504,7 @@
+ 
+ #ifdef SIGWINCH
+     case SIGWINCH:
+-        adjustwinsize();  /* check window size and adjust */
++        adjustwinsize(1);  /* check window size and adjust */
+ 	if (sigtrapped[SIGWINCH])
+ 	    dotrap(SIGWINCH);
+         break;
+--- Src/utils.c.winsize	Wed May  5 09:34:38 1999
++++ Src/utils.c	Sat May  8 14:44:16 1999
+@@ -852,27 +852,64 @@
+ /**/
+ int winchanged;
+ #endif
+- 
+-/* check the size of the window and adjust if necessary */
++
++/* check the size of the window and adjust if necessary. *
++ * The value of from:					 *
++ *   0: called from update_job or setupvals		 *
++ *   1: called from the SIGWINCH handler		 *
++ *   2: the user have just changed LINES manually	 *
++ *   3: the user have just changed COLUMNS manually      */
+ 
+ /**/
+ void
+-adjustwinsize(void)
++adjustwinsize(int from)
+ {
+-#ifdef TIOCGWINSZ
+     int oldcols = columns, oldrows = lines;
+ 
++#ifdef TIOCGWINSZ
++    static int userlines, usercols;
++
+     if (SHTTY == -1)
+ 	return;
+ 
+-    ioctl(SHTTY, TIOCGWINSZ, (char *)&shttyinfo.winsize);
+-    setiparam("COLUMNS", shttyinfo.winsize.ws_col);
+-    setiparam("LINES", shttyinfo.winsize.ws_row);
+-    if (zleactive && (oldcols != columns || oldrows != lines)) {
++    if (from == 2)
++	userlines = lines > 0;
++    if (from == 3)
++	usercols = columns > 0;
++
++    if (!ioctl(SHTTY, TIOCGWINSZ, (char *)&shttyinfo.winsize)) {
++	if (!userlines || from == 1)
++	    lines = shttyinfo.winsize.ws_row;
++	if (!usercols || from == 1)
++	    columns = shttyinfo.winsize.ws_col;
++    }
++#endif   /* TIOCGWINSZ */
++
++    if (lines <= 0)
++	lines = tclines > 0 ? tclines : 24;
++    if (columns <= 0)
++	columns = tccolumns > 0 ? tccolumns : 80;
++    if (lines > 2)
++	termflags &= ~TERM_SHORT;
++    else
++	termflags |= TERM_SHORT;
++    if (columns > 2)
++	termflags &= ~TERM_NARROW;
++    else
++	termflags |= TERM_NARROW;
++
++#ifdef TIOCGWINSZ
++    if (interact && from >= 2) {
++	shttyinfo.winsize.ws_row = lines;
++	shttyinfo.winsize.ws_col = columns;
++	ioctl(SHTTY, TIOCSWINSZ, (char *)&shttyinfo.winsize);
++    }
++#endif
++
++    if (zleactive && (from >= 2 || oldcols != columns || oldrows != lines)) {
+ 	resetneeded = winchanged = 1;
+ 	zrefresh();
+     }
+-#endif   /* TIOCGWINSZ */
+ }
+ 
+ /* Move a fd to a place >= 10 and mark the new fd in fdtable.  If the fd *
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

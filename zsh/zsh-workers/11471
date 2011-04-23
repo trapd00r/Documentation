@@ -1,0 +1,297 @@
+From zsh-workers-return-11471-mason-zsh=primenet.com.au@sunsite.auc.dk Fri May 19 18:39:38 2000
+Return-Path: <zsh-workers-return-11471-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15656 invoked from network); 19 May 2000 18:39:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 May 2000 18:39:35 -0000
+Received: (qmail 14990 invoked by alias); 19 May 2000 18:39:28 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11471
+Received: (qmail 14983 invoked from network); 19 May 2000 18:39:27 -0000
+Message-ID: <39258A5B.D57994E4@u.genie.co.uk>
+Date: Fri, 19 May 2000 19:39:23 +0100
+From: Oliver Kiddle <opk@u.genie.co.uk>
+X-Mailer: Mozilla 4.73 [en] (Win95; I)
+X-Accept-Language: en
+MIME-Version: 1.0
+To: Zsh workers <zsh-workers@sunsite.auc.dk>
+Subject: Re: PATCH: Re: _netscape
+References: <200005181102.NAA04256@beta.informatik.hu-berlin.de>
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+
+Sven Wischnowsky wrote:
+> 
+> So why do we use `-s', then.
+
+I'm not sure but it did used to work like that ages ago.
+
+> This'll do?
+
+That's great, thanks.
+
+I've gone on to try to fix the handling of the closing bracket suffix in
+netscape remote commands which has resulted in the following thoughts on
+suffix handling in the new completion.
+
+There are a few places where the contents of a remote command comes to a
+definite finish: a file/ftp/http URL that ends with a file or empty
+directory, a saveAs command after the file type, about: URLS. In these
+cases, it would be nice if completing the last stage added both the
+closing bracket (back-slash quoted if necessary) to terminate the remote
+command and any closing quote.
+
+Adding a closing quote sometimes happens, for example:
+netscape -remote 'openURL(about:c<tab>
+this completes to the about:cache URL with the closing quote appended.
+Where does the quote come from: is the default suffix actually
+"$compstate[quote] " instead of just a space?
+
+I can basically get this to work by using
+-S "${${QIPREFIX:+)}:-\)}$compstate[quote] "
+
+One of the problems which this highlighted is that _urls didn't handle
+being passed a -S option very well. Unlike many of the types completed
+by helper functions, urls contain several components which are completed
+separately (connection type, hostname, filename etc), all of which are
+completed separately. _urls passes "$@" to _next_label in several places
+so the -S option was passed at these points. This means that if you
+complete urls with _urls -S ')', ht<tab> will complete to 'http://)',
+i.e. the suffix is added yet the URL isn't finished. In the patch below,
+what I have done is removed the "$@" for all the places where we are not
+completing the final component of a URL. This is of course not ideal
+because -S is not the only compadd option which might get passed around.
+I think we need to work out a slightly better system for the handling of
+suffixes like this. Basically, what a helper function needs to do is
+take the suffix passed to it and when it is completing a final component
+of itself, it should pass any suffix it wants with the one passed to it
+appended. Pulling out -S options from "$@" is going to look messy
+without some special handling at a lower level somewhere. compadd seems
+to only use the first -S option it is passed but this isn't documented
+so I didn't want to rely on it. If we do make it a documented feature
+then we still need to handle the situation where you are completing the
+final part of something and you want to use both your own suffix and the
+one passed to the function.
+
+Note that _files can no longer complete subdirectories if you give it a
+-S option which is something other than a slash. _files should only add
+the suffix after a file (and possible after an empty directory).
+
+Returning to _netscape, the next issue was how to handle the closing
+bracket/quote already being there.
+I used compset -S '(|\\)\)*'. But this again comes up with a problem
+when we are not completing the final part of a URL. The suffix is only
+moved to ISUFFIX so for example:
+netscape -remote 'openURL(a<tab>)    i.e. cursor is at position of tab
+will complete the url to about:)' - advancing the cursor past the
+suffix. I'm able to prevent this by not using the suffix with compadd
+if the compset succeeded.
+
+This example shows how and leads me on to my next point:
+
+_foo() {
+  local lsuf="" nsuf=""
+  compset -S '.*' || lsuf=". "
+  if compset -P "*:"; then
+    compadd -S "$lsuf" aaa bbb ccc
+  else
+    compset -S ':*' || nsuf=":"
+    compadd -S "$rsuf" one two three
+  fi
+}
+
+foo o<tab>.  completes the one but moves the cursor past the '.'. I
+would prefer if it was only moved to the end of the :. We started off
+with just 'o.' so there was no :. this indicates to me that the part
+which comes after a colon is necessary so it is likely that the user
+will want to complete it. In the case of:
+foo o<tab>:ddd.
+it is fair enough in a way that the completion moves past the final '.'
+because there was a colon there to start with although even in this case
+I'd prefer it didn't. What I would actually want it to do in this case
+is move to the end of the 'ddd' but before the '.'. If 'ddd' was
+incomplete, I could finish it otherwise, another tab would advance me on
+to the next thing. I also looked at how
+_sep_parts -S "." '(one two three)' ':' '(aaa bbb ccc)'
+works as a comparison but it won't complete one in the case of o<tab>.
+which I suppose has its uses in different situations.
+
+Handling suffixes composed of more than one character is also less than
+ideal. For example, in the case of closing the netscape remote command,
+there is the closing bracket and the closing quote. To work out the
+appropriate suffix, you have to do:
+
+if compset -S '")*"; then
+  suf=""
+elif compset -S "'*"; then
+  suf=")"
+else
+  suf=")' "
+fi
+
+This is without checking compstate[quote]. Of course there may be some
+cases where later letters in the suffix could be part of a match so
+can't be used to delimit the end of it. I haven't bothered to do this
+but if changes are made to suffix handling, it might be worth
+considering. For an example of why this is useful, try completing a
+remote command of 'openURL(about:c<tab>' . With the above example, it
+will also not complete the closing quote if there is a closing bracket
+to the right of the cursor (before pressing tab) but not a closing
+quote.
+
+I have added a patch to _netscape and _urls. Note that I removed the
+compset -q which I think (as Sven said earlier), is not needed anymore.
+The removal of the "$@"s from _urls isn't particularly ideal though so
+that situation with suffixes needs some thought.
+
+Oliver Kiddle
+
+Index: Completion/User/_netscape
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/User/_netscape,v
+retrieving revision 1.5
+diff -u -r1.5 _netscape
+--- Completion/User/_netscape	2000/05/18 11:05:20	1.5
++++ Completion/User/_netscape	2000/05/19 18:27:35
+@@ -1,6 +1,6 @@
+ #compdef netscape
+ 
+-local curcontext="$curcontext" state line ret=1
++local curcontext="$curcontext" state line ret=1 suf
+ typeset -A opt_args
+ 
+ _x_arguments -C \
+@@ -27,24 +27,27 @@
+ [[ "$state" = "urls" ]] &&
+   _files "$@" && return 0
+ 
+-
+ # Handle netscape remote commands
+ if [[ "$state" = "remote" ]]; then  
+   local -a remote_commands
+   remote_commands=(openURL openFile saveAs mailto addBookmark)
+ 
+-  [[ $compstate[quoting] = (double|single) ]] && compset -q
+   compset -P '*\('
++  if compset -S '(|\\)\)*'; then
++    set - -S "" "$@"
++  else
++    set - -S"${${QIPREFIX:+)}:-\)}$compstate[quote] " "$@"
++  fi
+   case $IPREFIX in
+     openURL*|addBookmark*) state=urls;;
+-    openFile*) _files -W ~;;
++    openFile*) _files "$@" -W ~;;
+     saveAs*) 
+       if compset -P "*,"; then
+         _wanted types expl 'data type' \
+-            compadd -s")" -M 'm:{a-zA-Z}={A-Za-z}' HTML Text PostScript &&
+-                ret=0
++            compadd "$@" -M 'm:{a-zA-Z}={A-Za-z}' HTML Text PostScript && ret=0
+       else
+-        _files -W ~ && ret=0
++        compset -S ",*" || suf=","
++        _files -qS "$suf" -W ~ && ret=0
+       fi
+     ;;
+     mailto*)
+@@ -52,12 +55,14 @@
+       if compset -P '*@'; then
+         _wanted hosts expl 'remote host name' _hosts -q -S, && ret=0
+       else
+-        _wanted users expl 'login name' _users -q -S@ && ret=0
++        compset -S "@*" || suf="@"
++        _wanted users expl 'login name' _users -q -S "$suf" && ret=0
+       fi
+     ;;
+     *)
++      compset -S '(|\\)\(*' || suf="${${QIPREFIX:+(}:-\(}"
+       _wanted commands expl 'remote commands' \
+-  	  compadd -qS "${${QIPREFIX:+(}:-\(}" -M 'm:{a-zA-Z}={A-Za-z}' - \
++          compadd -qS "$suf" -M 'm:{a-zA-Z}={A-Za-z}' - \
+                   $remote_commands && ret=0
+     ;;
+   esac
+@@ -67,14 +72,15 @@
+   # Complete netscape urls
+   if compset -P about: ; then
+     _wanted values expl 'about what' \
+-        compadd authors blank cache document fonts global hype image-cache \
++        compadd "$@" authors blank cache document fonts global hype image-cache \
+             license logo memory-cache mozilla plugins && ret=0
+   else
+     _tags prefixes
+     while _tags; do
+       while _next_label prefixes expl 'URL prefix'; do
+-        compadd "$expl[@]" -S '' about: mocha: javascript: && ret=0
+         _urls "$@" && ret=0
++	compset -S '[^:]*'
++        compadd "$expl[@]" -S '' about: mocha: javascript: && ret=0
+       done
+       (( ret )) || return 0
+     done
+Index: Completion/User/_urls
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/User/_urls,v
+retrieving revision 1.7
+diff -u -r1.7 _urls
+--- Completion/User/_urls	2000/05/19 08:26:48	1.7
++++ Completion/User/_urls	2000/05/19 18:27:35
+@@ -57,7 +57,7 @@
+ if ! compset -P '(#b)([-+.a-z0-9]#):'; then
+   _tags -C argument prefixes
+   while _tags; do
+-    while _next_label prefixes expl 'URL prefix' "$@"; do
++    while _next_label prefixes expl 'URL prefix'; do
+       [[ -d $urls_path/bookmark ]] &&
+         compadd "$expl[@]" -S '' bookmark: && ret=0
+       compadd "$expl[@]" -S '' file: ftp:// gopher:// http:// && ret=0
+@@ -79,7 +79,7 @@
+     if ! compset -P //; then
+       _tags -C file files
+       while _tags; do
+-        while _next_label files expl 'local file' "$@"; do
++        while _next_label files expl 'local file'; do
+           if [[ -prefix / ]]; then
+ 	    _path_files "$expl[@]" -S '' -g '*(^/)' && ret=0
+ 	    _path_files "$expl[@]" -S/ -r '/' -/ && ret=0
+@@ -119,7 +119,7 @@
+ 
+   _tags hosts
+   while _tags; do
+-    while _next_label hosts expl host "$@"; do
++    while _next_label hosts expl host; do
+       (( $#uhosts )) || _hosts -S/ && ret=0
+       [[ "$scheme" = http ]] && uhosts=($uhosts $localhttp_servername)
+       compadd "$expl[@]" -S/ - $uhosts && ret=0
+@@ -143,7 +143,7 @@
+     user="$match[1]"
+     while _tags; do
+       while _next_label files expl 'local file'; do
+-        _path_files "$expl[@]" -W ~$user/$localhttp_userdir -g '*(^/)' && ret=0
++        _path_files "$expl[@]" "$@" -W ~$user/$localhttp_userdir -g '*(^/)' && ret=0
+         _path_files "$expl[@]" -W ~$user/$localhttp_userdir -S/ -r '/' -/ && ret=0
+       done
+       (( ret )) || return 0
+@@ -151,7 +151,7 @@
+   else
+     while _tags; do
+       while _next_label files expl 'local file'; do
+-        _path_files "$expl[@]" -W $localhttp_documentroot -g '*(^/)' && ret=0
++        _path_files "$expl[@]" "$@" -W $localhttp_documentroot -g '*(^/)' && ret=0
+         _path_files "$expl[@]" -W $localhttp_documentroot -S/ -r '/' -/ && ret=0
+       done
+       (( ret )) || return 0
+@@ -160,7 +160,7 @@
+ else
+   while _tags; do
+     while _next_label files expl 'local file'; do
+-      _path_files "$expl[@]" -W $urls_path/$scheme/$host -g '*(^/)' && ret=0
++      _path_files "$expl[@]" "$@" -W $urls_path/$scheme/$host -g '*(^/)' && ret=0
+       _path_files "$expl[@]" -W $urls_path/$scheme/$host -S/ -r '/' -/ && ret=0
+     done
+     (( ret )) || return 0
+

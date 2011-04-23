@@ -1,0 +1,215 @@
+From zsh-workers-return-12923-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Oct 08 17:35:22 2000
+Return-Path: <zsh-workers-return-12923-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5396 invoked from network); 8 Oct 2000 17:35:20 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 Oct 2000 17:35:20 -0000
+Received: (qmail 18363 invoked by alias); 8 Oct 2000 17:35:06 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12923
+Received: (qmail 18355 invoked from network); 8 Oct 2000 17:35:03 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1001008173447.ZM26825@candle.brasslantern.com>
+Date: Sun, 8 Oct 2000 17:34:47 +0000
+In-Reply-To: <200010060718.JAA14463@beta.informatik.hu-berlin.de>
+Comments: In reply to Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+        "Functions for multiple commands" (Oct  6,  9:18am)
+References: <200010060718.JAA14463@beta.informatik.hu-berlin.de>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: Functions for multiple commands
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Oct 6,  9:18am, Sven Wischnowsky wrote:
+} 
+} I thought of several ways to restructure these completion functions for
+} multiple commands/contexts. Below are those I liked best.
+
+You've probably run off to play with this over the weekend and I'm too
+late to give much useful feedback, but:
+
+} 1)
+} Each command/context has its own function. The autoloaded function
+} only defines those functions (and may contain other initialisation
+} code, like defining cache-arrays or whatever).
+} 
+} a)
+} The code that handles `#digest' tags immediately calls them, during
+} compinit.
+
+I don't think I like that one.  Compinit has too much to do already.
+
+} b)
+} One way to avoid that: the function that handles `#digest' only saves the
+} mappings from the autoloaded function to the sub-functions in an
+} associative array, say $_digest. Keys are the autoloaded functions, values
+} are formed like ' sub-func1 sub-func2 ...'.
+
+What other interesting thing do you envisage doing with the autoloaded
+function names that they need to be the keys?  Just unset the elements?
+
+Why not have the keys be the sub-funcs and the values be the names of
+the digests?  Instead of
+
+    digest="${(k)_digest[(R)* $func *]}"	# only needs (r), BTW,
+						# using your scheme
+it's just
+
+    digest=$_digest[$func]
+
+which seems a whole lot more straightforward.  And if you need to go
+from the digest name to the names of all functions it contains, it's
+
+    funcs=(${(k)_digest[(R)$digest]})
+
+Unsetting the elements can be done in a one-line loop over $funcs, so
+I don't think that's enough reason to complicate everything else.
+
+(I notice that you use $_digest[$func] in one of your examples for your
+idea #2, so ...)
+
+} We could of course add a helper function for that, which gets the name
+} of the command/context as argument:
+} 
+}   foo() {
+}     local func digest
+}     func="$_comp[$1]"
+}     digest="${(k)_digest[(R)* $func *]}"
+}     if [[ -n "$digest" ]]; then
+}       "$digest"
+}       unfunction "$digest"
+}       unset "_digest[$digest]"
+}     fi
+}     "$func"
+}   }
+
+Er, I don't like that `unfunction $digest' in there:  It means that the
+name of the digest can't be the name of one of the sub-functions (e.g.,
+the way _rlogin is in the patch I sent).  Let the digest function do its
+own unfunctioning, if that's appropriate.
+
+} I'm not exactly sure how big a problem it is that this means that sub-
+} functions are not directly callable.
+
+How often is any completion-system function meant to be directly called?
+ 
+} c)
+} That could be avoided with a bit of magic, namely: the function handling
+} `#digest' creates dummy-functions for the sub-functions [...]
+} And in any case, digest-file writers would have to use:
+} 
+}   (( $+functions[_foo] )) || _foo() { ... }
+
+The dummy function must then unfunction *itself* before calling the
+digest function, or none of the real sub-functions will ever become
+defined!
+
+However:
+
+} so that sub-functions found earlier (in user-defined autoloaded files)
+} override those found later.
+
+I disagree with this (and it's use in _cvs continually annoys me, BTW,
+because it makes it difficult to load a revised version into a running
+shell).  Either those functions are all intended to be used together,
+or they are not; if so, I want them all defined, and if not, they should
+not all be contained in the same source file.
+
+Rather than testing $+functions[...], I'd prefer to test $_comps[...]
+in the way that was done in the _rlogin patch I sent.  If the user wants
+to override a completion function with his own autoloads, he should also
+explicitly compdef for that function.  (This of course doesn't apply to
+helper functions that are designed to be replaced, only to completion
+"callbacks" themselves.)
+
+} 2)
+} Using only one autoloaded function, no sub-functions. The function then
+} uses a big `case', the `service' to use is given as the first argument
+
+Returning to Jay's original example (using _rlogin for krsh et al.), how
+is this idea qualitatively different from writing a little wrapper that
+looks like:
+
+    #compdef krsh krcp
+    words[1]=$words[1]:s/k//
+    _rlogin
+
+} 2a)
+} Instead of `#digest', we could also use `#compdef' and allow a special
+} syntax to mean that for a certain command/context the autoloaded function
+} should be called with a `service'-argument.
+
+Aside: Using new compdef syntax instead of #digest would work with idea #1.
+
+Let me ramble a little on this particular idea.  (As if I haven't already
+been.)  Instead of an _digest assoc, we'd have an _services assoc.  Then
+we'd change calls to the function in $_comps[$words[1]] to also pass as
+an argument $_services[$words[1]].  The #compdef line could look like:
+
+    #compdef -s rlogin=rlogin rsh=rsh remsh=rsh rcp=rcp
+	The LHS of the = is the key into _comps and _services, the RHS
+	is the value for that key in _services
+or
+    #compdef -S rlogin rsh remsh rcp
+	Shorthand for rlogin=rlogin rsh=rsh remsh=remsh rcp=rcp
+
+So the result (in the first case) would be that _comps[remsh]=_rlogin
+and _services[remsh]=rsh, and so on.
+
+The nice thing about this is that we don't need any special magic when
+the function is called.  _normal always passes $_services[$words[1]]
+when it exists.  Also, the meaning of the service is entirely up to the
+called function; the completion system isn't forced to interpret it as
+a function name.
+
+I'm leaning heavily towards this approach, at the moment.
+
+} 2b)
+} And of course, we could also combine this with 1c) and define dummy
+} functions for the `services' that just call the autoloaded function with
+} the argument. Together with 2a) we could also add a second syntax to
+} define `services' for which functions should be created (next to those
+} for which no functions are created).
+
+This sounds like it's getting too complicated.  We should pick one format
+-- whichever requires the fewest extra steps for writers of new completion
+functions and/or users who want to complete new commands with existing
+"services" -- because as demonstrated in my _rlogin patch it's not that
+difficult for the completion function to alter the way it will be called,
+once it's successfully called the first time.
+
+For example, suppose we choose (2a).  Then _rlogin could look something
+like:
+
+    #compdef -S rlogin rcp rsh remsh 
+
+    _rsh() {
+	# guts of rsh service ...
+    }
+    _rcp() { ... }
+    _rsh() { ... }
+
+    case $1 in
+    remsh) 1=rsh ;&
+    rsh|rcp)
+	_comps[$words[1]]=_$1
+	unset _services[$words[1]]  # this is not even strictly necessary
+	_$1 ;;
+    *)
+    	# guts of rlogin service ...
+	;;
+    esac
+
+Thus turning (2a) into (1b).  I'm not sure what the ramifications of this
+sort of thing would be for efficiency of .zwc file loading.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

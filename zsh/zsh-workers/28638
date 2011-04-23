@@ -1,0 +1,257 @@
+From zsh-workers-return-28638-mason-zsh=primenet.com.au@zsh.org Wed Jan 19 12:26:44 2011
+Return-Path: <zsh-workers-return-28638-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20013 invoked by alias); 19 Jan 2011 12:26:43 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28638
+Received: (qmail 11134 invoked from network); 19 Jan 2011 12:26:39 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Wed, 19 Jan 2011 12:26:26 +0000
+From: Peter Stephenson <pws@csr.com>
+To: "Zsh Hackers' List" <zsh-workers@zsh.org>
+Subject: PATCH: $usergroups in zsh/parameter
+Message-ID: <20110119122626.1458eb2d@pwslap01u.europe.root.pri>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.8 (GTK+ 2.20.1; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 19 Jan 2011 12:26:26.0429 (UTC) FILETIME=[176EFAD0:01CBB7D4]
+X-Scanned-By: MailControl A_10_80_00 (www.mailcontrol.com) on 10.68.0.149
+
+I didn't call it just "groups" since it's a bit ambiguous whose groups
+they are.  If this was for Windows it would be mygroups, but it isn't.
+
+I think all relevant system interfaces are long-standing standards.
+
+Index: Doc/Zsh/mod_parameter.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/mod_parameter.yo,v
+retrieving revision 1.13
+diff -p -u -r1.13 mod_parameter.yo
+--- Doc/Zsh/mod_parameter.yo	18 Dec 2008 09:49:04 -0000	1.13
++++ Doc/Zsh/mod_parameter.yo	19 Jan 2011 12:23:31 -0000
+@@ -164,6 +164,12 @@ item(tt(userdirs))(
+ This associative array maps user names to the pathnames of their home
+ directories.
+ )
++vindex(usergroups)
++item(tt(usergroups))(
++This associative array maps names of system groups of which the current
++user is a member to the corresponding group identifiers.  The contents
++are the same as the groups output by the tt(id) command.
++)
+ vindex(funcfiletrace)
+ item(tt(funcfiletrace))(
+ This array contains the absolute line numbers and corresponding file
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.173
+diff -p -u -r1.173 zsh.h
+--- Src/zsh.h	6 Jan 2011 16:49:26 -0000	1.173
++++ Src/zsh.h	19 Jan 2011 12:23:31 -0000
+@@ -1731,6 +1731,23 @@ struct nameddir {
+ #define ND_USERNAME	(1<<1)	/* nam is actually a username       */
+ #define ND_NOABBREV	(1<<2)	/* never print as abbrev (PWD or OLDPWD) */
+ 
++/* Storage for single group/name mapping */
++typedef struct {
++    /* Name of group */
++    char *name;
++    /* Group identifier */
++    gid_t gid;
++} groupmap;
++typedef groupmap *Groupmap;
++
++/* Storage for a set of group/name mappings */
++typedef struct {
++    /* The set of name to gid mappings */
++    Groupmap array;
++    /* A count of the valid entries in groupmap. */
++    int num;
++} groupset;
++typedef groupset *Groupset;
+ 
+ /* flags for controlling printing of hash table nodes */
+ #define PRINT_NAMEONLY		(1<<0)
+Index: Src/Modules/parameter.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/parameter.c,v
+retrieving revision 1.52
+diff -p -u -r1.52 parameter.c
+--- Src/Modules/parameter.c	12 Dec 2010 22:44:51 -0000	1.52
++++ Src/Modules/parameter.c	19 Jan 2011 12:23:31 -0000
+@@ -1820,6 +1820,141 @@ scanpmdissaliases(HashTable ht, ScanFunc
+     scanaliases(sufaliastab, ht, func, flags, ALIAS_SUFFIX|DISABLED);
+ }
+ 
++
++/* Functions for the usergroups special parameter */
++
++/*
++ * Get GID and names for groups of which the current user is a member.
++ */
++
++/**/
++static Groupset get_all_groups(void)
++{
++    Groupset gs = zhalloc(sizeof(*gs));
++    Groupmap gaptr;
++    gid_t *list, *lptr, egid;
++    int add_egid;
++    struct group *grptr;
++
++    egid = getegid();
++    add_egid = 1;
++    gs->num = getgroups(0, NULL);
++    if (gs->num > 0) {
++	list = zhalloc(gs->num * sizeof(*list));
++	if (getgroups(gs->num, list) < 0) {
++	    return NULL;
++	}
++
++	/*
++	 * It's unspecified whether $EGID is included in the
++	 * group set, so check.
++	 */
++	for (lptr = list; lptr < list + gs->num; lptr++) {
++	    if (*lptr == egid) {
++		add_egid = 0;
++		break;
++	    }
++	}
++	gs->array = zhalloc((gs->num + add_egid) * sizeof(*gs->array));
++	/* Put EGID if needed first */
++	gaptr = gs->array + add_egid;
++	for (lptr = list; lptr < list + gs->num; lptr++) {
++	    gaptr->gid = *lptr;
++	    gaptr++;
++	}
++	gs->num += add_egid;
++    } else {
++	/* Just use effective GID */
++	gs->num = 1;
++	gs->array = zhalloc(sizeof(*gs->array));
++    }
++    if (add_egid) {
++	gs->array->gid = egid;
++    }
++
++    /* Get group names */
++    for (gaptr = gs->array; gaptr < gs->array + gs->num; gaptr++) {
++	grptr = getgrgid(gaptr->gid);
++	if (!grptr) {
++	    return NULL;
++	}
++	gaptr->name = dupstring(grptr->gr_name);
++    }
++
++    return gs;
++}
++
++/* Standard hash element lookup. */
++
++/**/
++static HashNode
++getpmusergroups(UNUSED(HashTable ht), const char *name)
++{
++    Param pm = NULL;
++    Groupset gs = get_all_groups();
++    Groupmap gaptr;
++
++    pm = (Param)hcalloc(sizeof(struct param));
++    pm->node.nam = dupstring(name);
++    pm->node.flags = PM_SCALAR | PM_READONLY;
++    pm->gsu.s = &nullsetscalar_gsu;
++
++    if (!gs) {
++	zerr("failed to retrieve groups for user: %e", errno);
++	pm->u.str = dupstring("");
++	pm->node.flags |= PM_UNSET;
++	return &pm->node;
++    }
++
++    for (gaptr = gs->array; gaptr < gs->array + gs->num; gaptr++) {
++	if (!strcmp(name, gaptr->name)) {
++	    char buf[DIGBUFSIZE];
++
++	    sprintf(buf, "%d", (int)gaptr->gid);
++	    pm->u.str = dupstring(buf);
++	    return &pm->node;
++	}
++    }
++
++    pm->u.str = dupstring("");
++    pm->node.flags |= PM_UNSET;
++    return &pm->node;
++}
++
++/* Standard hash scan. */
++
++/**/
++static void
++scanpmusergroups(UNUSED(HashTable ht), ScanFunc func, int flags)
++{
++    struct param pm;
++    Groupset gs = get_all_groups();
++    Groupmap gaptr;
++
++    if (!gs) {
++	zerr("failed to retrieve groups for user: %e", errno);
++	return;
++    }
++
++    memset((void *)&pm, 0, sizeof(pm));
++    pm.node.flags = PM_SCALAR | PM_READONLY;
++    pm.gsu.s = &nullsetscalar_gsu;
++
++    for (gaptr = gs->array; gaptr < gs->array + gs->num; gaptr++) {
++	pm.node.nam = gaptr->name;
++	if (func != scancountparams &&
++	    ((flags & (SCANPM_WANTVALS|SCANPM_MATCHVAL)) ||
++	     !(flags & SCANPM_WANTKEYS))) {
++	    char buf[DIGBUFSIZE];
++
++	    sprintf(buf, "%d", (int)gaptr->gid);
++	    pm.u.str = dupstring(buf);
++	}
++	func(&pm.node, flags);
++    }
++}
++
++
+ /* Table for defined parameters. */
+ 
+ struct pardef {
+@@ -1926,7 +2061,9 @@ static struct paramdef partab[] = {
+     SPECIALPMDEF("saliases", 0,
+ 	    &pmsaliases_gsu, getpmsalias, scanpmsaliases),
+     SPECIALPMDEF("userdirs", PM_READONLY,
+-	    NULL, getpmuserdir, scanpmuserdirs)
++	    NULL, getpmuserdir, scanpmuserdirs),
++    SPECIALPMDEF("usergroups", PM_READONLY,
++	    NULL, getpmusergroups, scanpmusergroups)
+ };
+ 
+ static struct features module_features = {
+
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

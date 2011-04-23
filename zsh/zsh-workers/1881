@@ -1,0 +1,263 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Fri Aug  2 07:15:31 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id HAA01702 for <mason@primenet.com.au>; Fri, 2 Aug 1996 07:15:24 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id RAA12891; Thu, 1 Aug 1996 17:04:27 -0400 (EDT)
+Resent-Date: Thu, 1 Aug 1996 17:04:27 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199608012103.XAA05742@bolyai.cs.elte.hu>
+Subject: Re: More Configure problems
+To: hzoli@cs.elte.hu (Zoltan Hidvegi)
+Date: Thu, 1 Aug 1996 23:03:27 +0200 (MET DST)
+Cc: pws@ifh.de, zsh-workers@math.gatech.edu
+In-Reply-To: <199608011755.TAA00850@bolyai.cs.elte.hu> from Zoltan Hidvegi at "Aug 1, 96 07:55:32 pm"
+Organization: Dept. of Comp. Sci., Eotvos University, Budapest, Hungary
+Phone: (36 1)2669833 ext: 2667, home phone: (36 1) 2752368
+X-Mailer: ELM [version 2.4ME+ PL16 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"xp1OY3.0.L93.RlH0o"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1881
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I wrote:
+> Peter wrote:
+> > > Next problem with Configure... actually with the makedepend script
+> > > that comes with it:  this assignment is failing:
+> > > 
+> > >     defrule=`<$mf sed -n		\
+> > > ...
+> > > 
+> > > That first interestingly positioned <$mf (sometimes I wonder if people
+> > > do this deliberately) is supposed to be a redirection, but zsh is
+> > > treating it like $(<...).  ksh behaves like sh here, i.e. only $(<...)
+> > > has that behaviour.  Perhaps we should follow suit.
+> > 
+> > Well, there's only about one possible fix, as follows.  The manual
+> > page mentions $(<...) and specifically fails to mention `<...`, so I
+> > think we're in line with that after the patch.  No other Configure
+> > problems that I've noticed.  (This is actually non-trivial, if you
+> > want to install perl on Linux without having to have bash around.)
+> 
+> I'd prefer a different fix.  I think it is better to parse each command
+> substitution lexically and if it consists of a single redirection to stdin
+> than behave as $(< file) behaves now.  This is really preferrable since $(<
+> file command) should execute the given command.  That's the ksh behaviour
+> and that's what required by POSIX.  I'll try to write a patch for that.
+
+I made the patch below.  It really makes the code cleaner but unfortunately
+the change is not trivial because it removes pushheap()/popheap() from
+parse_string().  So far parse_string() used pushheap() before starting the
+parser and it did not pop the heap if the parsing was successful.  Of
+course this increases the possibility of a forgotten popheap() and indeed
+I've found that there was no popheap() after calling getshunc() which
+called getfpfunc() which called parse_string().  So this only happened when
+getshfunc used on an autoloaded function, e.g. when chpwd was autoloaded.
+Of course this did not cause any noticable problem except that it was a
+memory leak.
+
+The change below would be more difficult without removing this heap stuff
+because the parsed list must be preserved somehow after popheap (it would
+not be much more difficult, just 2 more lines I think).
+
+I did not test this patch, since I'd like to catch the last but home from
+the university so it may be buggy.  Please test it.
+
+Zoltan
+
+
+*** Src/exec.c	1996/07/31 14:05:25	2.78
+--- Src/exec.c	1996/08/01 20:59:39
+***************
+*** 48,61 ****
+      lexsave();
+      inpush(s, 0);
+      strinbeg();
+-     pushheap();
+      stophist = 2;
+      l = parse_list();
+      strinend();
+      inpop();
+      lexrestore();
+-     if (!l)
+- 	popheap();
+      return l;
+  }
+  
+--- 48,58 ----
+***************
+*** 475,484 ****
+  {
+      List list;
+  
+!     if ((list = parse_string(s))) {
+  	execlist(list, dont_change_job, exiting);
+! 	popheap();
+!     }
+  }
+  
+  /* Main routine for executing a list.                                *
+--- 472,481 ----
+  {
+      List list;
+  
+!     pushheap();
+!     if ((list = parse_string(s)))
+  	execlist(list, dont_change_job, exiting);
+!     popheap();
+  }
+  
+  /* Main routine for executing a list.                                *
+***************
+*** 1991,2033 ****
+      List list;
+      int pipes[2];
+      pid_t pid;
+  
+!     if (*cmd == '<') {
+! 	int stream, l;
+! 	char *fi, *s;
+! 
+! 	for (cmd++; *cmd == ' '; cmd++);
+! 	for (fi = s = cmd + strlen(cmd); s > cmd && s[-1] == ' '; s--);
+! 	if (s > cmd && s < fi && (s[-1] == '\\' || s[-1] == Meta))
+! 	    s++;
+! 	l = s - cmd;
+! 	fi = ncalloc(l + 1);
+! 	strncpy(fi, cmd, l);
+! 	fi[l] = '\0';
+! 	if (parsestr(fi))
+! 	    return NULL;
+! 	if (*fi == '~')
+! 	    *fi = Tilde;
+! 	else if (*fi == '=')
+! 	    *fi = Equals;
+! 	singsub(&fi);
+  	if (errflag)
+  	    return NULL;
+! 	stream = open(unmeta(fi), O_RDONLY);
+! 	if (stream == -1) {
+! 	    zerr("%e: %s", fi, errno);
+! 	    return NULL;
+! 	}
+  	return readoutput(stream, qt);
+      }
+!     if (!(list = parse_string(cmd)))
+! 	return NULL;
+      mpipe(pipes);
+      child_block();
+      cmdoutval = 0;
+      if ((cmdoutpid = pid = zfork()) == -1) {
+  	/* fork error */
+- 	popheap();
+  	zclose(pipes[0]);
+  	zclose(pipes[1]);
+  	errflag = 1;
+--- 1988,2021 ----
+      List list;
+      int pipes[2];
+      pid_t pid;
++     Cmd c;
++     Redir r;
+  
+!     if (!(list = parse_string(cmd)))
+! 	return NULL;
+!     if (list != &dummy_list && !list->right && !list->left->flags &&
+! 	list->left->type == END && list->left->left->type == END &&
+! 	(c = list->left->left->left)->type == SIMPLE && empty(c->args) &&
+! 	empty(c->vars) && nonempty(c->redir) &&
+! 	!nextnode(firstnode(c->redir)) &&
+! 	(r = (Redir) getdata(firstnode(c->redir)))->fd1 == 0 &&
+! 	r->type == READ) {
+! 	/* $(< word) */
+! 	int stream;
+! 	char *s = r->name;
+! 
+! 	singsub(&s);
+  	if (errflag)
+  	    return NULL;
+! 	stream = open(unmeta(s), O_RDONLY);
+  	return readoutput(stream, qt);
+      }
+! 
+      mpipe(pipes);
+      child_block();
+      cmdoutval = 0;
+      if ((cmdoutpid = pid = zfork()) == -1) {
+  	/* fork error */
+  	zclose(pipes[0]);
+  	zclose(pipes[1]);
+  	errflag = 1;
+***************
+*** 2037,2043 ****
+      } else if (pid) {
+  	LinkList retval;
+  
+- 	popheap();
+  	zclose(pipes[1]);
+  	retval = readoutput(pipes[0], qt);
+  	fdtable[pipes[0]] = 0;
+--- 2025,2030 ----
+***************
+*** 2159,2172 ****
+  
+      if (fd < 0 || (cmdoutpid = pid = zfork()) == -1) {
+  	/* fork or open error */
+- 	popheap();
+  	child_unblock();
+  	return nam;
+      } else if (pid) {
+  	int os;
+  
+  	close(fd);
+- 	popheap();
+  	os = jobtab[thisjob].stat;
+  	waitforpid(pid);
+  	cmdoutval = 0;
+--- 2146,2157 ----
+***************
+*** 2248,2254 ****
+  	zclose(pipes[out]);
+  	fdtable[pipes[!out]] = 2;
+  #endif
+- 	popheap();
+  	return pnam;
+      }
+  #ifndef HAVE_DEV_FD
+--- 2233,2238 ----
+***************
+*** 2285,2291 ****
+  	return -1;
+      mpipe(pipes);
+      if (zfork()) {
+- 	popheap();
+  	zclose(pipes[out]);
+  	return pipes[!out];
+      }
+--- 2269,2274 ----
+***************
+*** 2412,2418 ****
+  	    shf->flags &= ~PM_UNDEFINED;
+  	    funcdef = shf->funcdef = (List) dupstruct(funcdef);
+  	} LASTALLOC;
+- 	popheap();
+  
+  	/* Execute the function definition, we just retrived */
+  	doshfunc(shf->funcdef, cmd->args, shf->flags, 0);
+--- 2395,2400 ----
+*** Src/builtin.c	1996/07/31 15:45:25	2.71
+--- Src/builtin.c	1996/08/01 20:24:46
+***************
+*** 5501,5508 ****
+  	if (settrap(sig, t))
+  	    freestruct(t);
+      }
+-     if (l)
+- 	popheap();
+      return *argv != NULL;
+  }
+  
+--- 5501,5506 ----
+

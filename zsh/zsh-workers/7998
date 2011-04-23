@@ -1,0 +1,1459 @@
+From zsh-workers-return-7998-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Sep 22 11:28:06 1999
+Return-Path: <zsh-workers-return-7998-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3331 invoked from network); 22 Sep 1999 11:27:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 22 Sep 1999 11:27:44 -0000
+Received: (qmail 23895 invoked by alias); 22 Sep 1999 11:27:24 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7998
+Received: (qmail 23888 invoked from network); 22 Sep 1999 11:27:23 -0000
+Date: Wed, 22 Sep 1999 13:27:15 +0200 (MET DST)
+Message-Id: <199909221127.NAA20072@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: completion listing
+
+
+This does:
+
+- Number-of-columns is calculated one a per-group basis, not for the
+  whole list. Unconditionally (I played with doing it only when the
+  minimum and maximum numbers of columns are different enough, but
+  even for small values allowed, the switch from one form to the other 
+  looked weird).
+- The LIST_PACKED option: if set, columns may have different widths
+  (if that gives less lines).
+- The LIST_ROWS_FIRST option to change order in which matches are
+  listed.
+- I cleans up the two listing functions -- that's what mainly makes
+  the patch look big. I wanted to do that ever since I wrote complist.
+- It changes (because it must) the way cursor-up/down moves the mark
+  in menu-selection. It tries to place the cursor at the column
+  nearest to that where it came from.
+
+Comments? Do the groups look uniform enough?
+
+Bye
+ Sven
+
+diff -u -r os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Tue Sep 21 10:25:51 1999
++++ Src/Zle/comp.h	Wed Sep 22 12:47:02 1999
+@@ -195,6 +195,14 @@
+     LinkList lfmatches;		/* list of matches without fignore */
+     LinkList lallccs;		/* list of used compctls */
+     int num;			/* number of this group */
++    /* The following is collected/used during listing. */
++    int dcount;			/* number of matches to list in columns */
++    int cols;			/* number of columns */
++    int lins;			/* number of lines */
++    int width;			/* column width */
++    int *widths;		/* column widths for listpacked */
++    int totl;			/* total length */
++    int shortest;		/* length of shortest match */
+ };
+ 
+ 
+@@ -320,6 +328,22 @@
+     char *dpar;			/* array to delete non-matches in (-D) */
+     char *disp;			/* array with display lists (-d) */
+ };
++
++/* List data. */
++
++typedef struct cldata *Cldata;
++
++struct cldata {
++    int columns;		/* screen width */
++    int lines;			/* screen height */
++    int valid;			/* no need to calculate anew */
++    int nlist;			/* number of matches to list */
++    int nlines;			/* number of lines needed */
++    int hidden;			/* != 0 if there are hidden matches */
++};
++
++typedef void (*CLPrintFunc)(Cmgroup, Cmatch *, int, int, int, int,
++			    char *, struct stat *);
+ 
+ /* Data given to hooks. */
+ 
+diff -u -r os/Zle/complist.c Src/Zle/complist.c
+--- os/Zle/complist.c	Tue Sep 21 10:25:51 1999
++++ Src/Zle/complist.c	Wed Sep 22 11:58:21 1999
+@@ -317,434 +317,198 @@
+ static int noselect, mselect, inselect, mcol, mline, mcols, mlines;
+ static Cmatch *mmatch, **mtab;
+ static Cmgroup mgroup, *mgtab;
++static struct listcols mcolors;
+ 
+-/* List the matches. Most of this is just taken from ilistmatches(),
+- * of course. */
++
++static void
++clprintm(Cmgroup g, Cmatch *mp, int mc, int ml, int lastc, int width,
++	 char *path, struct stat *buf)
++{
++    Cmatch m;
++    int len, cc;
++
++    if (!mp) {
++	zcputs(&mcolors, COL_MI);
++	len = width - 2;
++	while (len-- > 0)
++	    putc(' ', shout);
++	if (mcolors.cols[COL_EC])
++	    tputs(mcolors.cols[COL_EC], 1, putshout);
++	else
++	    zcputs(&mcolors, COL_NO);
++
++	return;
++    }
++    m = *mp;
++    if (m->disp && (m->flags & CMF_DISPLINE)) {
++	if (mselect >= 0) {
++	    int mm = (mcols * ml) + (mcols >> 1);
++
++	    mtab[mm] = mp;
++	    mgtab[mm] = g;
++	}
++	if (m->gnum == mselect) {
++	    mline = ml;
++	    mmatch = mp;
++	    mgroup = g;
++	    cc = COL_MA;
++	} else
++	    cc = COL_NO;
++	zcputs(&mcolors, cc);
++	printfmt(m->disp, 0, 1, 0);
++	if (mcolors.cols[COL_EC])
++	    tputs(mcolors.cols[COL_EC], 1, putshout);
++	else
++	    zcputs(&mcolors, COL_NO);
++    } else {
++	int mx;
++
++	if (g->widths) {
++	    int i;
++
++	    for (i = mx = 0; i < mc; i++)
++		mx += g->widths[i];
++	} else
++	    mx = mc * g->width;
++	mx += (width >> 1);
++
++	if (mselect >= 0) {
++	    int mm = mcols * ml;
++
++	    mtab[mx + mm] = mp;
++	    mgtab[mx + mm] = g;
++	}
++	if (m->gnum == mselect) {
++	    mcol = mx;
++	    mline = ml;
++	    mmatch = mp;
++	    mgroup = g;
++	    zcputs(&mcolors, COL_MA);
++	} else if (buf)
++	    putcolstr(&mcolors, path, buf->st_mode);
++	else
++	    zcputs(&mcolors, COL_NO);
++
++	nicezputs((m->disp ? m->disp : m->str), shout);
++	len = niceztrlen(m->disp ? m->disp : m->str);
++
++	if (isset(LISTTYPES)) {
++	    if (buf)
++		putc(file_type(buf->st_mode), shout);
++	    else
++		putc(' ', shout);
++	    len++;
++	}
++	len = width - len - 2;
++
++	while (len-- > 0)
++	    putc(' ', shout);
++
++	if (mcolors.cols[COL_EC])
++	    tputs(mcolors.cols[COL_EC], 1, putshout);
++	else
++	    zcputs(&mcolors, COL_NO);
++	if (!lastc) {
++	    zcputs(&mcolors, COL_NO);
++	    fputs("  ", shout);
++	    if (mcolors.cols[COL_EC])
++		tputs(mcolors.cols[COL_EC], 1, putshout);
++	    else
++		zcputs(&mcolors, COL_NO);
++	}
++    }
++}
+ 
+ static int
+ complistmatches(Hookdef dummy, Chdata dat)
+ {
+-    Cmgroup amatches = dat->matches, g;
+-    Cmatch *p, m;
+-    Cexpl *e;
+-    int nlines = 0, ncols, nlist = 0, longest = 1, pnl = 0, opl = 0;
+-    int of = isset(LISTTYPES), cf;
+-    int mc, ml = 0, cc, hasm = 0, cl = -1;
+-    struct listcols col;
++    Cmgroup oamatches = amatches;
++
++    amatches = dat->matches;
+ 
+     if (minfo.asked == 2) {
+ 	showinglist = 0;
++	amatches = oamatches;
+ 	return (noselect = 1);
+     }
+-    getcols(&col);
++    getcols(&mcolors);
+ 
+-    for (g = amatches; g; g = g->next) {
+-	char **pp = g->ylist;
+-	int nl = 0, l;
+-
+-	if (pp) {
+-	    /* We have an ylist, lets see, if it contains newlines. */
+-	    while (!nl && *pp)
+-		nl = !!strchr(*pp++, '\n');
+-
+-	    pp = g->ylist;
+-	    if (nl || !pp[1]) {
+-		/* Yup, there are newlines, count lines. */
+-		char *nlptr, *sptr;
+-
+-		g->flags |= CGF_LINES;
+-		noselect = 1;
+-		while ((sptr = *pp)) {
+-		    while (sptr && *sptr) {
+-			nlines += (nlptr = strchr(sptr, '\n'))
+-			    ? 1 + (nlptr-sptr)/columns
+-			    : strlen(sptr)/columns;
+-			sptr = nlptr ? nlptr+1 : NULL;
+-		    }
+-		    nlines++;
+-		    pp++;
+-		}
+-		nlines--;
+-	    } else {
+-		while (*pp) {
+-		    if ((l = strlen(*pp)) > longest)
+-			longest = l;
+-		    nlist++;
+-		    pp++;
+-		}
+-	    }
+-	} else {
+-	    for (p = g->matches; (m = *p); p++) {
+-		if (m->disp) {
+-		    if (m->flags & CMF_DISPLINE) {
+-			nlines += 1 + printfmt(m->disp, 0, 0, 0);
+-			g->flags |= CGF_HASDL;
+-		    } else if ((l = niceztrlen(m->disp)) > longest)
+-			longest = l;
+-		    nlist++;
+-		} else if (!(m->flags & CMF_NOLIST)) {
+-		    if ((l = niceztrlen(m->str)) > longest)
+-			longest = l;
+-		    nlist++;
+-		} else
+-		    noselect = 1;
+-	    }
+-	}
+-	if ((e = g->expls)) {
+-	    while (*e) {
+-		if ((*e)->count)
+-		    nlines += 1 + printfmt((*e)->str, (*e)->count, 0, 1);
+-		e++;
+-	    }
+-	}
+-    }
+-    longest += 2 + of;
+-    if ((ncols = columns / longest)) {
+-	for (g = amatches; g; g = g->next)
+-	    nlines += (g->lcount - g->llcount + ncols - 1) / ncols;
+-    } else {
+-	ncols = 1;
+-	opl = 1;
+-	for (g = amatches; g; g = g->next) {
+-	    char **pp = g->ylist;
+-
+-	    if (pp) {
+-		if (!(g->flags & CGF_LINES)) {
+-		    while (*pp) {
+-			nlines += 1 + (strlen(*pp) / columns);
+-			pp++;
+-		    }
+-		}
+-	    } else
+-		for (p = g->matches; (m = *p); p++)
+-		    if (m->disp) {
+-			if (m->flags & CMF_DISPLINE)
+-			    nlines += 1 + printfmt(m->disp, 0, 0, 0);
+-			else
+-			    nlines += 1 + (niceztrlen(m->disp) / columns);
+-		    } else if (!(m->flags & CMF_NOLIST))
+-			nlines += 1 + ((1 + niceztrlen(m->str)) / columns);
+-	}
+-    }
+-    cf = (isset(USEZLE) && !termflags && complastprompt && *complastprompt);
+-    if (!nlines || (mselect >= 0 && (!cf || (nlines + nlnct - 1) >= lines))) {
++    calclist();
++
++    if (!listdat.nlines || (mselect >= 0 &&
++			    (!(isset(USEZLE) && !termflags &&
++			       complastprompt && *complastprompt) ||
++			     (listdat.nlines + nlnct - 1) >= lines))) {
+ 	showinglist = listshown = 0;
+ 	noselect = 1;
++	amatches = oamatches;
+ 	return 1;
+     }
+-    /* Set the cursor below the prompt. */
++    if (listdat.hidden) {
++	noselect = 1;
++	mselect = -1;
++    }
+     if (inselect)
+ 	clearflag = 0;
+-    trashzle();
+-    showinglist = listshown = 0;
+-
+-    clearflag = cf;
+ 
+-    /* Maybe we have to ask if the user wants to see the list. */
+-    if ((!minfo.cur || !minfo.asked) &&
+-	((complistmax && nlist > complistmax) ||
+-	 (!complistmax && nlines >= lines))) {
+-	int qup;
+-	zsetterm();
+-	qup = printfmt("zsh: do you wish to see all %n possibilities? ", nlist, 1, 1);
+-	fflush(shout);
+-	if (getzlequery() != 'y') {
+-	    if (clearflag) {
+-		putc('\r', shout);
+-		tcmultout(TCUP, TCMULTUP, qup);
+-		if (tccan(TCCLEAREOD))
+-		    tcout(TCCLEAREOD);
+-		tcmultout(TCUP, TCMULTUP, nlnct);
+-	    } else
+-		putc('\n', shout);
+-	    noselect = 1;
+-	    if (minfo.cur)
+-		minfo.asked = 2;
+-	    return 1;
+-	}
+-	if (clearflag) {
+-	    putc('\r', shout);
+-	    tcmultout(TCUP, TCMULTUP, qup);
+-	    if (tccan(TCCLEAREOD))
+-		tcout(TCCLEAREOD);
+-	} else
+-	    putc('\n', shout);
+-	settyinfo(&shttyinfo);
+-	if (minfo.cur)
+-	    minfo.asked = 1;
++    if (asklist()) {
++	amatches = oamatches;
++	return 1;
+     }
+     if (mselect >= 0) {
+ 	int i;
+ 
+-	i = ncols * nlines;
++	i = columns * listdat.nlines;
+ 	free(mtab);
+ 	mtab = (Cmatch **) zalloc(i * sizeof(Cmatch **));
+ 	memset(mtab, 0, i * sizeof(Cmatch **));
+ 	free(mgtab);
+ 	mgtab = (Cmgroup *) zalloc(i * sizeof(Cmgroup));
+ 	memset(mgtab, 0, i * sizeof(Cmgroup));
+-	mcols = ncols;
+-	mlines = cl = nlines;
+-	if (cl < 2) {
+-	    cl = -1;
+-	    if (tccan(TCCLEAREOD))
+-		tcout(TCCLEAREOD);
+-	}
++	mcols = columns;
++	mlines = listdat.nlines;
+     }
+-    /* Now print the matches. */
+     last_col = COL_NO - 1;
+-    g = amatches;
+-    while (g) {
+-	char **pp = g->ylist;
+-
+-	if ((e = g->expls)) {
+-	    int l;
+ 
+-	    while (*e) {
+-		if ((*e)->count) {
+-		    if (pnl) {
+-			putc('\n', shout);
+-			pnl = 0;
+-			ml++;
+-			if (cl >= 0 && --cl <= 1) {
+-			    cl = -1;
+-			    if (tccan(TCCLEAREOD))
+-				tcout(TCCLEAREOD);
+-			}
+-		    }
+-		    l = printfmt((*e)->str, (*e)->count, 1, 1);
+-		    ml += l;
+-		    if (cl >= 0 && (cl -= l) <= 1) {
+-			cl = -1;
+-			if (tccan(TCCLEAREOD))
+-			    tcout(TCCLEAREOD);
+-		    }
+-		    pnl = 1;
+-		}
+-		e++;
+-	    }
+-	}
+-	if (pp && *pp) {
+-	    if (pnl) {
+-		putc('\n', shout);
+-		pnl = 0;
+-		ml++;
+-		if (cl >= 0 && --cl <= 1) {
+-		    cl = -1;
+-		    if (tccan(TCCLEAREOD))
+-			tcout(TCCLEAREOD);
+-		}
+-	    }
+-	    if (g->flags & CGF_LINES) {
+-		while (*pp) {
+-		    zputs(*pp, shout);
+-		    if (*++pp)
+-			putc('\n', shout);
+-		}
+-	    } else {
+-		int n = g->lcount, nl = (n + ncols - 1) / ncols, nc = nl, i, a;
+-		char **pq;
+-
+-		while (n && nl--) {
+-		    i = ncols;
+-		    mc = 0;
+-		    pq = pp;
+-		    while (n && i--) {
+-			if (pq - g->ylist >= g->lcount)
+-			    break;
+-			zputs(*pq, shout);
+-			if (i) {
+-			    a = longest - strlen(*pq);
+-			    while (a--)
+-				putc(' ', shout);
+-			}
+-			pq += nc;
+-			n--;
+-		    }
+-		    if (n) {
+-			putc('\n', shout);
+-			ml++;
+-			if (cl >= 0 && --cl <= 1) {
+-			    cl = -1;
+-			    if (tccan(TCCLEAREOD))
+-				tcout(TCCLEAREOD);
+-			}
+-		    }
+-		    pp++;
+-		}
+-	    }
+-	} else if (g->lcount) {
+-	    int n = g->lcount - g->llcount, nl = (n + ncols - 1) / ncols;
+-	    int nc = nl, i, j, a = 0;
+-	    int zt;
+-	    Cmatch *q;
+-
+-	    if (g->flags & CGF_HASDL) {
+-		for (p = g->matches; (m = *p); p++)
+-		    if (m->disp && (m->flags & CMF_DISPLINE)) {
+-			if (pnl) {
+-			    putc('\n', shout);
+-			    pnl = 0;
+-			    ml++;
+-			    if (cl >= 0 && --cl <= 1) {
+-				cl = -1;
+-				if (tccan(TCCLEAREOD))
+-				    tcout(TCCLEAREOD);
+-			    }
+-			}
+-			hasm = 1;
+-			if (mselect >= 0) {
+-			    for (i = 0; i < ncols; i++) {
+-				mtab[i + (ncols * ml)] = p;
+-				mgtab[i + (ncols * ml)] = g;
+-			    }
+-			}
+-			if (m->gnum == mselect) {
+-			    mline = ml;
+-			    mmatch = p;
+-			    mgroup = g;
+-			    cc = COL_MA;
+-			} else
+-			    cc = COL_NO;
+-			zcputs(&col, cc);
+-			printfmt(m->disp, 0, 1, 0);
+-			if (col.cols[COL_EC])
+-			    tputs(col.cols[COL_EC], 1, putshout);
+-			else
+-			    zcputs(&col, COL_NO);
+-			pnl = 1;
+-		    }
+-	    }
+-	    if (n && pnl) {
+-		putc('\n', shout);
+-		pnl = 0;
+-		ml++;
+-		if (cl >= 0 && --cl <= 1) {
+-		    cl = -1;
+-		    if (tccan(TCCLEAREOD))
+-			tcout(TCCLEAREOD);
+-		}
+-	    }
+-	    for (p = skipnolist(g->matches); n && nl--;) {
+-		i = ncols;
+-		mc = 0;
+-		q = p;
+-		while (n && i--) {
+-		    if (!(m = *q)) {
+-			zcputs(&col, COL_MI);
+-			a = longest - 2;
+-			while (a--)
+-			    putc(' ', shout);
+-			if (col.cols[COL_EC])
+-			    tputs(col.cols[COL_EC], 1, putshout);
+-			else
+-			    zcputs(&col, COL_NO);
+-			break;
+-		    }
+-		    hasm = 1;
+-		    if (mselect >= 0) {
+-			mtab[mc + (ncols * ml)] = q;
+-			mgtab[mc + (ncols * ml)] = g;
+-		    }
+-		    if (m->gnum == mselect) {
+-			mcol = mc;
+-			mline = ml;
+-			mmatch = q;
+-			mgroup = g;
+-			cc = COL_MA;
+-		    } else
+-			cc = -1;
+-		    if (!m->disp && m->flags & CMF_FILE) {
+-			struct stat buf;
+-			char *pb;
+-
+-			pb = (char *) zhalloc((m->prpre ? strlen(m->prpre) : 0) +
+-					     3 + strlen(m->str));
+-			sprintf(pb, "%s%s", (m->prpre ? m->prpre : "./"),
+-				m->str);
+-
+-			zt = ztat(pb, &buf, 1);
+-			if (cc >= 0)
+-			    zcputs(&col, cc);
+-			else if (zt)
+-			    zcputs(&col, COL_NO);
+-			else
+-			    putcolstr(&col, pb, buf.st_mode);
+-			nicezputs(m->str, shout);
+-			if (zt)
+-			    putc(' ', shout);
+-			else
+-			    putc(file_type(buf.st_mode), shout);
+-		    } else {
+-			zcputs(&col, cc >= 0 ? cc : COL_NO);
+-			nicezputs((m->disp ? m->disp : m->str), shout);
+-			if (of)
+-			    putc(' ', shout);
+-		    }
+-		    a = longest - niceztrlen(m->disp ? m->disp : m->str) - 2 - of;
+-		    while (a-- > 0)
+-			putc(' ', shout);
+-		    if (col.cols[COL_EC])
+-			tputs(col.cols[COL_EC], 1, putshout);
+-		    else
+-			zcputs(&col, COL_NO);
+-		    if (i) {
+-			zcputs(&col, COL_NO);
+-			fputs("  ", shout);
+-			if (col.cols[COL_EC])
+-			    tputs(col.cols[COL_EC], 1, putshout);
+-			else
+-			    zcputs(&col, COL_NO);
+-		    }
+-		    if (--n)
+-			for (j = nc; j && *q; j--)
+-			    q = skipnolist(q + 1);
+-		    mc++;
+-		}
+-		if (i > 0) {
+-		    zcputs(&col, COL_MI);
+-		    a = longest - 2;
+-		    while (a--)
+-			putc(' ', shout);
+-		    if (col.cols[COL_EC])
+-			tputs(col.cols[COL_EC], 1, putshout);
+-		    else
+-			zcputs(&col, COL_NO);
+-		}
+-		if (n) {
+-		    putc('\n', shout);
+-		    ml++;
+-		    if (cl >= 0 && --cl <= 1) {
+-			cl = -1;
+-			if (tccan(TCCLEAREOD))
+-			    tcout(TCCLEAREOD);
+-		    }
+-		    if (n && nl)
+-			p = skipnolist(p + 1);
+-		}
+-	    }
+-	}
+-	if (g->lcount)
+-	    pnl = 1;
+-	g = g->next;
+-    }
+-    if (clearflag) {
+-	/* Move the cursor up to the prompt, if always_last_prompt *
+-	 * is set and all that...                                  */
+-	if ((nlines += nlnct - 1) < lines) {
+-	    tcmultout(TCUP, TCMULTUP, nlines);
+-	    showinglist = -1;
+-	} else
+-	    clearflag = 0, putc('\n', shout);
+-    } else
+-	putc('\n', shout);
+-    listshown = (clearflag ? 1 : -1);
+-    if (!hasm || nlines >= lines)
++    if (!printlist(1, clprintm) || listdat.nlines >= lines)
+ 	noselect = 1;
+ 
++    amatches = oamatches;
++
+     return noselect;
+ }
+ 
++static int
++adjust_mcol(Cmatch ***tabp, Cmgroup **grp)
++{
++    Cmatch **tab = *tabp;
++    int p, n, c;
++
++    tab -= mcol;
++
++    for (p = mcol; p >= 0 && !tab[p]; p--);
++    for (n = mcol; n < mcols && !tab[n]; n++);
++    if (n == mcols)
++	n = -1;
++
++    if (p < 0) {
++	if (n < 0)
++	    return 1;
++	c = n;
++    } else if (n < 0)
++	c = p;
++    else
++	c = ((mcol - p) < (n - mcol) ? p : n);
++
++    *tabp = tab + c;
++    if (grp)
++	*grp = *grp + c - mcol;
++
++    mcol = c;
++    
++    return 0;
++}
++
+ typedef struct menustack *Menustack;
+ 
+ struct menustack {
+@@ -887,6 +651,8 @@
+ 		    mline++;
+ 		    p += mcols;
+ 		}
++		if (adjust_mcol(&p, NULL))
++		    continue;
+ 	    } while (!*p);
+ 	} else if (cmd == Th(z_uphistory) ||
+ 		   cmd == Th(z_uplineorhistory) ||
+@@ -900,6 +666,8 @@
+ 		    mline--;
+ 		    p -= mcols;
+ 		}
++		if (adjust_mcol(&p, NULL))
++		    continue;
+ 	    } while (!*p);
+ 	} else if (cmd == Th(z_forwardchar) || cmd == Th(z_viforwardchar)) {
+ 	    do {
+@@ -958,6 +726,8 @@
+ 		    p += mcols;
+ 		    pg += mcols;
+ 		}
++		if (adjust_mcol(&p, &pg))
++		    continue;
+ 	    } while (ol != mline && (*pg == g || !*pg));
+ 	} else if (cmd == Th(z_backwardword) ||
+ 		   cmd == Th(z_emacsbackwardword) ||
+@@ -975,6 +745,8 @@
+ 		    p -= mcols;
+ 		    pg -= mcols;
+ 		}
++		if (adjust_mcol(&p, &pg))
++		    continue;
+ 	    } while (ol != mline && (*pg == g || !*pg));
+ 	} else if (cmd == Th(z_completeword) ||
+ 		   cmd == Th(z_expandorcomplete) ||
+diff -u -r os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Tue Sep 21 16:08:56 1999
++++ Src/Zle/zle_tricky.c	Wed Sep 22 13:05:43 1999
+@@ -155,6 +155,11 @@
+ /**/
+ int validlist;
+ 
++/* Information about the matches for listing. */
++
++/**/
++struct cldata listdat;
++
+ /* This flag is non-zero if we are completing a pattern (with globcomplete) */
+ 
+ static int ispattern, haspattern;
+@@ -7087,6 +7092,7 @@
+     if (validlist)
+ 	freematches();
+     lastambig = menucmp = menuacc = validlist = showinglist = fromcomp = 0;
++    listdat.valid = 0;
+     if (listshown < 0)
+ 	listshown = 0;
+     minfo.cur = NULL;
+@@ -7496,6 +7502,8 @@
+ 	    *cp = NULL;
+ 	} else
+ 	    n->ccs = NULL;
++	n->widths = NULL;
++
+ 	g = g->next;
+     }
+     for (g = amatches; g; g = g->next) {
+@@ -7575,6 +7583,7 @@
+ 	g = n;
+     }
+     hasperm = 0;
++    listdat.valid = 0;
+ }
+ 
+ /* Insert the given string into the command line.  If move is non-zero, *
+@@ -8531,21 +8540,26 @@
+ }
+ 
+ /**/
+-int
+-ilistmatches(Hookdef dummy, Chdata dat)
++void
++calclist(void)
+ {
+     Cmgroup g;
+     Cmatch *p, m;
+     Cexpl *e;
+-    int nlines = 0, ncols, nlist = 0, longest = 1, pnl = 0;
+-    int of = isset(LISTTYPES), opl = 0;
++    int hidden = 0, nlist = 0, nlines = 0, add = 2 + isset(LISTTYPES);
++    int max = 0, i;
++    VARARR(int, mlens, nmatches + 1);
++
++    if (listdat.valid && lines == listdat.lines && columns == listdat.columns)
++	return;
+ 
+     for (g = amatches; g; g = g->next) {
+ 	char **pp = g->ylist;
+-	int nl = 0, l;
++	int nl = 0, l, glong = 1, gshort = columns, ndisp = 0, totl = 0;
+ 
+ 	if (pp) {
+ 	    /* We have an ylist, lets see, if it contains newlines. */
++	    hidden = 1;
+ 	    while (!nl && *pp)
+ 		nl = !!strchr(*pp++, '\n');
+ 
+@@ -8555,7 +8569,7 @@
+ 		char *nlptr, *sptr;
+ 
+ 		g->flags |= CGF_LINES;
+-		
++		hidden = 1;
+ 		while ((sptr = *pp)) {
+ 		    while (sptr && *sptr) {
+ 			nlines += (nlptr = strchr(sptr, '\n'))
+@@ -8569,8 +8583,13 @@
+ 		nlines--;
+ 	    } else {
+ 		while (*pp) {
+-		    if ((l = strlen(*pp)) > longest)
+-			longest = l;
++		    l = strlen(*pp);
++		    ndisp++;
++		    if (l > glong)
++			glong = l;
++		    if (l < gshort)
++			gshort = l;
++		    totl += l;
+ 		    nlist++;
+ 		    pp++;
+ 		}
+@@ -8581,14 +8600,29 @@
+ 		    if (m->flags & CMF_DISPLINE) {
+ 			nlines += 1 + printfmt(m->disp, 0, 0, 0);
+ 			g->flags |= CGF_HASDL;
+-		    } else if ((l = niceztrlen(m->disp)) > longest)
+-			longest = l;
++		    } else {
++			l = niceztrlen(m->disp);
++			ndisp++;
++			if (l > glong)
++			    glong = l;
++			if (l < gshort)
++			    gshort = l;
++			totl += l;
++			mlens[m->gnum] = l;
++		    }
+ 		    nlist++;
+ 		} else if (!(m->flags & CMF_NOLIST)) {
+-		    if ((l = niceztrlen(m->str)) > longest)
+-			longest = l;
++		    l = niceztrlen(m->str);
++		    ndisp++;
++		    if (l > glong)
++			glong = l;
++		    if (l < gshort)
++			gshort = l;
++		    totl += l;
++		    mlens[m->gnum] = l;
+ 		    nlist++;
+-		}
++		} else
++		    hidden = 1;
+ 	    }
+ 	}
+ 	if ((e = g->expls)) {
+@@ -8598,39 +8632,228 @@
+ 		e++;
+ 	    }
+ 	}
++	g->totl = totl + (ndisp * add);
++	g->dcount = ndisp;
++	g->width = glong + add;
++	g->shortest = gshort + add;
++	if ((g->cols = columns / g->width) > g->dcount)
++	    g->cols = g->dcount;
++	if (g->cols) {
++	    i = g->cols * g->width - add;
++	    if (i > max)
++		max = i;
++	}
+     }
+-    longest += 2 + of;
+-    if ((ncols = columns / longest)) {
+-	for (g = amatches; g; g = g->next)
+-	    nlines += (g->lcount - g->llcount + ncols - 1) / ncols;
+-    } else {
+-	ncols = 1;
+-	opl = 1;
+-	for (g = amatches; g; g = g->next) {
+-	    char **pp = g->ylist;
++    for (g = amatches; g; g = g->next) {
++	char **pp;
++	int glines = 0;
+ 
+-	    if (pp) {
+-		if (!(g->flags & CGF_LINES)) {
+-		    while (*pp) {
+-			nlines += 1 + (strlen(*pp) / columns);
+-			pp++;
+-		    }
++	zfree(g->widths, 0);
++	g->widths = NULL;
++
++	if ((pp = g->ylist)) {
++	    if (!(g->flags & CGF_LINES)) {
++		if (g->cols) {
++		    glines += (arrlen(pp) + g->cols - 1) / g->cols;
++		    if (g->cols > 1)
++			g->width += (max - (g->width * g->cols - add)) / g->cols;
++		} else {
++		    g->cols = 1;
++		    g->width = 1;
++
++		    while (*pp)
++			glines += 1 + (strlen(*pp++) / columns);
+ 		}
+-	    } else
++	    }
++	} else {
++	    if (g->cols) {
++		glines += (g->dcount + g->cols - 1) / g->cols;
++		if (g->cols > 1)
++		    g->width += (max - (g->width * g->cols - add)) / g->cols;
++	    } else if (!(g->flags & CGF_LINES)) {
++		g->cols = 1;
++		g->width = 0;
++
+ 		for (p = g->matches; (m = *p); p++)
+ 		    if (m->disp) {
+-			if (m->flags & CMF_DISPLINE)
+-			    nlines += 1 + printfmt(m->disp, 0, 0, 0);
+-			else
+-			    nlines += 1 + (niceztrlen(m->disp) / columns);
++			if (!(m->flags & CMF_DISPLINE))
++			    glines += 1 + (mlens[m->gnum] / columns);
+ 		    } else if (!(m->flags & CMF_NOLIST))
+-			nlines += 1 + ((1 + niceztrlen(m->str)) / columns);
++			glines += 1 + ((1 + mlens[m->gnum]) / columns);
++	    }
+ 	}
++	g->lins = glines;
++	nlines += glines;
+     }
+-    if (!nlines) {
+-	showinglist = listshown = 0;
+-	return 1;
++    if (isset(LISTPACKED)) {
++	char **pp;
++	int *ws, j, k, cl, ml, mm;
++
++	for (g = amatches; g; g = g->next) {
++	    ws = g->widths = (int *) zalloc(columns * sizeof(int));
++	    memset(ws, 0, columns * sizeof(int));
++	    i = g->lins;
++	    mm = g->cols;
++	    cl = 0;
++
++	    if ((pp = g->ylist)) {
++		if (!(g->flags & CGF_LINES)) {
++		    int yl = arrlen(pp), i;
++		    VARARR(int, ylens, yl);
++
++		    for (i = 0; *pp; i++, pp++)
++			ylens[i] = strlen(*pp) + add;
++
++		    if (isset(LISTROWSFIRST)) {
++			int x, l = 0, v;
++
++			for (mm = columns / g->shortest; mm > g->cols; mm--) {
++			    for (j = i = ml = cl = l = v = x = 0,  k = g->dcount;
++				 k > 0; k--) {
++				if (ylens[j] > ml)
++				    ml = ylens[j];
++				j += mm;
++				v++;
++				if (j >= g->dcount) {
++				    if ((cl += ml) >= columns)
++					break;
++				    ws[x++] = ml;
++				    ml = 0;
++				    j = ++i;
++				    if (v > l)
++					l = v;
++				    v = 0;
++				}
++			    }
++			    if (j < g->dcount) {
++				ws[x++] = ml;
++				cl += ml;
++			    }
++			    if (!k && cl < columns)
++				break;
++			}
++			if (mm > g->cols)
++			    i = l;
++		    } else {
++			for (i = ((g->totl + columns) / columns);
++			     i < g->lins; i++) {
++			    for (pp = g->ylist, j = k = cl = ml = mm;
++				 *pp; j++, pp++) {
++				if (ylens[j] > ml)
++				    ml = ylens[j];
++				if (++k == i) {
++				    if ((cl += ml) >= columns)
++					break;
++				    ws[mm++] = ml;
++				    ml = k = 0;
++				}
++			    }
++			    if (k) {
++				ws[mm++] = ml;
++				cl += ml;
++			    }
++			    if (j == yl && cl < columns)
++				break;
++			}
++		    }
++		}
++	    } else if (g->width) {
++		if (isset(LISTROWSFIRST)) {
++		    int x, l = 0, v, al;
++
++		    for (mm = columns / g->shortest; mm > g->cols; mm--) {
++			for (j = i = ml = cl = l = v = x = 0,  k = g->dcount;
++			     k > 0; k--) {
++			    m = g->matches[j];
++			    if (!(m->flags & (m->disp ? CMF_DISPLINE :
++					      CMF_NOLIST))) {
++				al = mlens[m->gnum] + add;
++				if (al > ml)
++				    ml = al;
++				j += mm;
++				v++;
++				if (j >= g->dcount) {
++				    if ((cl += ml) >= columns)
++					break;
++				    ws[x++] = ml;
++				    ml = 0;
++				    j = ++i;
++				    if (v > l)
++					l = v;
++				    v = 0;
++				}
++			    }
++			}
++			if (j < g->dcount) {
++			    ws[x++] = ml;
++			    cl += ml;
++			}
++			if (!k && cl < columns)
++			    break;
++		    }
++		    if (mm > g->cols)
++			i = l;
++		} else {
++		    int al;
++
++		    for (i = ((g->totl + columns) / columns);
++			 i < g->lins; i++) {
++			for (p = g->matches, j = k = cl = ml = mm = 0;
++			     (m = *p); p++, j++) {
++			    if (!(m->flags & (m->disp ? CMF_DISPLINE :
++					      CMF_NOLIST))) {
++				al = mlens[m->gnum] + add;
++				if (al > ml)
++				    ml = al;
++				if (++k == i) {
++				    if ((cl += ml) >= columns)
++					break;
++				    ws[mm++] = ml;
++				    ml = k = 0;
++				}
++			    }
++			}
++			if (k) {
++			    ws[mm++] = ml;
++			    cl += ml;
++			}
++			if (j == g->dcount && cl < columns)
++			    break;
++		    }
++		}
++	    }
++	    if (i == g->lins) {
++		zfree(ws, columns * sizeof(int));
++		g->widths = NULL;
++	    } else {
++		nlines += i - g->lins;
++		g->lins = i;
++		g->cols = mm;
++	    }
++	    g->totl = cl;
++	    cl -= add;
++	    if (cl > max)
++		max = cl;
++	}
++	for (g = amatches; g; g = g->next) {
++	    if (g->widths) {
++		int *p, a = (max - g->totl - add) / g->cols;
++
++		for (i = g->cols, p = g->widths; i; i--, p++)
++		    *p += a;
++	    } else if (g->width && g->cols > 1)
++		g->width += (max - (g->width * g->cols - add)) / g->cols;
++	}
+     }
++    listdat.valid = 1;
++    listdat.hidden = hidden;
++    listdat.nlist = nlist;
++    listdat.nlines = nlines;
++}
++
++/**/
++int asklist(void)
++{
+     /* Set the cursor below the prompt. */
+     trashzle();
+     showinglist = listshown = 0;
+@@ -8640,12 +8863,12 @@
+ 
+     /* Maybe we have to ask if the user wants to see the list. */
+     if ((!minfo.cur || !minfo.asked) &&
+-	((complistmax && nlist > complistmax) ||
+-	 (!complistmax && nlines >= lines))) {
++	((complistmax && listdat.nlist > complistmax) ||
++	 (!complistmax && listdat.nlines >= lines))) {
+ 	int qup;
+ 	zsetterm();
+ 	qup = printfmt("zsh: do you wish to see all %n possibilities? ",
+-		       nlist, 1, 1);
++		       listdat.nlist, 1, 1);
+ 	fflush(shout);
+ 	if (getzlequery() != 'y') {
+ 	    if (clearflag) {
+@@ -8658,7 +8881,7 @@
+ 		putc('\n', shout);
+ 	    if (minfo.cur)
+ 		minfo.asked = 2;
+-	    return 0;
++	    return 1;
+ 	}
+ 	if (clearflag) {
+ 	    putc('\r', shout);
+@@ -8671,20 +8894,50 @@
+ 	if (minfo.cur)
+ 	    minfo.asked = 1;
+     }
++    return 0;
++}
+ 
+-    /* Now print the matches. */
++/**/
++int
++printlist(int over, CLPrintFunc printm)
++{
++    Cmgroup g;
++    Cmatch *p, m;
++    Cexpl *e;
++    int pnl = 0, cl = (over ? listdat.nlines : -1);
++    int mc, ml = 0, printed = 0;
++
++    if (cl < 2) {
++	cl = -1;
++	if (tccan(TCCLEAREOD))
++	    tcout(TCCLEAREOD);
++    }
+     g = amatches;
+     while (g) {
+ 	char **pp = g->ylist;
+ 
+ 	if ((e = g->expls)) {
++	    int l;
++
+ 	    while (*e) {
+ 		if ((*e)->count) {
+ 		    if (pnl) {
+ 			putc('\n', shout);
+ 			pnl = 0;
++			ml++;
++			if (cl >= 0 && --cl <= 1) {
++			    cl = -1;
++			    if (tccan(TCCLEAREOD))
++				tcout(TCCLEAREOD);
++			}
++		    }
++		    l = printfmt((*e)->str, (*e)->count, 1, 1);
++		    ml += l;
++		    if (cl >= 0 && (cl -= l) <= 1) {
++			cl = -1;
++			if (tccan(TCCLEAREOD))
++			    tcout(TCCLEAREOD);
+ 		    }
+-		    printfmt((*e)->str, (*e)->count, 1, 1);
+ 		    pnl = 1;
+ 		}
+ 		e++;
+@@ -8694,6 +8947,12 @@
+ 	    if (pnl) {
+ 		putc('\n', shout);
+ 		pnl = 0;
++		ml++;
++		if (cl >= 0 && --cl <= 1) {
++		    cl = -1;
++		    if (tccan(TCCLEAREOD))
++			tcout(TCCLEAREOD);
++		}
+ 	    }
+ 	    if (g->flags & CGF_LINES) {
+ 		while (*pp) {
+@@ -8702,60 +8961,86 @@
+ 			putc('\n', shout);
+ 		}
+ 	    } else {
+-		int n = g->lcount, nl = (n + ncols - 1) / ncols, nc = nl, i, a;
++		int n = g->lcount, nl, nc, i, a;
+ 		char **pq;
+ 
++		nl = nc = g->lins;
++
+ 		while (n && nl--) {
+-		    i = ncols;
++		    i = g->cols;
++		    mc = 0;
+ 		    pq = pp;
+ 		    while (n && i--) {
+ 			if (pq - g->ylist >= g->lcount)
+ 			    break;
+ 			zputs(*pq, shout);
+ 			if (i) {
+-			    a = longest - strlen(*pq);
++			    a = (g->widths ? g->widths[mc] : g->width) -
++				strlen(*pq);
+ 			    while (a--)
+ 				putc(' ', shout);
+ 			}
+-			pq += nc;
++			pq += (isset(LISTROWSFIRST) ? 1 : nc);
++			mc++;
+ 			n--;
+ 		    }
+-		    if (n)
++		    if (n) {
+ 			putc('\n', shout);
+-		    pp++;
++			ml++;
++			if (cl >= 0 && --cl <= 1) {
++			    cl = -1;
++			    if (tccan(TCCLEAREOD))
++				tcout(TCCLEAREOD);
++			}
++		    }
++		    pp += (isset(LISTROWSFIRST) ? g->cols : 1);
+ 		}
+ 	    }
+ 	} else if (g->lcount) {
+-	    int n = g->lcount - g->llcount, nl = (n + ncols - 1) / ncols;
+-	    int nc = nl, i, j, a = 0;
++	    int n = g->dcount, nl, nc, i, j, wid;
+ 	    Cmatch *q;
+ 
++	    nl = nc = g->lins;
++
+ 	    if (g->flags & CGF_HASDL) {
+ 		for (p = g->matches; (m = *p); p++)
+ 		    if (m->disp && (m->flags & CMF_DISPLINE)) {
+ 			if (pnl) {
+ 			    putc('\n', shout);
+ 			    pnl = 0;
++			    ml++;
++			    if (cl >= 0 && --cl <= 1) {
++				cl = -1;
++				if (tccan(TCCLEAREOD))
++				    tcout(TCCLEAREOD);
++			    }
+ 			}
+-			printfmt(m->disp, 0, 1, 0);
++			printed++;
++			printm(g, p, mc, ml, 1, 0, NULL, NULL);
+ 			pnl = 1;
+ 		    }
+ 	    }
+ 	    if (n && pnl) {
+ 		putc('\n', shout);
+ 		pnl = 0;
++		ml++;
++		if (cl >= 0 && --cl <= 1) {
++		    cl = -1;
++		    if (tccan(TCCLEAREOD))
++			tcout(TCCLEAREOD);
++		}
+ 	    }
+ 	    for (p = skipnolist(g->matches); n && nl--;) {
+-		i = ncols;
++		i = g->cols;
++		mc = 0;
+ 		q = p;
+ 		while (n && i--) {
+-		    if (!(m = *q))
++		    wid = (g->widths ? g->widths[mc] : g->width);
++		    if (!(m = *q)) {
++			printm(g, NULL, mc, ml, (!i), wid, NULL, NULL);
+ 			break;
+-		    nicezputs((m->disp ? m->disp : m->str), shout);
+-		    if (i)
+-			a = longest - niceztrlen(m->disp ? m->disp : m->str);
+-
+-		    if (of && !m->disp && m->flags & CMF_FILE) {
++		    }
++		    if (!m->disp && (m->flags & CMF_FILE)) {
+ 			struct stat buf;
+ 			char *pb;
+ 
+@@ -8765,23 +9050,34 @@
+ 				m->str);
+ 
+ 			if (ztat(pb, &buf, 1))
+-			    putc(' ', shout);
++			    printm(g, q, mc, ml, (!i), wid, NULL, NULL);
+ 			else
+-			    putc(file_type(buf.st_mode), shout);
++			    printm(g, q, mc, ml, (!i), wid, pb, &buf);
++		    } else
++			printm(g, q, mc, ml, (!i), wid, NULL, NULL);
++
++		    printed++;
+ 
+-			a--;
+-		    }
+-		    if (i && !opl && a > 0)
+-			while (a--)
+-			    putc(' ', shout);
+ 		    if (--n)
+-			for (j = nc; j && *q; j--)
++			for (j = (isset(LISTROWSFIRST) ? 1 : nc); j && *q; j--)
+ 			    q = skipnolist(q + 1);
++		    mc++;
+ 		}
++		while (i-- > 0)
++		    printm(g, NULL, mc, ml, (!i),
++			   (g->widths ? g->widths[mc] : g->width), NULL, NULL);
++
+ 		if (n) {
+ 		    putc('\n', shout);
+-		    if (n && nl)
+-			p = skipnolist(p + 1);
++		    ml++;
++		    if (cl >= 0 && --cl <= 1) {
++			cl = -1;
++			if (tccan(TCCLEAREOD))
++			    tcout(TCCLEAREOD);
++		    }
++		    if (nl)
++			for (j = (isset(LISTROWSFIRST) ? g->cols : 1); j && *p; j--)
++			    p = skipnolist(p + 1);
+ 		}
+ 	    }
+ 	}
+@@ -8792,14 +9088,68 @@
+     if (clearflag) {
+ 	/* Move the cursor up to the prompt, if always_last_prompt *
+ 	 * is set and all that...                                  */
+-	if ((nlines += nlnct - 1) < lines) {
+-	    tcmultout(TCUP, TCMULTUP, nlines);
++	if ((ml = listdat.nlines + nlnct - 1) < lines) {
++	    tcmultout(TCUP, TCMULTUP, ml);
+ 	    showinglist = -1;
+ 	} else
+ 	    clearflag = 0, putc('\n', shout);
+     } else
+ 	putc('\n', shout);
+     listshown = (clearflag ? 1 : -1);
++
++    return printed;
++}
++
++static void
++iprintm(Cmgroup g, Cmatch *mp, int mc, int ml, int lastc, int width,
++	char *path, struct stat *buf)
++{
++    Cmatch m;
++    int len = 0;
++
++    if (!mp)
++	return;
++
++    m = *mp;
++    if (m->disp) {
++	if (m->flags & CMF_DISPLINE) {
++	    printfmt(m->disp, 0, 1, 0);
++	    return;
++	}
++	nicezputs(m->disp, shout);
++	len = niceztrlen(m->disp);
++    } else {
++	nicezputs(m->str, shout);
++	len = niceztrlen(m->str);
++
++	if (isset(LISTTYPES)) {
++	    if (buf)
++		putc(file_type(buf->st_mode), shout);
++	    len++;
++	}
++    }
++    if (!lastc) {
++	len = width - len;
++
++	while (len-- > 0)
++	    putc(' ', shout);
++    }
++}
++
++/**/
++int
++ilistmatches(Hookdef dummy, Chdata dat)
++{
++    calclist();
++
++    if (!listdat.nlines) {
++	showinglist = listshown = 0;
++	return 1;
++    }
++    if (asklist())
++	return 0;
++
++    printlist(0, iprintm);
+ 
+     return 0;
+ }
+diff -u -r os/options.c Src/options.c
+--- os/options.c	Tue Sep 21 15:36:31 1999
++++ Src/options.c	Wed Sep 22 11:47:15 1999
+@@ -142,6 +142,8 @@
+ {NULL, "kshoptionprint",      OPT_EMULATE|OPT_KSH,	 KSHOPTIONPRINT},
+ {NULL, "listambiguous",	      OPT_ALL,			 LISTAMBIGUOUS},
+ {NULL, "listbeep",	      OPT_ALL,			 LISTBEEP},
++{NULL, "listpacked",	      0,			 LISTPACKED},
++{NULL, "listrowsfirst",	      0,			 LISTROWSFIRST},
+ {NULL, "listtypes",	      OPT_ALL,			 LISTTYPES},
+ {NULL, "localoptions",	      OPT_EMULATE|OPT_KSH,	 LOCALOPTIONS},
+ {NULL, "localtraps",	      OPT_EMULATE|OPT_KSH,	 LOCALTRAPS},
+diff -u -r os/zsh.h Src/zsh.h
+--- os/zsh.h	Tue Sep 21 15:36:32 1999
++++ Src/zsh.h	Wed Sep 22 11:36:15 1999
+@@ -1315,6 +1315,8 @@
+     KSHOPTIONPRINT,
+     LISTAMBIGUOUS,
+     LISTBEEP,
++    LISTPACKED,
++    LISTROWSFIRST,
+     LISTTYPES,
+     LOCALOPTIONS,
+     LOCALTRAPS,
+diff -u od/Zsh/options.yo Doc/Zsh/options.yo
+--- od/Zsh/options.yo	Wed Sep 22 09:03:35 1999
++++ Doc/Zsh/options.yo	Wed Sep 22 13:18:05 1999
+@@ -603,6 +603,19 @@
+ causes the shell to beep if the option tt(BEEP) is also set; this may
+ be modified if completion is called from a user-defined widget.
+ )
++pindex(LIST_PACKED)
++cindex(completion, listing)
++item(tt(LIST_PACKED))(
++Try to make the completion list smaller (occupying less lines) by
++printing the matches in columns with different widths.
++)
++pindex(LIST_ROWS_FIRST)
++cindex(completion, listing order)
++item(tt(LIST_ROWS_FIRST))(
++Lay out the matches in completion lists sorted horizontally, that is,
++the second match is to the right of the first one, not under it as
++usual.
++)
+ pindex(LIST_TYPES)
+ cindex(marking file types)
+ cindex(files, marking type of)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

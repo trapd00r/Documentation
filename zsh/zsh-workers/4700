@@ -1,0 +1,155 @@
+From zsh-workers-request@math.gatech.edu Fri Dec 04 09:55:20 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27949 invoked from network); 4 Dec 1998 09:55:18 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 4 Dec 1998 09:55:18 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id EAA14264;
+	Fri, 4 Dec 1998 04:51:00 -0500 (EST)
+Resent-Date: Fri, 4 Dec 1998 04:51:00 -0500 (EST)
+Date: Fri, 4 Dec 1998 10:49:09 +0100 (MET)
+Message-Id: <199812040949.KAA15607@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@math.gatech.edu
+In-reply-to: Phil Pennock's message of Sat, 21 Nov 1998 21:37:59 +0000 (GMT)
+Subject: Re:  heap memory issues
+Resent-Message-ID: <"HTVQF2.0.pU3.32xPs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4700
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+
+Phil Pennock wrote:
+
+> The debugging array h_m is declared to be:
+>   static int h_m[1025];
+> It seems to be used for tracing the number of allocations of a given
+> size; however, with an H_ISIZE == sizeof(long), [assuming 4] then
+> scanning mem.c, it's 3/4 unused.  The first 1024/H_ISIZE entries and
+> 1024 can be filled, the rest will never change from 0.
+
+The patch below adds the fix Bart suggested in his reply to Phil's
+mail.
+
+> 
+> Also, for 64-bit platforms, might alignment constraints require H_ISIZE
+> to be sizeof(long long), or can all of them use 32-bit alignment?  The
+> halloc() and hrealloc() functions seem to rely upon H_ISIZE being a
+> measure of sufficient alignment for all data-types.
+
+As I've in a reply to another mail all 64-Bit machines I know about
+use the LP64 convention, i.e. longs and pointers are 64 Bit wide. If
+ever some demented processor manufacturer builds a 64-Bit processor
+and manages to make people use a different convention in C(++) code we 
+are in trouble. In this case using a configure-test for the word size
+as suggested by Bart would be needed (and it might be a good thing
+even now).
+Btw. is the type `long long' in the ANSI-standard? I always thought it 
+was some special thing offered only by gcc.
+
+> 
+> Take a deap breath for the logic here ...
+> 
+> Whilst I haven't tested this, it looks upon reading as though there are
+> some problems if hrealloc()ing a memory-block that is larger than
+> HEAP_ARENA_SIZE.  This would only manifest itself on an allocation
+> larger than about 8176 bytes (varying according to compiler whim).
+> These are probably sufficiently rare to not crop up too often.
+> In halloc() line 269, we have:
+>   n = HEAP_ARENA_SIZE > size ? HEAPSIZE : size + sizeof(*h);
+> Then in hrealloc() line 335:
+>   zfree(h, HEAPSIZE);
+> from a hrealloc(startofhunk, oldverybig, 0) -- the /next/ block checks
+> for big sizes, just too late.  Changing this to check for
+> (h->used > HEAP_ARENA_SIZE) first would, as it stands, work FOR THIS
+> case.  If a previous hrealloc() has gone from greater than
+> HEAP_ARENA_SIZE to less than HEAP_ARENA_SIZE then a new arena will have
+> been allocated (lines 338-345), so h->used can't be less than
+> HEAP_ARENA_SIZE for a big hunk, *BUT* there is the problem that the new
+> arena thus allocated will be smaller than HEAP_ARENA_SIZE and the
+> zfree(h, HEAPSIZE) in line 269 now frees too much memory.
+> 
+> Um... just re-read the code if that's confusing.
+
+Bart already described the meaning of the second argument to
+zfree(). To answer the other thing: I don't see a place where a heap
+can be allocated that has an arena of less than HEAD_ARENA_SIZE
+bytes in which case we simply don't have the problem you
+described. Could you enlighten me where this small head arena can be
+allocated?
+
+> ...
+> 
+> Lines 318-325 handle reallocating from the middle of an arena  --
+> should this do a memset() to 0xff if ZSH_MEM_DEBUG, or is that only for
+> memory ranges that extend to the end of an arena?  If so, how about a
+> memset() to 0xfe or something?
+
+Yes, this might be useful, it seems someone has overlooked the
+halloc() here.
+
+The last hunk in the patch makes gcc be quiet about yet another
+`ambiguous else'.
+
+
+Bye
+ Sven
+
+*** os/mem.c	Thu Dec  3 09:10:44 1998
+--- Src/mem.c	Fri Dec  4 10:39:09 1998
+***************
+*** 244,250 ****
+      size = (size + H_ISIZE - 1) & ~(H_ISIZE - 1);
+  
+  #if defined(ZSH_MEM) && defined(ZSH_MEM_DEBUG)
+!     h_m[size < 1024 ? (size / H_ISIZE) : 1024]++;
+  #endif
+  
+      /* find a heap with enough free space */
+--- 244,250 ----
+      size = (size + H_ISIZE - 1) & ~(H_ISIZE - 1);
+  
+  #if defined(ZSH_MEM) && defined(ZSH_MEM_DEBUG)
+!     h_m[size < (1024 * H_ISIZE) ? (size / H_ISIZE) : 1024]++;
+  #endif
+  
+      /* find a heap with enough free space */
+***************
+*** 319,324 ****
+--- 319,327 ----
+  	if (new > old) {
+  	    char *ptr = (char *) halloc(new);
+  	    memcpy(ptr, p, old);
++ #ifdef ZSH_MEM_DEBUG
++ 	    memset(p, 0xff, old);
++ #endif
+  	    return ptr;
+  	} else
+  	    return new ? p : NULL;
+***************
+*** 1004,1011 ****
+  	long n = (m_lfree->len - M_MIN) & ~(m_pgsz - 1);
+  
+  	m_lfree->len -= n;
+! 	if (brk(m_high -= n) == -1)
+  	    DPUTS(1, "MEM: allocation error at brk.");
+  
+  #ifdef ZSH_MEM_DEBUG
+  	m_b += n;
+--- 1007,1015 ----
+  	long n = (m_lfree->len - M_MIN) & ~(m_pgsz - 1);
+  
+  	m_lfree->len -= n;
+! 	if (brk(m_high -= n) == -1) {
+  	    DPUTS(1, "MEM: allocation error at brk.");
++ 	}
+  
+  #ifdef ZSH_MEM_DEBUG
+  	m_b += n;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

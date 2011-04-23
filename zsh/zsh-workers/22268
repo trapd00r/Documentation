@@ -1,0 +1,428 @@
+From zsh-workers-return-22268-mason-zsh=primenet.com.au@sunsite.dk Tue Feb 14 10:07:41 2006
+Return-Path: <zsh-workers-return-22268-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13474 invoked from network); 14 Feb 2006 10:07:38 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.0 (2005-09-13) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 14 Feb 2006 10:07:38 -0000
+Received: (qmail 36414 invoked from network); 14 Feb 2006 10:07:15 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 14 Feb 2006 10:07:15 -0000
+Received: (qmail 16622 invoked by alias); 14 Feb 2006 10:04:36 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22268
+Received: (qmail 15827 invoked from network); 14 Feb 2006 10:03:28 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 14 Feb 2006 10:03:28 -0000
+Received: (qmail 6941 invoked from network); 14 Feb 2006 10:01:48 -0000
+Received: from dsl3-63-249-88-2.cruzio.com (HELO dot.blorf.net) (63.249.88.2)
+  by a.mx.sunsite.dk with SMTP; 14 Feb 2006 10:01:46 -0000
+Received: by dot.blorf.net (Postfix, from userid 1000)
+	id 928ED5EDD; Mon, 13 Feb 2006 23:14:41 -0800 (PST)
+Date: Mon, 13 Feb 2006 23:14:41 -0800
+From: Wayne Davison <wayned@users.sourceforge.net>
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: PATCH: fixing ${1+"$@"} when word-splitting
+Message-ID: <20060214071441.GA9931@dot.blorf.net>
+References: <20060211181440.GA30984@dot.blorf.net> <200602122026.k1CKQHGH003629@pwslaptop.csr.com> <20060213105349.GD31780@dot.blorf.net>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="qMm9M+Fa2AknHoGS"
+Content-Disposition: inline
+In-Reply-To: <20060213105349.GD31780@dot.blorf.net>
+User-Agent: Mutt/1.5.11
+
+
+--qMm9M+Fa2AknHoGS
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+I noticed that my patch wasn't handling backslash-quoted whitespace, so
+I fixed that.  I then did some testing of filename-matching, and noticed
+an improvement:
+
+  % emulate sh
+  % touch '1 2'  '3 4'
+  % print -l ${1:-*[\ ]*}
+  1 2
+  3 4
+
+Unpatched zsh would have output "*[" and "]*" on separate lines, which
+is the behavior that happens without the backslash (in bash and both
+patched/unpatched zsh).
+
+One inconsistency with bash is the handling of '~' -- we no longer split
+it if it contains a space, but bash does.  I think I'll just leave this
+alone for now.
+
+I added a few more tests to the D04 file.  Attached is the latest
+version of the patch.
+
+..wayne..
+
+--qMm9M+Fa2AknHoGS
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="splitting.diff"
+
+--- Src/subst.c	6 Feb 2006 11:57:06 -0000	1.44
++++ Src/subst.c	14 Feb 2006 06:45:52 -0000
+@@ -295,29 +295,86 @@ singsub(char **s)
+     DPUTS(nonempty(&foo), "BUG: singsub() produced more than one word!");
+ }
+ 
+-/* Perform substitution on a single word. Unlike with singsub, the      *
+- * result can have more than one word. A single word result is stored   *
+- * in *s and *isarr is set to zero; otherwise *isarr is set to 1 and    *
+- * the result is stored in *a. If `a' is zero a multiple word result is *
+- * joined using sep or the IFS parameter if sep is zero and the result  *
+- * is returned in *s.  The return value is true iff the expansion       *
+- * resulted in an empty list.                                           *
+- * The mult_isarr variable is used by paramsubst() to tell if it yields *
+- * an array.                                                            */
++/* Perform substitution on a single word, *s. Unlike with singsub(), the
++ * result can be more than one word. If split is non-zero, the string is
++ * first word-split using IFS, but only for non-quoted "whitespace" (as
++ * indicated by Dnull, Snull, Tick, Inpar, and Outpar).
++ *
++ * If arg "a" was non-NULL _and_ the parsing set mult_isarr, the resulting
++ * strings are stored in *a (even for a 1-element array) and *isarr is set
++ * to 1.  Otherwise, *isarr is set to 0, and the result is stored in *s,
++ * with any necessary joining of multiple elements using sep (which can be
++ * NULL to use IFS).  The return value is true iff the expansion resulted
++ * in an empty list.
++ *
++ * The mult_isarr variable is used by paramsubst() to tell us if the
++ * substitutions yielded an array, but we will also set it if we split *s
++ * into multiple items (since that also yields an array). */
+ 
+ /**/
+ static int mult_isarr;
+ 
+ /**/
+ static int
+-multsub(char **s, char ***a, int *isarr, UNUSED(char *sep))
++multsub(char **s, int split, char ***a, int *isarr, char *sep)
+ {
+     int l, omi = mult_isarr;
+-    char **r, **p;
++    char **r, **p, *x = *s;
+     local_list1(foo);
+ 
+     mult_isarr = 0;
+-    init_list1(foo, *s);
++
++    if (split) {
++	for ( ; *x; x += l+1) {
++	    char c = (l = *x == Meta) ? x[1] ^ 32 : *x;
++	    if (!iwsep(c))
++		break;
++	}
++    }
++
++    init_list1(foo, x);
++
++    if (split) {
++	LinkNode n = firstnode(&foo);
++	int inq = 0, inp = 0;
++	split = 0; /* use this to flag if we really split anything */
++	for ( ; *x; x += l+1) {
++	    char c = (l = *x == Meta) ? x[1] ^ 32 : *x;
++	    if (!inq && !inp && isep(c)) {
++		*x = '\0';
++		for (x += l+1; *x; x += l+1) {
++		    c = (l = *x == Meta) ? x[1] ^ 32 : *x;
++		    if (!isep(c))
++			break;
++		}
++		if (!*x)
++		    break;
++		insertlinknode(&foo, n, (void *)x), incnode(n);
++		split = 1;
++	    }
++	    switch (c) {
++	    case Dnull:  /* " */
++	    case Snull:  /* ' */
++	    case Tick:   /* ` (note: no Qtick!) */
++		/* These always occur in unnested pairs. */
++		inq = !inq;
++		break;
++	    case Inpar:  /* ( */
++		inp++;
++		break;
++	    case Outpar: /* ) */
++		inp--;
++		break;
++	    case Bnull:  /* \ */
++	    case Bnullkeep:
++		/* The parser verified the following char's existence. */
++		x += l+1;
++		l = *x == Meta;
++		break;
++	    }
++	}
++    }
++
+     prefork(&foo, 0);
+     if (errflag) {
+ 	if (isarr)
+@@ -325,7 +382,10 @@ multsub(char **s, char ***a, int *isarr,
+ 	mult_isarr = omi;
+ 	return 0;
+     }
+-    if ((l = countlinknodes(&foo))) {
++    if (split)
++	mult_isarr = 1;
++
++    if ((l = countlinknodes(&foo)) > 1 || (a && mult_isarr)) {
+ 	p = r = hcalloc((l + 1) * sizeof(char*));
+ 	while (nonempty(&foo))
+ 	    *p++ = (char *)ugetnode(&foo);
+@@ -345,7 +405,7 @@ multsub(char **s, char ***a, int *isarr,
+ 	    mult_isarr = omi;
+ 	    return 0;
+ 	}
+-	*s = sepjoin(r, NULL, 1);
++	*s = sepjoin(r, sep, 1);
+ 	mult_isarr = omi;
+ 	if (isarr)
+ 	    *isarr = 0;
+@@ -1457,7 +1517,7 @@ paramsubst(LinkList l, LinkNode n, char 
+ 	 * remove the aspar test and extract a value from an array, if
+ 	 * necessary, when we handle (P) lower down.
+ 	 */
+-	if (multsub(&val, (aspar ? NULL : &aval), &isarr, NULL) && quoted) {
++	if (multsub(&val, 0, (aspar ? NULL : &aval), &isarr, NULL) && quoted) {
+ 	    /* Empty quoted string --- treat as null string, not elided */
+ 	    isarr = -1;
+ 	    aval = (char **) hcalloc(sizeof(char *));
+@@ -1992,26 +2052,20 @@ paramsubst(LinkList l, LinkNode n, char 
+ 	/* Fall Through! */
+ 	case '-':
+ 	    if (vunset) {
++		int ws = opts[SHWORDSPLIT];
+ 		val = dupstring(s);
+-		/*
+-		 * This is not good enough for sh emulation!  Sh would
+-		 * split unquoted substrings, yet not split quoted ones
+-		 * (except according to $@ rules); but this leaves the
+-		 * unquoted substrings unsplit, and other code below
+-		 * for spbreak splits even within the quoted substrings.
+-		 *
+-		 * TODO: I think multsub needs to be told enough to
+-		 * decide about splitting with spbreak at this point
+-		 * (and equally in the `=' handler below).  Then
+-		 * we can turn off spbreak to avoid the join & split
+-		 * nastiness later.
+-		 *
+-		 * What we really want to do is make this look as
+-		 * if it were the result of an assignment from
+-		 * the same value, taking account of quoting.
+-		 */
+-		multsub(&val, (aspar ? NULL : &aval), &isarr, NULL);
++		/* If word-splitting is enabled, we ask multsub() to split
++		 * the substituted string at unquoted whitespace.  Then, we
++		 * turn off spbreak so that no further splitting occurs.
++		 * This allows a construct such as ${1+"$@"} to correctly
++		 * keep its array splits, and weird constructs such as
++		 * ${str+"one two" "3 2 1" foo "$str"} to only be split
++		 * at the unquoted spaces. */
++		opts[SHWORDSPLIT] = spbreak;
++		multsub(&val, spbreak && !aspar, (aspar ? NULL : &aval), &isarr, NULL);
++		opts[SHWORDSPLIT] = ws;
+ 		copied = 1;
++		spbreak = 0;
+ 	    }
+ 	    break;
+ 	case ':':
+@@ -2029,7 +2083,6 @@ paramsubst(LinkList l, LinkNode n, char 
+ 
+ 		*idend = '\0';
+ 		val = dupstring(s);
+-		isarr = 0;
+ 		/*
+ 		 * TODO: this is one of those places where I don't
+ 		 * think we want to do the joining until later on.
+@@ -2037,9 +2090,9 @@ paramsubst(LinkList l, LinkNode n, char 
+ 		 * point and unset them.
+ 		 */
+ 		if (spsep || spbreak || !arrasg)
+-		    multsub(&val, NULL, NULL, sep);
++		    multsub(&val, 0, NULL, &isarr, NULL);
+ 		else
+-		    multsub(&val, &aval, &isarr, NULL);
++		    multsub(&val, 0, &aval, &isarr, NULL);
+ 		if (arrasg) {
+ 		    /*
+ 		     * This is an array assignment in a context
+--- Test/D04parameter.ztst	11 Oct 2005 16:48:06 -0000	1.13
++++ Test/D04parameter.ztst	14 Feb 2006 06:45:52 -0000
+@@ -547,20 +547,148 @@
+ >shell
+ >again
+ 
+-  set If "this test fails" maybe "we have finally fixed" the shell
++  local sure_that='sure that' varieties_of='varieties of' one=1 two=2
++  set Make $sure_that "this test keeps" on 'preserving all' "$varieties_of" quoted whitespace
+   print -l ${=1+"$@"}
+-0:Regression test of unfixed ${=1+"$@"} bug
+->If
+->this
+->test
+->fails
+->maybe
+->we
+->have
+->finally
+->fixed
+->the
+->shell
++  print -l ${=1+Make $sure_that "this test keeps" on 'preserving all' "$varieties_of" quoted whitespace}
++  print -l ${=1+$one $two}
++0:Regression test of ${=1+"$@"} bug and some related expansions
++>Make
++>sure that
++>this test keeps
++>on
++>preserving all
++>varieties of
++>quoted
++>whitespace
++>Make
++>sure
++>that
++>this test keeps
++>on
++>preserving all
++>varieties of
++>quoted
++>whitespace
++>1
++>2
++
++  splitfn() {
++    emulate -L sh
++    local HOME="/differs from/bash"
++    print -l ${1:-~}
++    touch has\ space
++    print -l ${1:-*[ ]*}
++    print -l ${1:-*[\ ]*}
++    print -l ${1:-*}
++    rm has\ space
++  }
++  splitfn
++0:More bourne-shell-compatible nested word-splitting with wildcards and ~
++>/differs from/bash
++>*[
++>]*
++>has space
++>boringfile
++>evenmoreboringfile
++>has space
++
++  splitfn() {
++    local IFS=.-
++    local foo=1-2.3-4
++    #
++    print "Called with argument '$1'"
++    print "No quotes"
++    print -l ${=1:-1-2.3-4} ${=1:-$foo}
++    print "With quotes on default argument only"
++    print -l ${=1:-"1-2.3-4"} ${=1:-"$foo"}
++  }
++  print 'Using "="'
++  splitfn
++  splitfn 5.6-7.8
++  #
++  splitfn() {
++    emulate -L zsh
++    setopt shwordsplit
++    local IFS=.-
++    local foo=1-2.3-4
++    #
++    print "Called with argument '$1'"
++    print "No quotes"
++    print -l ${1:-1-2.3-4} ${1:-$foo}
++    print "With quotes on default argument only"
++    print -l ${1:-"1-2.3-4"} ${1:-"$foo"}
++  }
++  print Using shwordsplit
++  splitfn
++  splitfn 5.6-7.8
++0:Test of nested word splitting with and without quotes
++>Using "="
++>Called with argument ''
++>No quotes
++>1
++>2
++>3
++>4
++>1
++>2
++>3
++>4
++>With quotes on default argument only
++>1-2.3-4
++>1-2.3-4
++>Called with argument '5.6-7.8'
++>No quotes
++>5
++>6
++>7
++>8
++>5
++>6
++>7
++>8
++>With quotes on default argument only
++>5
++>6
++>7
++>8
++>5
++>6
++>7
++>8
++>Using shwordsplit
++>Called with argument ''
++>No quotes
++>1
++>2
++>3
++>4
++>1
++>2
++>3
++>4
++>With quotes on default argument only
++>1-2.3-4
++>1-2.3-4
++>Called with argument '5.6-7.8'
++>No quotes
++>5
++>6
++>7
++>8
++>5
++>6
++>7
++>8
++>With quotes on default argument only
++>5
++>6
++>7
++>8
++>5
++>6
++>7
++>8
+ 
+   unset SHLVL
+   (( SHLVL++ ))
+
+--qMm9M+Fa2AknHoGS--
+

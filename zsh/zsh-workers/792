@@ -1,0 +1,145 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Sat Mar  2 08:40:07 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with ESMTP id IAA15562 for <mason@werple.mira.net.au>; Sat, 2 Mar 1996 08:40:04 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id QAA09801; Fri, 1 Mar 1996 16:28:23 -0500 (EST)
+Resent-Date: Fri, 1 Mar 1996 16:28:23 -0500 (EST)
+From: hzoli@cs.elte.hu (Zoltan Hidvegi)
+Message-Id: <9603012126.AA28942@turan.elte.hu>
+Subject: Re: UGLY CRASHES UNDER ZSH 2.6 BETA 12
+To: pws@hydra.ifh.de (Peter Stephenson)
+Date: Fri, 1 Mar 1996 22:26:46 +0100 (MET)
+In-Reply-To: <9603011336.AA12720@hydra.ifh.de> from "Peter Stephenson" at Mar 1, 96 02:36:42 pm
+Organization: Dept. of Comp. Sci., Eotvos University, Budapest, Hungary
+Phone: (36 1)2669833 ext: 2667, home phone: (36 1) 2752368
+X-Mailer: ELM [version 2.4 PL24 PGP3 *ALPHA*]
+Mime-Version: 1.0
+Content-Type: application/pgp
+Content-Transfer-Encoding: 7bit
+Sender: hzoli@cs.elte.hu
+Resent-Message-ID: <"r2tnj3.0.0P2.rlsDn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/792
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+Peter Stephenson wrote:
+> esky@cs.ucla.edu wrote:
+> > Starting program: /usr/local/bin/zsh 
+> > marathon% bvi foo
+> > zsh: correct `bvi' to `vi' [nyae]? n
+> > zsh: command not found: bvi
+> > marathon% !!
+> > Program generated(1): Memory access exception on address 0x10 (protection fai
+> > lure).
+> > 0x164c2 in clearalstack ()
+> 
+> I can't reproduce this either for some reason, but my guess is that
+> the alias stack has got a NULL on it, which signifies history
+> expansion, and the lexrestore() is assuming it's an alias and trying
+> to dereference it.  Have a go at this (should be completely safe to
+> give to the kids at home):
+
+This patch does not cure the disease it only hides the symptoms.  The
+problem is that Eskandar probably uses the promptsubst option.  Now !!
+expands to bvi foo and lex.c calls the spell checker on bvi before the
+alias stack is poped.  The spell checker sees that bvi should be
+corrected, and prints the spelling correction prompt, which than calls
+lexsave/lexrestore (or parsestr in my version but that again calls
+lexsave/lexrestore).  And the later lexrestore calls clearalstack()
+which coredumps because of the NULL entry that history expansion put
+there earlier.  But there can be other problems when someone aliases bvi
+foo to something.  Here zsh tries to spell correct the expanded alias
+which is probably an unwanted feature.  And afer that the alstack is
+cleared and alstackind is restored which in this case can point to the
+middle of the now empty alstack.  The best is not to call spckword when
+alstackind is nonzero.  That's quite desirable since one probably does
+not want to speel check a history or alias expansion.  Also I think it's
+clear from the above example that it is a bug to call lexsave with
+nonzero alstackind.  Which means that it is really not necessary to
+save/restore alstackind in lexsave/lexrestore.  The patch below fixes
+that.  Peter's patch can still be used although it's probably better not
+to use it sine it may hide some bugs which should be cured.
+
+Cheers,
+
+Zoltan
+
+ rcsdiff -qc -kk -r1.14 -r1.15 Src/lex.c
+ *** Src/lex.c
+ --- Src/lex.c	1996/03/01 20:18:01	1.15
+ ***************
+ *** 52,58 ****
+       int histdone;
+       int spaceflag;
+       int stophist;
+ -     int alstackind;
+       int hlinesz;
+       char *hline;
+       char *hptr;
+ --- 52,57 ----
+ ***************
+ *** 83,88 ****
+ --- 82,93 ----
+   {
+       struct lexstack *ls;
+   
+ + #ifdef DEBUG
+ +     if (alstackind) {
+ + 	fprintf(stdout, "BUG: lexsave called with alstackind != 0\n");
+ + 	fflush(stdout);
+ +     }
+ + #endif
+       ls = (struct lexstack *)malloc(sizeof(struct lexstack));
+   
+       ls->incmdpos = incmdpos;
+ ***************
+ *** 91,97 ****
+       ls->dbparens = dbparens;
+       ls->in_brace_param = in_brace_param;
+       ls->alstat = alstat;
+ -     ls->alstackind = alstackind;
+       ls->isfirstln = isfirstln;
+       ls->isfirstch = isfirstch;
+       ls->histremmed = histremmed;
+ --- 96,101 ----
+ ***************
+ *** 155,161 ****
+       chwordlen = lstack->chwordlen;
+       chwordpos = lstack->chwordpos;
+       clearalstack();
+ -     alstackind = lstack->alstackind;
+       hlinesz = lstack->hlinesz;
+       lexstop = errflag = 0;
+   
+ --- 159,164 ----
+ ***************
+ *** 1066,1072 ****
+       hwget(&yytext);
+       s = yytext;
+       if (interact && isset(SHINSTDIN) && !strin && !incasepat && tok == STRING &&
+ ! 	(isset(CORRECTALL) || (isset(CORRECT) && incmdpos)) && !nocorrect)
+   	spckword(&tokstr, &s, incmdpos, 1);
+       if (zleparse && !alstackind) {
+   	int zp = zleparse;
+ --- 1069,1075 ----
+       hwget(&yytext);
+       s = yytext;
+       if (interact && isset(SHINSTDIN) && !strin && !incasepat && tok == STRING &&
+ ! 	(isset(CORRECTALL) || (isset(CORRECT) && incmdpos)) && !nocorrect && !alstackind)
+   	spckword(&tokstr, &s, incmdpos, 1);
+       if (zleparse && !alstackind) {
+   	int zp = zleparse;
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.3i
+Charset: noconv
+
+iQCVAwUBMTdrlQupSCiLN749AQHYDAP/fbQQbY6IQzxp2s6glyO0+fZYSozg7EjE
+sbF4EcZ0imZUFWiE9TxkI1C4NgAJqbZEvefeQ5sm9wT8W9g9tj5GUXmbX2dxhkeN
+uiNu2DgETrGnOja+QUjyy5zP5NxGmxGPf3E4Q3zNKepm7A0ITJR6wxC6697cw96y
+gbJ6FwJkFl0=
+=2ABp
+-----END PGP SIGNATURE-----
+

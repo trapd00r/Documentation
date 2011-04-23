@@ -1,0 +1,193 @@
+From zsh-workers-return-11565-mason-zsh=primenet.com.au@sunsite.auc.dk Thu May 25 07:57:28 2000
+Return-Path: <zsh-workers-return-11565-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20502 invoked from network); 25 May 2000 07:57:27 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 May 2000 07:57:27 -0000
+Received: (qmail 2753 invoked by alias); 25 May 2000 07:57:17 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11565
+Received: (qmail 2745 invoked from network); 25 May 2000 07:57:17 -0000
+Date: Thu, 25 May 2000 09:57:14 +0200 (MET DST)
+Message-Id: <200005250757.JAA32547@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 22 May 2000 16:52:57 +0000
+Subject: Re: PATCH: Re: TAB and PS2 and multiline buffers and vared
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> I've just tried comparing zsh with all patches up to but NOT including
+> 11503, against zsh including 11503, and I see no differences between
+> those (maybe 11493 had an effect?).  So then I compared zsh including
+> 11503 against zsh patched up to 11471 (e.g. code-wise should be identical
+> to -pre-4).  The newer zsh does NOT show the behavior above; the older
+> one does.
+
+Yes, 11493 should definitely had an effect on this.
+
+> Since the newer version doesn't have the bad behavior, the following is
+> mainly for information, in case a light bulb goes on above Sven when he
+> sees it.
+> 
+> The test case was to run `vared functions[_complete_debug]', scroll up
+> to the line `local w="${(qq)words}"', then type ^E ESC RET to open a
+> line, and begin completing on that line.
+
+The fact that you used `functions[_complete_debug]' was an important
+information, because with that I found a buglet in _in_vared that made 
+_value complete alternatingly assoc keys and values, as if for a
+assingment to $functions.
+
+I still can't see why it completed commands, but it might have
+something to do with this (I could understand it if you had tried it
+with commands[...]).
+
+> If I immediately type ^X?, both versions beep at me.  Comparing the xtrace
+> output, the ONLY difference shown (other than line numbers) is the value
+> assigned to the _saved_colors local, which is irrelevant.  Both versions
+> output the string from _message.
+
+There is another thing I noticed: ^X? with only one match did not show 
+the _message, because with only one match it didn't show the list at
+all. The patch fixes this in _complete_debug.
+
+Hm, should we change the C-code to enforce showing the list when a
+`compadd -x' message was added (that *seems* sensible, but I think
+there may also be cases where one doesn't want that)? Alternatively,
+we could enhance $compstate[list]: if it contains `messages', only the 
+messages are shown (like the `explanations' we have now).
+
+> If I start the test again from a fresh PS1, but type TAB and then ^X?,
+> zsh-11502 produces the same xtrace as before, but zsh-11471 has this
+> additional fragment:
+> 
+> +_main_complete:41:if: [[ tab automenu-unambiguous == tab* && _complete_debug != *list* ]]
+> +_main_complete:42:then cursh: zstyle -T :completion::::: insert-tab
+> +_main_complete:43:then cursh cmdand cursh: [[ ::: != :* || -z functions[_complete_debug] ]]
+> +_main_complete:44:then cursh cmdand cursh cmdor: zstyle -t :completion:vared:::: insert-tab
+> +_main_complete:46:then: compstate[insert]=automenu-unambiguous 
+
+Yes, the corrected `tab'-in-$compstate[insert]-behaviour.
+
+Well, another thing I noticed is that with a really large prompt and
+completion list scrolling it doesn't stop at the end of the list, so
+that the re-printed prompt scrolls most of the list out of the
+screen. So the patch makes it wait at the very end, allowing us to
+have a look at the whole list before printing the next prompt.
+
+Bye
+ Sven
+
+Index: Completion/Base/_in_vared
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/_in_vared,v
+retrieving revision 1.1
+diff -u -r1.1 _in_vared
+--- Completion/Base/_in_vared	2000/05/15 13:19:26	1.1
++++ Completion/Base/_in_vared	2000/05/25 07:56:36
+@@ -5,10 +5,17 @@
+ # Completion inside vared.
+ 
+ if [[ $compstate[vared] = *\[* ]]; then
+-  # vared on an array-element
+-  compstate[parameter]=${compstate[vared]%%\[*}
+-  compstate[context]=-value-
+-  also=value
++  if [[ $compstate[vared] = *\]* ]]; then
++    # vared on an array-element
++    compstate[parameter]=${${compstate[vared]%%\]*}//\[/-}
++    compstate[context]=value
++    also=-value-
++  else
++    # vared on an array-value
++    compstate[parameter]=${compstate[vared]%%\[*}
++    compstate[context]=value
++    also=-value-
++  fi
+ else
+   # vared on a parameter, let's see if it is an array
+   compstate[parameter]=$compstate[vared]
+Index: Completion/Commands/_complete_debug
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Commands/_complete_debug,v
+retrieving revision 1.4
+diff -u -r1.4 _complete_debug
+--- Completion/Commands/_complete_debug	2000/05/19 16:04:16	1.4
++++ Completion/Commands/_complete_debug	2000/05/25 07:56:36
+@@ -22,6 +22,7 @@
+     # _message -r "Trace output left in $tmp (up-history to view)"
+     # print -sR "${VISUAL:-${EDITOR:-${PAGER:-more}}} $tmp ;: $w"
+     _message -r "Trace output left in $tmp"
++    compstate[list]='list force'
+     print -zR "${VISUAL:-${EDITOR:-${PAGER:-more}}} $tmp ;: $w"
+     exec 2>&3 3>&-
+ }
+Index: Src/Zle/complist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complist.c,v
+retrieving revision 1.18
+diff -u -r1.18 complist.c
+--- Src/Zle/complist.c	2000/05/22 08:47:31	1.18
++++ Src/Zle/complist.c	2000/05/25 07:56:37
+@@ -1302,36 +1302,41 @@
+     if (nlnct <= 1)
+ 	mscroll = 0;
+     if (clearflag) {
++	int nl;
++
+ 	/* Move the cursor up to the prompt, if always_last_prompt *
+ 	 * is set and all that...                                  */
+ 	if (mlbeg >= 0) {
+-	    if ((ml = listdat.nlines + nlnct) >= lines) {
++	    if ((nl = listdat.nlines + nlnct) >= lines) {
+ 		if (mhasstat) {
+ 		    putc('\n', shout);
+ 		    compprintfmt(NULL, 0, 1, 1, mline, NULL);
+ 		}
+-		ml = lines - 1;
++		nl = lines - 1;
+ 	    } else
+-		ml--;
+-	    tcmultout(TCUP, TCMULTUP, ml);
++		nl--;
++	    tcmultout(TCUP, TCMULTUP, nl);
+ 	    showinglist = -1;
+ 
+ 	    lastlistlen = listdat.nlines;
+-	} else if ((ml = listdat.nlines + nlnct - 1) < lines) {
++	} else if ((nl = listdat.nlines + nlnct - 1) < lines) {
+ 	    if (mlbeg >= 0 && tccan(TCCLEAREOL))
+ 		tcout(TCCLEAREOL);
+-	    tcmultout(TCUP, TCMULTUP, ml);
++	    tcmultout(TCUP, TCMULTUP, nl);
+ 	    showinglist = -1;
+ 
+ 	    lastlistlen = listdat.nlines;
+ 	} else {
+ 	    clearflag = 0;
+-	    if (!asked)
++	    if (!asked) {
++		mrestlines = (ml + nlnct > lines);
+ 		compprintnl(ml);
++	    }
+ 	}
+-    } else if (!asked)
++    } else if (!asked) {
++	mrestlines = (ml + nlnct > lines);
+ 	compprintnl(ml);
+-
++    }
+     listshown = (clearflag ? 1 : -1);
+     mnew = 0;
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

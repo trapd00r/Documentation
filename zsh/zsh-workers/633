@@ -1,0 +1,128 @@
+From zsh-workers-request@math.gatech.edu  Wed Nov 22 21:03:57 1995
+Received: from math.gatech.edu (euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with SMTP id VAA29816 for <mason@werple.mira.net.au>; Wed, 22 Nov 1995 21:03:48 +1100 (EST)
+Received: by math.gatech.edu (5.x/SMI-SVR4)
+	id AA18018; Wed, 22 Nov 1995 04:31:32 -0500
+Resent-Date: Wed, 22 Nov 95 09:33:00 +0000
+Old-Return-Path: <P.Stephenson@swan.ac.uk>
+Message-Id: <22090.9511220933@pygmy.swan.ac.uk>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: beta12: 8-bit-cleanliness 
+In-Reply-To: "kaefer@aglaia.snafu.de"'s message of "Wed, 22 Nov 95 04:02:00 +0700."             <m0tI5Rm-000026C@aglaia.snafu.DE> 
+Date: Wed, 22 Nov 95 09:33:00 +0000
+From: P.Stephenson@swansea.ac.uk
+X-Mts: smtp
+Resent-Message-Id: <"288Zk1.0.SP4.ptkim"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/633
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+kaefer@aglaia.snafu.de wrote:
+> Tracking that down led to a dubious (unsigned) cast in input.c, present
+> since rev. 1.5. It does the same as (int)(unsigned int). But we want the
+> effect of (int)(unsigned char) instead:
+
+That cast really wants to be STOUC(*inbufptr++).  There was a patch
+for this at some point.  There are problems with the cast on some
+machines which that macro's supposed to fix.
+
+> After fixing this one might start to wonder about the metamorphoses
+> these 8-bit-characters are subjected to, notably in prompt and history:
+> 
+>   aglaia% mkdir zsh\ =FCber\ alles
+>   aglaia% history
+>       1  mkdir zsh\ ^=BCber\ alles
+>       2  history
+
+hmm.. looks to me like the correct thing is appearing in the history,
+it's just getting messed up on print out.  There's a routine called
+nicefputs() which formats history lines for display:  it does an
+isprint() check on each character.  This returns false for printable
+8-bit characters.  Now, the shell doesn't know whether the terminal
+can print 8-bit characters or not.  But that's not the full problem,
+since for characters over 128 which it doesn't think are printable, it
+just strips off 0x40 and prints it anyway.
+
+Here's my suggestion:  assume we can print 8-bit chars, but handle
+anything in the range of control characters + 128 separately by
+sticking \M- in front.  (They're likely to get messed up inside zsh
+anyway; one day they might work, though.)  The following is about the
+best we can easily do.
+
+I did the same to niceputc():  that seems only to be called from the
+error routines.
+
+*** Src/utils.c.nice	Tue Nov 21 06:39:31 1995
+--- Src/utils.c	Wed Nov 22 10:15:45 1995
+***************
+*** 145,150 ****
+--- 145,158 ----
+  	return;
+      }
+      c &= 0xff;
++     if (c & 0x80)
++ 	if (isprint(c & ~0x80)) {
++ 	    putc(c, f);
++ 	    return;
++ 	} else {
++ 	    fputs("\\M-", f);
++ 	    c &= ~0x80;
++ 	}
+      if (isprint(c)) {
+  	putc(c, f);
+      } else if (c == '\n') {
+***************
+*** 164,180 ****
+  nicefputs(char *s, FILE *f)
+  {
+      for (; *s; s++) {
+! 	if (isprint(*s))
+! 	    putc(*s, f);
+! 	else if (*s == '\n') {
+  	    putc('\\', f);
+  	    putc('n', f);
+! 	} else if(*s == '\t') {
+  	    putc('\\', f);
+  	    putc('t', f);
+  	} else {
+  	    putc('^', f);
+! 	    putc(*s ^ 0x40, f);
+  	}
+      }
+  }
+--- 172,197 ----
+  nicefputs(char *s, FILE *f)
+  {
+      for (; *s; s++) {
+! 	char c = *s;
+! 	if (c & 0x80)
+! 	    if (isprint(c & ~0x80)) {
+! 		putc(c, f);
+! 		continue;
+! 	    } else {
+! 		fputs("\\M-", f);
+! 		c &= ~0x80;
+! 	    }
+! 	if (isprint(c))
+! 	    putc(c, f);
+! 	else if (c == '\n') {
+  	    putc('\\', f);
+  	    putc('n', f);
+! 	} else if(c == '\t') {
+  	    putc('\\', f);
+  	    putc('t', f);
+  	} else {
+  	    putc('^', f);
+! 	    putc(c ^ 0x40, f);
+  	}
+      }
+  }
+
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

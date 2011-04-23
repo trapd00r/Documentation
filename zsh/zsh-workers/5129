@@ -1,0 +1,208 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <990131132513.ZM27321@candle.brasslantern.com>
+Date: Sun, 31 Jan 1999 13:25:12 -0800
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: 3.1.5-pws-6: vared and associative arrays
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5129
+
+The following patch makes vared do reasonable things with associative arrays.
+Using vared on an associative array edits a string consisting of all the keys
+and values of the array; the string is then split at spaces and assigned as
+alternating keys and values.
+
+Put another way:
+
+	vared array	is to	print -z "array=( ${array} )"
+as
+	vared assoc	is to	print -z "assoc=( ${(kv)assoc} )"
+
+The patch also adds two new options, -a and -A, which are only interesting
+when used with -c.  `vared -ca array` creates an array parameter, and (as
+you might expect) `vared -cA assoc` creates an associative array parameter.
+
+There is one change here that might be controversial.  Using `vared -ca`
+on an existing parameter whose type is not array converts it into an array.
+Similarly, `vared -cA` converts to an associative array.  Plain `vared -c`
+still does not change the type of existing parameters, so no existing uses
+should be broken by this.
+
+Finally, vared can now be used to edit individual elements of arrays and
+associative arrays, like so:
+
+zsh% array=(this is an array)
+zsh% noglob vared array[-1]
+array				<== here type C-a ESC-u RET
+zsh% echo $array
+this is an ARRAY
+zsh% noglob vared array[8]
+				<== here type E I G H T RET
+zsh$ echo $#array $array
+8 this is an ARRAY EIGHT
+
+Note that you don't have to use -c to create new elements, and that it's
+an error to use -ca or -cA when editing elements.
+
+I'd have included some of those examples in the manual, but I couldn't
+decide on the correct yodl incantation.
+
+(BTW, you can even edit array slices this way; but due to limitations on
+my understanding of the parameter code, the whole array is inserted into
+the editor buffer, and whatever's left when you press return is correctly
+assigned to the slice.)
+
+The one other change to this patch is to move a test for recursive ZLE up
+to the top of the function; there's no point in parsing the args if the
+whole thing is goig to bail anyway.
+
+Have fun.
+
+Index: Doc/Zsh/mod_zle.yo
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Doc/Zsh/mod_zle.yo,v
+retrieving revision 1.4
+diff -u -r1.4 mod_zle.yo
+--- mod_zle.yo	1999/01/26 05:23:21	1.4
++++ mod_zle.yo	1999/01/31 20:34:24
+@@ -131,12 +131,20 @@
+ findex(vared)
+ cindex(parameters, editing)
+ cindex(editing parameters)
+-item(tt(vared) [ tt(-ch) ] [ tt(-p) var(prompt) ] [ tt(-r) var(rprompt) ] var(name))(
++item(tt(vared) [ tt(-Aach) ] [ tt(-p) var(prompt) ] [ tt(-r) var(rprompt) ] var(name))(
+ The value of the parameter var(name) is loaded into the edit
+ buffer, and the line editor is invoked.  When the editor exits,
+ var(name) is set to the string value returned by the editor.
+-If the tt(-c) flag is given, the parameter is created if it doesn't
+-already exist.
++When the tt(-c) flag is given, the parameter is created if it doesn't
++already exist.  The tt(-a) flag may be given with tt(-c) to create
++an array parameter, or the tt(-A) flag to create an associative array.
++If the type of an existing parameter does not match the type to be
++created, the parameter is unset and recreated.
++
++Individual elements of existing array or associative array parameters
++may be edited by using subscript syntax on var(name).  New elements are
++created automatically, even without tt(-c).
++
+ If the tt(-p) flag is given, the following string will be taken as
+ the prompt to display at the left.  If the tt(-r) flag is given,
+ the following string gives the prompt to display at the right.  If the
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/Zle/zle_main.c,v
+retrieving revision 1.12
+diff -u -r1.12 zle_main.c
+--- zle_main.c	1999/01/29 17:24:07	1.12
++++ zle_main.c	1999/01/31 20:13:55
+@@ -674,10 +674,17 @@
+ {
+     char *s;
+     char *t;
+-    Param pm;
++    Value v;
++    Param pm = 0;
+     int create = 0;
++    int type = PM_SCALAR;
+     char *p1 = NULL, *p2 = NULL;
+ 
++    if (zleactive) {
++	zwarnnam(name, "ZLE cannot be used recursively (yet)", NULL, 0);
++	return 1;
++    }
++
+     /* all options are handled as arguments */
+     while (*args && **args == '-') {
+ 	while (*++(*args))
+@@ -687,6 +694,12 @@
+ 		yet exist */
+ 		create = 1;
+ 		break;
++	    case 'a':
++		type = PM_ARRAY;
++		break;
++	    case 'A':
++		type = PM_HASHED;
++		break;
+ 	    case 'p':
+ 		/* -p option -- set main prompt string */
+ 		if ((*args)[1])
+@@ -722,6 +735,9 @@
+ 	    }
+ 	args++;
+     }
++    if (type && !create) {
++	zwarnnam(name, "-%s ignored", type == PM_ARRAY ? "a" : "A", 0);
++    }
+ 
+     /* check we have a parameter name */
+     if (!*args) {
+@@ -729,17 +745,17 @@
+ 	return 1;
+     }
+     /* handle non-existent parameter */
+-    if (!(s = getsparam(args[0]))) {
+-	if (create)
+-	    createparam(args[0], PM_SCALAR);
+-	else {
+-	    zwarnnam(name, "no such variable: %s", args[0], 0);
+-	    return 1;
+-	}
+-    }
+-
+-    if(zleactive) {
+-	zwarnnam(name, "ZLE cannot be used recursively (yet)", NULL, 0);
++    s = args[0];
++    v = fetchvalue(&s, (!create || type == PM_SCALAR),
++		   SCANPM_WANTKEYS|SCANPM_WANTVALS|SCANPM_MATCHMANY);
++    if (!v && !create) {
++	zwarnnam(name, "no such variable: %s", args[0], 0);
++	return 1;
++    } else if (v) {
++	s = getstrvalue(v);
++	pm = v->pm;
++    } else if (*s) {
++	zwarnnam(name, "invalid parameter name: %s", args[0], 0);
+ 	return 1;
+     }
+ 
+@@ -757,14 +773,24 @@
+     if (t[strlen(t) - 1] == '\n')
+ 	t[strlen(t) - 1] = '\0';
+     /* final assignment of parameter value */
+-    pm = (Param) paramtab->getnode(paramtab, args[0]);
+-    if (pm && PM_TYPE(pm->flags) == PM_ARRAY) {
++    if (create && (!pm || (type && PM_TYPE(pm->flags) != type))) {
++	if (pm)
++	    unsetparam(args[0]);
++	createparam(args[0], type);
++	pm = 0;
++    }
++    if (!pm)
++	pm = (Param) paramtab->getnode(paramtab, args[0]);
++    if (pm && (PM_TYPE(pm->flags) & (PM_ARRAY|PM_HASHED))) {
+ 	char **a;
+ 
+ 	PERMALLOC {
+ 	    a = spacesplit(t, 1);
+ 	} LASTALLOC;
+-	setaparam(args[0], a);
++	if (PM_TYPE(pm->flags) == PM_ARRAY)
++	    setaparam(args[0], a);
++	else
++	    sethparam(args[0], a);
+     } else
+ 	setsparam(args[0], t);
+     return 0;
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

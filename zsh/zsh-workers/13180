@@ -1,0 +1,165 @@
+From zsh-workers-return-13180-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Nov 22 08:12:45 2000
+Return-Path: <zsh-workers-return-13180-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20988 invoked from network); 22 Nov 2000 08:12:43 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 22 Nov 2000 08:12:43 -0000
+Received: (qmail 11771 invoked by alias); 22 Nov 2000 08:12:32 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13180
+Received: (qmail 11727 invoked from network); 22 Nov 2000 08:12:29 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1001122081141.ZM11237@candle.brasslantern.com>
+Date: Wed, 22 Nov 2000 08:11:41 +0000
+In-Reply-To: <20001121145838.A2755@h0040333b7dc3.ne.mediaone.net>
+Comments: In reply to "Glenn F. Maynard" <glennm@mediaone.net>
+        "xterm title/screen title+hardstatus" (Nov 21,  2:58pm)
+References: <20001121145838.A2755@h0040333b7dc3.ne.mediaone.net>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: "Glenn F. Maynard" <glennm@mediaone.net>, zsh-workers@sunsite.auc.dk
+Subject: Re: xterm title/screen title+hardstatus
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Nov 21,  2:58pm, Glenn F. Maynard wrote:
+}
+} My objective is to display exactly what was typed in the titlebar (parsed
+} somewhat: the first word, the command, is placed in the title; the remainder,
+} if anything, is placed in the hardstatus line.)
+
+I hate to rain on your parade, but you haven't even begun to address all
+the possible problems here.  What do you do about the AUTO_FG option?  What
+is "the command" in something like:
+
+zsh% ( print look, I am a subshell ; sleep 60 ; echo goodbye ) &
+
+(Your function, and mine below, will put "(" in the title bar for that.)
+
+How meaningful is your hardstatus line when you run several commands in
+a pipeline?  What about redirections?  (Did you know that you can write
+`2>/dev/null foo bar' in place of `foo bar 2>/dev/null'?)  What about
+`fg %2 %3 %5'?  (Brings multiple jobs to the foreground in succession.)
+
+(OK, maybe I did like raining, just a little.  One solution would be to
+forget about putting one word in the title, and instead put a truncated
+prefix of the entire command line there.)
+
+Anyway, here's a preexec to do what your patches and precmd did, without
+having to hack on the zsh source.
+
+    # Helper function to output the title escapes
+    title() {
+	print -nR $'\033k'$1$'\033'\\
+	print -nR $'\033_'$2$'\033'\\
+    }
+
+    preexec() {
+    	emulate -L zsh
+        local -a cmd; cmd=(${(z)1})		# Re-parse the command line
+
+	# Construct a command that will output the desired job number.
+        case $cmd[1] in
+	    fg) if (( $#cmd == 1 )); then
+		    # No arguments, must find the current job
+		    cmd=(builtin jobs -l %+)
+		else
+		    # Replace the command name, ignore extra args.
+		    cmd=(builtin jobs -l $cmd[2])
+		fi;;
+	    %*) cmd=(builtin jobs -l $cmd[1]);;	# Same as "else" above
+	    *)  title $cmd[1]:t "$cmd[2,-1]"	# Not resuming a job,
+	    	return;;			# so we're all done
+        esac
+
+	local -A jt; jt=(${(kv)jobtexts})	# Copy jobtexts for subshell
+
+	# Run the command, read its output, and look up the jobtext.
+	# Could parse $rest here, but $jobtexts (via $jt) is easier.
+	$cmd >>(read num rest
+		cmd=(${(z)${(e):-\$jt$num}})
+		title $cmd[1]:t "$cmd[2,-1]") 2>/dev/null
+    }
+
+Probably the oddest bit of that is ${(z)${(e):-\$jt$num}} ... $num will be
+a string such as "[3]", so \$jt$num is $jt[3], which evaluated with (e) is
+the desired job text, which is then parsed with (z).
+
+Some other commentary:
+
+} preexec appears to receive the original, unparsed input command (including
+} whitespace)--except that escapes are parsed, so a command like
+} echo "Hello\nThere\n"; contains two real newlines, not the character
+} sequence "\n".
+
+No, escapes of that sort are not parsed before calling preexec.  It's your
+`echo -n' that's turning those "\n" into newlines.  That's why I used
+`print -Rn' instead, in the `title' function above.
+
+} Currently, I've added a variable expansion parameter: if FOO=%vi, then
+} ${(J)FOO} expands to the job number.
+
+That was a creative approach, but I don't think it's the best way.  An
+option to the `jobs' command to have it stick its output in a parameter,
+like the `stat' command from the zsh/stat module does, would probably be
+much better.
+
+} Other problems I've had: Whitespace stripping was rather tricky; I'm sure
+} there's a better way to do it.  The (z) (split) expansion command has very
+} strange behavior: it splits on spaces if there's more than one word; if
+} there's only one word, it splits it into an array of single characters.
+
+Nope, that's not what's happening.  Subscripts on zsh parameters always
+behave that way:  If the parameter is a string, the subscript indexes it
+by characters, and if it's an array, it indexes by array elements.
+
+When you do this:
+
+	spl=${(z)cmd}
+
+The type of `spl' is a string if ${(z)cmd} is a string, or an array if
+${(z)cmd} is an array.  It just happens that when $cmd has only one word,
+${(z)cmd} is a string, and otherwise it's an array.  That's probably not
+intentional -- most likely (z) should always return a (maybe one-element)
+array.  However, you can (and should) force `spl' to always be an array,
+by using parens like this:
+
+	spl=( ${(z)cmd} )
+
+} preexec() {
+} 	local cmd spl pnum lhs rhs
+} 	cmd=$@
+
+This is unneccesary; preexec always gets exactly one argument (the whole
+command line, unparsed).
+
+} 	spl=${(z)cmd}
+} 	if [[ ${#spl} == ${#cmd} ]] then
+} 		# it was split into an array of chars
+
+Oh, really?  Try `echo 1 2 3'.
+
+} 	# strip off any path from lhs
+} 	lhs=${lhs:t}
+} 	# is this a command which restarts an existing job?
+} 	# lhs "fg"
+} 	if [[ $lhs == "fg" ]] then
+} 		pnum=${(J)rhs}
+} 		preexec ${jobtexts[$pnum]}
+
+This recursive call is a lot of work just to get those two `echo's.
+
+} precmd() {
+} 	echo -n '\033kzsh\033\\\033_'$PWD'\033'\\
+} }
+
+This, of course, is still necessary with my preexec above.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

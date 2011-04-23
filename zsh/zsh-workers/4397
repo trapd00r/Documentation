@@ -1,0 +1,97 @@
+From zsh-workers-request@math.gatech.edu Fri Sep 25 15:19:49 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25683 invoked from network); 25 Sep 1998 15:19:48 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 25 Sep 1998 15:19:48 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id LAA16437;
+	Fri, 25 Sep 1998 11:09:07 -0400 (EDT)
+Resent-Date: Fri, 25 Sep 1998 11:09:07 -0400 (EDT)
+Message-Id: <9809251501.AA18139@ibmth.df.unipi.it>
+To: zsh-workers@math.gatech.edu
+Subject: PATCH: 3.1.4: Insidious exit status bug
+In-Reply-To: ""Bart Schaefer""'s message of "Thu, 24 Sep 1998 23:41:27 DFT."
+             <980924234127.ZM15042@candle.brasslantern.com> 
+Date: Fri, 25 Sep 1998 17:01:09 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"FSsXI1.0.m04.J8x2s"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4397
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Bart wrote:
+> zagzig% echo yyy | fgrep -q `echo xxx` && echo ok
+> ok
+
+First:  getoutput():  OK, I'll stop worrying about a $(...) setting
+lastval.  It's not necessary in the middle of an ordinary command, but
+when the rest of the code is working it's harmless.
+
+Second:  Phew.  Here's what was happening.
+
+1) The `echo yyy' was added to the process list for the current job;
+that job finished straight away since it was short.  (It had to fork
+even for the builtin because of the pipeline.)
+
+2) The shell handled the arguments for fgrep, called the `echo xxx',
+and waited for it.  As `echo yyy' was already finished, it was
+harvested, too.  As it was (at that point) the last job in the
+pipeline, the job had the STAT_DONE flag set.
+
+3) The fgrep was added to the job table, making a second process in
+the pipeline, but the STAT_DONE flag was not unset.
+
+4) The shell now waited for all jobs to finish.  However, in waitjobs(),
+the current status is updated (via printjob()) to check whether
+everything has already finished.  As the STAT_DONE flag was set on the
+job, it was wiped.
+
+5) The fgrep process was harvested anyway, but it didn't have a job
+table entry corresponding to it any more, so the shell didn't know it
+was supposed to use the return status for lastval/$?.
+
+Benissimo.  Here's the simplest fix: turn off the STAT_DONE flag
+explicitly when adding a new process.  As noted in the comment, it's
+important that the shell doesn't try to check job statuses between the
+wait() which harvested the first process, and the time the second
+process is added, else the bug will reappear.  At the moment things
+look OK.  (Maybe specific processes like $(...) should have a
+waitpid() for their own process, rather than wreaking havoc on the job
+table?)
+
+For a more sophisticated fix:  add a flags field to struct process,
+record there by an extra argument to addproc() whether the process is
+the last in the pipeline, don't set STAT_DONE if that process isn't
+yet in the procs list.  I'll do that if there's a preference.
+
+(Quite likely applies to 3.0.5 too, could certainly be done by hand
+without much effort.)
+
+*** Src/jobs.c.cout	Thu Jul  9 12:04:42 1998
+--- Src/jobs.c	Fri Sep 25 16:40:34 1998
+***************
+*** 658,663 ****
+--- 658,670 ----
+  	/* first process for this job */
+  	jobtab[thisjob].procs = pn;
+      }
++     /* If the first process in the job finished before any others were *
++      * added, maybe STAT_DONE got set incorrectly.  This can happen if *
++      * a $(...) was waited for and the last existing job in the        *
++      * pipeline was already finished.  We need to be very careful that *
++      * there was no call to printjob() between then and now, else      *
++      * the job will already have been deleted from the table.          */
++     jobtab[thisjob].stat &= ~STAT_DONE;
+  }
+  
+  /* Check if we have files to delete.  We need to check this to see *
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Gruppo Teorico, Dipartimento di Fisica
+Piazza Torricelli 2, 56100 Pisa, Italy
+

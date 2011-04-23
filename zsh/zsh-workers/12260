@@ -1,0 +1,133 @@
+From zsh-workers-return-12260-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Jul 16 20:22:15 2000
+Return-Path: <zsh-workers-return-12260-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1604 invoked from network); 16 Jul 2000 20:22:14 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 16 Jul 2000 20:22:14 -0000
+Received: (qmail 4120 invoked by alias); 16 Jul 2000 20:21:56 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12260
+Received: (qmail 4113 invoked from network); 16 Jul 2000 20:21:50 -0000
+Date: Sun, 16 Jul 2000 13:21:21 -0700 (PDT)
+From: Wayne Davison <wayned@users.sourceforge.net>
+X-Sender: wayne@phong.blorf.net
+To: Zsh Workers <zsh-workers@sunsite.auc.dk>
+Subject: PATCH: histfile-related fixes
+Message-ID: <Pine.LNX.4.21.0007161312400.15755-100000@phong.blorf.net>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+I'm looking into a problem that can cause history lines to not be
+shared with other processes when SHAREHISTORY is set.  In doing this,
+I noticed that the non-HAVE_LINK side of the lockhistfile() code was
+not right when handling lock failures, and that a few spots in the
+code that use the HISTFILE name needed to call unmeta().  Here's a
+patch for these problems, plus an extra call to unlink(tmpfile) in the
+HAVE_LINK side of the locking code (since the open() man page for
+Linux says that O_EXCL over NFS is broken, I figure this might help).
+
+..wayne..
+
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/hist.c
+@@ -1695,7 +1695,7 @@
+     if (!fn && !(fn = getsparam("HISTFILE")))
+ 	return;
+     if (readflags & HFILE_FAST) {
+-	if (stat(fn, &sb) < 0
++	if (stat(unmeta(fn), &sb) < 0
+ 	 || (lasthist.fsiz == sb.st_size && lasthist.mtim == sb.st_mtime)
+ 	 || !lockhistfile(fn, 0))
+ 	    return;
+@@ -1980,17 +1980,23 @@
+ 	return 0;
+     if (!lockhistct++) {
+ 	struct stat sb;
+-	int fd, len = strlen(fn);
+-	char *tmpfile, *lockfile;
++	int fd, len;
++	char *lockfile;
++#ifdef HAVE_LINK
++	char *tmpfile;
++#endif
+ 
++	fn = unmeta(fn);
++	len = strlen(fn);
++	lockfile = zalloc(len + 5 + 1);
++	sprintf(lockfile, "%s.LOCK", fn);
+ #ifdef HAVE_LINK
+ 	tmpfile = zalloc(len + 10 + 1);
+ 	sprintf(tmpfile, "%s.%ld", fn, (long)mypid);
+-	if ((fd = open(tmpfile, O_RDWR|O_CREAT|O_EXCL, 0644)) >= 0) {
+-	    write(fd, "0\n", 2);
++	unlink(tmpfile); /* NFS's O_EXCL is often broken... */
++	if ((fd = open(tmpfile, O_WRONLY|O_CREAT|O_EXCL, 0644)) >= 0) {
++	    write(fd, tmpfile+len+1, strlen(tmpfile+len+1));
+ 	    close(fd);
+-	    lockfile = zalloc(len + 5 + 1);
+-	    sprintf(lockfile, "%s.LOCK", fn);
+ 	    while (link(tmpfile, lockfile) < 0) {
+ 		if (stat(lockfile, &sb) < 0) {
+ 		    if (errno == ENOENT)
+@@ -2006,25 +2012,33 @@
+ 		lockhistct--;
+ 		break;
+ 	    }
+-	    free(lockfile);
++	    unlink(tmpfile);
+ 	}
+-	unlink(tmpfile);
+ 	free(tmpfile);
+ #else /* not HAVE_LINK */
+-	lockfile = zalloc(len + 5 + 1);
+-	sprintf(lockfile, "%s.LOCK", fn);
+-	while ((fd = open(lockfile, O_CREAT|O_EXCL, 0644)) < 0) {
+-		if (errno == EEXIST) continue;
+-		else if (keep_trying) {
+-		    if (time(NULL) - sb.st_mtime < 10)
+-			sleep(1);
++	while ((fd = open(lockfile, O_WRONLY|O_CREAT|O_EXCL, 0644)) < 0) {
++	    if (errno != EEXIST || !keep_trying)
++		break;
++	    if (stat(lockfile, &sb) < 0) {
++		if (errno == ENOENT)
+ 		    continue;
+-		}
+-		lockhistct--;
+ 		break;
++	    }
++	    if (time(NULL) - sb.st_mtime < 10)
++		sleep(1);
++	    else
++		unlink(lockfile);
++	}
++	if (fd < 0)
++	    lockhistct--;
++	else {
++	    char buf[16];
++	    sprintf(buf, "%ld", (long)mypid);
++	    write(fd, buf, strlen(buf));
++	    close(fd);
+ 	}
++#endif /* not HAVE_LINK */
+ 	free(lockfile);
+-#endif /* HAVE_LINK */
+     }
+     return ct != lockhistct;
+ }
+@@ -2044,7 +2058,9 @@
+ 	    lockhistct = 0;
+     }
+     else {
+-	char *lockfile = zalloc(strlen(fn) + 5 + 1);
++	char *lockfile;
++	fn = unmeta(fn);
++	lockfile = zalloc(strlen(fn) + 5 + 1);
+ 	sprintf(lockfile, "%s.LOCK", fn);
+ 	unlink(lockfile);
+ 	free(lockfile);
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

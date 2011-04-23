@@ -1,0 +1,551 @@
+From zsh-workers-return-13101-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Oct 31 13:19:34 2000
+Return-Path: <zsh-workers-return-13101-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20383 invoked from network); 31 Oct 2000 13:19:32 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 Oct 2000 13:19:32 -0000
+Received: (qmail 17490 invoked by alias); 31 Oct 2000 13:19:25 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13101
+Received: (qmail 17481 invoked from network); 31 Oct 2000 13:19:20 -0000
+Date: Tue, 31 Oct 2000 14:19:18 +0100 (MET)
+Message-Id: <200010311319.OAA00721@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 30 Oct 2000 16:18:08 +0000
+Subject: Re: zsh-3.1.9-dev-6 crashes occassionally
+
+
+Bart Schaefer wrote:
+
+> ...
+>  
+> } We could also use a mixture: a global flag that tells the signal code
+> } that it's save to invoke the trap handler right away but normally it
+> } would only make them be called later. That flag could be set when zsh
+> } is waiting for an external command, reading somethin or whatever.
+> 
+> That would probably be enough to take care of the blocking-read issue.
+> However, our choice of "a safe place" to invoke the handler is still
+> going to have be made with some care --
+
+Of course.
+
+> it has to be a place (or more
+> than one) that is *guaranteed* to be reached quickly, and I just don't
+> see how we can possibly enforce that when arbitrary module code may get
+> involved.
+
+We can't. Unless we want to allow immediate trap-handling in all
+module code, which we don't want.
+
+
+The patch below (not to be committed yet) is how far I've got.  It
+makes dotrap() just put the signals of the traps to execute on a queue 
+if trapsallowed is false. There are three hopefully convenient macros
+to say how traps are to be executed. RUNTRAPS() makes all queued traps 
+be run *now*. The pair of ALLOWTRAPS { ... } DISALOWTRAPS; should look 
+familiar and can be used to temporarily allow executing traps
+immediately.  These can be nested but are really only intended to be
+called around short parts of the code that may block, like a read or
+something like that. The last change in the interface is that dotrap() 
+gets a second argument that says that the trap is to be executed
+immediately (in that case any traps on the queue will be executed
+before that trap).
+
+The rest of the patch makes the macros be used in some places (inter
+alia, traps are allowed to run after every command) and changes the
+calls to dotrap(). I've tried the tests and they work fine.
+
+I haven't even tried to implement the function that can be used to
+block/read/write/wait everywhere (but I continue to dream about it).
+
+
+Bye
+ Sven
+
+diff -u -r ../oz/Src/Zle/zle_main.c ./Src/Zle/zle_main.c
+--- ../oz/Src/Zle/zle_main.c	Sun Oct 22 15:17:55 2000
++++ ./Src/Zle/zle_main.c	Mon Oct 30 20:11:38 2000
+@@ -398,47 +398,49 @@
+ # endif
+ #endif
+ 	}
+-	while ((r = read(SHTTY, &cc, 1)) != 1) {
+-	    if (r == 0) {
+-		/* The test for IGNOREEOF was added to make zsh ignore ^Ds
+-		   that were typed while commands are running.  Unfortuantely
+-		   this caused trouble under at least one system (SunOS 4.1).
+-		   Here shells that lost their xterm (e.g. if it was killed
+-		   with -9) didn't fail to read from the terminal but instead
+-		   happily continued to read EOFs, so that the above read
+-		   returned with 0, and, with IGNOREEOF set, this caused
+-		   an infinite loop.  The simple way around this was to add
+-		   the counter (icnt) so that this happens 20 times and than
+-		   the shell gives up (yes, this is a bit dirty...). */
+-		if (isset(IGNOREEOF) && icnt++ < 20)
+-		    continue;
+-		stopmsg = 1;
+-		zexit(1, 0);
++	ALLOWTRAPS {
++	    while ((r = read(SHTTY, &cc, 1)) != 1) {
++		if (r == 0) {
++		    /* The test for IGNOREEOF was added to make zsh ignore ^Ds
++		       that were typed while commands are running.  Unfortuantely
++		       this caused trouble under at least one system (SunOS 4.1).
++		       Here shells that lost their xterm (e.g. if it was killed
++		       with -9) didn't fail to read from the terminal but instead
++		       happily continued to read EOFs, so that the above read
++		       returned with 0, and, with IGNOREEOF set, this caused
++		       an infinite loop.  The simple way around this was to add
++		       the counter (icnt) so that this happens 20 times and than
++		       the shell gives up (yes, this is a bit dirty...). */
++		    if (isset(IGNOREEOF) && icnt++ < 20)
++			continue;
++		    stopmsg = 1;
++		    zexit(1, 0);
++		}
++		icnt = 0;
++		if (errno == EINTR) {
++		    die = 0;
++		    if (!errflag && !retflag && !breaks)
++			continue;
++		    errflag = 0;
++		    breaks = obreaks;
++		    errno = old_errno;
++		    ALLOWTRAPS_RETURN(EOF);
++		} else if (errno == EWOULDBLOCK) {
++		    fcntl(0, F_SETFL, 0);
++		} else if (errno == EIO && !die) {
++		    ret = opts[MONITOR];
++		    opts[MONITOR] = 1;
++		    attachtty(mypgrp);
++		    zrefresh();	/* kludge! */
++		    opts[MONITOR] = ret;
++		    die = 1;
++		} else if (errno != 0) {
++		    zerr("error on TTY read: %e", NULL, errno);
++		    stopmsg = 1;
++		    zexit(1, 0);
++		}
+ 	    }
+-	    icnt = 0;
+-	    if (errno == EINTR) {
+-		die = 0;
+-		if (!errflag && !retflag && !breaks)
+-		    continue;
+-		errflag = 0;
+-		breaks = obreaks;
+-		errno = old_errno;
+-		return EOF;
+-	    } else if (errno == EWOULDBLOCK) {
+-		fcntl(0, F_SETFL, 0);
+-	    } else if (errno == EIO && !die) {
+-		ret = opts[MONITOR];
+-		opts[MONITOR] = 1;
+-		attachtty(mypgrp);
+-		zrefresh();	/* kludge! */
+-		opts[MONITOR] = ret;
+-		die = 1;
+-	    } else if (errno != 0) {
+-		zerr("error on TTY read: %e", NULL, errno);
+-		stopmsg = 1;
+-		zexit(1, 0);
+-	    }
+-	}
++	} DISALLOWTRAPS;
+ 	if (cc == '\r')		/* undo the exchange of \n and \r determined by */
+ 	    cc = '\n';		/* zsetterm() */
+ 	else if (cc == '\n')
+diff -u -r ../oz/Src/builtin.c ./Src/builtin.c
+--- ../oz/Src/builtin.c	Sun Oct 22 15:17:53 2000
++++ ./Src/builtin.c	Mon Oct 30 21:22:08 2000
+@@ -3218,7 +3218,7 @@
+ 	    checkjobs();   /* check if any jobs are running/stopped */
+ 	if (stopmsg) {
+ 	    stopmsg = 2;
+-	    LASTALLOC_RETURN;
++	    return;
+ 	}
+     }
+     if (in_exit++ && from_signal)
+@@ -3240,7 +3240,7 @@
+ 	}
+     }
+     if (sigtrapped[SIGEXIT])
+-	dotrap(SIGEXIT);
++	dotrap(SIGEXIT, 1);
+     runhookdef(EXITHOOK, NULL);
+     if (mypid != getpid())
+ 	_exit(val);
+@@ -3733,6 +3733,7 @@
+ zread(int izle, int *readchar)
+ {
+     char cc, retry = 0;
++    int ret;
+ 
+     if (izle) {
+ 	int c = getkeyptr(0);
+@@ -3756,7 +3757,10 @@
+     }
+     for (;;) {
+ 	/* read a character from readfd */
+-	switch (read(readfd, &cc, 1)) {
++	ALLOWTRAPS {
++	    ret = read(readfd, &cc, 1);
++	} DISALLOWTRAPS;
++	switch (ret) {
+ 	case 1:
+ 	    /* return the character read */
+ 	    return STOUC(cc);
+diff -u -r ../oz/Src/exec.c ./Src/exec.c
+--- ../oz/Src/exec.c	Sun Oct 22 15:17:53 2000
++++ ./Src/exec.c	Mon Oct 30 21:22:34 2000
+@@ -738,6 +738,7 @@
+ execsimple(Estate state)
+ {
+     wordcode code = *state->pc++;
++    int lv;
+ 
+     if (errflag)
+ 	return (lastval = 1);
+@@ -754,9 +755,13 @@
+ 	    fputc('\n', xtrerr);
+ 	    fflush(xtrerr);
+ 	}
+-	return (lastval = (errflag ? errflag : cmdoutval));
++	lv = (errflag ? errflag : cmdoutval);
+     } else
+-	return (lastval = (execfuncs[code - WC_CURSH])(state, 0));
++	lv = (execfuncs[code - WC_CURSH])(state, 0);
++
++    RUNTRAPS();
++
++    return lastval = lv;
+ }
+ 
+ /* Main routine for executing a list.                                *
+@@ -887,19 +892,19 @@
+ 	noerrexit = oldnoerrexit;
+ 
+ 	if (sigtrapped[SIGDEBUG])
+-	    dotrap(SIGDEBUG);
++	    dotrap(SIGDEBUG, 1);
+ 
+ 	/* Check whether we are suppressing traps/errexit *
+ 	 * (typically in init scripts) and if we haven't  *
+ 	 * already performed them for this sublist.       */
+ 	if (!noerrexit && !donetrap) {
+ 	    if (sigtrapped[SIGZERR] && lastval) {
+-		dotrap(SIGZERR);
++		dotrap(SIGZERR, 1);
+ 		donetrap = 1;
+ 	    }
+ 	    if (lastval && isset(ERREXIT)) {
+ 		if (sigtrapped[SIGEXIT])
+-		    dotrap(SIGEXIT);
++		    dotrap(SIGEXIT, 1);
+ 		if (mypid != getpid())
+ 		    _exit(lastval);
+ 		else
+@@ -1181,9 +1186,10 @@
+ 	else
+ 	    list_pipe_text[0] = '\0';
+     }
+-    if (WC_PIPE_TYPE(pcode) == WC_PIPE_END)
++    if (WC_PIPE_TYPE(pcode) == WC_PIPE_END) {
+ 	execcmd(state, input, output, how, last1 ? 1 : 2);
+-    else {
++	RUNTRAPS();
++    } else {
+ 	int old_list_pipe = list_pipe;
+ 	Wordcode next = state->pc + (*state->pc);
+ 	wordcode code;
+@@ -1218,12 +1224,14 @@
+ 		entersubsh(how, 2, 0);
+ 		close(synch[1]);
+ 		execcmd(state, input, pipes[1], how, 0);
++		RUNTRAPS();
+ 		_exit(lastval);
+ 	    }
+ 	} else {
+ 	    /* otherwise just do the pipeline normally. */
+ 	    subsh_close = pipes[0];
+ 	    execcmd(state, input, pipes[1], how, 0);
++	    RUNTRAPS();
+ 	}
+ 	zclose(pipes[1]);
+ 	state->pc = next;
+diff -u -r ../oz/Src/init.c ./Src/init.c
+--- ../oz/Src/init.c	Sun Oct 22 15:17:53 2000
++++ ./Src/init.c	Mon Oct 30 21:22:47 2000
+@@ -170,7 +170,7 @@
+ 	}
+ 	if (isset(SINGLECOMMAND) && toplevel) {
+ 	    if (sigtrapped[SIGEXIT])
+-		dotrap(SIGEXIT);
++		dotrap(SIGEXIT, 1);
+ 	    exit(lastval);
+ 	}
+ 	if (justonce)
+@@ -1101,13 +1101,19 @@
+ mod_export unsigned char *
+ fallback_zleread(char *lp, char *rp, int ha)
+ {
++    unsigned char *ret;
+     char *pptbuf;
+     int pptlen;
+ 
+     pptbuf = unmetafy(promptexpand(lp, 0, NULL, NULL), &pptlen);
+     write(2, (WRITE_ARG_2_T)pptbuf, pptlen);
+     free(pptbuf);
+-    return (unsigned char *)shingetline();
++
++    ALLOWTRAPS {
++	ret = (unsigned char *)shingetline();
++    } DISALLOWTRAPS;
++
++    return ret;
+ }
+ 
+ /* compctl entry point pointers.  Similar to the ZLE ones. */
+diff -u -r ../oz/Src/jobs.c ./Src/jobs.c
+--- ../oz/Src/jobs.c	Sun Oct 22 15:17:53 2000
++++ ./Src/jobs.c	Mon Oct 30 21:23:14 2000
+@@ -378,7 +378,7 @@
+ 	    zrefresh();
+     }
+     if (sigtrapped[SIGCHLD] && job != thisjob)
+-	dotrap(SIGCHLD);
++	dotrap(SIGCHLD, 0);
+ 
+     /* When MONITOR is set, the foreground process runs in a different *
+      * process group from the shell, so the shell will not receive     *
+@@ -389,7 +389,7 @@
+ 
+ 	if (sig == SIGINT || sig == SIGQUIT) {
+ 	    if (sigtrapped[sig]) {
+-		dotrap(sig);
++		dotrap(sig, 0);
+ 		/* We keep the errflag as set or not by dotrap.
+ 		 * This is to fulfil the promise to carry on
+ 		 * with the jobs if trap returns zero.
+@@ -872,15 +872,17 @@
+ 
+     /* child_block() around this loop in case #ifndef WNOHANG */
+     child_block();		/* unblocked in child_suspend() */
+-    while (!errflag && (kill(pid, 0) >= 0 || errno != ESRCH)) {
+-	if (first)
+-	    first = 0;
+-	else
+-	    kill(pid, SIGCONT);
++    ALLOWTRAPS {
++	while (!errflag && (kill(pid, 0) >= 0 || errno != ESRCH)) {
++	    if (first)
++		first = 0;
++	    else
++		kill(pid, SIGCONT);
+ 
+-	child_suspend(SIGINT);
+-	child_block();
+-    }
++	    child_suspend(SIGINT);
++	    child_block();
++	}
++    } DISALLOWTRAPS;
+     child_unblock();
+ }
+ 
+@@ -932,9 +934,11 @@
+ {
+     Job jn = jobtab + thisjob;
+ 
+-    if (jn->procs)
+-	waitjob(thisjob, 0);
+-    else {
++    if (jn->procs) {
++	ALLOWTRAPS {
++	    waitjob(thisjob, 0);
++	} DISALLOWTRAPS;
++    } else {
+ 	deletejob(jn);
+ 	pipestats[0] = lastval;
+ 	numpipestats = 1;
+@@ -1270,9 +1274,11 @@
+ 		}
+ 	    return 0;
+ 	} else {   /* Must be BIN_WAIT, so wait for all jobs */
+-	    for (job = 0; job != MAXJOB; job++)
+-		if (job != thisjob && jobtab[job].stat)
+-		    waitjob(job, SIGINT);
++	    ALLOWTRAPS {
++		for (job = 0; job != MAXJOB; job++)
++		    if (job != thisjob && jobtab[job].stat)
++			waitjob(job, SIGINT);
++	    } DISALLOWTRAPS;
+ 	    return 0;
+ 	}
+     }
+@@ -1362,8 +1368,11 @@
+ 		    settyinfo(jobtab[job].ty);
+ 		killjb(jobtab + job, SIGCONT);
+ 	    }
+-	    if (func == BIN_WAIT)
+-	        waitjob(job, SIGINT);
++	    if (func == BIN_WAIT) {
++		ALLOWTRAPS {
++		    waitjob(job, SIGINT);
++		} DISALLOWTRAPS;
++	    }
+ 	    if (func != BIN_BG) {
+ 		waitjobs();
+ 		retval = lastval2;
+diff -u -r ../oz/Src/signals.c ./Src/signals.c
+--- ../oz/Src/signals.c	Sun Oct 22 15:17:53 2000
++++ ./Src/signals.c	Mon Oct 30 21:21:55 2000
+@@ -497,7 +497,7 @@
+  
+     case SIGHUP:
+         if (sigtrapped[SIGHUP])
+-            dotrap(SIGHUP);
++            dotrap(SIGHUP, 0);
+         else {
+             stopmsg = 1;
+             zexit(SIGHUP, 1);
+@@ -506,7 +506,7 @@
+  
+     case SIGINT:
+         if (sigtrapped[SIGINT])
+-            dotrap(SIGINT);
++            dotrap(SIGINT, 0);
+         else {
+ 	    if ((isset(PRIVILEGED) || isset(RESTRICTED)) &&
+ 		isset(INTERACTIVE) && noerrexit < 0)
+@@ -523,14 +523,14 @@
+     case SIGWINCH:
+         adjustwinsize(1);  /* check window size and adjust */
+ 	if (sigtrapped[SIGWINCH])
+-	    dotrap(SIGWINCH);
++	    dotrap(SIGWINCH, 0);
+         break;
+ #endif
+ 
+     case SIGALRM:
+         if (sigtrapped[SIGALRM]) {
+ 	    int tmout;
+-            dotrap(SIGALRM);
++            dotrap(SIGALRM, 0);
+ 
+ 	    if ((tmout = getiparam("TMOUT")))
+ 		alarm(tmout);           /* reset the alarm */
+@@ -549,7 +549,7 @@
+         break;
+  
+     default:
+-        dotrap(sig);
++        dotrap(sig, 0);
+         break;
+     }   /* end of switch(sig) */
+  
+@@ -907,7 +907,9 @@
+      * function will test for this, but this way we keep status flags *
+      * intact without working too hard.  Special cases (e.g. calling  *
+      * a trap for SIGINT after the error flag was set) are handled    *
+-     * by the calling code.  (PWS 1995/06/08).			      */
++     * by the calling code.  (PWS 1995/06/08).			      *
++     *                                                                *
++     * This test is now replicated in dotrap().                       */
+     if ((*sigtr & ZSIG_IGNORED) || !sigfn || errflag)
+         return;
+ 
+@@ -957,11 +959,56 @@
+ 	*sigtr &= ~ZSIG_IGNORED;
+ }
+ 
+-/* Standard call to execute a trap for a given signal */
++/* != 0 if trap handlers can be called immediately */
++
++/**/
++mod_export int trapsallowed;
++
++/* Queued traps and allocated length of queue. */
++
++static int *trapqueue, trapqlen;
++
++/* Number of used slots in trap queue. */
++
++/**/
++mod_export int trapqused;
++
++/* Standard call to execute a trap for a given signal.  The second
++ * argument should be zero if we may need to put the trap on the queue
++ * and 1 if it may be called immediately.  It should never be set to
++ * anything less than zero, that's used internally. */
+ 
+ /**/
+ void
+-dotrap(int sig)
++dotrap(int sig, int now)
+ {
+-    dotrapargs(sig, sigtrapped+sig, sigfuncs[sig]);
++    /* Copied from dotrapargs(). */
++    if ((sigtrapped[sig] & ZSIG_IGNORED) || !sigfuncs[sig] || errflag)
++	return;
++
++    if (now || trapsallowed) {
++	if (now < 0)
++	    RUNTRAPS();
++	dotrapargs(sig, sigtrapped+sig, sigfuncs[sig]);
++    } else {
++	if (trapqlen == trapqused)
++	    trapqueue = (int *) zrealloc(trapqueue, (trapqlen += 32));
++	trapqueue[trapqused++] = sig;
++    }
++}
++
++/**/
++mod_export void
++doqueuedtraps(void)
++{
++    int sig, ota = trapsallowed;
++
++    trapsallowed = 1;
++    while (trapqused) {
++	trapqused--;
++	sig = *trapqueue;
++	memcpy(trapqueue, trapqueue + 1, trapqused * sizeof(int));
++	dotrap(sig, -1);
++    }
++    trapsallowed = ota;
+ }
+diff -u -r ../oz/Src/signals.h ./Src/signals.h
+--- ../oz/Src/signals.h	Sun Oct 22 15:17:53 2000
++++ ./Src/signals.h	Mon Oct 30 20:06:14 2000
+@@ -118,3 +118,8 @@
+ extern sigset_t signal_unblock _((sigset_t));
+ #endif   /* POSIX_SIGNALS */
+ 
++#define RUNTRAPS() do { if (trapqused) doqueuedtraps(); } while (0)
++#define ALLOWTRAPS do { RUNTRAPS(); trapsallowed++; do
++#define DISALLOWTRAPS while (0); RUNTRAPS(); trapsallowed--; } while (0)
++#define ALLOWTRAPS_RETURN(V) \
++    do { RUNTRAPS(); trapsallowed--; return (V); } while (0)
+diff -u -r ../oz/Src/zsh.h ./Src/zsh.h
+--- ../oz/Src/zsh.h	Sun Oct 22 15:17:54 2000
++++ ./Src/zsh.h	Mon Oct 30 19:42:27 2000
+@@ -1627,8 +1627,6 @@
+ #endif
+ ;
+ 
+-# define LASTALLOC_RETURN return
+-
+ # define NEWHEAPS(h)    do { Heap _switch_oldheaps = h = new_heaps(); do
+ # define OLDHEAPS       while (0); old_heaps(_switch_oldheaps); } while (0);
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

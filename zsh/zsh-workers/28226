@@ -1,0 +1,246 @@
+From zsh-workers-return-28226-mason-zsh=primenet.com.au@zsh.org Fri Sep 03 22:39:26 2010
+Return-Path: <zsh-workers-return-28226-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12261 invoked by alias); 3 Sep 2010 22:39:26 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28226
+Received: (qmail 17490 invoked from network); 3 Sep 2010 22:39:22 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00 autolearn=ham
+	version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.56 as permitted sender)
+Date: Fri, 3 Sep 2010 23:06:10 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: Zsh Hackers' List <zsh-workers@zsh.org>
+Subject: Re: PATCH: documentation on keymap selection
+Message-ID: <20100903230610.34ecd51b@pws-pc>
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.20.1; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Cloudmark-Analysis: v=1.1 cv=DhNl2YeytwJssBBGe49HJX82LNDFEEVkpVB34RXKaPo= c=1 sm=0 a=EWzdkCzTIBoA:10 a=DogomfpGjd0A:10 a=kj9zAlcOel0A:10 a=NLZqzBF-AAAA:8 a=QvXXFQXZlVRPmOO4kI4A:9 a=ztTRgQEFE1L0ZWZSsfYA:7 a=WGrbjz9d-a8v_KWYVRqYtwcAzGQA:4 a=CjuIK1q_8ugA:10 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+Peter Stephenson <p.w.stephenson@ntlworld.com> wrote:
+> It doesn't address the issue that "bindkey -lL" lies about aliased
+> keymaps.
+
+This does.  It's minor, but it's a real gap --- in addition to not
+knowing which keymaps are aliases for others, you can't even find out
+trivially whether you're "in emacs mode" or "in vi mode".  The inverted
+commas are because technically you never are, you just have some keymap
+or other linked to main which happens to have a set of emacs-like or
+vi-like bindings.  However, by keeping track of names of keymaps that
+aren't "main" we can give a consistent account of what's happening such
+that in the normal cases it does look exactly like you're in emacs or vi
+mode.
+
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.84
+diff -p -u -r1.84 zle.yo
+--- Doc/Zsh/zle.yo	1 Sep 2010 16:39:32 -0000	1.84
++++ Doc/Zsh/zle.yo	3 Sep 2010 21:53:07 -0000
+@@ -175,7 +181,8 @@ startitem()
+ item(tt(-l))(
+ List all existing keymap names.  If the tt(-L)
+ option is also used, list in the form of tt(bindkey)
+-commands to create the keymaps.
++commands to create the keymaps; this combination also shows
++which keymap is linked to `tt(main)', if any.
+ )
+ item(tt(-d))(
+ Delete all existing keymaps and reset to the default state.
+Index: Src/Zle/zle_keymap.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_keymap.c,v
+retrieving revision 1.32
+diff -p -u -r1.32 zle_keymap.c
+--- Src/Zle/zle_keymap.c	28 Jan 2009 09:32:01 -0000	1.32
++++ Src/Zle/zle_keymap.c	3 Sep 2010 21:53:07 -0000
+@@ -58,11 +58,24 @@ struct keymapname {
+     Keymap keymap;	/* the keymap itsef */
+ };
+ 
++/* Can't be deleted (.safe) */
+ #define KMN_IMMORTAL (1<<1)
+ 
+ struct keymap {
+     Thingy first[256];	/* base binding of each character */
+     HashTable multi;	/* multi-character bindings */
++    /*
++     * The "real" name of this keymap.
++     * For an aliased keymap, this is the first name to be defined.
++     * If this is deleted but there are other names we randomly pick another
++     * one, avoiding the name "main".  The principal use
++     * for this is to make it clear what "main" is aliased to.
++     *
++     * If "main" is the only name for this map, this will be NULL.
++     * That's fine, there's no alias.  We'll pick a primary if we
++     * alias "main" again.
++     */
++    KeymapName primary;
+     int flags;		/* various flags (see below) */
+     int rc;		/* reference count */
+ };
+@@ -162,6 +175,70 @@ makekeymapnamnode(Keymap keymap)
+     return kmn;
+ }
+ 
++
++/*
++ * Reference a keymap from a keymapname.
++ * Used when linking keymaps.  This includes the first link to a
++ * newly created keymap.
++ */
++
++static void
++refkeymap_by_name(KeymapName kmn)
++{
++    refkeymap(kmn->keymap);
++    if (!kmn->keymap->primary && strcmp(kmn->nam, "main") != 0)
++	kmn->keymap->primary = kmn;
++}
++
++/*
++ * Communication to keymap scanner when looking for a new primary name.
++ */
++static Keymap km_rename_me;
++
++/* Find a new primary name for a keymap.  See below. */
++
++static void
++scanprimaryname(HashNode hn, int ignored)
++{
++    KeymapName n = (KeymapName) hn;
++
++    (void)ignored;
++
++    /* Check if we've already found a new primary name. */
++    if (km_rename_me->primary)
++	return;
++    /* Don't use "main". */
++    if (!strcmp(n->nam, "main"))
++	return;
++    if (n->keymap == km_rename_me)
++	km_rename_me->primary = n;
++}
++
++/*
++ * Unreference a keymap from a keymapname.
++ * Used when unlinking keymaps to ensure there is still a primary
++ * name for the keymap, unless it is an unaliased "main".
++ */
++static void
++unrefkeymap_by_name(KeymapName kmname)
++{
++    Keymap km = kmname->keymap;
++    if (unrefkeymap(km) && km->primary == kmname) {
++	/*
++	 * The primary name for the keymap has gone,
++	 * but the keymap is still referred to; find a new primary name
++	 * for it.  Sort the keymap to make the result deterministic.
++	 */
++	/* Set the primary name to NULL so we can check if we've found one */
++	km->primary = NULL;
++	km_rename_me = km;
++	scanhashtable(keymapnamtab, 1, 0, 0, scanprimaryname, 0);
++	/* Just for neatness */
++	km_rename_me = NULL;
++    }
++}
++
++
+ /**/
+ static void
+ freekeymapnamnode(HashNode hn)
+@@ -169,7 +246,7 @@ freekeymapnamnode(HashNode hn)
+     KeymapName kmn = (KeymapName) hn;
+ 
+     zsfree(kmn->nam);
+-    unrefkeymap(kmn->keymap);
++    unrefkeymap_by_name(kmn);
+     zfree(kmn, sizeof(*kmn));
+ }
+ 
+@@ -354,7 +431,7 @@ linkkeymap(Keymap km, char *name, int im
+ 	    return 1;
+ 	if(n->keymap == km)
+ 	    return 0;
+-	unrefkeymap(n->keymap);
++	unrefkeymap_by_name(n);
+ 	n->keymap = km;
+     } else {
+ 	n = makekeymapnamnode(km);
+@@ -362,21 +439,29 @@ linkkeymap(Keymap km, char *name, int im
+ 	    n->flags |= KMN_IMMORTAL;
+ 	keymapnamtab->addnode(keymapnamtab, ztrdup(name), n);
+     }
+-    refkeymap(km);
++    refkeymap_by_name(n);
+     return 0;
+ }
+ 
+ /**/
+-void refkeymap(Keymap km)
++void
++refkeymap(Keymap km)
+ {
+     km->rc++;
+ }
+ 
++/* Unreference keymap, returning new reference count, 0 if deleted */
++
+ /**/
+-void unrefkeymap(Keymap km)
++int
++unrefkeymap(Keymap km)
+ {
+-    if (!--km->rc)
++    if (!--km->rc) {
+ 	deletekeymap(km);
++	return 0;
++    }
++
++    return km->rc;
+ }
+ 
+ /* Select a keymap as the current ZLE keymap.  Can optionally fall back *
+@@ -734,10 +819,21 @@ scanlistmaps(HashNode hn, int list)
+ {
+     KeymapName n = (KeymapName) hn;
+ 
+-    if(list) {
+-	fputs("bindkey -N ", stdout);
+-	if(n->nam[0] == '-')
+-	    fputs("-- ", stdout);
++    if (list) {
++	Keymap km = n->keymap;
++	fputs("bindkey -", stdout);
++	if (km->primary && km->primary != n) {
++	    KeymapName pn = km->primary;
++	    fputs("A ", stdout);
++	    if (pn->nam[0] == '-')
++		fputs("-- ", stdout);
++	    quotedzputs(pn->nam, stdout);
++	    fputc(' ', stdout);
++	} else {
++	    fputs("N ", stdout);
++	    if(n->nam[0] == '-')
++		fputs("-- ", stdout);
++	}
+ 	quotedzputs(n->nam, stdout);
+     } else
+ 	nicezputs(n->nam, stdout);
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

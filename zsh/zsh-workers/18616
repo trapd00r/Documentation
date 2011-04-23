@@ -1,0 +1,352 @@
+From zsh-workers-return-18616-mason-zsh=primenet.com.au@sunsite.dk Thu Jun 19 19:32:49 2003
+Return-Path: <zsh-workers-return-18616-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12475 invoked from network); 19 Jun 2003 19:32:45 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 19 Jun 2003 19:32:45 -0000
+Received: (qmail 26715 invoked by alias); 19 Jun 2003 19:32:32 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 18616
+Received: (qmail 26707 invoked from network); 19 Jun 2003 19:32:32 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 19 Jun 2003 19:32:32 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.183.235] by sunsite.dk (MessageWall 1.0.8) with SMTP; 19 Jun 2003 19:32:32 -0000
+Received: from EXCHANGE02.csr.com (unverified) by MAILSWEEPER01.cambridgesiliconradio.com
+ (Content Technologies SMTPRS 4.3.10) with ESMTP id <T62e906d116c0a88d011d8@MAILSWEEPER01.cambridgesiliconradio.com> for <zsh-workers@sunsite.dk>;
+ Wed, 18 Jun 2003 20:32:13 +0100
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.5329);
+	 Thu, 19 Jun 2003 20:32:13 +0100
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: ternary expression handling for zformat
+Date: Thu, 19 Jun 2003 20:32:29 +0100
+Message-ID: <27395.1056051149@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 19 Jun 2003 19:32:13.0085 (UTC) FILETIME=[7BC414D0:01C33699]
+
+Now we've got that out of the way... This adds ternary expression
+handling to the generalised %-escape mechanism of the zformat command.
+I've tried to do it in a way which is as compatible as possible to the
+system used by ternary expressions in prompts.  It may turn up in an
+extension to the TCP function system's prompts, but first things first.
+
+The example from the manual shows the basic features:
+
+   % zformat -f REPLY "The answer is '%3(c.yes.no)'." c:3
+   % print $REPLY
+   The answer is 'yes'.
+
+Index: Src/Modules/zutil.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/zutil.c,v
+retrieving revision 1.13
+diff -u -r1.13 zutil.c
+--- Src/Modules/zutil.c	27 Aug 2002 21:10:34 -0000	1.13
++++ Src/Modules/zutil.c	19 Jun 2003 19:29:34 -0000
+@@ -549,6 +549,148 @@
+ 
+ /* Format stuff. */
+ 
++/*
++ * One chunk of text, to allow recursive handling of ternary
++ * expressions in zformat -f output.
++ *   instr	The input string.
++ *   specs	The format specifiers, specs[c] is the string from c:string
++ *   outp	*outp is the start of the output string
++ *   ousedp	(*outp)[*ousedp] is where to write next
++ *   olenp	*olenp is the size allocated for *outp
++ *   endchar    Terminator character in addition to `\0' (may be '\0')
++ *   skip	If 1, don't output, just parse.
++ */
++static char *zformat_substring(char* instr, char **specs, char **outp,
++			       int *ousedp, int *olenp, int endchar, int skip)
++{
++    char *s;
++
++    for (s = instr; *s && *s != endchar; s++) {
++	if (*s == '%') {
++	    int right, min = -1, max = -1, outl, testit;
++	    char *spec, *start = s;
++
++	    if ((right = (*++s == '-')))
++		s++;
++
++	    if (*s >= '0' && *s <= '9') {
++		for (min = 0; *s >= '0' && *s <= '9'; s++)
++		    min = (min * 10) + (int) STOUC(*s) - '0';
++	    }
++
++	    /* Ternary expressions */
++	    testit = (STOUC(*s) == '(');
++	    if (testit && s[1] == '-')
++	    {
++		/* Allow %(-1... etc. */
++		right = 1;
++		s++;
++	    }
++	    if ((*s == '.' || testit) && s[1] >= '0' && s[1] <= '9') {
++		for (max = 0, s++; *s >= '0' && *s <= '9'; s++)
++		    max = (max * 10) + (int) STOUC(*s) - '0';
++	    }
++	    else if (testit)
++		s++;
++
++	    if (testit && STOUC(*s)) {
++		int actval, testval, endcharl;
++
++		/*
++		 * One one number is useful for ternary expressions.
++		 * Remember to put the sign back.
++		 */
++		testval = (min >= 0) ? min : (max >= 0) ? max : 0;
++		if (right)
++		    testval *= -1;
++
++		if (specs[STOUC(*s)])
++		    actval = (int)mathevali(specs[STOUC(*s)]);
++		else
++		    actval = 0;
++		/* zero means values are equal, i.e. true */
++		actval -= testval;
++
++		/* careful about premature end of string */
++		if (!(endcharl = *++s))
++		    return NULL;
++
++		/*
++		 * Either skip true text and output false text, or
++		 * vice versa... unless we are already skipping.
++		 */
++		if (!(s = zformat_substring(s+1, specs, outp, ousedp,
++					    olenp, endcharl, skip || actval)))
++		    return NULL;
++		if (!(s = zformat_substring(s+1, specs, outp, ousedp,
++					    olenp, ')', skip || !actval)))
++		    return NULL;
++	    } else if (skip) {
++		continue;
++	    } else if ((spec = specs[STOUC(*s)])) {
++		int len;
++
++		if ((len = strlen(spec)) > max && max >= 0)
++		    len = max;
++		outl = (min >= 0 ? (min > len ? min : len) : len);
++
++		if (*ousedp + outl >= *olenp) {
++		    int nlen = *olenp + outl + 128;
++		    char *tmp = (char *) zhalloc(nlen);
++
++		    memcpy(tmp, *outp, *olenp);
++		    *olenp = nlen;
++		    *outp = tmp;
++		}
++		if (len >= outl) {
++		    memcpy(*outp + *ousedp, spec, outl);
++		    *ousedp += outl;
++		} else {
++		    int diff = outl - len;
++
++		    if (right) {
++			while (diff--)
++			    (*outp)[(*ousedp)++] = ' ';
++			memcpy(*outp + *ousedp, spec, len);
++			*ousedp += len;
++		    } else {
++			memcpy(*outp + *ousedp, spec, len);
++			*ousedp += len;
++			while (diff--)
++			    (*outp)[(*ousedp)++] = ' ';
++		    }
++		}
++	    } else {
++		int len = s - start + 1;
++
++		if (*ousedp + len >= *olenp) {
++		    int nlen = *olenp + len + 128;
++		    char *tmp = (char *) zhalloc(nlen);
++
++		    memcpy(tmp, *outp, *olenp);
++		    *olenp = nlen;
++		    *outp = tmp;
++		}
++		memcpy(*outp + *ousedp, start, len);
++		*ousedp += len;
++	    }
++	} else {
++	    if (skip)
++		continue;
++	    if (*ousedp + 1 >= *olenp) {
++		char *tmp = (char *) zhalloc((*olenp) << 1);
++
++		memcpy(tmp, *outp, *olenp);
++		*olenp <<= 1;
++		*outp = tmp;
++	    }
++	    (*outp)[(*ousedp)++] = *s;
++	}
++    }
++
++    return s;
++}
++
+ static int
+ bin_zformat(char *nam, char **args, Options ops, int func)
+ {
+@@ -563,11 +705,13 @@
+     switch (opt) {
+     case 'f':
+ 	{
+-	    char **ap, *specs[256], *out, *s;
++	    char **ap, *specs[256], *out;
+ 	    int olen, oused = 0;
+ 
+ 	    memset(specs, 0, 256 * sizeof(char *));
+ 
++	    specs['%'] = "%";
++	    specs[')'] = ")";
+ 	    for (ap = args + 2; *ap; ap++) {
+ 		if (!ap[0][0] || ap[0][0] == '-' || ap[0][0] == '.' ||
+ 		    (ap[0][0] >= '0' && ap[0][0] <= '9') ||
+@@ -579,80 +723,7 @@
+ 	    }
+ 	    out = (char *) zhalloc(olen = 128);
+ 
+-	    for (s = args[1]; *s; s++) {
+-		if (*s == '%') {
+-		    int right, min = -1, max = -1, outl;
+-		    char *spec, *start = s;
+-
+-		    if ((right = (*++s == '-')))
+-			s++;
+-
+-		    if (*s >= '0' && *s <= '9') {
+-			for (min = 0; *s >= '0' && *s <= '9'; s++)
+-			    min = (min * 10) + (int) STOUC(*s) - '0';
+-		    }
+-		    if (*s == '.' && s[1] >= '0' && s[1] <= '9') {
+-			for (max = 0, s++; *s >= '0' && *s <= '9'; s++)
+-			    max = (max * 10) + (int) STOUC(*s) - '0';
+-		    }
+-		    if ((spec = specs[STOUC(*s)])) {
+-			int len;
+-
+-			if ((len = strlen(spec)) > max && max >= 0)
+-			    len = max;
+-			outl = (min >= 0 ? (min > len ? min : len) : len);
+-
+-			if (oused + outl >= olen) {
+-			    int nlen = olen + outl + 128;
+-			    char *tmp = (char *) zhalloc(nlen);
+-
+-			    memcpy(tmp, out, olen);
+-			    olen = nlen;
+-			    out = tmp;
+-			}
+-			if (len >= outl) {
+-			    memcpy(out + oused, spec, outl);
+-			    oused += outl;
+-			} else {
+-			    int diff = outl - len;
+-
+-			    if (right) {
+-				while (diff--)
+-				    out[oused++] = ' ';
+-				memcpy(out + oused, spec, len);
+-				oused += len;
+-			    } else {
+-				memcpy(out + oused, spec, len);
+-				oused += len;
+-				while (diff--)
+-				    out[oused++] = ' ';
+-			    }				
+-			}
+-		    } else {
+-			int len = s - start + 1;
+-
+-			if (oused + len >= olen) {
+-			    int nlen = olen + len + 128;
+-			    char *tmp = (char *) zhalloc(nlen);
+-
+-			    memcpy(tmp, out, olen);
+-			    olen = nlen;
+-			    out = tmp;
+-			}
+-			memcpy(out + oused, start, len);
+-			oused += len;
+-		    }
+-		} else {
+-		    if (oused + 1 >= olen) {
+-			char *tmp = (char *) zhalloc(olen << 1);
+-
+-			memcpy(tmp, out, olen);
+-			olen <<= 1;
+-			out = tmp;
+-		    }
+-		    out[oused++] = *s;
+-		}
+-	    }
++	    zformat_substring(args[1], specs, &out, &oused, &olen, '\0', 0);
+ 	    out[oused] = '\0';
+ 
+ 	    setsparam(args[0], ztrdup(out));
+Index: Doc/Zsh/mod_zutil.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/mod_zutil.yo,v
+retrieving revision 1.14
+diff -u -r1.14 mod_zutil.yo
+--- Doc/Zsh/mod_zutil.yo	29 Aug 2000 06:35:40 -0000	1.14
++++ Doc/Zsh/mod_zutil.yo	19 Jun 2003 19:29:34 -0000
+@@ -124,6 +124,31 @@
+ have been processed, the resulting string is stored in the parameter
+ var(param).
+ 
++The tt(%)-escapes also understand ternary expressions in the form used by
++prompts.  The tt(%) is followed by a `tt(LPAR())' and then an ordinary
++format specifier character as described above.  There may be a set of
++digits either before or after the `tt(LPAR())'; these specify a test
++number, which defaults to zero.  Negative numbers are also allowed.  An
++arbitrary delimiter character follows the format specifier, which is
++followed by a piece of `true' text, the delimiter character again, a piece
++of `false' text, and a closing parenthesis.  The complete expression
++(without the digits) thus looks like
++`tt(%LPAR())var(X)tt(.)var(text1)tt(.)var(text2)tt(RPAR())', except that
++the `tt(.)' character is arbitrary.  The value given for the format
++specifier in the var(char)tt(:)var(string) expressions is evaluated as a
++mathematical expression, and compared with the test number.  If they are
++the same, var(text1) is output, else var(text2) is output.  A parenthesis
++may be escaped in var(text2) as tt(%RPAR()).  Either of var(text1) or
++var(text2) may contain nested tt(%)-escapes.
++
++For example:
++
++example(zformat -f REPLY "The answer is '%3(c.yes.no)'." c:3)
++
++outputs "The answer is 'yes'." to tt(REPLY) since the value for the format
++specifier tt(c) is 3, agreeing with the digit argument to the ternary
++expression.
++
+ The second form, using the tt(-a) option, can be used for aligning
+ strings.  Here, the var(specs) are of the form
+ `var(left)tt(:)var(right)' where `var(left)' and `var(right)' are
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

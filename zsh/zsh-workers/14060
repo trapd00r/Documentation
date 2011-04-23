@@ -1,0 +1,278 @@
+From zsh-workers-return-14060-mason-zsh=primenet.com.au@sunsite.dk Sat Apr 21 18:15:55 2001
+Return-Path: <zsh-workers-return-14060-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7364 invoked from network); 21 Apr 2001 18:15:54 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Apr 2001 18:15:54 -0000
+Received: (qmail 16759 invoked by alias); 21 Apr 2001 18:15:49 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14060
+Received: (qmail 16743 invoked from network); 21 Apr 2001 18:15:47 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010421181520.ZM9874@candle.brasslantern.com>
+Date: Sat, 21 Apr 2001 18:15:20 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.dk
+Subject: PATCH: Clean up subscripting details
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+I discovered that ${A[foo]=bar} gave "not an identifier" because of the
+tokenized [ ] that getindex() was leaving in its rewritten input string.
+As the code now knows where the close bracket must be, it's possible to
+untokenize again, and also optimize by skipping some loops that walk the
+string looking for the end.  That makes up a little for the extra cost
+incurred by parse_subscript().
+
+I also discovered that testing isident() in bin_typeset() was not entirely
+redundant; doing it it typeset_single() avoids an extra parse_subscript().
+
+Then there's this:
+
+	zsh-4.0.1-pre-2% noglob typeset a[3]=three
+	zsh-4.0.1-pre-2% echo $#a
+	3
+	zsh-4.0.1-pre-2% echo X${^a}X
+	XX XX XthreeX
+
+This has appeared to work for some time now -- I don't know exactly how
+far back, though it's the same in 3.0.[6-8] -- but has the side-effect of
+creating a spurious parameter whose name is 'a[3]':
+
+	zsh-4.0.1-pre-2% set | grep -w a
+	a=('' '' baz)
+	'a[3]'=''
+
+There's no way to reference this parameter or give it a value.  Similarly:
+
+	zsh-4.0.1-pre-2% typeset 12foo=bar
+	zsh-4.0.1-pre-2% set | grep foo
+	12foo=''
+	zsh-4.0.1-pre-2% echo $#
+	12
+
+Another spurious parameter that you can't use, plus assignment to the
+positional parameter $12.
+
+The patch below improves isident() a bit further to require that when an
+identifier begins with a digit, it must consist of nothing but digits.
+It also makes the typeset slice-assignment explicitly legal, but avoids
+creating the bogus extra parameter.  This means you can do
+
+	func () {
+	  noglob local a[1]=one a[2]=two a[3]=three
+	  # same as: local -a a; a=(one two three)
+	}
+
+to create and assign to a local array.  Note, however, that you can't
+change the type of a parameter this way -- if `a' is already a scalar in
+the local scope, the above will insert substrings into the value rather
+than create array elements.
+
+Finally, the lex.c hunks fix this discrepancy:
+
+	zsh-4.0.1-pre-2% ((\[))
+	[: ']' expected
+
+	% ((\[))
+	zsh: bad output format specification
+
+That is, one of my changes broke zsh's heuristic for determining whether
+((...)) is a math expression or a subshell in a subshell; the patch fixes
+that, restoring the 4.0.1-pre-2 interpretation.
+
+Now I'm going to try to write some documentation.
+
+diff -ru -x CVS common/Src/builtin.c zsh-4.0/Src/builtin.c
+--- common/Src/builtin.c	Tue Apr 17 19:54:53 2001
++++ zsh-4.0/Src/builtin.c	Sat Apr 21 00:01:06 2001
+@@ -1691,7 +1691,7 @@
+ 		pm->env = NULL;
+ 	    }
+ 	    if (value && !(pm = setsparam(pname, ztrdup(value))))
+-		return 0;
++		return NULL;
+ 	} else if (value) {
+ 	    zwarnnam(cname, "can't assign new value for array %s", pname, 0);
+ 	    return NULL;
+@@ -1782,7 +1782,27 @@
+ 	    pm->ct = auxlen;
+ 	else
+ 	    pm->ct = 0;
+-    } else {
++    } else if (strchr(pname, '[')) {
++	if (on & PM_READONLY) {
++	    zerrnam(cname,
++		    "%s: can't create readonly array elements", pname, 0);
++	    return NULL;
++	} else if (PM_TYPE(on) == PM_SCALAR) {
++	    /*
++	     * This will either complain about bad identifiers, or will set
++	     * a hash element or array slice.  This once worked by accident,
++	     * creating a stray parameter along the way via createparam(),
++	     * now called below in the isident() branch.
++	     */
++	    if (!(pm = setsparam(pname, ztrdup(value ? value : ""))))
++		return NULL;
++	    value = NULL;
++	} else {
++	    zerrnam(cname,
++		    "%s: array elements must be scalar", pname, 0);
++	    return NULL;
++	}
++    } else if (isident(pname)) {
+ 	/*
+ 	 * Create a new node for a parameter with the flags in `on' minus the
+ 	 * readonly flag
+@@ -1790,6 +1810,9 @@
+ 	pm = createparam(pname, on & ~PM_READONLY);
+ 	DPUTS(!pm, "BUG: parameter not created");
+ 	pm->ct = auxlen;
++    } else {
++	zerr("not an identifier: %s", pname, 0);
++	return NULL;
+     }
+ 
+     if (altpm && PM_TYPE(pm->flags) == PM_SCALAR) {
+@@ -1808,8 +1831,14 @@
+     else if (on & PM_LOCAL)
+ 	pm->level = locallevel;
+     if (value && !(pm->flags & (PM_ARRAY|PM_HASHED))) {
++	Param ipm = pm;
+ 	if (!(pm = setsparam(pname, ztrdup(value))))
+-	    return 0;
++	    return NULL;
++	if (pm != ipm) {
++	    DPUTS(ipm->flags != pm->flags,
++		  "BUG: parameter recreated with wrong flags");
++	    unsetparam_pm(ipm, 0, 1);
++	}
+     } else if (newspecial && !(pm->old->flags & PM_NORESTORE)) {
+ 	/*
+ 	 * We need to use the special setting function to re-initialise
+diff -ru -x CVS common/Src/lex.c zsh-4.0/Src/lex.c
+--- common/Src/lex.c	Thu Apr 19 22:11:32 2001
++++ zsh-4.0/Src/lex.c	Fri Apr 20 22:06:39 2001
+@@ -1303,9 +1303,9 @@
+ 	    if (c != '\n') {
+ 		if (c == '$' || c == '\\' || (c == '}' && !intick && bct) ||
+ 		    c == endchar || c == '`' ||
+-		    (math && (c == '[' || c == ']' ||
+-			      c == '(' || c == ')' ||
+-			      c == '{' || c == '}')))
++		    (endchar == ']' && (c == '[' || c == ']' ||
++					c == '(' || c == ')' ||
++					c == '{' || c == '}')))
+ 		    add(Bnull);
+ 		else {
+ 		    /* lexstop is implicitly handled here */
+@@ -1390,7 +1390,7 @@
+ 		err = (!brct-- && math);
+ 	    break;
+ 	case '"':
+-	    if (intick || (!endchar && !bct))
++	    if (intick || endchar == ']' || (!endchar && !bct))
+ 		break;
+ 	    if (bct) {
+ 		add(Dnull);
+diff -ru -x CVS common/Src/params.c zsh-4.0/Src/params.c
+--- common/Src/params.c	Thu Apr 19 22:11:32 2001
++++ zsh-4.0/Src/params.c	Sat Apr 21 00:37:09 2001
+@@ -765,10 +765,17 @@
+     if (!*s)			/* empty string is definitely not valid */
+ 	return 0;
+ 
+-    /* find the first character in `s' not in the iident type table */
+-    for (ss = s; *ss; ss++)
+-	if (!iident(*ss))
+-	    break;
++    if (idigit(*s)) {
++	/* If the first character is `s' is a digit, then all must be */
++	for (ss = ++s; *ss; ss++)
++	    if (!idigit(*ss))
++		break;
++    } else {
++	/* Find the first character in `s' not in the iident type table */
++	for (ss = s; *ss; ss++)
++	    if (!iident(*ss))
++		break;
++    }
+ 
+     /* If the next character is not [, then it is *
+      * definitely not a valid identifier.         */
+@@ -1171,7 +1178,7 @@
+     int start, end, inv = 0;
+     char *s = *pptr, *tbrack;
+ 
+-    *s++ = Inbrack;
++    *s++ = '[';
+     s = parse_subscript(s);	/* Error handled after untokenizing */
+     /* Now we untokenize everthing except INULL() markers so we can check *
+      * for the '*' and '@' special subscripts.  The INULL()s are removed  *
+@@ -1191,7 +1198,7 @@
+ 	return 1;
+     }
+     s = *pptr + 1;
+-    if ((s[0] == '*' || s[0] == '@') && s[1] == Outbrack) {
++    if ((s[0] == '*' || s[0] == '@') && s + 1 == tbrack) {
+ 	if ((v->isarr || IS_UNSET_VALUE(v)) && s[0] == '@')
+ 	    v->isarr |= SCANPM_ISVAR_AT;
+ 	v->start = 0;
+@@ -1223,12 +1230,11 @@
+ 	    }
+ 	    if (*s == ',') {
+ 		zerr("invalid subscript", NULL, 0);
+-		while (*s && *s != Outbrack)
+-		    s++;
+-		*pptr = s;
++		*tbrack = ']';
++		*pptr = tbrack+1;
+ 		return 1;
+ 	    }
+-	    if (*s == Outbrack)
++	    if (s == tbrack)
+ 		s++;
+ 	} else {
+ 	    int com;
+@@ -1243,7 +1249,7 @@
+ 		start--;
+ 	    else if (start == 0 && end == 0)
+ 		end++;
+-	    if (*s == Outbrack) {
++	    if (s == tbrack) {
+ 		s++;
+ 		if (v->isarr && start == end-1 && !com &&
+ 		    (!(v->isarr & SCANPM_MATCHMANY) ||
+@@ -1256,6 +1262,7 @@
+ 		s = *pptr;
+ 	}
+     }
++    *tbrack = ']';
+     *pptr = s;
+     return 0;
+ }
+diff -ru -x CVS common/Test/D06subscript.ztst zsh-4.0/Test/D06subscript.ztst
+--- common/Test/D06subscript.ztst	Thu Apr 19 22:11:32 2001
++++ zsh-4.0/Test/D06subscript.ztst	Sat Apr 21 09:44:36 2001
+@@ -128,3 +128,11 @@
+ >obrack obrack
+ >] ]
+ >backcbrack
++
++  print -R ${A[${A[(r)\\\\\\\\\]]}]::=zounds}
++  print -R ${A[${A[(r)\\\\\\\\\]]}]}
++  print -R $A[\\\\\]]
++0:Associative array substitution-assignment with reverse pattern subscript key
++>zounds
++>zounds
++>zounds
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

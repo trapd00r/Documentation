@@ -1,0 +1,169 @@
+From zsh-workers-return-7164-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jul 15 16:27:23 1999
+Return-Path: <zsh-workers-return-7164-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29786 invoked from network); 15 Jul 1999 16:27:21 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 Jul 1999 16:27:21 -0000
+Received: (qmail 25472 invoked by alias); 15 Jul 1999 16:27:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7164
+Received: (qmail 25465 invoked from network); 15 Jul 1999 16:27:10 -0000
+Message-Id: <9907151556.AA31468@ibmth.df.unipi.it>
+To: "ZSH workers mailing list" <zsh-workers@sunsite.auc.dk>
+Subject: Re: PATCH: 3.1.6-test-1: strange cd behaviour 
+In-Reply-To: "Peter Stephenson"'s message of "Thu, 15 Jul 1999 14:23:26 DFT."
+             <9907151223.AA35531@ibmth.df.unipi.it> 
+Date: Thu, 15 Jul 1999 17:56:14 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Peter Stephenson wrote:
+> (Although with AUTOCD `../rod' on its own already fails,
+> because it tests for a physical directory, since cancd() doesn't call
+> fixdir() --- anyone want that fixed?)
+> 
+> It's now true that if you do `cd bar/../rod' and bar is a symlink, then
+> this won't work because of the test I added --- it stat's bar/../rod which
+> looks for rod in the physical parent of the directory to which bar points.
+> Maybe this is already going too far when CHASELINKS is unset.  (I could
+> change it to stat every occurrence of <dir>/.. , which was my first thought,
+> and which should get round this.)
+
+Fixing the first of these bugs seems to be easy, just an extra call to
+fixdir() with pwd tacked on front if necessary, so I did it.
+
+Looking at the second one, I realised my response to Andrej's suggestion
+was excessive.  By only testing the directories which really need to be
+there --- e.g. in the case of foo/bar/../rod/.., that would be foo/bar,
+then foo/rod when we wipe out the bar/.. bit --- we can both have a
+reliable test for real directories, and also not bother whether or not
+we're in pwd, since we're always looking only at the already modified
+directory string which has to exist.
+
+So this code is very much simpler than what I proposed before, and also has
+the feature Andrej suggested, that `cd ..' might as well fail if the
+directory doesn't exist, since ... well, since the directory doesn't
+exist.  You can do ${PWD:h} to get to the parent.  Most of the patch is
+removing what I just added.
+
+--- Src/builtin.c.cd2	Thu Jul 15 17:21:44 1999
++++ Src/builtin.c	Thu Jul 15 17:40:15 1999
+@@ -1042,44 +1042,13 @@
+  * combinations, are removed and the path is unmetafied.   */
+ 
+ /**/
+-static void
++void
+ fixdir(char *src)
+ {
+-    char *dest = src, *d0 = dest, *chks = src, *ptrp;
++    char *dest = src, *d0 = dest;
+ #ifdef __CYGWIN
+     char *s0 = src;
+ #endif
+-    int donecheck = 0, len;
+-
+-    /*
+-     * Normally, we should not rationalize away path segments foo/.. if
+-     * the directory foo does not exist.  However, if foo was part of
+-     * pwd then we should allow it, because we know the current
+-     * directory was once valid, although may have been deleted, and `cd
+-     * ..' should always work as long as the parent directory exists.
+-     * Hence we find an initial portion of the path consisting of pwd
+-     * followed by any number of .. or . segments, and don't check
+-     * that the original path exists.  After this point (given by
+-     * chks), if there are any remaining ..'s in the path we
+-     * check that the directory with the remaining portion
+-     * unrationalized really exists, and return if it doesn't.
+-     *
+-     * Bug:  this is ridiculously heavy handed.
+-     */
+-    len = strlen(pwd);
+-    if (!strncmp(src, pwd, len) && src[len] == '/') {
+-	chks = src + len;
+-	while (*chks == '/')
+-	    chks++;
+-	while (*chks == '.' &&
+-	       (!chks[1] || chks[1] == '/' ||
+-		(chks[1] == '.' && (!chks[2] || chks[2] == '/')))) {
+-	    while (*chks == '.')
+-		chks++;
+-	    while (*chks == '/')
+-		chks++;
+-	}
+-    }
+ 
+ /*** if have RFS superroot directory ***/
+ #ifdef HAVE_SUPERROOT
+@@ -1115,33 +1084,21 @@
+ 	}
+ 	if (src[0] == '.' && src[1] == '.' &&
+ 	  (src[2] == '\0' || src[2] == '/')) {
+-	    if (!donecheck && src >= chks) {
++	    if (dest > d0 + 1) {
+ 		/*
+-		 * We need to check the original path exists, to catch
+-		 * problems like 'cd nonexistent/..'.  We use dest
+-		 * as far as we've got, plus the rest of src.
+-		 * We only need to do this once, as any later ..'s
+-		 * will automatically be tested here.
++		 * remove a foo/.. combination:
++		 * first check foo exists, else return
+ 		 */
+ 		struct stat st;
+-		char *testdir;
+-		if (dest == src)
+-		    testdir = dupstring(d0);
+-		else {
+-		    *dest = '\0';
+-		    testdir = dyncat(d0, src);
+-		}
+-		for (chks = src, ptrp = testdir + (dest - d0); *chks;
+-		     chks++, ptrp++)
+-		    *ptrp = (*chks == Meta) ? (*++chks ^ 32) : *chks;
+-		if (stat(testdir, &st) < 0 || !S_ISDIR(st.st_mode)) {
+-		    strcpy(d0, testdir);
++		*dest = '\0';
++		if (stat(d0, &st) < 0 || !S_ISDIR(st.st_mode)) {
++		    char *ptrd, *ptrs;
++		    if (dest == src)
++			*dest = '.';
++		    for (ptrs = src, ptrd = dest; *ptrs; ptrs++, ptrd++)
++			*ptrd = (*ptrs == Meta) ? (*++ptrs ^ 32) : *ptrs;
+ 		    return;
+ 		}
+-		donecheck = 1;
+-	    }
+-	    if (dest > d0 + 1) {
+-		/* remove a foo/.. combination */
+ 		for (dest--; dest > d0 + 1 && dest[-1] != '/'; dest--);
+ 		if (dest[-1] != '/')
+ 		    dest--;
+--- Src/exec.c.cd2	Thu Jul  8 17:10:17 1999
++++ Src/exec.c	Thu Jul 15 17:40:01 1999
+@@ -3144,9 +3144,16 @@
+ cancd2(char *s)
+ {
+     struct stat buf;
+-    char *us = unmeta(s);
++    char *us = unmeta(s), *us2 = NULL;
+ 
++    if (*us != '/')
++	us = us2 = tricat(unmeta(pwd), "/", us);
++    else
++	us = dupstring(us);
++    fixdir(us);
+     return !(access(us, X_OK) || stat(us, &buf) || !S_ISDIR(buf.st_mode));
++    if (us2)
++	zsfree(us2);
+ }
+ 
+ /**/
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

@@ -1,0 +1,377 @@
+From zsh-workers-return-9267-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jan 07 22:24:28 2000
+Return-Path: <zsh-workers-return-9267-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8745 invoked from network); 7 Jan 2000 22:24:26 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 7 Jan 2000 22:24:26 -0000
+Received: (qmail 19398 invoked by alias); 7 Jan 2000 22:24:18 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9267
+Received: (qmail 19372 invoked from network); 7 Jan 2000 22:24:17 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: finally tidy up trap handling
+Date: Fri, 07 Jan 2000 22:26:11 +0000
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E126hnr-0006dD-00.2000-01-07-22-24-15@cmailg1.svr.pol.co.uk>
+
+This is supposed to resolve all the remaining issues with saving, restoring
+and calling traps.  The structure has been simplified, so I trust it rather
+more.  Anybody who reported a trap bug should try again to see if I've
+reintroduced it, and attempt to add the code to the new tests in
+Test/08traps.ztst if there's isn't something corresponding there (one
+representative signal ought to be enough, though EXIT is separate as it's
+handled internally).
+
+The hard bit in testing is the triggering of traps (it seemed cheating to
+get the shell to deliver a signal to itself), and I've had to insert delays
+to try and make things occur in the right order, though there is still no
+guarantee.  Maybe somebody can see a better way.
+
+There's one thing I've worked around, but I still don't understand:
+
+zsh -c 'fn() { trap "print Trapped...; return 1;" TERM; sleep 2; }
+fn &
+sleep 1
+kill $!'
+
+The use of `zsh -c' is to force the shell not to have job control.  Try it
+and you will see that the command terminates, and about a second later you
+get the `Trapped...' message.  That means the background process doesn't
+execute the trap until the `sleep 2' is finished.  Now, since there's no
+job control the `sleep 2' won't get the signal itself, fine.  But shouldn't
+the background shell get the signal itself straight away, and immediately
+execute the trap while it's waiting for a SIGCHILD?  This is what happens
+in interactive shells --- we've talked about delaying traps so that they
+occur synchronously, but we've never done it.  So it seems to me that
+something inconsistent is happening.  But maybe I'm worrying about nothing,
+and the fact that the sleep doesn't get the signal is enough reason for the
+shell to wait.  (None of this should have been altered by the patch.)
+
+Index: Src/signals.c
+===================================================================
+RCS file: /home/pws/CVSROOT/projects/zsh/Src/signals.c,v
+retrieving revision 1.2
+diff -u -r1.2 signals.c
+--- Src/signals.c	1999/12/03 19:12:11	1.2
++++ Src/signals.c	2000/01/07 20:21:43
+@@ -635,11 +635,6 @@
+ 
+ static LinkList savetraps;
+ 
+-/* Flag to unsettrap not to free the structs, which we're keeping */
+-
+-/**/
+-int notrapfree;
+-
+ /*
+  * Save the current trap and unset it.
+  */
+@@ -651,7 +646,6 @@
+     st = (struct savetrap *)zalloc(sizeof(*st));
+     st->sig = sig;
+     st->local = level;
+-    notrapfree++;
+     if ((st->flags = sigtrapped[sig]) & ZSIG_FUNC) {
+ 	/*
+ 	 * Get the old function: this assumes we haven't added
+@@ -667,10 +661,7 @@
+     } else {
+ 	st->list = sigfuncs[sig];
+ 	sigfuncs[sig] = NULL;
+-	unsettrap(sig);
+     }
+-    sigtrapped[sig] = 0;
+-    notrapfree--;
+     PERMALLOC {
+ 	if (!savetraps)
+ 	    savetraps = newlinklist();
+@@ -691,16 +682,13 @@
+         zerr("can't trap SIG%s in interactive shells", sigs[sig], 0);
+         return 1;
+     }
++
+     /*
+-     * Note that we save the trap here even if there isn't an existing
+-     * one, to aid in removing this one.  However, if there's
+-     * already one at the current locallevel we just overwrite it.
++     * Call unsettrap() unconditionally, to make sure trap is saved
++     * if necessary.
+      */
+-    if (isset(LOCALTRAPS) && locallevel &&
+-	(!sigtrapped[sig] || locallevel > (sigtrapped[sig] >> ZSIG_SHIFT))) {
+-	dosavetrap(sig, locallevel);
+-    } else if (sigfuncs[sig])
+-	unsettrap(sig);
++    unsettrap(sig);
++
+     sigfuncs[sig] = l;
+     if (!l) {
+ 	sigtrapped[sig] = ZSIG_IGNORED;
+@@ -734,23 +722,23 @@
+ {
+     int trapped;
+ 
+-    if (sig == -1 || !(trapped = sigtrapped[sig]) ||
+-	(jobbing && (sig == SIGTTOU || sig == SIGTSTP || sig == SIGTTIN))) {
+-        return;
+-    }
++    if (sig == -1 ||
++	(jobbing && (sig == SIGTTOU || sig == SIGTSTP || sig == SIGTTIN)))
++	return;
++
++    trapped = sigtrapped[sig];
++    /*
++     * Note that we save the trap here even if there isn't an existing
++     * one, to aid in removing this one.  However, if there's
++     * already one at the current locallevel we just overwrite it.
++     */
+     if (isset(LOCALTRAPS) && locallevel &&
+-	sigtrapped[sig] && locallevel > (sigtrapped[sig] >> ZSIG_SHIFT)) {
+-	/*
+-	 * This calls unsettrap recursively to do any dirty work, so
+-	 * make sure this bit doesn't happen:  a bit messy, but hard
+-	 * to avoid.
+-	 */
+-	int oldlt = opts[LOCALTRAPS];
+-	opts[LOCALTRAPS] = 0;
++	(!trapped || locallevel > (sigtrapped[sig] >> ZSIG_SHIFT)))
+ 	dosavetrap(sig, locallevel);
+-	opts[LOCALTRAPS] = oldlt;
+-	return;
+-    }
++
++    if (!trapped)
++        return;
++
+     sigtrapped[sig] = 0;
+     if (sig == SIGINT && interact) {
+ 	/* PWS 1995/05/16:  added test for interactive, also noholdintr() *
+@@ -765,14 +753,24 @@
+ #endif
+              sig != SIGCHLD)
+         signal_default(sig);
+-    if (notrapfree)
+-	return;
++
++    /*
++     * At this point we free the appropriate structs.  If we don't
++     * want that to happen (e.g. we are saving the trap), then
++     * either the function should already have been removed from shfunctab,
++     * or the entry in sigfuncs should have been set to NULL, and then
++     * we're laughing, in a sort of vague virtual sense.
++     */
+     if (trapped & ZSIG_FUNC) {
+ 	char func[20];
+ 	HashNode hn;
+ 
+ 	sprintf(func, "TRAP%s", sigs[sig]);
+-	if ((hn = shfunctab->removenode(shfunctab, func)))
++	/*
++	 * As in dosavetrap(), don't call removeshfuncnode() because
++	 * that calls back into unsettrap();
++	 */
++	if ((hn = removehashnode(shfunctab, func)))
+ 	    shfunctab->freenode(hn);
+     } else if (sigfuncs[sig]) {
+ 	freestruct(sigfuncs[sig]);
+@@ -786,10 +784,14 @@
+ {
+     /*
+      * SIGEXIT needs to be restored at the current locallevel,
+-     * so give it the next higher one.
++     * so give it the next higher one. dosavetrap() is called
++     * automatically where necessary.
+      */
+-    if (sigtrapped[SIGEXIT])
+-	dosavetrap(SIGEXIT, locallevel+1);
++    if (sigtrapped[SIGEXIT]) {
++	locallevel++;
++	unsettrap(SIGEXIT);
++	locallevel--;
++    }
+ }
+ 
+ /*
+@@ -811,14 +813,13 @@
+      * after all the other traps have been put back.
+      */
+     if ((exittr = sigtrapped[SIGEXIT])) {
+-	notrapfree++;
+ 	if (exittr & ZSIG_FUNC) {
+-	    exitfn = shfunctab->removenode(shfunctab, "TRAPEXIT");
++	    exitfn = removehashnode(shfunctab, "TRAPEXIT");
+ 	} else {
+ 	    exitfn = sigfuncs[SIGEXIT];
+-	    unsettrap(SIGEXIT);
++	    sigfuncs[SIGEXIT] = NULL;
+ 	}
+-	notrapfree--;
++	unsettrap(SIGEXIT);
+     }
+ 
+     if (savetraps) {
+Index: Test/08traps.ztst
+===================================================================
+RCS file: 08traps.ztst
+diff -N 08traps.ztst
+--- /dev/null	Tue May  5 21:32:27 1998
++++ 08traps.ztst	Fri Jan  7 22:05:58 2000
+@@ -0,0 +1,128 @@
++# Tests for both trap builtin and TRAP* functions.
++
++%prep
++
++  setopt localtraps
++  mkdir traps.tmp && cd traps.tmp
++
++%test
++
++  fn1() {
++    trap 'print EXIT1' EXIT
++    fn2() { trap 'print EXIT2' EXIT; }
++    fn2
++  }
++  fn1
++0:Nested `trap ... EXIT'
++>EXIT2
++>EXIT1
++
++  fn1() {
++    TRAPEXIT() { print EXIT1; }
++    fn2() { TRAPEXIT() { print EXIT2; }; }
++    fn2
++  }
++  fn1
++0: Nested TRAPEXIT
++>EXIT2
++>EXIT1
++
++  fn1() {
++    trap 'print EXIT1' EXIT
++    fn2() { trap - EXIT; }
++    fn2
++  }
++  fn1
++0:Nested `trap - EXIT' on `trap ... EXIT'
++>EXIT1
++
++  fn1() {
++    TRAPEXIT() { print EXIT1; }
++    fn2() { trap - EXIT; }
++    fn2
++  }
++  fn1
++0:Nested `trap - EXIT' on `TRAPEXIT'
++>EXIT1
++
++  fn1() {
++    trap
++    trap 'print INT1' INT
++    fn2() { trap 'print INT2' INT; trap; }
++    trap
++    fn2
++    trap
++  }
++  fn1
++0: Nested `trap ... INT', not triggered
++>trap -- 'print INT1' INT
++>trap -- 'print INT2' INT
++>trap -- 'print INT1' INT
++
++   fn1() {
++    trap
++    TRAPINT() { print INT1; }
++    fn2() { TRAPINT() { print INT2; }; trap; }
++    trap
++    fn2
++    trap
++  }
++  fn1
++0: Nested `trap ... INT', not triggered
++>TRAPINT () {
++>	print INT1
++>}
++>TRAPINT () {
++>	print INT2
++>}
++>TRAPINT () {
++>	print INT1
++>}
++
++  fn1() {
++    trap 'print INT1' INT
++    fn2() { trap - INT; trap; }
++    trap
++    fn2
++    trap
++  }
++  fn1
++0: Nested `trap - INT' on untriggered `trap ... INT'
++>trap -- 'print INT1' INT
++>trap -- 'print INT1' INT
++
++# Testing the triggering of traps here is very unpleasant.
++# The delays are attempts to avoid race conditions, though there is
++# no guarantee that they will work.  Note the subtlety that the
++# `sleep' in the function which receives the trap does *not* get the
++# signal, only the parent shell, which is waiting for a SIGCHILD.
++# (At least, that's what I think is happening.) Thus we have to wait at
++# least the full two seconds to make sure we have got the output from the
++# execution of the trap.
++
++  print 'This test takes at least three seconds...' >&8
++  fn1() {
++    trap 'print TERM1' TERM
++    fn2() { trap 'print TERM2; return 1' TERM; sleep 2; }
++    fn2 &
++    sleep 1
++    kill -TERM $!
++    sleep 2
++  }
++  fn1
++0: Nested `trap ... TERM', triggered on inner loop
++>TERM2
++
++  print 'This test, too, takes at least three seconds...' >&8
++  fn1() {
++    trap 'print TERM1; return 1' TERM
++    fn2() { trap 'print TERM2; return 1' TERM; }
++    fn2
++    sleep 2
++  }
++  fn1 &
++  sleep 1
++  kill -TERM $!
++  sleep 2
++0: Nested `trap ... TERM', triggered on outer loop
++>TERM1
+Index: Test/50cd.ztst
+===================================================================
+RCS file: /home/pws/CVSROOT/projects/zsh/Test/50cd.ztst,v
+retrieving revision 1.2
+diff -u -r1.2 50cd.ztst
+--- Test/50cd.ztst	1999/12/15 19:38:45	1.2
++++ Test/50cd.ztst	2000/01/07 21:56:21
+@@ -17,11 +17,10 @@
+ # of spaces and/or tabs, to differentiate it from tags with a special
+ # meaning to the test harness.  Note that this is true even in sections
+ # where there are no such tags.  Also note that file descriptor 9
+-# is reserved for input from the test script; if ZTST_verbose is set,
+-# output is sent to the original stdout via fd 8.  Option settings
+-# are preserved between the execution of different code chunks;
+-# initially, all standard zsh options (the effect of `emulate -R zsh')
+-# are set.
++# is reserved for input from the test script, and file descriptor 8
++# preserves the original stdout.  Option settings are preserved between the
++# execution of different code chunks; initially, all standard zsh options
++# (the effect of `emulate -R zsh') are set.
+ 
+ %prep
+ # This optional section prepares the test, creating directories and files
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+

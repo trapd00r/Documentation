@@ -1,0 +1,672 @@
+From zsh-workers-request@math.gatech.edu Tue Dec 08 15:36:04 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11933 invoked from network); 8 Dec 1998 15:36:00 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 8 Dec 1998 15:36:00 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id KAA15829;
+	Tue, 8 Dec 1998 10:32:24 -0500 (EST)
+Resent-Date: Tue, 8 Dec 1998 10:32:24 -0500 (EST)
+Date: Tue, 8 Dec 1998 16:30:27 +0100 (MET)
+Message-Id: <199812081530.QAA30063@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@math.gatech.edu
+Subject: PATCH: module-defined conditions
+Resent-Message-ID: <"2z4_i3.0.Gt3.8QKRs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4716
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+
+Hi
+
+Planning to implement the new completion stuff I started doing some
+preparatory work.
+
+The patch below is the first result: it allows modules to define
+condition codes. The function interface is like the one used to define 
+builtins.
+
+Two types of condition names can be defined: names that take
+precedence over the builtin ones (so they can be redefined by modules) 
+and names that are tried only if there is no builtin condition with
+the same name (I can easily be convinced to remove the code that
+allows one to redefine builtin conditions, maybe it's too dangerous,
+and it would also simplify the code and zmodload...).
+
+For each of these types prefix and infix conditions can be defined.
+
+I have modified the example module to define to conditions which can
+be tested with:
+
+  [[ -ex <str> ]]      # yields true if <str> is `example'
+
+and
+
+  [[ <s1> -ex <s2> ]]  # yield true if <s1> and <s2> concatenated
+                       # give `example'
+
+Of course, zmodload has been enhanced to allow autoloaded condition
+code (using the `c' and `C' options).
+
+Now, some enhancements can be thought of:
+
+- it should be possible to allow the definition of prefix conditions
+  that take more than one string
+- it wouldn't be too hard to add a builtin (say condctl) that allows
+  the definition of condition names from user level, attaching a
+  condition name to a shell function name
+
+Bye
+ Sven
+
+diff -c os/builtin.c Src/builtin.c
+*** os/builtin.c	Thu Dec  3 09:10:42 1998
+--- Src/builtin.c	Tue Dec  8 14:30:38 1998
+***************
+*** 120,126 ****
+      BUILTIN("which", 0, bin_whence, 0, -1, 0, "ampsw", "c"),
+  
+  #ifdef DYNAMIC
+!     BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "Laudi", NULL),
+  #endif
+  };
+  
+--- 120,126 ----
+      BUILTIN("which", 0, bin_whence, 0, -1, 0, "ampsw", "c"),
+  
+  #ifdef DYNAMIC
+!     BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "LaudicCI", NULL),
+  #endif
+  };
+  
+diff -c os/cond.c Src/cond.c
+*** os/cond.c	Thu Dec  3 09:10:42 1998
+--- Src/cond.c	Tue Dec  8 14:00:53 1998
+***************
+*** 148,154 ****
+  	    return d == st->st_dev && i == st->st_ino;
+  	}
+      default:
+! 	zerr("bad cond structure", NULL, 0);
+      }
+      return 0;
+  }
+--- 148,161 ----
+  	    return d == st->st_dev && i == st->st_ino;
+  	}
+      default:
+! 	{
+! 	    Conddef cd;
+! 
+! 	    if ((cd = getnumconddef(c->type)))
+! 		return cd->handler(cd, c->left, c->right);
+! 	    else
+! 		zerr("bad cond structure", NULL, 0);
+! 	}
+      }
+      return 0;
+  }
+diff -c os/init.c Src/init.c
+*** os/init.c	Thu Dec  3 09:10:43 1998
+--- Src/init.c	Tue Dec  8 11:39:15 1998
+***************
+*** 592,597 ****
+--- 592,599 ----
+      createnameddirtable();  /* create hash table for named directories */
+      createparamtable();     /* create paramater hash table             */
+  
++     pre_conds = post_conds = NULL;
++ 
+  #ifdef TIOCGWINSZ
+      adjustwinsize();
+  #else
+diff -c os/module.c Src/module.c
+*** os/module.c	Thu Dec  3 09:10:44 1998
+--- Src/module.c	Tue Dec  8 15:50:26 1998
+***************
+*** 161,166 ****
+--- 161,368 ----
+      return hadf ? hads : 1;
+  }
+  
++ /* The lists of module-defined conditions. pre_conds contains the ones *
++  * that take precedence over the builtin ones. */
++ 
++ /**/
++ Conddef pre_conds;
++ 
++ /**/
++ Conddef post_conds;
++ 
++ /* Used to number module-defined conditions. */
++ 
++ static int cond_num = 256;
++ 
++ /* This gets a condition definition with the given name. The first        *
++  * argument says if we have to look for a condition that takes precedence *
++  * over the builtin ones and the second argument says if we have to look  *
++  * for an infix condition. */
++ 
++ /**/
++ Conddef
++ getconddef(int prec, int inf, char *name)
++ {
++     Conddef p = (prec ? pre_conds : post_conds);
++ 
++     for (; p; p = p->next) {
++ 	if ((!!inf == !!(p->flags & CONDF_INFIX)) &&
++ 	    !strcmp(name, p->name))
++ 	    return p;
++     }
++     return NULL;
++ }
++ 
++ /* Find a condition definition given its number. */
++ 
++ /**/
++ Conddef
++ getnumconddef(int n)
++ {
++     Conddef p;
++     int f = 1;
++ 
++     do {
++ 	for (p = pre_conds; p; p = p->next) {
++ 	    if (n == p->num)
++ 		break;
++ 	}
++ 	if (!p)
++ 	    for(p = post_conds; p; p = p->next) {
++ 		if (n == p->num)
++ 		    break;
++ 	    }
++ 	if (p && p->module) {
++ 	    /* This is a definition for an autoloaded condition, load the *
++ 	     * module if we haven't tried that already. */
++ 	    if (f) {
++ 		load_module(p->module);
++ 		f = 0;
++ 		p = NULL;
++ 	    }
++ 	    else
++ 		break;
++ 	}
++ 	else
++ 	    break;
++     } while (!p);
++ 
++     return p;
++ }
++ 
++ /* This adds the given condition definition. The return value is zero on *
++  * success and 1 on failure. If there is a matching definition for an    *
++  * autoloaded condition, it is removed. */
++ 
++ /**/
++ int
++ addconddef(Conddef c)
++ {
++     Conddef p = getconddef((c->flags & CONDF_PREC), (c->flags & CONDF_INFIX),
++ 			   c->name);
++     int nu = cond_num++;
++ 
++     if (p) {
++ 	if (!p->module || (p->flags & CONDF_ADDED))
++ 	    return 1;
++ 
++ 	/* There is an autoload definition. */
++ 
++ 	nu = p->num;
++ 
++ 	deleteconddef(p);
++     }
++     if (c->flags & CONDF_PREC) {
++ 	c->next = pre_conds;
++ 	pre_conds = c;
++     } else {
++ 	c->next = post_conds;
++ 	post_conds = c;
++     }
++     c->num = nu;
++     return 0;
++ }
++ 
++ /* This add multiple condition definitions. This is like addbuiltins(). */
++ 
++ /**/
++ int
++ addconddefs(char const *nam, Conddef c, int size)
++ {
++     int hads = 0, hadf = 0;
++ 
++     while (size--) {
++ 	if (c->flags & CONDF_ADDED)
++ 	    continue;
++ 	if (addconddef(c)) {
++ 	    zwarnnam(nam, "name clash when adding condition `%s'", c->name, 0);
++ 	    hadf = 1;
++ 	} else {
++ 	    c->flags |= CONDF_ADDED;
++ 	    hads = 2;
++ 	}
++ 	c++;
++     }
++     return hadf ? hads : 1;
++ }
++ 
++ /* This adds a definition for autoloading a module for a condition. */
++ 
++ /**/
++ int
++ add_autocond(char *nam, int prec, int inf, char *module)
++ {
++     Conddef c = zalloc(sizeof(*c));
++ 
++     c->name = ztrdup(nam);
++     c->flags =
++ 	(prec ? CONDF_PREC  : 0) |
++ 	(inf  ? CONDF_INFIX : 0);
++     c->module = ztrdup(module);
++ 
++     if (addconddef(c)) {
++ 	zsfree(c->name);
++ 	zsfree(c->module);
++ 	zfree(c, sizeof(*c));
++ 
++ 	return 1;
++     }
++     return 0;
++ }
++ 
++ /* This removes the given condition definition from the list(s). If this *
++  * is a definition for a autoloaded condition, the memory is freed. */
++ 
++ /**/
++ int
++ deleteconddef(Conddef c)
++ {
++     Conddef p = ((c->flags & CONDF_PREC) ? pre_conds : post_conds), q = NULL;
++ 
++     for (; p && p != c; q = p, p = p->next);
++ 
++     if (p) {
++ 	if (q)
++ 	    q->next = p->next;
++ 	else if (c->flags & CONDF_PREC)
++ 	    pre_conds = p->next;
++ 	else
++ 	    post_conds = p->next;
++ 		
++ 	if (p->module) {
++ 	    /* autoloaded, free it */
++ 	    zsfree(p->name);
++ 	    zsfree(p->module);
++ 	    zfree(p, sizeof(*p));
++ 	}
++ 	return 0;
++     }
++     return -1;
++ }
++ 
++ /* This removes multiple condition definitions (like deletebuiltins()). */
++ 
++ /**/
++ int
++ deleteconddefs(char const *nam, Conddef c, int size)
++ {
++     int hads = 0, hadf = 0;
++ 
++     while (size--) {
++ 	if (!(c->flags & CONDF_ADDED))
++ 	    continue;
++ 	if (deleteconddef(c)) {
++ 	    zwarnnam(nam, "condition `%s' already deleted", c->name, 0);
++ 	    hadf = 1;
++ 	} else
++ 	    hads = 2;
++ 	c->flags &= ~CONDF_ADDED;
++ 	c++;
++     }
++     return hadf ? hads : 1;
++ }
++ 
++ 
+  #ifdef HAVE_DLFCN_H
+  # include <dlfcn.h>
+  #else
+***************
+*** 436,441 ****
+--- 638,645 ----
+  	return bin_zmodload_dep(nam, args, ops);
+      else if(ops['a'])
+  	return bin_zmodload_auto(nam, args, ops);
++     else if (ops['c'] || ops['C'])
++ 	return bin_zmodload_cond(nam, args, ops);
+      else
+  	return bin_zmodload_load(nam, args, ops);
+  }
+***************
+*** 561,566 ****
+--- 765,853 ----
+  		ret = 1;
+  	    } else if (add_autobin(bnam, modnam) && !ops['i']) {
+  		zwarnnam(nam, "failed to add builtin %s", bnam, 0);
++ 		ret = 1;
++ 	    }
++ 	} while(*args);
++ 	return ret;
++     }
++ }
++ 
++ /**/
++ static int
++ bin_zmodload_cond(char *nam, char **args, char *ops)
++ {
++     int ret = 0;
++ 
++     if (ops['u']) {
++ 	/* remove autoloaded conditions */
++ 	for (; *args; args++) {
++ 	    Conddef cd = getconddef(ops['C'], ops['I'], *args);
++ 
++ 	    if (!cd) {
++ 		if (!ops['i']) {
++ 		    zwarnnam(nam, "%s: no such condition", *args, 0);
++ 		    ret = 1;
++ 		}
++ 	    } else if (cd->flags & CONDF_ADDED) {
++ 		zwarnnam(nam, "%s: condition is already defined", *args, 0);
++ 		ret = 1;
++ 	    } else
++ 		deleteconddef(cd);
++ 	}
++ 	return ret;
++     } else if (!*args) {
++ 	/* list autoloaded conditions */
++ 	Conddef p;
++ 
++ 	if (ops['C'])
++ 	    for (p = pre_conds; p; p = p->next) {
++ 		if (p->module) {
++ 		    if (ops['L']) {
++ 			fputs("zmodload -C", stdout);
++ 			if (p->flags & CONDF_INFIX)
++ 			    putchar('I');
++ 			printf(" %s %s\n", p->module, p->name);
++ 		    } else {
++ 			fputs("pre ", stdout);
++ 			if (p->flags & CONDF_INFIX)
++ 			    fputs("infix ", stdout);
++ 			printf("%s (%s)\n",p->name, p->module);
++ 		    }
++ 		}
++ 	    }
++ 	if (ops['c'])
++ 	    for (p = post_conds; p; p = p->next) {
++ 		if (p->module) {
++ 		    if (ops['L']) {
++ 			fputs("zmodload -c", stdout);
++ 			if (p->flags & CONDF_INFIX)
++ 			    putchar('I');
++ 			printf(" %s %s\n", p->module, p->name);
++ 		    } else {
++ 			fputs("post ", stdout);
++ 			if (p->flags & CONDF_INFIX)
++ 			    fputs("infix ", stdout);
++ 			printf("%s (%s)\n",p->name, p->module);
++ 		    }
++ 		}
++ 	    }
++ 	return 0;
++     } else {
++ 	/* add autoloaded conditions */
++ 	char *modnam;
++ 
++ 	modnam = *args++;
++ 	if(isset(RESTRICTED) && strchr(modnam, '/')) {
++ 	    zwarnnam(nam, "%s: restricted", modnam, 0);
++ 	    return 1;
++ 	}
++ 	do {
++ 	    char *cnam = *args ? *args++ : modnam;
++ 	    if (strchr(cnam, '/')) {
++ 		zwarnnam(nam, "%s: `/' is illegal in a condition", cnam, 0);
++ 		ret = 1;
++ 	    } else if (add_autocond(cnam, ops['C'], ops['I'], modnam) && !ops['i']) {
++ 		zwarnnam(nam, "failed to add condition %s", cnam, 0);
+  		ret = 1;
+  	    }
+  	} while(*args);
+diff -c os/parse.c Src/parse.c
+*** os/parse.c	Thu Dec  3 09:10:45 1998
+--- Src/parse.c	Tue Dec  8 15:45:50 1998
+***************
+*** 1311,1321 ****
+  par_cond_double(char *a, char *b)
+  {
+      Cond n = (Cond) make_cond();
+  
+!     if (a[0] != '-' || !a[1] || a[2])
+  	COND_ERROR("parse error: condition expected: %s", a);
+      n->left = (void *) b;
+-     n->type = a[1];
+      n->ntype = NT_SET(N_COND, NT_STR, NT_STR, 0, 0);
+      return n;
+  }
+--- 1311,1329 ----
+  par_cond_double(char *a, char *b)
+  {
+      Cond n = (Cond) make_cond();
++     Conddef cd;
+  
+!     if ((cd = getconddef(1, 0, a+1)))
+! 	n->type = cd->num;
+!     else if (a[0] != '-' || !a[1])
+  	COND_ERROR("parse error: condition expected: %s", a);
++     else if (!a[2] && strspn(a+1, "abcdefgknoprstuwxzhLONGS") == 1)
++ 	n->type = a[1];
++     else if ((cd = getconddef(0, 0, a+1)))
++ 	n->type = cd->num;
++     else
++ 	COND_ERROR("parse error: unrecognized condition: %s", a);
+      n->left = (void *) b;
+      n->ntype = NT_SET(N_COND, NT_STR, NT_STR, 0, 0);
+      return n;
+  }
+***************
+*** 1341,1349 ****
+  par_cond_triple(char *a, char *b, char *c)
+  {
+      Cond n = (Cond) make_cond();
+      int t0;
+  
+!     if ((b[0] == Equals || b[0] == '=') &&
+  	(!b[1] || ((b[1] == Equals || b[1] == '=') && !b[2])))
+  	n->type = COND_STREQ;
+      else if (b[0] == '!' && (b[1] == Equals || b[1] == '=') && !b[2])
+--- 1349,1360 ----
+  par_cond_triple(char *a, char *b, char *c)
+  {
+      Cond n = (Cond) make_cond();
++     Conddef cd;
+      int t0;
+  
+!     if ((cd = getconddef(1, 1, b+1)))
+! 	n->type = cd->num;
+!     else if ((b[0] == Equals || b[0] == '=') &&
+  	(!b[1] || ((b[1] == Equals || b[1] == '=') && !b[2])))
+  	n->type = COND_STREQ;
+      else if (b[0] == '!' && (b[1] == Equals || b[1] == '=') && !b[2])
+***************
+*** 1351,1356 ****
+--- 1362,1369 ----
+      else if (b[0] == '-') {
+  	if ((t0 = get_cond_num(b + 1)) > -1)
+  	    n->type = t0 + COND_NT;
++ 	else if ((cd = getconddef(0, 1, b+1)))
++ 	    n->type = cd->num;
+  	else
+  	    COND_ERROR("unrecognized condition: %s", b);
+      } else
+diff -c os/zsh.h Src/zsh.h
+*** os/zsh.h	Thu Dec  3 09:10:46 1998
+--- Src/zsh.h	Tue Dec  8 13:52:35 1998
+***************
+*** 242,247 ****
+--- 242,248 ----
+  typedef struct value     *Value;
+  typedef struct varasg    *Varasg;
+  typedef struct cond      *Cond;
++ typedef struct conddef   *Conddef;
+  typedef struct cmd       *Cmd;
+  typedef struct pline     *Pline;
+  typedef struct sublist   *Sublist;
+***************
+*** 455,460 ****
+--- 456,479 ----
+  #define COND_GT    13
+  #define COND_LE    14
+  #define COND_GE    15
++ 
++ typedef int (*CondHandler) _((Conddef, char *, char *));
++ 
++ struct conddef {
++     Conddef next;
++     int num;
++     char *name;
++     int flags;
++     CondHandler handler;
++     char *module;
++ };
++ 
++ #define CONDF_INFIX  1
++ #define CONDF_ADDED  2
++ #define CONDF_PREC   4
++ 
++ #define CONDDEF(name, flags, handler) \
++     { NULL, 0, name, flags, handler, NULL }
+  
+  struct forcmd {			/* for/select */
+  /* Cmd->args contains list of words to loop thru */
+diff -c od/Zsh/builtins.yo Doc/Zsh/builtins.yo
+*** od/Zsh/builtins.yo	Thu Dec  3 09:10:52 1998
+--- Doc/Zsh/builtins.yo	Tue Dec  8 16:05:13 1998
+***************
+*** 1115,1121 ****
+  xitem(tt(zmodload) tt(-d) [ tt(-L) ] [ var(name) [ var(dep) ... ] ])
+  xitem(tt(zmodload) tt(-du) var(name) [ var(dep) ... ])
+  xitem(tt(zmodload) tt(-a) [ tt(-iL) ] [ var(name) [ var(builtin) ... ] ])
+! item(tt(zmodload) tt(-au) [ tt(-i) ] var(builtin) ...)(
+  tt(zmodload) performs operations relating to zsh's loadable modules.
+  This feature is not available on all operating systems,
+  or on all installations on a particular operating system.
+--- 1115,1127 ----
+  xitem(tt(zmodload) tt(-d) [ tt(-L) ] [ var(name) [ var(dep) ... ] ])
+  xitem(tt(zmodload) tt(-du) var(name) [ var(dep) ... ])
+  xitem(tt(zmodload) tt(-a) [ tt(-iL) ] [ var(name) [ var(builtin) ... ] ])
+! xitem(tt(zmodload) tt(-au) [ tt(-i) ] var(builtin) ...)
+! xitem(tt(zmodload) tt(-c) [ tt(-iI) ] [ var(name) [ var(cond) ... ] ])
+! xitem(tt(zmodload) tt(-C) [ tt(-iI) ] [ var(name) [ var(cond) ... ] ])
+! xitem(tt(zmodload) tt(-cu) [ tt(-iI) ] var(cond) ...)
+! xitem(tt(zmodload) tt(-Cu) [ tt(-iI) ] var(cond) ...)
+! xitem(tt(zmodload) tt(-c) [ tt(-IL) ])
+! item(tt(zmodload) tt(-C) [ tt(-IL) ])(
+  tt(zmodload) performs operations relating to zsh's loadable modules.
+  This feature is not available on all operating systems,
+  or on all installations on a particular operating system.
+***************
+*** 1182,1186 ****
+--- 1188,1205 ----
+  tt(zmodload -a).  This is only possible if the builtin is not yet
+  loaded.  tt(-i) suppresses the error if the builtin is already
+  removed (or never existed).
++ 
++ The tt(-c) and tt(-C) options are used to define autoloaded condition
++ codes. The var(cond) strings give the names of the conditions defined
++ by the module. The tt(-C) option is used for conditions that take
++ precedence over the builtin ones, whereas the tt(-c) option is used
++ for normal (lower precedence) conditions. The optional tt(-I) option
++ is used to define infix condition names (taking two
++ strings). Without this option prefix condition names are defined
++ (taking one string).
++ 
++ Together with the tt(-u) option definitions for autoloaded conditions
++ are removed. If given no condition names all defined names are listed
++ (as a series of tt(zmodload) commands if the tt(-L) option is given).
+  )
+  enditem()
+diff -c os/Modules/example.c Src/Modules/example.c
+*** os/Modules/example.c	Tue Nov  3 10:47:29 1998
+--- Src/Modules/example.c	Tue Dec  8 15:34:31 1998
+***************
+*** 49,54 ****
+--- 49,68 ----
+      return 0;
+  }
+  
++ /**/
++ static int
++ cond_p_ex(Conddef c, char *a, char *dummy)
++ {
++     return !strcmp("example", a);
++ }
++ 
++ /**/
++ static int
++ cond_i_ex(Conddef c, char *a, char *b)
++ {
++     return !strcmp("example", dyncat(a, b));
++ }
++ 
+  /*
+   * boot_example is executed when the module is loaded.
+   */
+***************
+*** 57,67 ****
+      BUILTIN("example", 0, bin_example, 0, -1, 0, "flags", NULL),
+  };
+  
+  /**/
+  int
+  boot_example(Module m)
+  {
+!     return !addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
+  }
+  
+  #ifdef MODULE
+--- 71,87 ----
+      BUILTIN("example", 0, bin_example, 0, -1, 0, "flags", NULL),
+  };
+  
++ static struct conddef condtab[] = {
++     CONDDEF("ex", 0, cond_p_ex),
++     CONDDEF("ex", CONDF_INFIX, cond_i_ex),
++ };
++ 
+  /**/
+  int
+  boot_example(Module m)
+  {
+!     return !(addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab)) |
+! 	     addconddefs(m->nam, condtab, sizeof(condtab)/sizeof(*condtab)));
+  }
+  
+  #ifdef MODULE
+***************
+*** 71,76 ****
+--- 91,97 ----
+  cleanup_example(Module m)
+  {
+      deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++     deleteconddefs(m->nam, condtab, sizeof(condtab)/sizeof(*condtab));
+      return 0;
+  }
+  #endif
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

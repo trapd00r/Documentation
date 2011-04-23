@@ -1,0 +1,196 @@
+From zsh-workers-return-28295-mason-zsh=primenet.com.au@zsh.org Fri Sep 24 21:18:54 2010
+Return-Path: <zsh-workers-return-28295-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4128 invoked by alias); 24 Sep 2010 21:18:54 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28295
+Received: (qmail 27694 invoked from network); 24 Sep 2010 21:18:36 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00 autolearn=ham
+	version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.56 as permitted sender)
+Date: Fri, 24 Sep 2010 21:12:47 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: Zsh Workers <zsh-workers@zsh.org>
+Subject: Re: !!$ unitialized at first prompt
+Message-ID: <20100924211247.626449fb@pws-pc>
+In-Reply-To: <100924081042.ZM4496@torch.brasslantern.com>
+References: <alpine.LNX.2.01.1009232317460.4754@hp>
+	<alpine.LNX.2.01.1009240037470.4754@hp>
+	<AANLkTikvXfMnkWiZ0kay=s67X=UFhiSvhJGdU120=-6R@mail.gmail.com>
+	<20100924133936.245765b2@pwslap01u.europe.root.pri>
+	<100924081042.ZM4496@torch.brasslantern.com>
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.20.1; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Cloudmark-Analysis: v=1.1 cv=4QByPj+6Iq2k/6L54d+eVKTdgQxdscpRskJJReCfdXo= c=1 sm=0 a=siWDj2ndfesA:10 a=4YI7mmuYAqcA:10 a=kj9zAlcOel0A:10 a=q2GGsy2AAAAA:8 a=NLZqzBF-AAAA:8 a=s_rh6q5OBczaKHgp1YMA:9 a=Tl9pTv8rhlWq-9PNDyEA:7 a=s02ovA_7B0f1qShMvV2G1Km2v4gA:4 a=CjuIK1q_8ugA:10 a=I6wTmPyJxzYA:10 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+On Fri, 24 Sep 2010 08:10:40 -0700
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> You can load your own history something like this provided that you
+> *don't* use shared or extended history:
+> 
+>     readhistfile() {
+> 	emulate -LR zsh
+> 	local histline
+> 	local -a histwords
+> 	while read -r histline
+> 	do
+> 	    if [[ $histline = *\\ ]]
+> 	    then
+> 		histline[-1]=''
+> 		histwords+=( ${(z)histline}$'\n' )
+> 	    else
+> 		histwords+=( ${(z)histline} )
+> 		print -s $histwords
+> 		histwords=()
+> 	    fi
+> 	done
+>     }
+
+This, we can do internally without the side effects.  I'd forgotten this
+already did use the lexer, so I was too pessimistic.
+
+The mechanism for word splitting in the manner of the (z) flag is a bit
+iffy.  I've picked up that newlines get turned into semicolons --- there
+was a discussion about this recently --- and also that &! turns into &|,
+which I didn't know about.  If you have debugging turned on you'll see
+warning messages that should be enough to fix any remaining problems.
+(I could just assume the words are at least the right length but I'd
+rather find out the problems.)
+
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.99
+diff -p -u -r1.99 hist.c
+--- Src/hist.c	22 Jun 2010 11:00:32 -0000	1.99
++++ Src/hist.c	24 Sep 2010 19:59:41 -0000
+@@ -2228,11 +2228,12 @@ readhistfile(char *fn, int err, int read
+     Histent he;
+     time_t stim, ftim, tim = time(NULL);
+     off_t fpos;
+-    short *wordlist;
++    short *words;
+     struct stat sb;
+-    int nwordpos, nwordlist, bufsiz;
++    int nwordpos, nwords, bufsiz;
+     int searching, newflags, l, ret;
+-
++    LinkList wordlist;
++   
+     if (!fn && !(fn = getsparam("HISTFILE")))
+ 	return;
+     if (readflags & HFILE_FAST) {
+@@ -2251,8 +2252,8 @@ readhistfile(char *fn, int err, int read
+ 	}
+     }
+     if ((in = fopen(unmeta(fn), "r"))) {
+-	nwordlist = 64;
+-	wordlist = (short *)zalloc(nwordlist*sizeof(short));
++	nwords = 64;
++	words = (short *)zalloc(nwords*sizeof(short));
+ 	bufsiz = 1024;
+ 	buf = zalloc(bufsiz);
+ 
+@@ -2334,29 +2335,63 @@ readhistfile(char *fn, int err, int read
+ 	    else
+ 		he->ftim = ftim;
+ 
+-	    /* Divide up the words.  We don't know how it lexes,
+-	       so just look for white-space.
+-	       */
++	    /*
++	     * Divide up the words.  Attempt to do this using the lexer.
++	     */
+ 	    nwordpos = 0;
+ 	    start = pt;
+-	    do {
++	    wordlist = bufferwords(NULL, pt, NULL);
++	    he->nwords = countlinknodes(wordlist);
++	    if (2*he->nwords > nwords) {
++		nwords = 2*he->nwords;
++		words = (short *)realloc(words, nwords*sizeof(short));
++	    }
++	    while (firstnode(wordlist)) {
++		char *word = uremnode(wordlist, firstnode(wordlist));
++		
+ 		while (inblank(*pt))
+ 		    pt++;
+-		if (*pt) {
+-		    if (nwordpos >= nwordlist)
+-			wordlist = (short *) realloc(wordlist,
+-					(nwordlist += 64)*sizeof(short));
+-		    wordlist[nwordpos++] = pt - start;
+-		    while (*pt && !inblank(*pt))
+-			pt++;
+-		    wordlist[nwordpos++] = pt - start;
++		if (!strpfx(word, pt)) {
++		    int bad = 0;
++		    /*
++		     * Oddity 1: newlines turn into semicolons.
++		     */
++		    if (!strcmp(word, ";"))
++			continue;
++		    /*
++		     * Oddity 2: !'s turn into |'s.
++		     */
++		    while (*pt) {
++			if (!*word) {
++			    bad = 1;
++			    break;
++			}
++			if (*pt == *word ||
++			    (*pt == '!' && *word == '|')) {
++			    pt++;
++			    word++;
++			} else {
++			    bad = 1;
++			    break;
++			}
++		    }
++		    if (bad) {
++#ifdef DEBUG
++			dputs(ERRMSG("bad wordsplit reading history: %s\nat: %s"
++				     "\nword: %s"),
++			      start, pt, word);
++#endif
++			break;
++		    }
+ 		}
+-	    } while (*pt);
++		words[nwordpos++] = pt - start;
++		pt += strlen(word);
++		words[nwordpos++] = pt - start;
++	    }
+ 
+-	    he->nwords = nwordpos/2;
+ 	    if (he->nwords) {
+ 		he->words = (short *)zalloc(nwordpos*sizeof(short));
+-		memcpy(he->words, wordlist, nwordpos*sizeof(short));
++		memcpy(he->words, words, nwordpos*sizeof(short));
+ 	    } else
+ 		he->words = (short *)NULL;
+ 	    addhistnode(histtab, he->node.nam, he);
+@@ -2369,7 +2404,7 @@ readhistfile(char *fn, int err, int read
+ 	    zsfree(lasthist.text);
+ 	    lasthist.text = ztrdup(start);
+ 	}
+-	zfree(wordlist, nwordlist*sizeof(short));
++	zfree(words, nwords*sizeof(short));
+ 	zfree(buf, bufsiz);
+ 
+ 	fclose(in);
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

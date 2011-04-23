@@ -1,0 +1,318 @@
+From zsh-workers-return-17299-mason-zsh=primenet.com.au@sunsite.dk Thu Jun 06 09:28:41 2002
+Return-Path: <zsh-workers-return-17299-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8043 invoked from network); 6 Jun 2002 09:28:40 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 6 Jun 2002 09:28:40 -0000
+Received: (qmail 312 invoked by alias); 6 Jun 2002 09:28:32 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17299
+Received: (qmail 288 invoked from network); 6 Jun 2002 09:28:31 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: delete function/traps as soon as possible
+Date: Thu, 06 Jun 2002 10:22:58 +0100
+Message-ID: <11294.1023355378@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+Here's a patch which introduces reference counts for Eprog's, the
+structures internally representing chunks of code.  It fixes the problem
+that if you deleted a trap, or it went out of scope, or you deleted a
+function, the memory wasn't freed until the shell returned to the top
+level.  With localtraps inside a function, this could be a sizeable
+memory hog.
+
+It works by initialising a reference count to 1, and decrementing that
+when the structure needs to be freed.  The pair useeprog()/freeeprog()
+mark a structure as in use or out of use, so if a trap or function is in
+use when it is marked for deletion it will typically be removed by the
+freeeprog() in execode().  Programmes on the heap are ignored.
+
+This has been working OK and I haven't seen any of the paranoid
+debugging messages from freeeprog().  Also, the useeprog()/freeeprog()
+pairs in text.c are probably unnecessary.  However, I will leave this
+for anyone to look over for a bit.  It's possible Sven can spot some
+area I might have missed.
+
+We could shorten struct eprog a bit; I don't think we need the full 32 bit
+integers in all the cases.  However, I don't think it's that much of a
+saving, either.
+
+This will patch with a couple of lines of offset in parse.c owing to
+intervening fixes, but it seemed safer to send it as it is rather than
+regenerate it.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.73
+diff -u -r1.73 builtin.c
+--- Src/builtin.c	24 Mar 2002 07:56:42 -0000	1.73
++++ Src/builtin.c	4 Jun 2002 16:06:19 -0000
+@@ -2322,6 +2322,7 @@
+     p->strs = NULL;
+     p->shf = shf;
+     p->npats = 0;
++    p->nref = 1; /* allocated from permanent storage */
+     p->pats = (Patprog *) p->prog;
+     p->flags = EF_REAL;
+     p->dump = NULL;
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.41
+diff -u -r1.41 exec.c
+--- Src/exec.c	6 May 2002 14:46:11 -0000	1.41
++++ Src/exec.c	4 Jun 2002 16:06:29 -0000
+@@ -725,8 +725,11 @@
+     s.prog = p;
+     s.pc = p->prog;
+     s.strs = p->strs;
++    useeprog(p);		/* Mark as in use */
+ 
+     execlist(&s, dont_change_job, exiting);
++
++    freeeprog(p);		/* Free if now unused */
+ }
+ 
+ /* Execute a simplified command. This is used to execute things that
+@@ -3134,6 +3141,7 @@
+     while ((s = (char *) ugetnode(names))) {
+ 	prog = (Eprog) zalloc(sizeof(*prog));
+ 	prog->npats = npats;
++	prog->nref = 1; /* allocated from permanent storage */
+ 	prog->len = len;
+ 	if (state->prog->dump) {
+ 	    prog->flags = EF_MAP;
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.23
+diff -u -r1.23 init.c
+--- Src/init.c	13 May 2002 09:36:53 -0000	1.23
++++ Src/init.c	4 Jun 2002 16:06:35 -0000
+@@ -163,8 +163,6 @@
+ 	    if (stopmsg)	/* unset 'you have stopped jobs' flag */
+ 		stopmsg--;
+ 	    execode(prog, 0, 0);
+-	    if (toplevel)
+-		freeeprogs();
+ 	    tok = toksav;
+ 	    if (toplevel)
+ 		noexitct = 0;
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.34
+diff -u -r1.34 parse.c
+--- Src/parse.c	2 Jun 2002 18:03:20 -0000	1.34
++++ Src/parse.c	4 Jun 2002 16:06:41 -0000
+@@ -396,6 +396,7 @@
+ 		(ecused * sizeof(wordcode)) +
+ 		ecsoffs);
+     ret->npats = ecnpats;
++    ret->nref = -1;		/* Eprog is on the heap */
+     ret->pats = (Patprog *) zhalloc(ret->len);
+     ret->prog = (Wordcode) (ret->pats + ecnpats);
+     ret->strs = (char *) (ret->prog + ecused);
+@@ -2083,6 +2086,12 @@
+     r->dump = NULL;
+     r->len = p->len;
+     r->npats = p->npats;
++    /*
++     * If Eprog is on the heap, reference count is not valid.
++     * Otherwise, initialise reference count to 1 so that a freeeprog()
++     * will delete it if it is not in use.
++     */
++    r->nref = heap ? -1 : 1;
+     pp = r->pats = (heap ? (Patprog *) hcalloc(r->len) :
+ 		    (Patprog *) zcalloc(r->len));
+     r->prog = (Wordcode) (r->pats + r->npats);
+@@ -2096,33 +2105,49 @@
+     return r;
+ }
+ 
+-static LinkList eprog_free;
++
++/*
++ * Pair of functions to mark an Eprog as in use, and to delete it
++ * when it is no longer in use, by means of the reference count in
++ * then nref element.
++ *
++ * If nref is negative, the Eprog is on the heap and is never freed.
++ */
++
++/* Increase the reference count of an Eprog so it won't be deleted. */
+ 
+ /**/
+ mod_export void
+-freeeprog(Eprog p)
++useeprog(Eprog p)
+ {
+-    if (p && p != &dummy_eprog)
+-	zaddlinknode(eprog_free, p);
++    if (p && p != &dummy_eprog && p->nref >= 0)
++	p->nref++;
+ }
+ 
++/* Free an Eprog if we have finished with it */
++
+ /**/
+-void
+-freeeprogs(void)
++mod_export void
++freeeprog(Eprog p)
+ {
+-    Eprog p;
+     int i;
+     Patprog *pp;
+ 
+-    while ((p = (Eprog) getlinknode(eprog_free))) {
+-	for (i = p->npats, pp = p->pats; i--; pp++)
+-	    freepatprog(*pp);
+-	if (p->dump) {
+-	    decrdumpcount(p->dump);
+-	    zfree(p->pats, p->npats * sizeof(Patprog));
+-	} else
+-	    zfree(p->pats, p->len);
+-	zfree(p, sizeof(*p));
++    if (p && p != &dummy_eprog) {
++	/* paranoia */
++	DPUTS(p->nref > 0 && (p->flags & EF_HEAP), "Heap EPROG has nref > 0");
++	DPUTS(p->nref < 0 && !(p->flags & EF_HEAP), "Real EPROG has nref < 0");
++	DPUTS(p->nref < -1 || p->nref > 256, "Uninitialised EPROG nref");
++	if (p->nref > 0 && !--p->nref) {
++	    for (i = p->npats, pp = p->pats; i--; pp++)
++		freepatprog(*pp);
++	    if (p->dump) {
++		decrdumpcount(p->dump);
++		zfree(p->pats, p->npats * sizeof(Patprog));
++	    } else
++		zfree(p->pats, p->len);
++	    zfree(p, sizeof(*p));
++	}
+     }
+ }
+ 
+@@ -2266,8 +2291,6 @@
+     dummy_eprog.len = sizeof(wordcode);
+     dummy_eprog.prog = &dummy_eprog_code;
+     dummy_eprog.strs = NULL;
+-
+-    eprog_free = znewlinklist();
+ }
+ 
+ /* Code for function dump files.
+@@ -3055,6 +3078,7 @@
+ 	    prog->flags = EF_MAP;
+ 	    prog->len = h->len;
+ 	    prog->npats = np = h->npats;
++	    prog->nref = 1;	/* allocated from permanent storage */
+ 	    prog->pats = pp = (Patprog *) zalloc(np * sizeof(Patprog));
+ 	    prog->prog = f->map + h->start;
+ 	    prog->strs = ((char *) prog->prog) + h->strs;
+@@ -3106,6 +3130,7 @@
+ 	    prog->flags = EF_REAL;
+ 	    prog->len = h->len + po;
+ 	    prog->npats = np = h->npats;
++	    prog->nref = 1; /* allocated from permanent storage */
+ 	    prog->pats = pp = (Patprog *) d;
+ 	    prog->prog = (Wordcode) (((char *) d) + po);
+ 	    prog->strs = ((char *) prog->prog) + h->strs;
+Index: Src/text.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/text.c,v
+retrieving revision 1.10
+diff -u -r1.10 text.c
+--- Src/text.c	17 Dec 2001 17:17:38 -0000	1.10
++++ Src/text.c	4 Jun 2002 16:06:43 -0000
+@@ -117,6 +117,8 @@
+     if (!c)
+ 	c = prog->prog;
+ 
++    useeprog(prog);		/* mark as used */
++
+     s.prog = prog;
+     s.pc = c;
+     s.strs = prog->strs;
+@@ -130,6 +132,7 @@
+     if (prog->len)
+ 	gettext2(&s);
+     *tptr = '\0';
++    freeeprog(prog);		/* mark as unused */
+     untokenize(tbuf);
+     return tbuf;
+ }
+@@ -147,6 +150,7 @@
+     if (!c)
+ 	c = prog->prog;
+ 
++    useeprog(prog);		/* mark as used */
+     s.prog = prog;
+     s.pc = c;
+     s.strs = prog->strs;
+@@ -159,6 +163,7 @@
+     tjob = 1;
+     gettext2(&s);
+     *tptr = '\0';
++    freeeprog(prog);		/* mark as unused */
+     untokenize(jbuf);
+     return jbuf;
+ }
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.36
+diff -u -r1.36 zsh.h
+--- Src/zsh.h	17 Dec 2001 17:17:38 -0000	1.36
++++ Src/zsh.h	4 Jun 2002 16:06:50 -0000
+@@ -497,10 +497,28 @@
+     char *filename;
+ };
+ 
++/*
++ * A note on the use of reference counts in Eprogs.
++ *
++ * When an Eprog is created, nref is set to -1 if the Eprog is on the
++ * heap; then no attempt is ever made to free it.  (This information is
++ * already present in EF_HEAP; we use the redundancy for debugging
++ * checks.)
++ *
++ * Otherwise, nref is initialised to 1.  Calling freeprog() decrements
++ * nref and frees the Eprog if the count is now zero.  When the Eprog
++ * is in use, we call useeprog() at the start and freeprog() at the
++ * end to increment and decrement the reference counts.  If an attempt
++ * is made to free the Eprog from within, this will then take place
++ * when execution is finished, typically in the call to freeeprog()
++ * in execode().  If the Eprog was on the heap, neither useeprog()
++ * nor freeeprog() has any effect.
++ */
+ struct eprog {
+     int flags;			/* EF_* below */
+     int len;			/* total block length */
+     int npats;			/* Patprog cache size */
++    int nref;			/* number of references: delete when zero */
+     Patprog *pats;		/* the memory block, the patterns */
+     Wordcode prog;		/* memory block ctd, the code */
+     char *strs;			/* memory block ctd, the strings */
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

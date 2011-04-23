@@ -1,0 +1,165 @@
+From zsh-workers-return-6614-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jun 14 08:30:57 1999
+Return-Path: <zsh-workers-return-6614-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27702 invoked from network); 14 Jun 1999 08:30:51 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Jun 1999 08:30:51 -0000
+Received: (qmail 2723 invoked by alias); 14 Jun 1999 08:30:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6614
+Received: (qmail 2716 invoked from network); 14 Jun 1999 08:30:44 -0000
+Date: Mon, 14 Jun 1999 10:30:41 +0200 (MET DST)
+Message-Id: <199906140830.KAA30250@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: completion after ${"${foo
+
+
+... failed because the completion code removed the quote. I've fixed
+this by not removing the quotes at all when completing only in a
+parameter expansion and by not quoting the surrounding strings when
+re-inserting them into the line. This has one problem: completion
+after foo\ bar${foo<TAB> removes the backslash (completion after
+"foo bar${foo<TAB> works, however). I currently see no way around this 
+-- until we make the lexer return different tokens for quotes inside
+parameter expansions.
+The patch also fixes _brace_parameter so that it doesn't leave the
+command line in a state that is certainly wrong (which could happen
+with completeinword set and completing ${"foo" with the cursor on the
+second quote).
+
+Bye
+ Sven
+
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Mon Jun 14 09:16:29 1999
++++ Src/Zle/zle_tricky.c	Mon Jun 14 10:20:57 1999
+@@ -681,12 +681,11 @@
+ /* Check if we have to complete a parameter name. */
+ 
+ static char *
+-check_param(char *s, int set, char **ep)
++check_param(char *s, int set, int test)
+ {
+     char *p;
+-    int bq = 0, eq = 0, i;
+ 
+-    if (!ep)
++    if (!test)
+ 	ispar = parq = eparq = 0;
+     /* Try to find a `$'. */
+     for (p = s + offs; p > s && *p != String && *p != Qstring; p--);
+@@ -726,9 +725,9 @@
+ 
+ 	e = b;
+ 	if (br) {
+-	    while (*e == (ep ? Dnull : '"'))
+-		e++, parq++, bq++;
+-	    if (!ep)
++	    while (*e == (test ? Dnull : '"'))
++		e++, parq++;
++	    if (!test)
+ 		b = e;
+ 	}
+ 	/* Find the end of the name. */
+@@ -749,14 +748,12 @@
+ 	if (offs <= e - s && offs >= b - s && n <= 0) {
+ 	    if (br) {
+ 		p = e;
+-		while (*p == (ep ? Dnull : '"'))
+-		    p++, parq--, eparq++, eq++;
++		while (*p == (test ? Dnull : '"'))
++		    p++, parq--, eparq++;
+ 	    }
+ 	    /* It is. */
+-	    if (ep) {
+-		*ep = e;
++	    if (test)
+ 		return b;
+-	    }
+ 	    /* If we were called from makecomplistflags(), we have to set the
+ 	     * global variables. */
+ 
+@@ -765,21 +762,12 @@
+ 		    mflags |= CMF_PARBR;
+ 
+ 		/* Get the prefix (anything up to the character before the name). */
+-		for (i = eq, p = e; i; i--, p++)
+-		    *p = '.';
+-		isuf = quotename(e, NULL);
+-		for (i = eq, p = isuf; i; i--, p++)
+-		    *p = '"';
++		isuf = dupstring(e);
++		untokenize(isuf);
+ 		*e = '\0';
+ 		ripre = dupstring(s);
+ 		ripre[b - s] = '\0';
+-		for (i = bq, p = ripre + (b - s) - 1; i; i--, p--)
+-		    *p = '.';
+-		ipre = quotename(ripre, NULL);
+-		for (i = bq, p = ripre + strlen(ripre) - 1; i; i--, p--)
+-		    *p = '"';
+-		for (i = bq, p = ipre + strlen(ipre) - 1; i; i--, p--)
+-		    *p = '"';
++		ipre = dupstring(ripre);
+ 		untokenize(ipre);
+ 	    }
+ 	    else
+@@ -1534,11 +1522,12 @@
+ 	/* This variable will hold the current word in quoted form. */
+ 	qword = ztrdup(s);
+ 	offs = cs - wb;
+-	if ((p = check_param(s, 0, &tt))) {
+-	    for (; *p == Dnull; p++)
+-		*p = '"';
+-	    for (; *tt == Dnull; tt++)
+-		*tt = '"';
++	if ((p = check_param(s, 0, 1))) {
++	    for (p = s; *p; p++)
++		if (*p == Dnull)
++		    *p = '"';
++		else if (*p == Snull)
++		    *p = '\'';
+ 	}
+ 	if (*s == Snull || *s == Dnull) {
+ 	    char *q = (*s == Snull ? "'" : "\""), *n = tricat(qipre, q, "");
+@@ -4985,11 +4974,21 @@
+     ll = oll;
+     if (cur < 0 || i < 1)
+ 	return 1;
++    owb = offs;
++    offs = soffs;
++    if ((p = check_param(ns, 0, 1))) {
++	for (p = ns; *p; p++)
++	    if (*p == Dnull)
++		*p = '"';
++	    else if (*p == Snull)
++		*p = '\'';
++    }
++    offs = owb;
+     if (*ns == Snull || *ns == Dnull) {
+ 	instring = (*ns == Snull ? 1 : 2);
+ 	inbackt = 0;
+ 	swb++;
+-	if (ns[strlen(ns) - 1] == *ns)
++	if (ns[strlen(ns) - 1] == *ns && ns[1])
+ 	    swe--;
+ 	autoq = (*ns == Snull ? '\'' : '"');
+     } else {
+diff -u oc/Base/_brace_parameter Completion/Base/_brace_parameter
+--- oc/Base/_brace_parameter	Mon Jun 14 09:20:07 1999
++++ Completion/Base/_brace_parameter	Mon Jun 14 09:26:00 1999
+@@ -16,4 +16,6 @@
+ n=${(M)#ls##\"#}
+ q=${(M)lp%%\"#}
+ 
++[[ n -gt 0 ]] && suf=''
++
+ _parameters -s "${q[1,-n-1]}" -S "$suf" -r '-:?#%+=[/'
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,257 @@
+From zsh-workers-return-11144-mason-zsh=primenet.com.au@sunsite.auc.dk Thu May 04 10:16:09 2000
+Return-Path: <zsh-workers-return-11144-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2136 invoked from network); 4 May 2000 10:16:08 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 4 May 2000 10:16:08 -0000
+Received: (qmail 895 invoked by alias); 4 May 2000 10:16:01 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11144
+Received: (qmail 855 invoked from network); 4 May 2000 10:15:58 -0000
+Date: Thu, 4 May 2000 11:44:32 +0200 (MET DST)
+Message-Id: <200005040944.LAA30645@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Andrej Borsenkow"'s message of Wed, 3 May 2000 17:36:44 +0400
+Subject: PATCH: Re: zpty and controlling tty (and other fd's)
+
+
+Andrej Borsenkow wrote:
+
+> Should not we reset controlling tty for external command as well? Else,
+> I'm afraid, commands that directly open /dev/tty may have problems with
+> it.
+
+Hm, quite reasonable. This tries it, tested on Digital Unix and
+Linux. I have no BSDish system around, could someone test it there?
+
+
+On True64 Unix O_NOCTTY is implicit and cannot be unset. How weird.
+
+> ...
+> 
+> Oh, yes, and why nslookup has fd's 10 and 11 open at all?
+
+Missing close()s? (The parent shell's stdio descriptors.)
+
+
+There is also a hunk that tries to avoid closing the connection to the 
+child too early (when there is still something to read).
+
+Bye
+ Sven
+
+Index: Src/Modules/zpty.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/zpty.c,v
+retrieving revision 1.3
+diff -u -r1.3 zpty.c
+--- Src/Modules/zpty.c	2000/04/07 15:01:03	1.3
++++ Src/Modules/zpty.c	2000/05/04 09:42:34
+@@ -155,33 +155,29 @@
+ /**** maybe we should use configure here */
+ /**** and we certainly need more/better #if tests */
+ 
+-#ifdef __osf__
+-
+-static int
+-get_pty(int *master, int *slave)
+-{
+-    return openpty(master, slave, NULL, NULL, NULL);
+-}
+-
+-#else /* ! __osf__ */
+-
+ #if defined(__SVR4) || defined(sinix)
+ 
+ #include <sys/stropts.h>
+ 
+ static int
+-get_pty(int *master, int *slave)
++get_pty(int master, int *retfd)
+ {
+-    int mfd, sfd;
+-    char *name;
++    static char *name;
++    static int mfd, sfd;
++
+     int ret;
+ 
+-    if ((mfd = open("/dev/ptmx", O_RDWR)) < 0)
+-	return 1;
++    if (master) {
++	if ((mfd = open("/dev/ptmx", O_RDWR)) < 0)
++	    return 1;
+ 
+-    if (grantpt(mfd) || unlockpt(mfd) || !(name = ptsname(mfd))) {
+-	close(mfd);
+-	return 1;
++	if (grantpt(mfd) || unlockpt(mfd) || !(name = ptsname(mfd))) {
++	    close(mfd);
++	    return 1;
++	}
++	*retfd = mfd;
++
++	return 0;
+     }
+     if ((sfd = open(name, O_RDWR)) < 0) {
+ 	close(mfd);
+@@ -205,16 +201,16 @@
+ 	   close(sfd);
+ 	   return 1;
+        }
+-    *master = mfd;
+-    *slave = sfd;
+ 
++    *retfd = sfd;
++
+     return 0;
+ }
+ 
+ #else /* ! (defined(__SVR4) || defined(sinix)) */
+ 
+ static int
+-get_pty(int *master, int *slave)
++get_pty(int master, int *retfd)
+ {
+ 
+ #ifdef __linux
+@@ -224,34 +220,38 @@
+     static char char1[] = "pq";
+     static char char2[] = "0123456789abcdef";
+ #endif /* __linux */
+-
+-    char name[11], *p1, *p2;
+-    int mfd, sfd;
+ 
+-    strcpy(name, "/dev/ptyxx");
++    static char name[11];
++    static int mfd, sfd;
++    char *p1, *p2;
++
++    if (master) {
++	strcpy(name, "/dev/ptyxx");
++
++	for (p1 = char1; *p1; p1++) {
++	    name[8] = *p1;
++	    for (p2 = char2; *p2; p2++) {
++		name[9] = *p2;
++		if ((mfd = open(name, O_RDWR)) >= 0) {
++		    *retfd = mfd;
+ 
+-    for (p1 = char1; *p1; p1++) {
+-	name[8] = *p1;
+-	for (p2 = char2; *p2; p2++) {
+-	    name[9] = *p2;
+-	    if ((mfd = open(name, O_RDWR)) >= 0) {
+-		name[5] = 't';
+-		if ((sfd = open(name, O_RDWR)) >= 0) {
+-		    *master = mfd;
+-		    *slave = sfd;
+-
+ 		    return 0;
+ 		}
+-		name[5] = 'p';
+-		close(mfd);
+ 	    }
+ 	}
+     }
++    name[5] = 't';
++    if ((sfd = open(name, O_RDWR)) >= 0) {
++	*retfd = sfd;
++
++	return 0;
++    }
++    close(mfd);
++
+     return 1;
+ }
+ 
+ #endif /* __SVR4 */
+-#endif /* __osf__ */
+ 
+ static int
+ newptycmd(char *nam, char *pname, char **args, int echo, int block)
+@@ -264,7 +264,7 @@
+ 	zwarnnam(nam, "unknown command: %s", *args, 0);
+ 	return 1;
+     }
+-    if (get_pty(&master, &slave)) {
++    if (get_pty(1, &master)) {
+ 	zwarnnam(nam, "can't open pseudo terminal", NULL, 0);
+ 	return 1;
+     }
+@@ -274,6 +274,42 @@
+ 	zwarnnam(nam, "couldn't create pty command: %s", pname, 0);
+ 	return 1;
+     } else if (!pid) {
++
++	pid = getpid();
++
++#ifdef HAVE_SETSID
++	setsid();
++#else
++#ifdef TIOCNOTTY
++	{
++	    int t = open("/dev/tty", O_RDWR);
++
++	    ioctl(t, TIOCNOTTY, 0);
++	    close(t);
++	}
++#endif
++#endif
++
++	if (get_pty(0, &slave))
++	    exit(1);
++
++#ifdef TIOCSCTTY
++	ioctl(slave, TIOCSCTTY, 0);
++#endif
++
++	/* This is taken from attachtty(). Should we exit in case of
++	 * failure? */
++
++#ifdef HAVE_TCSETPGRP
++	tcsetpgrp(slave, pid);
++#else
++# if ardent
++	setpgrp();
++# else
++	ioctl(slave, TIOCSPGRP, &pid);
++# endif
++#endif
++
+ 	if (!echo) {
+ 	    struct ttyinfo info;
+ 
+@@ -317,13 +353,13 @@
+ 
+ 	close(slave);
+ 
+-	setpgrp(0L, getpid());
++	if (SHTTY != -1)
++	    close(SHTTY);
+ 
+ 	execve(cmd, args, environ);
+ 	exit(0);
+     }
+     master = movefd(master);
+-    close(slave);
+ 
+     p = (Ptycmd) zalloc(sizeof(*p));
+ 
+@@ -539,7 +575,6 @@
+ 	    zwarnnam(nam, "no such pty command: %s", *args, 0);
+ 	    return 1;
+ 	}
+-	checkptycmd(p);
+ 	if (p->fin)
+ 	    return 1;
+ 	return (ops['r'] ?
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

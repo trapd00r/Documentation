@@ -1,0 +1,406 @@
+From zsh-workers-return-23067-mason-zsh=primenet.com.au@sunsite.dk Mon Dec 18 16:14:12 2006
+Return-Path: <zsh-workers-return-23067-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15558 invoked from network); 18 Dec 2006 16:14:06 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.7 (2006-10-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.7
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 18 Dec 2006 16:14:06 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 55679 invoked from network); 18 Dec 2006 16:14:00 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 18 Dec 2006 16:14:00 -0000
+Received: (qmail 13410 invoked by alias); 18 Dec 2006 16:13:53 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23067
+Received: (qmail 13401 invoked from network); 18 Dec 2006 16:13:52 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 18 Dec 2006 16:13:52 -0000
+Received: (qmail 54937 invoked from network); 18 Dec 2006 16:13:52 -0000
+Received: from cluster-c.mailcontrol.com (168.143.177.190)
+  by a.mx.sunsite.dk with SMTP; 18 Dec 2006 16:13:47 -0000
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly04c.srv.mailcontrol.com (MailControl) with ESMTP id kBIG9t0H000647
+	for <zsh-workers@sunsite.dk>; Mon, 18 Dec 2006 16:13:33 GMT
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.1830);
+	 Mon, 18 Dec 2006 16:12:36 +0000
+Date: Mon, 18 Dec 2006 16:12:29 +0000
+From: Peter Stephenson <pws@csr.com>
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: Is wait not interruptable?
+Message-Id: <20061218161229.7bbec427.pws@csr.com>
+In-Reply-To: <20061218113953.c19237da.pws@csr.com>
+References: <200612171600.kBHG0IXv005533@pwslaptop.csr.com>
+	<061217095424.ZM2103@torch.brasslantern.com>
+	<20061218113953.c19237da.pws@csr.com>
+Organization: Cambridge Silicon Radio
+X-Mailer: Sylpheed version 2.2.10 (GTK+ 2.10.4; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 18 Dec 2006 16:12:36.0191 (UTC) FILETIME=[54E796F0:01C722BF]
+X-Scanned-By: MailControl A-07-06-00 (www.mailcontrol.com) on 10.67.0.114
+
+Peter Stephenson <pws@csr.com> wrote:
+> > } Surely the right thing to do would be to use a more lenient signal mask
+> > } in signal_suspend(), since we know that's a good place for signal
+> > } handling---although we might have to queue traps for later execution
+> > } unless one of TRAPSASYNC or the wait builtin is in use.
+> > 
+> > This may be an artifact from before trap queuing was possible, then.  I
+> > generally concur with your assessment here.
+> 
+> I think some rewriting may be in order... There's the vestiges of code
+> (trap_queue* variables in signals.c) for queueing traps (as opposed to the
+> current method of queueing signals, which necessarily means delaying traps,
+> too).  I suggest using that in this case so that signals are handled
+> immediately, but traps are queued except for the cases of wait or
+> TRAPSASYNC.  This will allow the shell to exit quickly if the signal isn't
+> trapped, which is the real problem in this case (and presumably the reason
+> for that sigdelset(set, SIGHUP) in signal_suspend_setup()).  To be clear:
+> nothing would change except for the handling of signals around the point
+> where we're doing nothing but waiting for a child.  (In particular, no
+> fiddling with the signal queueing code is needed.)
+
+Here is the implementation, attempting to be minimally invasive.  I won't
+check it in immediately (but I'm on holiday from Wednesday so would like
+to sort it out by Tuesday evening UK time).  Tests suggest it does what I
+think it should.
+
+As I noted in a comment, there's presumably a race when queuing traps since
+the signal may already have been delivered by the time we start the trap
+queuing.  That's not new (we only queue traps at roughly the point where we
+previously blocked signals).  I could move the new queue_traps() before
+dont_queue_signals() in the two applicable functions: then traps would be
+queued when the previously blocked signals arrive.  I suspect that's a good
+thing to do, but (i) it only just occurred to me (ii) it's a slightly
+larger change of behaviour, so I haven't done it here.  Discussion welcome,
+obviously.
+
+One slight difference is that in zwaitjob() we'll delay traps to wait for
+the entire foreground job, not just the first process to exit.  Before, if
+there were multiple processes to wait for, we'd have returned from
+sigsuspend() after each, and potentially handled signals there.  That seems
+a bit hit and miss---it didn't matter which process was actually
+finished---so I'm happy with the new behaviour.
+
+The first hunk is separate, to indicate that additional uses of PIDs by
+kill may be used if handled by the OS.
+
+I think that with this patch Dave's original problem should go away: even though
+the "sleep"s in his example hang on, as discussed in the other half of this thread,
+they won't have any effect since the shell will exit immediately when it gets the
+(untrapped) SIGTERM.
+
+Index: Doc/Zsh/builtins.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/builtins.yo,v
+retrieving revision 1.89
+diff -u -r1.89 builtins.yo
+--- Doc/Zsh/builtins.yo	13 Dec 2006 22:30:38 -0000	1.89
++++ Doc/Zsh/builtins.yo	18 Dec 2006 15:54:06 -0000
+@@ -692,6 +692,9 @@
+ show if the alternative form corresponds to a signal number.  For example,
+ under Linux tt(kill -l IO) and tt(kill -l POLL) both output 29, hence
+ tt(kill -IO) and tt(kill -POLL) have the same effect.
++
++Many systems will allow process IDs to be negative to kill a process
++group or zero to kill the current process group.
+ )
+ findex(let)
+ item(tt(let) var(arg) ...)(
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.51
+diff -u -r1.51 jobs.c
+--- Src/jobs.c	18 Dec 2006 11:16:03 -0000	1.51
++++ Src/jobs.c	18 Dec 2006 15:54:06 -0000
+@@ -1141,6 +1141,7 @@
+     /* child_block() around this loop in case #ifndef WNOHANG */
+     dont_queue_signals();
+     child_block();		/* unblocked in signal_suspend() */
++    queue_traps(wait_cmd);
+     while (!errflag && (kill(pid, 0) >= 0 || errno != ESRCH)) {
+ 	if (first)
+ 	    first = 0;
+@@ -1148,7 +1149,7 @@
+ 	    kill(pid, SIGCONT);
+ 
+ 	last_signal = -1;
+-	signal_suspend(SIGCHLD, wait_cmd);
++	signal_suspend(SIGCHLD);
+ 	if (last_signal != SIGCHLD && wait_cmd) {
+ 	    /* wait command interrupted, but no error: return */
+ 	    restore_queue_signals(q);
+@@ -1156,6 +1157,7 @@
+ 	}
+ 	child_block();
+     }
++    unqueue_traps();
+     child_unblock();
+     restore_queue_signals(q);
+ 
+@@ -1177,6 +1179,7 @@
+ 
+     dont_queue_signals();
+     child_block();		 /* unblocked during signal_suspend() */
++    queue_traps(wait_cmd);
+     if (jn->procs || jn->auxprocs) { /* if any forks were done         */
+ 	jn->stat |= STAT_LOCKED;
+ 	if (jn->stat & STAT_CHANGED)
+@@ -1184,7 +1187,7 @@
+ 	while (!errflag && jn->stat &&
+ 	       !(jn->stat & STAT_DONE) &&
+ 	       !(interact && (jn->stat & STAT_STOPPED))) {
+-	    signal_suspend(SIGCHLD, wait_cmd);
++	    signal_suspend(SIGCHLD);
+ 	    if (last_signal != SIGCHLD && wait_cmd)
+ 	    {
+ 		/* builtin wait interrupted by trapped signal */
+@@ -1211,6 +1214,7 @@
+ 	pipestats[0] = lastval;
+ 	numpipestats = 1;
+     }
++    unqueue_traps();
+     child_unblock();
+     restore_queue_signals(q);
+ 
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.41
+diff -u -r1.41 signals.c
+--- Src/signals.c	30 May 2006 22:35:03 -0000	1.41
++++ Src/signals.c	18 Dec 2006 15:54:06 -0000
+@@ -346,39 +346,10 @@
+ static int suspend_longjmp = 0;
+ static signal_jmp_buf suspend_jmp_buf;
+ #endif
+- 
+-#if defined(POSIX_SIGNALS) || defined(BSD_SIGNALS)
+-static void
+-signal_suspend_setup(sigset_t *set, int sig, int wait_cmd)
+-{
+-    if (isset(TRAPSASYNC)) {
+-	sigemptyset(set);
+-    } else {
+-	sigfillset(set);
+-	sigdelset(set, sig);
+-#ifdef POSIX_SIGNALS
+-	sigdelset(set, SIGHUP);  /* still don't know why we add this? */
+-#endif
+-	if (wait_cmd)
+-	{
+-	    /*
+-	     * Using "wait" builtin.  We should allow SIGINT and
+-	     * execute traps delivered to the shell.
+-	     */
+-	    int sigtr;
+-	    sigdelset(set, SIGINT);
+-	    for (sigtr = 1; sigtr <= NSIG; sigtr++) {
+-		if (sigtrapped[sigtr] & ~ZSIG_IGNORED)
+-		    sigdelset(set, sigtr);
+-	    }
+-	}
+-    }
+-}
+-#endif
+ 
+ /**/
+ int
+-signal_suspend(int sig, int wait_cmd)
++signal_suspend(int sig)
+ {
+     int ret;
+  
+@@ -388,7 +359,7 @@
+     sigset_t oset;
+ #endif /* BROKEN_POSIX_SIGSUSPEND */
+ 
+-    signal_suspend_setup(&set, sig, wait_cmd);
++    sigemptyset(&set);
+ #ifdef BROKEN_POSIX_SIGSUSPEND
+     sigprocmask(SIG_SETMASK, &set, &oset);
+     pause();
+@@ -400,7 +371,7 @@
+ # ifdef BSD_SIGNALS
+     sigset_t set;
+ 
+-    signal_suspend_setup(&set, sig, wait_cmd);
++    sigemptyset(&set);
+     ret = sigpause(set);
+ # else
+ #  ifdef SYSV_SIGNALS
+@@ -419,7 +390,7 @@
+ #  endif /* SYSV_SIGNALS  */
+ # endif  /* BSD_SIGNALS   */
+ #endif   /* POSIX_SIGNALS */
+- 
++
+     return ret;
+ }
+ 
+@@ -561,18 +532,14 @@
+         break;
+  
+     case SIGHUP:
+-        if (sigtrapped[SIGHUP])
+-            dotrap(SIGHUP);
+-        else {
++        if (!handletrap(SIGHUP)) {
+             stopmsg = 1;
+             zexit(SIGHUP, 1);
+         }
+         break;
+  
+     case SIGINT:
+-        if (sigtrapped[SIGINT])
+-            dotrap(SIGINT);
+-        else {
++        if (!handletrap(SIGINT)) {
+ 	    if ((isset(PRIVILEGED) || isset(RESTRICTED)) &&
+ 		isset(INTERACTIVE) && noerrexit < 0)
+ 		zexit(SIGINT, 1);
+@@ -587,19 +554,12 @@
+ #ifdef SIGWINCH
+     case SIGWINCH:
+         adjustwinsize(1);  /* check window size and adjust */
+-	if (sigtrapped[SIGWINCH])
+-	    dotrap(SIGWINCH);
++	(void) handletrap(SIGWINCH);
+         break;
+ #endif
+ 
+     case SIGALRM:
+-        if (sigtrapped[SIGALRM]) {
+-	    int tmout;
+-            dotrap(SIGALRM);
+-
+-	    if ((tmout = getiparam("TMOUT")))
+-		alarm(tmout);           /* reset the alarm */
+-        } else {
++        if (!handletrap(SIGALRM)) {
+ 	    int idle = ttyidlegetfn(NULL);
+ 	    int tmout = getiparam("TMOUT");
+ 	    if (idle >= 0 && idle < tmout)
+@@ -614,7 +574,7 @@
+         break;
+  
+     default:
+-        dotrap(sig);
++        (void) handletrap(sig);
+         break;
+     }   /* end of switch(sig) */
+  
+@@ -1000,6 +960,96 @@
+ 	  "BUG: still saved traps outside all function scope");
+ }
+ 
++
++/*
++ * Decide whether a trap needs handling.
++ * If so, see if the trap should be run now or queued.
++ * Return 1 if the trap has been or will be handled.
++ * This only needs to be called in place of dotrap() in the
++ * signal handler, since it's only while waiting for children
++ * to exit that we queue traps.
++ */
++/**/
++static int
++handletrap(int sig)
++{
++    if (!sigtrapped[sig])
++	return 0;
++
++    if (trap_queueing_enabled)
++    {
++	/* Code borrowed from signal queueing */
++	int temp_rear = ++trap_queue_rear % MAX_QUEUE_SIZE;
++
++	DPUTS(temp_rear == trap_queue_front, "BUG: trap queue full");
++	/* If queue is not full... */
++	if (temp_rear != trap_queue_front) {
++	    trap_queue_rear = temp_rear;
++	    trap_queue[trap_queue_rear] = sig;
++	}
++	return 1;
++    }
++
++    dotrap(sig);
++
++    if (sig == SIGALRM)
++    {
++	int tmout;
++	/*
++	 * Reset the alarm.
++	 * It seems slightly more natural to do this when the
++	 * trap is run, rather than when it's queued, since
++	 * the user doesn't see the latter.
++	 */
++	if ((tmout = getiparam("TMOUT")))
++	    alarm(tmout);
++    }
++
++    return 1;
++}
++
++
++/*
++ * Queue traps if they shouldn't be run asynchronously, i.e.
++ * we're not in the wait builtin and TRAPSASYNC isn't set, when
++ * waiting for children to exit.
++ *
++ * Note that unlike signal queuing this should only be called
++ * in single matching pairs and can't be nested.  It is
++ * only needed when waiting for a job or process to finish.
++ *
++ * There is presumably a race setting this up: we shouldn't be running
++ * traps between forking a foreground process and this point, either.
++ */
++/**/
++void
++queue_traps(int wait_cmd)
++{
++    if (!isset(TRAPSASYNC) && !wait_cmd) {
++	/*
++	 * Traps need to be handled synchronously, so
++	 * enable queueing.
++	 */
++	trap_queueing_enabled = 1;
++    }
++}
++
++
++/*
++ * Disable trap queuing and run the traps.
++ */
++/**/
++void
++unqueue_traps(void)
++{
++    trap_queueing_enabled = 0;
++    while (trap_queue_front != trap_queue_rear) {
++	trap_queue_front = (trap_queue_front + 1) % MAX_QUEUE_SIZE;
++	(void) handletrap(trap_queue[trap_queue_front]);
++    }
++}
++
++
+ /* Execute a trap function for a given signal, possibly
+  * with non-standard sigtrapped & siglists values
+  */
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+To access the latest news from CSR copy this link into a web browser:  http://www.csr.com/email_sig.php
+

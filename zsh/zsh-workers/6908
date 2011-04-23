@@ -1,0 +1,249 @@
+From zsh-workers-return-6908-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Jun 29 10:51:42 1999
+Return-Path: <zsh-workers-return-6908-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7654 invoked from network); 29 Jun 1999 10:51:34 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 29 Jun 1999 10:51:34 -0000
+Received: (qmail 14315 invoked by alias); 29 Jun 1999 10:51:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6908
+Received: (qmail 14307 invoked from network); 29 Jun 1999 10:51:16 -0000
+Date: Tue, 29 Jun 1999 12:51:08 +0200 (MET DST)
+Message-Id: <199906291051.MAA23127@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Tue, 29 Jun 1999 07:34:44 +0000
+Subject: Re: PATCH: that execution stuff
+
+
+Bart Schaefer wrote:
+
+> On Jun 29,  8:56am, Sven Wischnowsky wrote:
+> } Subject: PATCH: that execution stuff
+> }
+> } This tries to get the always-pgrp-behavior back without losing the
+> } other things that were fixed in the meanwhile. Now please test your
+> } favorite execution bugs everyone and tell me what does not work.
+> 
+> This gets exactly to where I got, and no farther.  The test case is the
+> same as for the original problem reported by Jos Backus; the failure is
+> as I described in 6883:  Suspend the function, then bring it back into
+> the foreground, and bin_fg() passes zsh's PID to attachtty() as the
+> process group, which means mutt gets a SIGTTIN as soon as you type.  And
+> then when you try to bring it back into the foreground yet again, the
+> wrong thing gets SIGCONT'd and zsh ends up waiting in sigsuspend() for a
+> job that's never going to signal it.
+
+(Btw. I couldn't test Jos' problem because I don't have mutt.)
+
+But I could reproduce it with less, I had forgotten to test it with
+something that needs the terminal, sorry.
+
+The patch below is probably larger than necessary, mainly because I
+made the gleader of the super-job be set to -1 if the super-job
+contains only the sub-shell created on ^Z.
+After the problem Bart mentioned worked again I tried:
+
+  % f() { less /etc/termcap; echo done }
+  % x=4; while (( x-- )); do f; done
+
+Which works now, too.
+
+However, there is still a problem (and this one isn't new, it was
+always like this): the sub-shell created on ^Z has the same pgrp as
+the parent shell and commands started by it use it, too. So if we
+have:
+
+  % f() { less /etc/termcap; mutt }
+  % f
+
+and then ^Z the less, fg it, and exit from it, the sub-shell takes
+over and starts mutt *in the pgrp of the parent shell*! As I said, I
+don't have mutt, but this should then have the effect of stopping the
+parent shell again, right?
+
+The solution would of course be to make the sub-shell use its own
+group, and have the parent shell correctly handle the
+attachtty()s. The patch tries to do that.
+
+I had to add a STAT_*-flag (WASSUPER) that is set when a super-job is
+turned into a normal one. It's used to delete the sub-job when the
+super-job finishes (under certain circumstances it is possible to
+delete it before the super-job, but I can't find a good place where to 
+put that deletejob() without breaking one case or another).
+
+
+Andrej Borsenkow wrote:
+
+> > I don't need to point out that `while true; do gzip ...; done' is not
+> > expected to be ^C'able again, do I? Maybe we should document this?
+> > (Together with the ^Z/fg/^C-trick?)
+> 
+> It does not work. I can suspend *and* kill 'while true; do gzcat -f; done'. But
+> after I suspend and resume it, I can neither kill nor suspend it again.
+
+Hm, it worked for me with `zcat ... >/dev/null'. But this patch might
+also have an effect on this (because of this sub-shell-pgrp thing).
+
+So, the next round...
+
+Bye
+ Sven
+
+P.S.: Bart, thanks, I had just had a look at the other new uses of
+      pline_level, too. The problem is to find out which are needed 
+      to be able to stop functions/functions-in-loops (which was
+      broken before) and which had to go.
+
+diff -u os/exec.c Src/exec.c
+--- os/exec.c	Tue Jun 29 12:49:36 1999
++++ Src/exec.c	Tue Jun 29 11:59:32 1999
+@@ -302,7 +302,7 @@
+ static int
+ execcursh(Cmd cmd, LinkList args, int flags)
+ {
+-    if (!list_pipe)
++    if (!list_pipe && thisjob != list_pipe_job)
+ 	deletejob(jobtab + thisjob);
+     cmdpush(CS_CURSH);
+     execlist(cmd->u.list, 1, flags & CFLAG_EXEC);
+@@ -890,7 +890,7 @@
+ 
+ 	    lastwj = thisjob = newjob;
+ 
+-	    if (list_pipe)
++	    if (list_pipe || pline_level)
+ 		jn->stat |= STAT_NOPRINT;
+ 
+ 	    if (nowait) {
+@@ -901,8 +901,10 @@
+ 		    DPUTS(!list_pipe_pid, "invalid list_pipe_pid");
+ 		    addproc(list_pipe_pid, list_pipe_text);
+ 
++		    /* If the super-job contains only the sub-shell, the
++		       sub-shell is the group leader. */
+ 		    if (!jn->procs->next)
+-			jn->gleader = mypgrp;
++			jn->gleader = list_pipe_pid;
+ 
+ 		    for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+ 			if (WIFSTOPPED(pn->status))
+@@ -924,7 +926,7 @@
+ 	    }
+ 
+ 	    for (; !nowait;) {
+-		if (list_pipe_child || pline_level) {
++		if (list_pipe_child) {
+ 		    jn->stat |= STAT_NOPRINT;
+ 		    makerunning(jn);
+ 		}
+@@ -983,6 +985,8 @@
+ 			entersubsh(Z_ASYNC, 0, 0);
+ 			if (jobtab[list_pipe_job].procs)
+ 			    setpgrp(0L, mypgrp = jobtab[list_pipe_job].gleader);
++			else
++			    setpgrp(0L, getpid());
+ 			close(synch[1]);
+ 			kill(getpid(), SIGSTOP);
+ 			list_pipe = 0;
+@@ -1004,8 +1008,7 @@
+ 		jn = jobtab + pj;
+ 		killjb(jn, lastval & ~0200);
+ 	    }
+-	    if (list_pipe_child || ((list_pipe || pline_level) &&
+-				    (jn->stat & STAT_DONE)))
++	    if (list_pipe_child || (list_pipe && (jn->stat & STAT_DONE)))
+ 		deletejob(jn);
+ 	    thisjob = pj;
+ 
+diff -u os/jobs.c Src/jobs.c
+--- os/jobs.c	Tue Jun 29 12:49:41 1999
++++ Src/jobs.c	Tue Jun 29 12:50:20 1999
+@@ -180,7 +180,7 @@
+ 		/* If we have `cat foo|while read a; grep $a bar;done'
+ 		 * and have hit ^Z, the sub-job is stopped, but the
+ 		 * super-job may still be running, waiting to be stopped
+-		 * or to exit. So we have to send it a SIGSTOP. */
++		 * or to exit. So we have to send it a SIGTSTP. */
+ 		int i;
+ 
+ 		for (i = 1; i < MAXJOB; i++)
+@@ -672,6 +672,8 @@
+     if (jn->ty)
+ 	zfree(jn->ty, sizeof(struct ttyinfo));
+ 
++    if (jn->stat & STAT_WASSUPER)
++	deletejob(jobtab + jn->other);
+     jn->gleader = jn->other = 0;
+     jn->stat = jn->stty_in_env = 0;
+     jn->procs = NULL;
+@@ -792,13 +794,17 @@
+ 		    
+ 		    for (p = sj->procs; p; p = p->next)
+ 			if (WIFSIGNALED(p->status)) {
+-			    killpg(jn->gleader, WTERMSIG(p->status));
++			    if (jn->gleader != mypgrp && jn->procs->next)
++				killpg(jn->gleader, WTERMSIG(p->status));
++			    else
++				kill(jn->procs->pid, WTERMSIG(p->status));
+ 			    kill(sj->other, SIGCONT);
+ 			    kill(sj->other, WTERMSIG(p->status));
+ 			    break;
+ 			}
+ 		    if (!p) {
+ 			jn->stat &= ~STAT_SUPERJOB;
++			jn->stat |= STAT_WASSUPER;
+ 			if (WIFEXITED(jn->procs->status) &&
+ 			    killpg(jn->gleader, 0) == -1)
+ 			    jn->gleader = mypgrp;
+@@ -810,6 +816,11 @@
+ 			   but the parent shell gets notified for the
+ 			   sleep.
+ 			   deletejob(sj); */
++			/* If this super-job contains only the sub-shell,
++			   we have to attach the tty to our process group
++			   (which is shared by the sub-shell) now. */
++			if (!jn->procs->next)
++			    attachtty(jn->gleader);
+ 			kill(sj->other, SIGCONT);
+ 		    }
+ 		    curjob = jn - jobtab;
+@@ -1238,7 +1249,11 @@
+ 		fflush(shout);
+ 		if (func != BIN_WAIT) {		/* fg */
+ 		    thisjob = job;
+-		    attachtty(jobtab[job].gleader);
++		    if ((jobtab[job].stat & STAT_SUPERJOB) &&
++			!jobtab[job].procs->next)
++			attachtty(jobtab[jobtab[job].other].gleader);
++		    else
++			attachtty(jobtab[job].gleader);
+ 		}
+ 	    }
+ 	    if (stopped) {
+diff -u os/zsh.h Src/zsh.h
+--- os/zsh.h	Mon Jun 28 16:04:05 1999
++++ Src/zsh.h	Tue Jun 29 12:26:04 1999
+@@ -629,10 +629,12 @@
+ #define STAT_INUSE	(1<<6)	/* this job entry is in use             */
+ #define STAT_SUPERJOB	(1<<7)	/* job has a subjob                     */
+ #define STAT_SUBJOB	(1<<8)	/* job is a subjob                      */
+-#define STAT_CURSH	(1<<9)	/* last command is in current shell     */
+-#define STAT_NOSTTY	(1<<10)	/* the tty settings are not inherited   */
++#define STAT_WASSUPER   (1<<9)  /* was a super-job, sub-job needs to be */
++				/* deleted */
++#define STAT_CURSH	(1<<10)	/* last command is in current shell     */
++#define STAT_NOSTTY	(1<<11)	/* the tty settings are not inherited   */
+ 				/* from this job when it exits.         */
+-#define STAT_ATTACH	(1<<11)	/* delay reattaching shell to tty       */
++#define STAT_ATTACH	(1<<12)	/* delay reattaching shell to tty       */
+ 
+ #define SP_RUNNING -1		/* fake status for jobs currently running */
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

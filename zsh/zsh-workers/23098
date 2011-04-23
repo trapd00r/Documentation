@@ -1,0 +1,179 @@
+From zsh-workers-return-23098-mason-zsh=primenet.com.au@sunsite.dk Tue Jan 09 22:02:06 2007
+Return-Path: <zsh-workers-return-23098-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3896 invoked from network); 9 Jan 2007 22:02:04 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.7 (2006-10-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.7
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 9 Jan 2007 22:02:04 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 40623 invoked from network); 9 Jan 2007 21:35:18 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 9 Jan 2007 21:35:18 -0000
+Received: (qmail 6515 invoked by alias); 9 Jan 2007 21:35:15 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23098
+Received: (qmail 6505 invoked from network); 9 Jan 2007 21:35:15 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 9 Jan 2007 21:35:15 -0000
+Received: (qmail 40277 invoked from network); 9 Jan 2007 21:35:14 -0000
+Received: from mtaout02-winn.ispmail.ntl.com (81.103.221.48)
+  by a.mx.sunsite.dk with SMTP; 9 Jan 2007 21:35:10 -0000
+Received: from aamtaout04-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout02-winn.ispmail.ntl.com with ESMTP
+          id <20070109213508.CHPL18673.mtaout02-winn.ispmail.ntl.com@aamtaout04-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Tue, 9 Jan 2007 21:35:08 +0000
+Received: from pwslaptop.csr.com ([81.107.46.42])
+          by aamtaout04-winn.ispmail.ntl.com with SMTP
+          id <20070109213508.UVDK29112.aamtaout04-winn.ispmail.ntl.com@pwslaptop.csr.com>
+          for <zsh-workers@sunsite.dk>; Tue, 9 Jan 2007 21:35:08 +0000
+Date: Tue, 9 Jan 2007 21:35:00 +0000
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: Zsh Hackers' List <zsh-workers@sunsite.dk>
+Subject: PATCH: printf width with multibyte characters
+Message-Id: <20070109213500.78972e86.p.w.stephenson@ntlworld.com>
+X-Mailer: Sylpheed version 2.2.10 (GTK+ 2.10.4; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This is, I think, the last of the places where widths of characters
+needs to be calculated using multibyte characters if MULTIBYTE is set.
+Consistently with other widths, the printing width isn't included, only
+a count of the number of characters.
+
+I would guess POSIX only makes guarantees for this for the portable
+character set.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.172
+diff -u -r1.172 builtin.c
+--- Src/builtin.c	4 Jan 2007 17:24:02 -0000	1.172
++++ Src/builtin.c	9 Jan 2007 21:31:59 -0000
+@@ -3792,6 +3792,12 @@
+ 	return ret;
+     }
+     
++    /*
++     * All the remaining code in this function is for printf-style
++     * output (printf itself, or print -f).  We still have to handle
++     * special cases of printing to a ZLE buffer or the history, however.
++     */
++
+     if (OPT_ISSET(ops,'z') || OPT_ISSET(ops,'s')) {
+ #ifdef HAVE_OPEN_MEMSTREAM
+     	if ((fout = open_memstream(&buf, &mcount)) == NULL)
+@@ -3948,26 +3954,74 @@
+ 	    case 's':
+ 	    case 'b':
+ 		if (curarg) {
+-		    char *b;
+-		    int l;
++		    char *b, *ptr;
++		    int lbytes, lchars, lleft;
++#ifdef MULTIBYTE_SUPPORT
++		    mbstate_t mbs;
++#endif
++
+ 		    if (*c == 'b') {
+ 			b = getkeystring(metafy(curarg, curlen, META_USEHEAP),
+-					 &l,
++					 &lbytes,
+ 					 OPT_ISSET(ops,'b') ? GETKEYS_BINDKEY :
+ 					 GETKEYS_PRINTF_ARG, &nnl);
+ 		    } else {
+ 			b = curarg;
+-			l = curlen;
++			lbytes = curlen;
++		    }
++		    /*
++		     * Handle width/precision here and use fwrite so that
++		     * nul characters can be output.
++		     *
++		     * First, examine width of string given that it
++		     * may contain multibyte characters.  The output
++		     * widths are for characters, so we need to count
++		     * (in lchars).  However, if we need to truncate
++		     * the string we need the width in bytes (in lbytes).
++		     */
++		    ptr = b;
++#ifdef MULTIBYTE_SUPPORT
++		    memset(&mbs, 0, sizeof(mbs));
++#endif
++
++		    for (lchars = 0, lleft = lbytes; lleft > 0; lchars++) {
++			int chars;
++
++			if (lchars == prec) {
++			    /* Truncate at this point. */
++			    lbytes = ptr - b;
++			    break;
++			}
++#ifdef MULTIBYTE_SUPPORT
++			if (isset(MULTIBYTE)) {
++			    chars = mbrlen(ptr, lleft, &mbs);
++			    if (chars < 0) {
++				/*
++				 * Invalid/incomplete character at this
++				 * point.  Assume all the rest are a
++				 * single byte.  That's about the best we
++				 * can do.
++				 */
++				lchars += lleft;
++				lbytes = (ptr - b) + lleft;
++				break;
++			    } else if (chars == 0) {
++				/* NUL, handle as real character */
++				chars = 1;
++			    }
++			}
++			else	/* use the non-multibyte code below */
++#endif
++			    chars = 1; /* compiler can optimise this...*/
++			lleft -= chars;
++			ptr += chars;
+ 		    }
+-		    /* handle width/precision here and use fwrite so that
+-		     * nul characters can be output */
+-		    if (prec >= 0 && prec < l) l = prec;
+ 		    if (width > 0 && flags[2]) width = -width;
+-		    if (width > 0 && l < width)
+-		    	count += fprintf(fout, "%*c", width - l, ' ');
+-		    count += fwrite(b, 1, l, fout);
+-		    if (width < 0 && l < -width)
+-		    	count += fprintf(fout, "%*c", -width - l, ' ');
++		    if (width > 0 && lchars < width)
++		    	count += fprintf(fout, "%*c", width - lchars, ' ');
++		    count += fwrite(b, 1, lbytes, fout);
++		    if (width < 0 && lchars < -width)
++		    	count += fprintf(fout, "%*c", -width - lchars, ' ');
+ 		    if (nnl) {
+ 			/* If the %b arg had a \c escape, truncate the fmt. */
+ 			flen = c - fmt + 1;
+Index: Test/D07multibyte.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D07multibyte.ztst,v
+retrieving revision 1.12
+diff -u -r1.12 D07multibyte.ztst
+--- Test/D07multibyte.ztst	7 Nov 2006 22:47:07 -0000	1.12
++++ Test/D07multibyte.ztst	9 Jan 2007 21:31:59 -0000
+@@ -311,3 +311,7 @@
+ 0:Delimiters in parameter flags
+ >barXX
+ >YYYYYHIbar
++
++  printf "%4.3s\n" főobar
++0:Multibyte characters in printf widths
++> főo
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

@@ -1,0 +1,167 @@
+From zsh-workers-return-12237-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jul 13 08:40:37 2000
+Return-Path: <zsh-workers-return-12237-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27060 invoked from network); 13 Jul 2000 08:40:36 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 13 Jul 2000 08:40:36 -0000
+Received: (qmail 6368 invoked by alias); 13 Jul 2000 08:40:23 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12237
+Received: (qmail 6361 invoked from network); 13 Jul 2000 08:40:22 -0000
+Date: Thu, 13 Jul 2000 10:40:19 +0200 (MET DST)
+Message-Id: <200007130840.KAA25580@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Wed, 12 Jul 2000 18:41:20 +0000
+Subject: PATCH: Re: Bug in ${(z)...} lexing, or what?
+
+
+Bart Schaefer wrote:
+
+> On Jul 12,  5:57pm, Peter Stephenson wrote:
+> } Subject: Re: Bug in ${(z)...} lexing, or what?
+> }
+> } That was before applying the patch (the correct behaviour).  After, I get:
+> } 
+> } [[
+> } a
+> } =
+> } (
+> } ;
+> } 
+> } with interactivecomments set (which is wrong), and what Sven was reporting
+> } without it (which isn't great).  I'd much prefer the old behaviour in this
+> } case, but the interactivecomments variant is definitely broken.
+> 
+> The situation is exactly reversed inside a ZLE widget:  The behavior with
+> both interactivecomments and without is now correct inside the widget, but
+> broken outside.
+> 
+> So was all Sven's patch acheived to invert some condition?
+
+No. This was dependent on zle being loaded and the value of ll (line
+length). The lexing code calls gotword() where that is used and where
+it may reset zleparse to zero. So using zleparse as a token for `don't 
+recognize comments' won't work.
+
+And that sometimes triggered the test at lex.c:1553 (line number after 
+this patch) in exalias() so that the `[[' wasn't recognised as
+introducing a condition. So incond wasn't set and the whole things was 
+parsed like a command, without the double-meaning-of-a-leading-( Peter 
+mentioned.
+
+So this patch solves only the comment-thing. And it changes things so
+that `[[ (#i)foo ]]' now always fails to report the `(#i)foo' as one
+string, independent of what is before or after the `[['. This is
+because it now correctly recognises that there is a condition being
+started.
+
+Now we need a way to detect which opening parens in conditions are
+parts of words and I'm not sure where and when to do that (Peter?).
+
+Faking `incond = 0' in bufferwords after the call to ctxtlex() won't
+work because then we don't get parens in conditions used for grouping
+one by one, we get the whole group as one string.
+
+Ideas, anyone?
+
+Bye
+ Sven
+
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.9
+diff -u -r1.9 hist.c
+--- Src/hist.c	2000/07/12 10:31:29	1.9
++++ Src/hist.c	2000/07/13 08:39:32
+@@ -2057,16 +2057,16 @@
+ mod_export LinkList
+ bufferwords(LinkList list, char *buf, int *index)
+ {
+-    int num = 0, cur = -1, got = 0, ne = noerrs, ocs = cs;
+-    int owb = wb, owe = we, oadx = addedx, ozp = zleparse, oexp = expanding;
++    int num = 0, cur = -1, got = 0, ne = noerrs, ocs = cs, oll = ll;
++    int owb = wb, owe = we, oadx = addedx, ozp = zleparse, onc = nocomments;
+     char *p;
+ 
+     if (!list)
+ 	list = newlinklist();
+ 
+-    zleparse = 3;
++    zleparse = 1;
+     addedx = 0;
+-    noerrs = expanding = 1;
++    noerrs = 1;
+     lexsave();
+     if (buf) {
+ 	int l = strlen(buf);
+@@ -2076,7 +2076,8 @@
+ 	p[l] = ' ';
+ 	p[l + 1] = '\0';
+ 	inpush(p, 0, NULL);
+-	cs = 0;
++	cs = strlen(p) + 1;
++	nocomments = 1;
+     } else if (!isfirstln && chline) {
+ 	p = (char *) zhalloc(hptr - chline + ll + 2);
+ 	memcpy(p, chline, hptr - chline);
+@@ -2092,6 +2093,7 @@
+ 	p[ll + 1] = '\0';
+ 	inpush(p, 0, NULL);
+     }
++    ll = strlen(p);
+     if (cs)
+ 	cs--;
+     strinbeg(0);
+@@ -2133,10 +2135,11 @@
+     inpop();
+     errflag = 0;
+     zleparse = ozp;
+-    expanding = oexp;
++    nocomments = onc;
+     noerrs = ne;
+     lexrestore();
+     cs = ocs;
++    ll = oll;
+     wb = owb;
+     we = owe;
+     addedx = oadx;
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.9
+diff -u -r1.9 lex.c
+--- Src/lex.c	2000/07/12 10:31:29	1.9
++++ Src/lex.c	2000/07/13 08:39:33
+@@ -116,7 +116,12 @@
+ 
+ /**/
+ mod_export int parend;
++
++/* don't recognize comments */
+  
++/**/
++mod_export int nocomments;
++
+ /* text of puctuation tokens */
+ 
+ /**/
+@@ -672,8 +677,8 @@
+ 
+     /* chars in initial position in word */
+ 
+-    if (c == hashchar &&
+-	((zleparse != 3 && isset(INTERACTIVECOMMENTS)) ||
++    if (c == hashchar && !nocomments &&
++	(isset(INTERACTIVECOMMENTS) ||
+ 	 (!zleparse && !expanding &&
+ 	  (!interact || unset(SHINSTDIN) || strin)))) {
+ 	/* History is handled here to prevent extra  *
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,247 @@
+From zsh-workers-return-5355-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Feb 12 13:41:28 1999
+Return-Path: <zsh-workers-return-5355-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4775 invoked from network); 12 Feb 1999 13:41:23 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Feb 1999 13:41:23 -0000
+Received: (qmail 17934 invoked by alias); 12 Feb 1999 13:40:51 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5355
+Received: (qmail 17924 invoked from network); 12 Feb 1999 13:40:47 -0000
+Date: Fri, 12 Feb 1999 14:39:58 +0100 (MET)
+Message-Id: <199902121339.OAA10405@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Thu, 11 Feb 1999 10:09:52 +0100
+	(MET)
+Subject: Re: PATCH: compadd (+ questions)
+
+
+I wrote:
+
+> > > And yet another one (this one may still be experimental): `-r <str>'
+> > > says that the suffix should be removed if the next character typed is
+> > > one of those given in `<str>'.
+> > 
+> > Is there a decision on how this is going to work after Bart got at
+> > the last proposal?
+> 
+> I'm currently thinking about keeping the `-r ...' option and adding a
+> `-R func' option that gives a function to be called to remove the
+> suffix when it is left unchanged by the `-r ...' stuff or the internal 
+> suffix-removal-code (the non-inserting stuff known from `compctl').
+
+The patch below implements almost this. The function given to `compadd -R'
+will be called from zle the first time it thinks that there might be a 
+suffix to remove. This function gets the length of the suffix inserted 
+as a argument and can then use the widget-special parameters to test
+what caused it to be called and to modify the command line.
+
+I don't know if this is considered to be a general-enough solution to
+be included, though.
+
+Bye
+ Sven
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Fri Feb 12 12:03:20 1999
++++ Src/Zle/comp.h	Fri Feb 12 13:55:52 1999
+@@ -211,6 +211,7 @@
+     int brpl;			/* the place where to put the brace prefix */
+     int brsl;			/* ...and the suffix */
+     char *rems;			/* when to remove the suffix */
++    char *remf;			/* shell function to call for suffix-removal */
+ };
+ 
+ #define CMF_FILE     1		/* this is a file */
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Fri Feb 12 13:46:37 1999
++++ Src/Zle/comp1.c	Fri Feb 12 13:53:54 1999
+@@ -49,7 +49,7 @@
+ /* pointers to functions required by compctl and defined by zle */
+ 
+ /**/
+-void (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, char *, char *, int, int, Cmatcher, char **));
++void (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, char *, char *, char *, int, int, Cmatcher, char **));
+ 
+ /**/
+ char *(*comp_strptr) _((int*,int*));
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Fri Feb 12 13:46:37 1999
++++ Src/Zle/compctl.c	Fri Feb 12 13:54:53 1999
+@@ -1676,7 +1676,7 @@
+     char *p, **sp, *e;
+     char *ipre = NULL, *ppre = NULL, *psuf = NULL, *prpre = NULL;
+     char *pre = NULL, *suf = NULL, *group = NULL, *m = NULL, *rs = NULL;
+-    char *ign = NULL;
++    char *ign = NULL, *rf = NULL;
+     int f = 0, a = 0, dm;
+     Cmatcher match = NULL;
+ 
+@@ -1754,9 +1754,15 @@
+ 		dm = 1;
+ 		break;
+ 	    case 'r':
++		f |= CMF_REMOVE;
+ 		sp = &rs;
+ 		e = "string expected after -%c";
+ 		break;
++	    case 'R':
++		f |= CMF_REMOVE;
++		sp = &rf;
++		e = "function name expected after -%c";
++		break;
+ 	    case '-':
+ 		argv++;
+ 		goto ca_args;
+@@ -1792,7 +1798,7 @@
+ 
+     match = cpcmatcher(match);
+     addmatchesptr(ipre, ppre, psuf, prpre, pre, suf, group,
+-		  rs, ign, f, a, match, argv);
++		  rs, rf, ign, f, a, match, argv);
+     freecmatcher(match);
+ 
+     return 0;
+diff -u os/Zle/zle_misc.c Src/Zle/zle_misc.c
+--- os/Zle/zle_misc.c	Fri Feb 12 13:46:38 1999
++++ Src/Zle/zle_misc.c	Fri Feb 12 14:31:10 1999
+@@ -764,6 +764,11 @@
+ /**/
+ int suffixlen[257];
+ 
++/* Shell function to call to remove the suffix. */
++
++/**/
++static char *suffixfunc;
++
+ /* Set up suffix: the last n characters are a suffix that should be *
+  * removed in the usual word end conditions.                        */
+ 
+@@ -798,9 +803,13 @@
+ 
+ /**/
+ void
+-makesuffixstr(char *s, int n)
++makesuffixstr(char *f, char *s, int n)
+ {
+-    if (s) {
++    if (f) {
++	zsfree(suffixfunc);
++	suffixfunc = ztrdup(f);
++	suffixlen[0] = n;
++    } else if (s) {
+ 	int inv, i, v, z = 0;
+ 
+ 	if (*s == '^' || *s == '!') {
+@@ -842,10 +851,33 @@
+ void
+ iremovesuffix(int c)
+ {
+-    int sl = suffixlen[c];
+-    if(sl) {
+-	backdel(sl);
+-	invalidatelist();
++    if (suffixfunc) {
++	List l = getshfunc(suffixfunc);
++
++	if (l != &dummy_list) {
++	    LinkList args = newlinklist();
++	    char buf[20];
++	    int osc = sfcontext;
++
++	    sprintf(buf, "%d", suffixlen[0]);
++	    addlinknode(args, suffixfunc);
++	    addlinknode(args, buf);
++
++	    startparamscope();
++	    makezleparams(0);
++	    sfcontext = SFC_COMPLETE;
++	    doshfunc(suffixfunc, l, args, 0, 1);
++	    sfcontext = osc;
++	    endparamscope();
++	}
++	zsfree(suffixfunc);
++	suffixfunc = NULL;
++    } else {
++	int sl = suffixlen[c];
++	if(sl) {
++	    backdel(sl);
++	    invalidatelist();
++	}
+     }
+     fixsuffix();
+ }
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Fri Feb 12 13:46:39 1999
++++ Src/Zle/zle_tricky.c	Fri Feb 12 14:08:31 1999
+@@ -2458,7 +2458,7 @@
+ /**/
+ void
+ addmatches(char *ipre, char *ppre, char *psuf, char *prpre, char *pre,
+-	   char *suf, char *group, char *rems, char *ign,
++	   char *suf, char *group, char *rems, char *remf, char *ign,
+ 	   int flags, int aflags, Cmatcher match, char **argv)
+ {
+     char *s, *t, *e, *te, *ms, *lipre = NULL, *lpre, *lsuf, **aign = NULL;
+@@ -2528,7 +2528,10 @@
+ 		if (aflags & CAF_NOSORT)
+ 		    mgroup->flags |= CGF_NOSORT;
+ 	    }
+-	    if (rems)
++	    if (remf) {
++		remf = dupstring(remf);
++		rems = NULL;
++	    } else if (rems)
+ 		rems = dupstring(rems);
+     	    if (ai->pprefix) {
+ 		if (pre)
+@@ -2643,6 +2646,7 @@
+ 		cm->flags = flags;
+ 		cm->brpl = bpl;
+ 		cm->brsl = bsl;
++		cm->remf = remf;
+ 		cm->rems = rems;
+ 		addlinknode(l, cm);
+ 
+@@ -2944,7 +2948,7 @@
+     cm->flags = mflags | isf;
+     cm->brpl = bpl;
+     cm->brsl = bsl;
+-    cm->rems = NULL;
++    cm->rems = cm->remf = NULL;
+     addlinknode(l, cm);
+ 
+     /* One more match for this explanation. */
+@@ -5266,6 +5270,7 @@
+     r->brpl = m->brpl;
+     r->brsl = m->brsl;
+     r->rems = ztrdup(m->rems);
++    r->remf = ztrdup(m->remf);
+ 
+     return r;
+ }
+@@ -5378,6 +5383,7 @@
+     zsfree(m->psuf);
+     zsfree(m->prpre);
+     zsfree(m->rems);
++    zsfree(m->remf);
+ 
+     zfree(m, sizeof(m));
+ }
+@@ -5632,7 +5638,7 @@
+ 	if (menuwe) {
+ 	    menuend += menuinsc;
+ 	    if (m->flags & CMF_REMOVE) {
+-		makesuffixstr(m->rems, menuinsc);
++		makesuffixstr(m->remf, m->rems, menuinsc);
+ 		if (menuinsc == 1)
+ 		    suffixlen[STOUC(m->suf[0])] = 1;
+ 	    }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

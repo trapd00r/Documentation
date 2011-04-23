@@ -1,0 +1,125 @@
+From zsh-workers-return-16400-mason-zsh=primenet.com.au@sunsite.dk Sat Jan 05 23:29:18 2002
+Return-Path: <zsh-workers-return-16400-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27850 invoked from network); 5 Jan 2002 23:29:17 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 5 Jan 2002 23:29:17 -0000
+Received: (qmail 6016 invoked by alias); 5 Jan 2002 23:29:08 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16400
+Received: (qmail 6005 invoked from network); 5 Jan 2002 23:29:07 -0000
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <1020106002047.ZM3115@candle.brasslantern.com>
+Date: Sun, 6 Jan 2002 00:20:47 +0000
+In-Reply-To: <3C33308E.DB275E2@yahoo.co.uk>
+Comments: In reply to Oliver Kiddle <okiddle@yahoo.co.uk>
+        "brace expansion inconsistency" (Jan  2,  4:08pm)
+References: <87ellbxkek.fsf@squeaker.lickey.com>  <3C33308E.DB275E2@yahoo.co.uk>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.dk
+Subject: Re: brace expansion inconsistency
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Jan 2,  4:08pm, Oliver Kiddle wrote:
+}
+} Matt Armstrong wrote:
+} > Is there a simple way to turn an array (a b c) into (a "" b "" c "")?
+} 
+} I would have thought that _p4_cmds=( {$a,} ) would do the job but
+} it doesn't. On closer inspection, it seems that {,$a} does expand
+} in the way I would expect with alternate array elements and empty
+} strings.
+
+With RC_EXPAND_PARAM set, of course.  Otherwise you get {,a b c} (three
+words) and the braces don't do anything.
+
+} In bash {x,} expands to just 'x'. ksh 93 expands it to two
+} words - 'x' and an empty word. zsh is different for
+} {x,} and {,x}. I'd argue that ksh93 is right.
+
+Interesting (zsh's behavior, I mean): {x,}y produces xy and y, but {x,}''
+produces just x.  The problem appears to be in prefork():
+
+    for (node = firstnode(list); node; incnode(node)) {
+	if (*(char *)getdata(node)) {
+	    remnulargs(getdata(node));
+	    if (unset(IGNOREBRACES) && !(flags & PF_SINGLE))
+		while (hasbraces(getdata(node)))
+		    xpandbraces(list, &node);
+
+For {,x}, we enter this block with getdata(node) == "{,x}" and expand
+the braces, which replaces node with the first word of the expanded
+list, which is the empty string; the loop incnode(node) then moves to
+the next node of the expansion, which is "x", leaving the empty element
+in place.
+
+For {x,} the expansion happens the same way, except now incnode(node)
+takes us to the empty string node and we go through this branch instead:
+
+	} else if (!(flags & PF_SINGLE))
+	    uremnode(list, node);
+
+Thus, empty nodes after the first are lost whenever there is a brace
+expansion, unless something non-empty precedes or follows the braces:
+
+    zsh% print -l {x,,y}
+    x
+    y
+
+} Any thoughts?
+
+This is clearly a bug, because xpandbraces() inserts the empty nodes as
+it should, and prefork() is inconsistent about stripping them out again.
+The following patch fixes it; there may be a simpler way.
+
+Index: Src/subst.c
+===================================================================
+--- Src/subst.c	2001/10/17 14:38:29	1.8
++++ Src/subst.c	2002/01/06 00:14:33
+@@ -49,8 +49,8 @@
+ mod_export void
+ prefork(LinkList list, int flags)
+ {
+-    LinkNode node;
+-    int asssub = (flags & PF_TYPESET) && isset(KSHTYPESET);
++    LinkNode node, stop = 0;
++    int keep = 0, asssub = (flags & PF_TYPESET) && isset(KSHTYPESET);
+ 
+     queue_signals();
+     for (node = firstnode(list); node; incnode(node)) {
+@@ -78,15 +78,21 @@
+ 	}
+     }
+     for (node = firstnode(list); node; incnode(node)) {
++	if (node == stop)
++	    keep = 0;
+ 	if (*(char *)getdata(node)) {
+ 	    remnulargs(getdata(node));
+-	    if (unset(IGNOREBRACES) && !(flags & PF_SINGLE))
+-		while (hasbraces(getdata(node)))
++	    if (unset(IGNOREBRACES) && !(flags & PF_SINGLE)) {
++		stop = nextnode(node);
++		while (hasbraces(getdata(node))) {
++		    keep = 1;
+ 		    xpandbraces(list, &node);
++		}
++	    }
+ 	    if (unset(SHFILEEXPANSION))
+ 		filesub((char **)getaddrdata(node),
+ 			flags & (PF_TYPESET|PF_ASSIGN));
+-	} else if (!(flags & PF_SINGLE))
++	} else if (!(flags & PF_SINGLE) && !keep)
+ 	    uremnode(list, node);
+ 	if (errflag) {
+ 	    unqueue_signals();
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,133 @@
+From zsh-workers-return-6819-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jun 24 09:08:37 1999
+Return-Path: <zsh-workers-return-6819-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16556 invoked from network); 24 Jun 1999 09:08:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 24 Jun 1999 09:08:35 -0000
+Received: (qmail 23360 invoked by alias); 24 Jun 1999 09:08:06 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6819
+Received: (qmail 23353 invoked from network); 24 Jun 1999 09:08:05 -0000
+Date: Thu, 24 Jun 1999 11:08:02 +0200 (MET DST)
+Message-Id: <199906240908.LAA27110@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: loop killing
+
+
+This is the solution which executes commands in a loop in the same
+process group as the parent shell. I.e. ^C'ing loops such as
+
+  while true; do zcat ...; done
+
+works now, even with ill-behaved progrms such as zcat. But of course I 
+could think of a case where we still have problems with such programs:
+
+  zcat ... | while true; do zcat ...; done
+
+Here we need two ^C's to interrupt the whole thing. The first one
+interrupts both zcats currently running, but since none of them tells
+us that it was interrupted the loop happily continues running. But
+every zcat started in it after the first ^C finds out that the group
+leader is finished and puts itself in the process group of the shell
+and thus the shell sees the second ^C.
+Again, two possible ways to solve this are: 1) do all job control by
+hand -- merely thinking about this causes me pain, 2) these dummy
+processes I was talking about. I half-heartedly had a look at 2) and
+couldn't get it to work immediatly and then stopped trying. Especially 
+since Bart and I don't like this anyway and, after all, this is a
+different case because we *can* stop such a loop -- we only need two
+^C's. And what the heck... at least we are much better than bash.
+
+This also fixes another problem with loops, namely:
+
+  foo | while true; do bar; done
+
+...where bar was finishing very quickly. In that case the code didn't
+find out that it had to suspend because it never looked at the state
+of the super-job (foo).
+
+
+Bye
+ Sven
+
+diff -u oos/exec.c Src/exec.c
+--- oos/exec.c	Thu Jun 24 08:55:15 1999
++++ Src/exec.c	Thu Jun 24 10:47:16 1999
+@@ -933,7 +933,10 @@
+ 		    lastval2 & 0200)
+ 		    killpg(mypgrp, lastval2 & ~0200);
+ 		if ((list_pipe || last1 || pline_level) &&
+-		    !list_pipe_child && jn->stat & STAT_STOPPED) {
++		    !list_pipe_child && 
++		    ((jn->stat & STAT_STOPPED) ||
++		     (list_pipe_job && pline_level &&
++		      (jobtab[list_pipe_job].stat & STAT_STOPPED)))) {
+ 		    pid_t pid;
+ 		    int synch[2];
+ 
+@@ -959,10 +962,14 @@
+ 			close(synch[1]);
+ 			read(synch[0], &dummy, 1);
+ 			close(synch[0]);
+-			jobtab[list_pipe_job].other = newjob;
+-			jobtab[list_pipe_job].stat |= STAT_SUPERJOB;
+-			jn->stat |= STAT_SUBJOB | STAT_NOPRINT;
+-			jn->other = pid;
++			/* If this job has finished, we turn this into a
++			 * normal (non-super-) job. */
++			if (!(jn->stat & STAT_DONE)) {
++			    jobtab[list_pipe_job].other = newjob;
++			    jobtab[list_pipe_job].stat |= STAT_SUPERJOB;
++			    jn->stat |= STAT_SUBJOB | STAT_NOPRINT;
++			    jn->other = pid;
++			}
+ 			if (list_pipe || last1)
+ 			    killpg(jobtab[list_pipe_job].gleader, SIGSTOP);
+ 			break;
+@@ -2196,8 +2203,9 @@
+ 		    attachtty(jobtab[thisjob].gleader);
+ 	    }
+ 	}
+-	else if (!jobtab[thisjob].gleader ||
+-		 (setpgrp(0L, jobtab[thisjob].gleader) == -1)) {
++	else if (!(list_pipe || list_pipe_child || pline_level > 1) &&
++		 (!jobtab[thisjob].gleader ||
++		  setpgrp(0L, jobtab[thisjob].gleader) == -1)) {
+ 	    jobtab[thisjob].gleader = getpid();
+ 	    if (list_pipe_job != thisjob &&
+ 		!jobtab[list_pipe_job].gleader)
+diff -u oos/jobs.c Src/jobs.c
+--- oos/jobs.c	Thu Jun 24 08:55:16 1999
++++ Src/jobs.c	Thu Jun 24 10:56:48 1999
+@@ -185,8 +185,9 @@
+ 
+ 		for (i = 1; i < MAXJOB; i++)
+ 		    if ((jobtab[i].stat & STAT_SUPERJOB) &&
+-			jobtab[i].other == job) {
+-			killpg(jobtab[i].gleader, SIGSTOP);
++			jobtab[i].other == job &&
++			jobtab[i].gleader) {
++			killpg(jobtab[i].gleader, SIGTSTP);
+ 			break;
+ 		    }
+ 	    }
+diff -u oos/signals.c Src/signals.c
+--- oos/signals.c	Thu Jun 24 08:55:18 1999
++++ Src/signals.c	Thu Jun 24 10:57:16 1999
+@@ -584,7 +584,7 @@
+                 for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+                     kill(pn->pid, sig);
+  
+-                for (pn = jn->procs; pn->next; pn = pn->next)
++                for (pn = jn->procs; pn; pn = pn->next)
+                     err = kill(pn->pid, sig);
+  
+                 return err;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

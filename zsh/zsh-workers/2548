@@ -1,0 +1,216 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Mon Dec 09 14:04:27 1996
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 1579 invoked from network); 9 Dec 1996 14:04:23 -0000
+Received: from euclid.skiles.gatech.edu (root@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 9 Dec 1996 14:04:23 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id IAA03844; Mon, 9 Dec 1996 08:14:56 -0500 (EST)
+Resent-Date: Mon, 9 Dec 1996 08:14:56 -0500 (EST)
+Message-Id: <199612091315.OAA10751@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Alias expansion madness contd.
+Date: Mon, 09 Dec 1996 14:15:16 +0100
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"MqLym2.0.yx.G31ho"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2548
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+There's quite a sizeable bug in the code I posted last week (now in
+3.0.2-test1) to improve handling of where aliases are marked as no
+longer in use:  if alias text ends at the same point as a new alias
+expansion, everything goes pear-shaped (e.g. `alias foo=echo bar=foo':
+bar will not be recognised after the first time it's used).
+
+The problem was I'd forgotten about the possibility of popping more
+than one alias at the same place, and hence the need to keep all those
+ready for re-pushing them on the alias stack during an inungetc().
+Obviously the old mechanism wasn't as stupid as I thought.
+
+The previous patch stands, however, and I've fixed the problem by
+saving more information on the input stack which will allow the latter
+to be incremented back to its old position to re-access sets of
+aliases.  The actual rigmarole gone through when a set of alias
+expansions terminate at the same point is pretty hair-raising, but I
+can't think of a better way of making the handling of aliases' in-use
+status invisible to the rest of the code:  you've got to be prepared
+to pop and later re-push arbitrary numbers of aliases on/off the alias
+stack.
+
+On the other hand, now I've bitten the bullet and stored the alias in
+the input stack itself, it should be possible to eliminate the alias
+stack and simply use the input stack.  I'll look into this.
+
+*** Src/input.c.pop2	Mon Dec  9 10:04:54 1996
+--- Src/input.c	Mon Dec  9 13:54:50 1996
+***************
+*** 57,69 ****
+   *
+   * PWS 1995/06/30
+   * 
+!  * 1996/11/02: The INP_ALIAS flag is now attached to the line pushed onto
+   * the stack, rather than the line which replaces it.  After the line is
+   * popped, the alias is popped from alstack when starting to read it, or
+   * if the line is discarded, and recorded as inalias.  The INP_ALPOP
+   * flag indicates that this has already happened.  If the line is
+   * inungetc()'d back to the previous point, inbufpush, the alias is
+   * pushed again.  None of this is visible to the calling code.
+   */
+  
+  #include "zsh.h"
+--- 57,73 ----
+   *
+   * PWS 1995/06/30
+   * 
+!  * 1996/12/02: The INP_ALIAS flag is now attached to the line pushed onto
+   * the stack, rather than the line which replaces it.  After the line is
+   * popped, the alias is popped from alstack when starting to read it, or
+   * if the line is discarded, and recorded as inalias.  The INP_ALPOP
+   * flag indicates that this has already happened.  If the line is
+   * inungetc()'d back to the previous point, inbufpush, the alias is
+   * pushed again.  None of this is visible to the calling code.
++  *
++  * 1996/12/09 The alias being expanded is now saved on the input stack, too.
++  * The stack can be incremented back to its old value to allow multiple
++  * aliases popped from the alias stack at the same point to be re-pushed.
+   */
+  
+  #include "zsh.h"
+***************
+*** 72,78 ****
+  static char *inbuf;		/* Current input buffer */
+  static char *inbufptr;		/* Pointer into input buffer */
+  static char *inbufpush;		/* Character at which to re-push alias */
+- static Alias inalias;		/* Alias to be popped at start of read */
+  static int inbufleft;		/* Characters left in current input
+  				   stack element */
+  static int inbufflags;		/* flags: see INP_* in zsh.h  */
+--- 76,81 ----
+***************
+*** 86,91 ****
+--- 89,95 ----
+  
+  struct instacks {
+      char *buf, *bufptr;
++     Alias alias;
+      int bufleft, bufct, flags;
+  };
+  static struct instacks *instack, *instacktop;
+***************
+*** 155,160 ****
+--- 159,165 ----
+  inpopalias(void)
+  {
+      char *t;
++     Alias inalias;
+  
+      if (!alstackind || inbufflags & INP_ALPOP)
+  	return;
+***************
+*** 374,382 ****
+  	 * Note this may be a dummy (history expansion) entry.
+  	 */
+  	if (inbufptr == inbufpush && inbufflags & INP_ALPOP) {
+! 	    if ((alstack[alstackind++] = inalias))
+! 		inalias->inuse = 1;
+! 	    inbufflags &= ~INP_ALPOP;
+  	}
+      }
+  }
+--- 379,396 ----
+  	 * Note this may be a dummy (history expansion) entry.
+  	 */
+  	if (inbufptr == inbufpush && inbufflags & INP_ALPOP) {
+! 	    /*
+! 	     * Go back up the stack over all entries which were alias
+! 	     * expansions and were pushed with nothing remaining to read.
+! 	     */
+! 	    do {
+! 		if ((alstack[alstackind++] = instacktop->alias))
+! 		    instacktop->alias->inuse = 1;
+! 		instacktop++;
+! 	    } while ((instacktop->flags & INP_ALIAS) && !instacktop->bufleft);
+! 	    inbufflags = INP_CONT;
+! 	    inbufleft = 0;
+! 	    inbuf = inbufptr = "";
+  	}
+      }
+  }
+***************
+*** 438,451 ****
+  	/* Initial stack allocation */
+  	instack = (struct instacks *)zalloc(instacksz*sizeof(struct instacks));
+  	instacktop = instack;
+-     } else if (instacktop == instack + instacksz) {
+- 	/* Expand the stack */
+- 	instack = (struct instacks *)
+- 	    realloc(instack,
+- 		    (instacksz + INSTACK_EXPAND)*sizeof(struct instacks));
+- 	instacktop = instack + instacksz;
+- 	instacksz += INSTACK_EXPAND;
+      }
+      instacktop->buf = inbuf;
+      instacktop->bufptr = inbufptr;
+      instacktop->bufleft = inbufleft;
+--- 452,459 ----
+  	/* Initial stack allocation */
+  	instack = (struct instacks *)zalloc(instacksz*sizeof(struct instacks));
+  	instacktop = instack;
+      }
++ 
+      instacktop->buf = inbuf;
+      instacktop->bufptr = inbufptr;
+      instacktop->bufleft = inbufleft;
+***************
+*** 454,467 ****
+      if (flags & INP_ALIAS && alstackind) {
+  	flags = (flags & ~INP_ALIAS) | INP_CONT;
+  	instacktop->flags = inbufflags | INP_ALIAS;
+      } else {
+  	instacktop->flags = inbufflags;
+      }
+  
+      instacktop++;
+  
+      inbufpush = inbuf = NULL;
+-     inalias = NULL;
+  
+      inputsetline(str, flags);
+  }
+--- 462,488 ----
+      if (flags & INP_ALIAS && alstackind) {
+  	flags = (flags & ~INP_ALIAS) | INP_CONT;
+  	instacktop->flags = inbufflags | INP_ALIAS;
++ 	instacktop->alias = alstack[alstackind-1];
+      } else {
+  	instacktop->flags = inbufflags;
+      }
+  
+      instacktop++;
++     if (instacktop == instack + instacksz) {
++ 	/* Expand the stack */
++ 	instack = (struct instacks *)
++ 	    realloc(instack,
++ 		    (instacksz + INSTACK_EXPAND)*sizeof(struct instacks));
++ 	instacktop = instack + instacksz;
++ 	instacksz += INSTACK_EXPAND;
++     }
++     /*
++      * We maintain the entry above the highest one with real
++      * text as a flag to inungetc() that it can stop re-pushing the stack.
++      */
++     instacktop->flags = 0;
+  
+      inbufpush = inbuf = NULL;
+  
+      inputsetline(str, flags);
+  }
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

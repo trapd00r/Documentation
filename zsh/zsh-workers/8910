@@ -1,0 +1,185 @@
+From zsh-workers-return-8910-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Dec 06 10:25:34 1999
+Return-Path: <zsh-workers-return-8910-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23199 invoked from network); 6 Dec 1999 10:25:31 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 6 Dec 1999 10:25:31 -0000
+Received: (qmail 21040 invoked by alias); 6 Dec 1999 10:25:18 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8910
+Received: (qmail 21033 invoked from network); 6 Dec 1999 10:25:17 -0000
+Date: Mon, 6 Dec 1999 11:25:16 +0100 (MET)
+Message-Id: <199912061025.LAA05800@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Sun, 05 Dec 1999 18:07:04 +0000
+Subject: Re: Bug with parameter module
+
+
+Peter Stephenson wrote:
+
+> Zefram wrote:
+> > Peter Stephenson wrote:
+> > >The shell hangs.  It seems that executing fn uses some wrapper associated
+> > >with the parameter module which then won't unload.
+> > 
+> > Just ignore errors; *attempt* to unload
+> > each module, but leave it if it doesn't unload.
+> 
+> That sounds reasonable.  I think the reason we need at least to attempt to
+> unload modules is that in general we don't know what code that can trigger;
+> it could in principle be something required for the shell to exit cleanly.
+> But I don't know if that's true (or ever will be true) in practice.  This
+> case is something of a counterexample to that attitude.
+
+I don't think this `try to unload modules' is reasonable. The reason
+why I made that was to make sure that modules can rely on having their 
+cleanup functions be called. Since your examples showed that this
+isn't always possible, this patch removes exit_modules() altogether.
+
+So, if we ever get a module that needs some code to be executed before 
+the shell finishes, we'll have to add a hook for that. Simple.
+
+> I found another problem while attempting to work around this.
+> 
+> zsh -c 'zmodload parameter; zmodload -u parameter
+> fn() { zmodload parameter; zmodload; }; fn'
+> 
+> Only the pseudo-module `zsh' shows up; parameter isn't there in the
+> function.  If you take away the code on the first line, it is.
+
+Forgot the PM_REMOVABLE flag for the parameter parameters. With that
+the old definition of, e.g. $funcstack, was still lingering around
+when the module was loaded a second time.
+
+Bye
+ Sven
+
+diff -u -r oldsrc/Modules/parameter.c Src/Modules/parameter.c
+--- oldsrc/Modules/parameter.c	Mon Dec  6 11:08:04 1999
++++ Src/Modules/parameter.c	Mon Dec  6 11:08:12 1999
+@@ -1889,7 +1889,8 @@
+ 	    if (def->hsetfn)
+ 		def->pm->sets.hfn = def->hsetfn;
+ 	} else {
+-	    if (!(def->pm = createparam(def->name, def->flags | PM_HIDE)))
++	    if (!(def->pm = createparam(def->name, def->flags | PM_HIDE |
++					PM_REMOVABLE)))
+ 		return 1;
+ 	    def->pm->sets.afn = def->setfn;
+ 	    def->pm->gets.afn = def->getfn;
+diff -u -r oldsrc/builtin.c Src/builtin.c
+--- oldsrc/builtin.c	Mon Dec  6 10:42:37 1999
++++ Src/builtin.c	Mon Dec  6 10:43:30 1999
+@@ -3201,9 +3201,6 @@
+ 	if (in_exit++ && from_signal) {
+ 	    LASTALLOC_RETURN;
+ 	}
+-	zleactive = 0;
+-	exit_modules();
+-
+ 	if (isset(MONITOR)) {
+ 	    /* send SIGHUP to any jobs left running  */
+ 	    killrunjobs(from_signal);
+diff -u -r oldsrc/exec.c Src/exec.c
+--- oldsrc/exec.c	Mon Dec  6 10:42:37 1999
++++ Src/exec.c	Mon Dec  6 11:20:17 1999
+@@ -3073,7 +3073,7 @@
+ 
+ 	if (!wrap->module->wrapper &&
+ 	    (wrap->module->flags & MOD_UNLOAD))
+-	    unload_module(wrap->module, NULL, 0);
++	    unload_module(wrap->module, NULL);
+ 
+ 	if (!cont)
+ 	    return;
+diff -u -r oldsrc/module.c Src/module.c
+--- oldsrc/module.c	Mon Dec  6 10:42:38 1999
++++ Src/module.c	Mon Dec  6 11:20:10 1999
+@@ -839,47 +839,6 @@
+     putchar('\n');
+ }
+ 
+-/* Cleanup and finish all modules. */
+-
+-/**/
+-void
+-exit_modules(void)
+-{
+-    Module m;
+-    char *name;
+-    LinkNode node, next, mn, dn;
+-    int del, used;
+-
+-    while (nonempty(modules)) {
+-	for (node = firstnode(modules); (next = node); node = next) {
+-	    incnode(next);
+-	    del = used = 0;
+-	    name = ((Module) getdata(node))->nam;
+-	    for (mn = firstnode(modules); !used && mn; incnode(mn)) {
+-		m = (Module) getdata(mn);
+-		if (m->deps && m->u.handle)
+-		    for (dn = firstnode(m->deps); dn; incnode(dn))
+-			if (!strcmp((char *) getdata(dn), name)) {
+-			    if (m->flags & MOD_UNLOAD)
+-				del = 1;
+-			    else {
+-				used = 1;
+-				break;
+-			    }
+-			}
+-	    }
+-	    if (!used) {
+-		m = (Module) getdata(node);
+-		if (del)
+-		    m->wrapper++;
+-		unload_module(m, NULL, 1);
+-		if (del)
+-		    m->wrapper--;
+-	    }
+-	}
+-    }
+-}
+-
+ /**/
+ int
+ bin_zmodload(char *nam, char **args, char *ops, int func)
+@@ -1274,7 +1233,7 @@
+ 
+ /**/
+ int
+-unload_module(Module m, LinkNode node, int force)
++unload_module(Module m, LinkNode node)
+ {
+     if ((m->flags & MOD_INIT_S) &&
+ 	!(m->flags & MOD_UNLOAD) &&
+@@ -1335,11 +1294,11 @@
+ 			}
+ 		    }
+ 		    if (du)
+-			unload_module(dm, NULL, 0);
++			unload_module(dm, NULL);
+ 		}
+ 	    }
+ 	}
+-	if(!m->deps || force) {
++	if(!m->deps) {
+ 	    if (!node) {
+ 		for (node = firstnode(modules); node; incnode(node))
+ 		    if (m == (Module) getdata(node))
+@@ -1387,7 +1346,7 @@
+ 		m = (Module) getdata(node);
+ 		if (del)
+ 		    m->wrapper++;
+-		if (unload_module(m, node, 0))
++		if (unload_module(m, node))
+ 		    ret = 1;
+ 		if (del)
+ 		    m->wrapper--;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

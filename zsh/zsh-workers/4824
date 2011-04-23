@@ -1,0 +1,453 @@
+From zsh-workers-request@math.gatech.edu Wed Dec 16 16:36:10 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20757 invoked from network); 16 Dec 1998 16:36:06 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 16 Dec 1998 16:36:06 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id LAA13143;
+	Wed, 16 Dec 1998 11:32:59 -0500 (EST)
+Resent-Date: Wed, 16 Dec 1998 11:32:59 -0500 (EST)
+Message-Id: <9812161612.AA50147@ibmth.df.unipi.it>
+To: Gene Cohler <gene@bear.com>, zsh-workers@math.gatech.edu
+Subject: PATCH: 3.1.5-pws-3: Dynamic loading under HPUX 10
+In-Reply-To: "Gene Cohler"'s message of "Tue, 15 Dec 1998 21:20:36 NFT."
+             <19981215212036.J26659@bear.com> 
+Date: Wed, 16 Dec 1998 17:12:03 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"TjDIz3.0.FD3.x2-Ts"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4824
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Gene Cohler wrote:
+>    Suffering module envy can be a sad thing! I have tested the following
+>    which seems to get the modules stuff working fine under HPUX 10.20.
+>    (HPUX 11 comes pre-armed with dlopen() et al so it is not needed there).
+
+Excellent, that's exactly what I wanted to know.  It means the
+mechanism is not so very different from the standard one, so the
+usual configure tests will work with just a bit of header hacking,
+unlike AIX.
+
+With the following patch, dynamic loading under HPUX 10.20 (and
+presumably before, but that's the only one I have access too) is fully
+supported.  I haven't sent patches for configure and config.h.in, so
+you need to run both autoheader and autoconf before trying this out.
+(I used gcc for testing, someone ought to check with the standard
+compiler since the arguments will be different.)
+
+Sorry it doesn't apply to straight 3.1.5, but there have been
+considerable module changes --- the AIXDYNAMIC stuff is the main
+culprit.  It's not beyond the wit of person to fix by hand.
+Given the changes this week, I'll probably make one final
+pre-Christmas version available at the end of the week.
+
+I'm assuming .sl is the standard suffix for shared libraries with this
+mechanism?  Or rather, I'm making the rather weaker assumption that
+someone hasn't filled /usr/lib with .sl files just for a joke.
+
+This would have been even neater if someone had worked out how to use
+ad hoc include files with configure, but it's not so bad anyway.
+
+There's no patch for the `void *symlist1[]' fix, since that seems to
+have been fixed already, though I couldn't tell you when.
+
+*** Src/module.c.hpux	Wed Dec 16 12:20:51 1998
+--- Src/module.c	Wed Dec 16 16:40:00 1998
+***************
+*** 255,266 ****
+  #ifdef HAVE_DLFCN_H
+  # include <dlfcn.h>
+  #else
+! # include <sys/types.h>
+! # include <nlist.h>
+! # include <link.h>
+  #endif
+! #ifndef HAVE_DLCLOSE
+! # define dlclose(X) ((X), 0)
+  #endif
+  
+  #ifdef DLSYM_NEEDS_UNDERSCORE
+--- 255,292 ----
+  #ifdef HAVE_DLFCN_H
+  # include <dlfcn.h>
+  #else
+! # ifdef HAVE_DL_H
+! #  include <dl.h>
+! #  define RTLD_LAZY BIND_DEFERRED
+! #  define RTLD_GLOBAL DYNAMIC_PATH
+! # else
+! #  include <sys/types.h>
+! #  include <nlist.h>
+! #  include <link.h>
+! # endif
+  #endif
+! 
+! #ifdef HPUXDYNAMIC
+! # define dlopen(file,mode) (void *)shl_load((file), (mode), (long) 0)
+! # define dlclose(handle) shl_unload((shl_t)(handle))
+! 
+! /**/
+! static
+! void *
+! hpux_dlsym(void *handle, char *name)
+! {
+!     void *sym_addr;
+!     if (!shl_findsym((shl_t *)&handle, name, TYPE_UNDEFINED, &sym_addr))
+! 	return sym_addr;
+!     return NULL;
+! }
+! 
+! # define dlsym(handle,name) hpux_dlsym(handle,name)
+! # define dlerror() 0
+! #else
+! # ifndef HAVE_DLCLOSE
+! #  define dlclose(X) ((X), 0)
+! # endif
+  #endif
+  
+  #ifdef DLSYM_NEEDS_UNDERSCORE
+*** acconfig.h.hpux	Fri Oct 30 15:56:16 1998
+--- acconfig.h	Wed Dec 16 14:56:33 1998
+***************
+*** 222,224 ****
+--- 222,227 ----
+  
+  /* Define to 1 if you want to use dynamically loaded modules on AIX */
+  #undef AIXDYNAMIC
++ 
++ /* Define to 1 if you want to use dynamically loaded modules on HPUX 10 */
++ #undef HPUXDYNAMIC
+*** aczsh.m4.hpux	Tue Dec 15 09:47:50 1998
+--- aczsh.m4	Wed Dec 16 15:29:44 1998
+***************
+*** 56,61 ****
+--- 56,73 ----
+  $CC -c $CFLAGS $CPPFLAGS $DLCFLAGS conftest2.c 1>&5 2>&5 &&
+  $DLLD -o conftest2.$DL_EXT $LDFLAGS $DLLDFLAGS conftest2.o $LIBS 1>&5 2>&5; then
+      AC_TRY_RUN([
++ #ifdef TEST_HPUXDYNAMIC
++ #include <dl.h>
++ #define RTLD_LAZY BIND_DEFERRED
++ #define RTLD_GLOBAL DYNAMIC_PATH
++ 
++ char *zsh_gl_sym_addr ;
++ 
++ #define dlopen(file,mode) (void *)shl_load((file), (mode), (long) 0)
++ #define dlclose(handle) shl_unload((shl_t)(handle))
++ #define dlsym(handle,name) (zsh_gl_sym_addr=0,shl_findsym((shl_t *)&(handle),name,TYPE_UNDEFINED,&zsh_gl_sym_addr), (void *)zsh_gl_sym_addr)
++ #define dlerror() 0
++ #else
+  #ifdef HAVE_DLFCN_H
+  #include <dlfcn.h>
+  #else
+***************
+*** 63,68 ****
+--- 75,81 ----
+  #include <nlist.h>
+  #include <link.h>
+  #endif
++ #endif
+  #ifndef RTLD_LAZY
+  #define RTLD_LAZY 1
+  #endif
+***************
+*** 116,121 ****
+--- 129,146 ----
+  $CC -c $CFLAGS $CPPFLAGS $DLCFLAGS conftest2.c 1>&5 2>&5 &&
+  $DLLD -o conftest2.$DL_EXT $LDFLAGS $DLLDFLAGS conftest2.o $LIBS 1>&5 2>&5; then
+      AC_TRY_RUN([
++ #ifdef TEST_HPUXDYNAMIC
++ #include <dl.h>
++ #define RTLD_LAZY BIND_DEFERRED
++ #define RTLD_GLOBAL DYNAMIC_PATH
++ 
++ char *zsh_gl_sym_addr ;
++ 
++ #define dlopen(file,mode) (void *)shl_load((file), (mode), (long) 0)
++ #define dlclose(handle) shl_unload((shl_t)(handle))
++ #define dlsym(handle,name) (zsh_gl_sym_addr=0,shl_findsym((shl_t *)&(handle),name,TYPE_UNDEFINED,&zsh_gl_sym_addr), (void *)zsh_gl_sym_addr)
++ #define dlerror() 0
++ #else
+  #ifdef HAVE_DLFCN_H
+  #include <dlfcn.h>
+  #else
+***************
+*** 123,128 ****
+--- 148,154 ----
+  #include <nlist.h>
+  #include <link.h>
+  #endif
++ #endif
+  #ifndef RTLD_LAZY
+  #define RTLD_LAZY 1
+  #endif
+***************
+*** 130,135 ****
+--- 156,162 ----
+  #define RTLD_GLOBAL 0
+  #endif
+  
++ 
+  main()
+  {
+      void *handle1, *handle2;
+***************
+*** 177,182 ****
+--- 204,221 ----
+  $CC -c $CFLAGS $CPPFLAGS $DLCFLAGS conftest2.c 1>&5 2>&5 &&
+  $DLLD -o conftest2.$DL_EXT $LDFLAGS $DLLDFLAGS conftest2.o $LIBS 1>&5 2>&5; then
+      AC_TRY_RUN([
++ #ifdef TEST_HPUXDYNAMIC
++ #include <dl.h>
++ #define RTLD_LAZY BIND_DEFERRED
++ #define RTLD_GLOBAL DYNAMIC_PATH
++ 
++ char *zsh_gl_sym_addr ;
++ 
++ #define dlopen(file,mode) (void *)shl_load((file), (mode), (long) 0)
++ #define dlclose(handle) shl_unload((shl_t)(handle))
++ #define dlsym(handle,name) (zsh_gl_sym_addr=0,shl_findsym((shl_t *)&(handle),name,TYPE_UNDEFINED,&zsh_gl_sym_addr), (void *)zsh_gl_sym_addr)
++ #define dlerror() 0
++ #else
+  #ifdef HAVE_DLFCN_H
+  #include <dlfcn.h>
+  #else
+***************
+*** 184,189 ****
+--- 223,229 ----
+  #include <nlist.h>
+  #include <link.h>
+  #endif
++ #endif
+  #ifndef RTLD_LAZY
+  #define RTLD_LAZY 1
+  #endif
+***************
+*** 234,239 ****
+--- 274,291 ----
+      save_ldflags=$LDFLAGS
+      LDFLAGS="$LDFLAGS $EXTRA_LDFLAGS"
+      AC_TRY_RUN([
++ #ifdef TEST_HPUXDYNAMIC
++ #include <dl.h>
++ #define RTLD_LAZY BIND_DEFERRED
++ #define RTLD_GLOBAL DYNAMIC_PATH
++ 
++ char *zsh_gl_sym_addr ;
++ 
++ #define dlopen(file,mode) (void *)shl_load((file), (mode), (long) 0)
++ #define dlclose(handle) shl_unload((shl_t)(handle))
++ #define dlsym(handle,name) (zsh_gl_sym_addr=0,shl_findsym((shl_t *)&(handle),name,TYPE_UNDEFINED,&zsh_gl_sym_addr), (void *)zsh_gl_sym_addr)
++ #define dlerror() 0
++ #else
+  #ifdef HAVE_DLFCN_H
+  #include <dlfcn.h>
+  #else
+***************
+*** 241,246 ****
+--- 293,299 ----
+  #include <nlist.h>
+  #include <link.h>
+  #endif
++ #endif
+  #ifndef RTLD_LAZY
+  #define RTLD_LAZY 1
+  #endif
+***************
+*** 294,299 ****
+--- 347,364 ----
+      save_ldflags=$LDFLAGS
+      LDFLAGS="$LDFLAGS $EXTRA_LDFLAGS -s"
+      AC_TRY_RUN([
++ #ifdef TEST_HPUXDYNAMIC
++ #include <dl.h>
++ #define RTLD_LAZY BIND_DEFERRED
++ #define RTLD_GLOBAL DYNAMIC_PATH
++ 
++ char *zsh_gl_sym_addr ;
++ 
++ #define dlopen(file,mode) (void *)shl_load((file), (mode), (long) 0)
++ #define dlclose(handle) shl_unload((shl_t)(handle))
++ #define dlsym(handle,name) (zsh_gl_sym_addr=0,shl_findsym((shl_t *)&(handle),name,TYPE_UNDEFINED,&zsh_gl_sym_addr), (void *)zsh_gl_sym_addr)
++ #define dlerror() 0
++ #else
+  #ifdef HAVE_DLFCN_H
+  #include <dlfcn.h>
+  #else
+***************
+*** 301,306 ****
+--- 366,372 ----
+  #include <nlist.h>
+  #include <link.h>
+  #endif
++ #endif
+  #ifndef RTLD_LAZY
+  #define RTLD_LAZY 1
+  #endif
+***************
+*** 348,359 ****
+--- 414,438 ----
+  if $CC -c $CFLAGS $CPPFLAGS $DLCFLAGS conftest1.c 1>&5 2>&5 &&
+  $DLLD -o conftest1.$DL_EXT $LDFLAGS $DLLDFLAGS -s conftest1.o $LIBS 1>&5 2>&5; then
+      AC_TRY_RUN([
++ #ifdef TEST_HPUXDYNAMIC
++ #include <dl.h>
++ #define RTLD_LAZY BIND_DEFERRED
++ #define RTLD_GLOBAL DYNAMIC_PATH
++ 
++ char *zsh_gl_sym_addr ;
++ 
++ #define dlopen(file,mode) (void *)shl_load((file), (mode), (long) 0)
++ #define dlclose(handle) shl_unload((shl_t)(handle))
++ #define dlsym(handle,name) (zsh_gl_sym_addr=0,shl_findsym((shl_t *)&(handle),name,TYPE_UNDEFINED,&zsh_gl_sym_addr), (void *)zsh_gl_sym_addr)
++ #define dlerror() 0
++ #else
+  #ifdef HAVE_DLFCN_H
+  #include <dlfcn.h>
+  #else
+  #include <sys/types.h>
+  #include <nlist.h>
+  #include <link.h>
++ #endif
+  #endif
+  #ifndef RTLD_LAZY
+  #define RTLD_LAZY 1
+*** configure.in.hpux	Tue Dec 15 10:01:29 1998
+--- configure.in	Wed Dec 16 16:59:47 1998
+***************
+*** 214,220 ****
+  fi
+  if test -n "$auto_ldflags"; then
+    case "${enable_zsh_debug}$host_os" in
+!     yesaix*) ;;  # AIX ld does not accept -g
+      yes*)    LDFLAGS=-g ;;
+      *)       LDFLAGS=-s ;;
+    esac
+--- 214,220 ----
+  fi
+  if test -n "$auto_ldflags"; then
+    case "${enable_zsh_debug}$host_os" in
+!     yesaix*|yeshpux*) ;;  # AIX ld does not accept -g
+      yes*)    LDFLAGS=-g ;;
+      *)       LDFLAGS=-s ;;
+    esac
+***************
+*** 343,348 ****
+--- 343,349 ----
+  		 utmp.h utmpx.h sys/types.h pwd.h grp.h)
+  if test $dynamic = yes; then
+    AC_CHECK_HEADERS(dlfcn.h)
++   AC_CHECK_HEADERS(dl.h)
+  fi
+  
+  dnl Some SCO systems cannot include both sys/time.h and sys/select.h
+***************
+*** 622,628 ****
+  	      getgrgid getgrnam getpwent getpwnam getpwuid)
+  
+  if test $dynamic = yes; then
+!   AC_CHECK_FUNCS(dlopen dlerror dlsym dlclose load loadquery loadbind unload)
+  fi
+  
+  
+--- 623,630 ----
+  	      getgrgid getgrnam getpwent getpwnam getpwuid)
+  
+  if test $dynamic = yes; then
+!   AC_CHECK_FUNCS(dlopen dlerror dlsym dlclose load loadquery loadbind unload \
+! 		shl_load shl_unload shl_findsym)
+  fi
+  
+  
+***************
+*** 905,910 ****
+--- 907,913 ----
+  dnl ---------------
+  L=N
+  aixdynamic=no
++ hpuxdynamic=no
+  if test "$ac_cv_func_dlopen"  != yes ||
+     test "$ac_cv_func_dlsym"   != yes ||
+     test "$ac_cv_func_dlerror" != yes; then
+***************
+*** 912,918 ****
+       test "$ac_cv_func_unload"    != yes ||
+       test "$ac_cv_func_loadbind"  != yes ||
+       test "$ac_cv_func_loadquery" != yes; then
+!     dynamic=no
+    elif test "x$dynamic" = xyes; then
+      aixdynamic=yes
+    fi
+--- 915,932 ----
+       test "$ac_cv_func_unload"    != yes ||
+       test "$ac_cv_func_loadbind"  != yes ||
+       test "$ac_cv_func_loadquery" != yes; then
+!     if test "$ac_cv_func_shl_load" != yes ||
+!        test "$ac_cv_func_shl_unload" != yes ||
+!        test "$ac_cv_func_shl_findsym" != yes; then
+!       dynamic=no
+!     elif test "x$dynamic" = xyes; then
+!       hpuxdynamic=yes
+!       DL_EXT="${DL_EXT=sl}"
+! dnl Don't define HPUXDYNAMIC until after the tests.  However,
+! dnl we need some way of telling the test programmes that we
+! dnl want to try the HPUX <= 10 way of doing things.
+!       AC_DEFINE(TEST_HPUXDYNAMIC)dnl
+!     fi
+    elif test "x$dynamic" = xyes; then
+      aixdynamic=yes
+    fi
+***************
+*** 993,998 ****
+--- 1007,1024 ----
+      $DLLD -o conftest.$DL_EXT $LDFLAGS $DLLDFLAGS conftest.o 1>&5 2>&5 &&
+      AC_TRY_RUN([
+  #include <stdio.h>
++ #ifdef TEST_HPUXDYNAMIC
++ #include <dl.h>
++ #define RTLD_LAZY BIND_DEFERRED
++ #define RTLD_GLOBAL DYNAMIC_PATH
++ 
++ char *zsh_gl_sym_addr ;
++ 
++ #define dlopen(file,mode) (void *)shl_load((file), (mode), (long) 0)
++ #define dlclose(handle) shl_unload((shl_t)(handle))
++ #define dlsym(handle,name) (zsh_gl_sym_addr=0,shl_findsym((shl_t *)&(handle),name,TYPE_UNDEFINED,&zsh_gl_sym_addr), (void *)zsh_gl_sym_addr)
++ #define dlerror() 0
++ #else
+  #ifdef HAVE_DLFCN_H
+  #include <dlfcn.h>
+  #else
+***************
+*** 1000,1005 ****
+--- 1026,1032 ----
+  #include <nlist.h>
+  #include <link.h>
+  #endif
++ #endif
+  #ifndef RTLD_LAZY
+  #define RTLD_LAZY 1
+  #endif
+***************
+*** 1082,1087 ****
+--- 1109,1118 ----
+    AC_DEFINE(AIXDYNAMIC)dnl
+  else
+    E=N
++ fi
++ 
++ if test "x$hpuxdynamic" = xyes -a "x$dynamic" = xyes; then
++   AC_DEFINE(HPUXDYNAMIC)dnl
+  fi
+  
+  AC_DEFINE_UNQUOTED(DL_EXT, "$DL_EXT")dnl
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

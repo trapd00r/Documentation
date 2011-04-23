@@ -1,0 +1,98 @@
+From zsh-workers-return-28195-mason-zsh=primenet.com.au@zsh.org Mon Aug 23 17:46:34 2010
+Return-Path: <zsh-workers-return-28195-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23525 invoked by alias); 23 Aug 2010 17:46:34 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28195
+Received: (qmail 23501 invoked from network); 23 Aug 2010 17:46:31 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at closedmail.com does not designate permitted sender hosts)
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-id: <100823104610.ZM26959@torch.brasslantern.com>
+Date: Mon, 23 Aug 2010 10:46:10 -0700
+In-reply-to: <AANLkTim0NXjt4hp-UV4PK_7wNS2+tvf8NOu9W8F9RUSD@mail.gmail.com>
+Comments: In reply to Mikael Magnusson <mikachu@gmail.com>
+ "[RFC or so] Add HASH_LOOKUP option" (Aug 23,  4:09pm)
+References: <AANLkTim0NXjt4hp-UV4PK_7wNS2+tvf8NOu9W8F9RUSD@mail.gmail.com>
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+To: zsh workers <zsh-workers@zsh.org>
+Subject: Re: [RFC or so] Add HASH_LOOKUP option
+MIME-version: 1.0
+Content-type: text/plain; charset=us-ascii
+
+On Aug 23,  4:09pm, Mikael Magnusson wrote:
+}
+} When this is unset, external commands are always resolved with a full
+} path search, but still inserted into the hash for spell correction if
+} those options are on.
+} 
+} diff --git a/Src/exec.c b/Src/exec.c
+} index 93d1b26..9a488fe 100644
+} --- a/Src/exec.c
+} +++ b/Src/exec.c
+} @@ -754,7 +754,7 @@ findcmd(char *arg0, int docopy)
+}  	    }
+}  	    break;
+}  	}
+} -    if (cn) {
+} +    if (cn && isset(HASHLOOKUP)) {
+}  	char nn[PATH_MAX];
+} 
+}  	if (cn->node.flags & HASHED)
+
+I think there may be  problem with this in the event that the "hash"
+command has been used to deliberately insert an entry into the hash
+table.  That's a documented mechanism for overriding path search.
+Also I think you've missed that execute() also uses the hash table;
+did you intend that "command foo" ignores NO_HASHLOOKUP?
+
+In looking more closely, there are a number of things about findcmd()
+that look a bit fishy to me.  Correct me where I've gone wrong?
+
+It starts (if the command is not already in the hash table and HASHCMDS
+is set) by doing hashcmd(), which performs a search of only absolute
+directory names in the path (not, e.g., ".", "..", or other relative
+names).  That search itself seems a bit off because if *arg0 == '/'
+then it's going to prepend the path component anyway. [*]
+
+It then ignores what it got back from the search and, if arg0 contains
+a '/', checks whether arg0 is executable without path traversal.  This
+seems a bit sideways to me; why not do that first?  HASHDIRS, I guess?
+[This disagrees with execute(), which does the directly-executable test
+first.]  In any case this can return NULL, leaving the ignored results
+from the previous search in the hash table, unless PATHDIRS is set.
+
+Then, if it DID find the command either in the hashtable already or
+via hashcmd() but the hashtable entry does not have the HASHED bit [**]
+it performs a search of only relative directory names in the path ahead
+of the previously-found absolute directory.
+
+Finally, if all of the above failed, we do a full path search of both
+relative and absolute directories again, which is redundant in the
+case of HASHCMDS unless by some unlikely race condition the command
+has appeared in one of the directories in the path in the meantime.
+
+
+[*] And indeed, from zsh -f:
+
+torch% hash
+torch% print =/X11/xterm
+zsh: /X11/xterm not found
+torch% hash | grep X11
+/X11/xterm=/usr/bin//X11/xterm
+
+
+[**] The HASHED bit means the command was deliberately inserted into
+the hash table with the "hash" builtin, rather than found by search.
+In this case the both findcmd() and execute() are forced to believe
+what the hash table tells them.
+

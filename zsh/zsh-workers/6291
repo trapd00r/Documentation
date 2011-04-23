@@ -1,0 +1,180 @@
+From zsh-workers-return-6291-mason-zsh=primenet.com.au@sunsite.auc.dk Sat May 15 15:36:45 1999
+Return-Path: <zsh-workers-return-6291-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13467 invoked from network); 15 May 1999 15:36:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 May 1999 15:36:44 -0000
+Received: (qmail 9065 invoked by alias); 15 May 1999 15:36:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6291
+Received: (qmail 9058 invoked from network); 15 May 1999 15:36:21 -0000
+Message-Id: <9905151511.AA12996@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: pws-18: zftp system type detection
+Date: Sat, 15 May 1999 17:11:58 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+I discovered that some FTP servers, in particular the one currently in use
+at sunsite.ic.ac.uk, don't let you send a SYST command until you're logged
+in: this is sort of implied by RFC959, but most servers let you do it
+anyway.  If you saw an unexpected '530 Not logged in' or '530 Please log in
+with USER and PASS' or something such while opening a connection, that was
+probably what was causing it.
+
+The reply to the SYST command is what sets the $ZFTP_SYSTEM parameter and
+turns the transfer type into image if the remote system is UNIX.  I can't
+see any harm in moving the test unconditionally down to after login, but
+I'm sure you'll let me know.  (You can always run `zftp quote SYST' and
+look at $ZFTP_REPLY, if you want to see what happens; remember you can turn
+off all these extra commands by putting a D for Dumb in $ZFTP_PREFS,
+i.e. you probably want ZFTP_PREFS=PSD.  This will confuse the zf*
+functions.  Yes, I know no-one cares.)
+
+(Isn't it interesting we sometimes write `login' as a one-word verb, but
+never say `loginned'?  Is the German eingelogged or eingelogt or even
+eingeloggt, or maybe einlogiert or einloggiert?  Does the
+Rechtschreibreform have something to say about this?)
+
+--- Src/Modules/zftp.c.stat	Fri May 14 11:06:42 1999
++++ Src/Modules/zftp.c	Sat May 15 16:49:28 1999
+@@ -250,25 +250,26 @@
+  * --- we don't try to track it because it's too complicated.
+  */
+ enum {
+-    ZFST_ASCI = 0x00,		/* type for next transfer is ASCII */
+-    ZFST_IMAG = 0x01,		/* type for next transfer is image */
++    ZFST_ASCI = 0x0000,		/* type for next transfer is ASCII */
++    ZFST_IMAG = 0x0001,		/* type for next transfer is image */
+ 
+-    ZFST_TMSK = 0x01,		/* mask for type flags */
+-    ZFST_TBIT = 0x01,		/* number of bits in type flags */
++    ZFST_TMSK = 0x0001,		/* mask for type flags */
++    ZFST_TBIT = 0x0001,		/* number of bits in type flags */
+ 
+-    ZFST_CASC = 0x00,		/* current type is ASCII - default */
+-    ZFST_CIMA = 0x02,		/* current type is image */
++    ZFST_CASC = 0x0000,		/* current type is ASCII - default */
++    ZFST_CIMA = 0x0002,		/* current type is image */
+ 
+-    ZFST_STRE = 0x00,		/* stream mode - default */
+-    ZFST_BLOC = 0x04,		/* block mode */
+-
+-    ZFST_MMSK = 0x04,		/* mask for mode flags */
+-
+-    ZFST_LOGI = 0x08,		/* user logged in */
+-    ZFST_NOPS = 0x10,		/* server doesn't understand PASV */
+-    ZFST_NOSZ = 0x20,		/* server doesn't send `(XXXX bytes)' reply */
+-    ZFST_TRSZ = 0x40,		/* tried getting 'size' from reply */
+-    ZFST_CLOS = 0x80		/* connection closed */
++    ZFST_STRE = 0x0000,		/* stream mode - default */
++    ZFST_BLOC = 0x0004,		/* block mode */
++
++    ZFST_MMSK = 0x0004,		/* mask for mode flags */
++
++    ZFST_LOGI = 0x0008,		/* user logged in */
++    ZFST_SYST = 0x0010,		/* done system type check */
++    ZFST_NOPS = 0x0020,		/* server doesn't understand PASV */
++    ZFST_NOSZ = 0x0040,		/* server doesn't send `(XXXX bytes)' reply */
++    ZFST_TRSZ = 0x0080,		/* tried getting 'size' from reply */
++    ZFST_CLOS = 0x0100		/* connection closed */
+ };
+ #define ZFST_TYPE(x) (x & ZFST_TMSK)
+ /*
+@@ -1599,7 +1600,7 @@
+     struct protoent *zprotop;
+     struct servent *zservp;
+     struct hostent *zhostp = NULL;
+-    char **addrp, tbuf[2] = "X", *fname;
++    char **addrp, *fname;
+     int err, len, tmout;
+ 
+     if (!*args) {
+@@ -1803,32 +1804,11 @@
+ #endif
+     unlink(fname);
+ 
+-    /* now find out what system we're connected to */
+-    if (!(zfprefs & ZFPF_DUMB) && zfsendcmd("SYST\r\n") == 2) {
+-	char *ptr = lastmsg, *eptr, *systype;
+-	for (eptr = ptr; *eptr; eptr++)
+-	    ;
+-	systype = ztrduppfx(ptr, eptr-ptr);
+-	if (!strncmp(systype, "UNIX Type: L8", 13)) {
+-	    /*
+-	     * Use binary for transfers.  This simple test saves much
+-	     * hassle for all concerned, particularly me.
+-	     */
+-	    zfstatus |= ZFST_IMAG;
+-	    zfis_unix = 1;
+-	}
+-	/*
+-	 * we could set zfis_unix based just on the UNIX part,
+-	 * but I don't really know the consequences of that.
+-	 */
+-	zfsetparam("ZFTP_SYSTEM", systype, ZFPM_READONLY);
+-    } else if (zcfd == -1) {
++    if (zcfd == -1) {
+ 	/* final paranoid check */
+ 	return 1;
+     }
+ 	
+-    tbuf[0] = (ZFST_TYPE(zfstatus) == ZFST_ASCI) ? 'A' : 'I';
+-    zfsetparam("ZFTP_TYPE", ztrdup(tbuf), ZFPM_READONLY);
+     zfsetparam("ZFTP_MODE", ztrdup("S"), ZFPM_READONLY);
+     /* if remaining arguments, use them to log in. */
+     if (zcfd > -1 && *++args)
+@@ -1965,7 +1945,7 @@
+ zftp_login(char *name, char **args, int flags)
+ {
+     char *ucmd, *passwd = NULL, *acct = NULL;
+-    char *user;
++    char *user, tbuf[2] = "X";
+     int stopit;
+ 
+     if ((zfstatus & ZFST_LOGI) && zfsendcmd("REIN\r\n") >= 4)
+@@ -2044,6 +2024,36 @@
+     zfsetparam("ZFTP_USER", ztrdup(user), ZFPM_READONLY);
+     if (acct)
+ 	zfsetparam("ZFTP_ACCOUNT", ztrdup(acct), ZFPM_READONLY);
++
++    /*
++     * Now find out what system we're connected to. Some systems
++     * won't let us do this until we're logged in; it's fairly safe
++     * to delay it here for all systems.
++     */
++    if (!(zfprefs & ZFPF_DUMB) && !(zfstatus & ZFST_SYST)) {
++	if (zfsendcmd("SYST\r\n") == 2) {
++	    char *ptr = lastmsg, *eptr, *systype;
++	    for (eptr = ptr; *eptr; eptr++)
++		;
++	    systype = ztrduppfx(ptr, eptr-ptr);
++	    if (!strncmp(systype, "UNIX Type: L8", 13)) {
++		/*
++		 * Use binary for transfers.  This simple test saves much
++		 * hassle for all concerned, particularly me.
++		 */
++		zfstatus |= ZFST_IMAG;
++		zfis_unix = 1;
++	    }
++	    /*
++	     * we could set zfis_unix based just on the UNIX part,
++	     * but I don't really know the consequences of that.
++	     */
++	    zfsetparam("ZFTP_SYSTEM", systype, ZFPM_READONLY);
++	}
++	zfstatus |= ZFST_SYST;
++    }
++    tbuf[0] = (ZFST_TYPE(zfstatus) == ZFST_ASCI) ? 'A' : 'I';
++    zfsetparam("ZFTP_TYPE", ztrdup(tbuf), ZFPM_READONLY);
+ 
+     /*
+      * Get the directory.  This is possibly an unnecessary overhead, of
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

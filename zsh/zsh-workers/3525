@@ -1,0 +1,202 @@
+From zsh-workers-request@math.gatech.edu Thu Sep 25 12:47:57 1997
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 22892 invoked from network); 25 Sep 1997 12:47:54 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 25 Sep 1997 12:47:54 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id IAA15997;
+	Thu, 25 Sep 1997 08:14:01 -0400 (EDT)
+Resent-Date: Thu, 25 Sep 1997 08:14:01 -0400 (EDT)
+Message-Id: <199709251214.OAA11658@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: closures: #4
+Date: Thu, 25 Sep 1997 14:14:27 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"JyiUA.0.uv3.8MbAq"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3525
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I'm glad to say this is getting minor now.  Tests like
+
+[[ fffooofoooooffoofffooofffx = (f#o#)# ]]
+
+--- the x on the end to make it fail is a vital ingredient --- were
+painfully slow with the previous three patches, because the way the
+backtracking was done the time increased exponentially (maybe even
+factorially, I didn't look too hard).  However, I have a cunnning
+plan: see the comment above addclosures().  Good news (for me,
+anyway): ksh 88 doesn't have such an optimisation and takes ages for
+the equivalent *(*(f)*(o)).  It's a sign the algorithm isn't too
+unconventional either.
+
+The old, unpatched shell simply hung with the above test.
+
+*** Misc/globtests.clos4	Thu Sep 25 13:35:10 1997
+--- Misc/globtests	Thu Sep 25 13:36:51 1997
+***************
+*** 49,53 ****
+--- 49,56 ----
+  # The following is supposed to match only as fo+ofo+ofo
+  t foofoofo      (foo|f|fo)(f|ofo##)#
+  t oofooofo      (of|oofo##)#
++ t fffooofoooooffoofffooofff     (f#o#)#
++ # If the following is really slow, that's a bug.
++ f fffooofoooooffoofffooofffx     (f#o#)#
+  EOT
+  print "$failed tests failed."
+*** Src/glob.c.clos4	Wed Sep 24 11:33:43 1997
+--- Src/glob.c	Thu Sep 25 13:32:42 1997
+***************
+*** 1965,1979 ****
+  
+  static int inclosure;		/* see comment in doesmatch() */
+  
+  /**/
+  static void
+! addclosures(Comp c, LinkList closlist, int *pdone)
+  {
+      Gclose gcnode;
+  
+      for (; *pptr; (*pdone)++) {
+  	char *saves = pptr;
+! 	if (!matchonce(c) || saves == pptr) {
+  	    pptr = saves;
+  	    break;
+  	}
+--- 1965,1991 ----
+  
+  static int inclosure;		/* see comment in doesmatch() */
+  
++ /* Add a list of matches that fit the closure.  trystring is a string of
++  * the same length as the target string; a non-zero in that string
++  * indicates that we have already tried to match the patterns following
++  * the closure (c->next) at that point and failed.  This means that not
++  * only should we not bother using the corresponding match, we should
++  * also not bother going any further, since the first time we got to
++  * that position (when it was marked), we must already have failed on
++  * and backtracked over any further closure matches beyond that point.
++  */
++ 
+  /**/
+  static void
+! addclosures(Comp c, LinkList closlist, int *pdone, char *trystring)
+  {
+      Gclose gcnode;
++     char *opptr = pptr;
+  
+      for (; *pptr; (*pdone)++) {
+  	char *saves = pptr;
+! 	if (!matchonce(c) || saves == pptr ||
+! 	    trystring[pptr-opptr]) {
+  	    pptr = saves;
+  	    break;
+  	}
+***************
+*** 1992,1998 ****
+  {
+      if (CLOSUREP(c)) {
+  	int done, retflag = 0;
+! 	char *saves;
+  	LinkList closlist;
+  	Gclose gcnode;
+  
+--- 2004,2010 ----
+  {
+      if (CLOSUREP(c)) {
+  	int done, retflag = 0;
+! 	char *saves, *trystring, *opptr;
+  	LinkList closlist;
+  	Gclose gcnode;
+  
+***************
+*** 2049,2061 ****
+  	/* The full, gory backtracking code is now necessary. */
+  	inclosure++;
+  	closlist = newlinklist();
+  
+  	/* Start by making a list where each match is as long
+  	 * as possible.  We later have to take account of the
+  	 * fact that earlier matches may be too long.
+  	 */
+  	done = 0;
+! 	addclosures(c, closlist, &done);
+  	for (;;) {
+  	    if (TWOHASHP(c) && !done)
+  		break;
+--- 2061,2075 ----
+  	/* The full, gory backtracking code is now necessary. */
+  	inclosure++;
+  	closlist = newlinklist();
++ 	trystring = zcalloc(strlen(pptr)+1);
++ 	opptr = pptr;
+  
+  	/* Start by making a list where each match is as long
+  	 * as possible.  We later have to take account of the
+  	 * fact that earlier matches may be too long.
+  	 */
+  	done = 0;
+! 	addclosures(c, closlist, &done, trystring);
+  	for (;;) {
+  	    if (TWOHASHP(c) && !done)
+  		break;
+***************
+*** 2066,2071 ****
+--- 2080,2086 ----
+  		retflag = 1;
+  		break;
+  	    }
++ 	    trystring[saves-opptr] = 1;
+  	    /*
+  	     * If we failed, the first thing to try is whether we can
+  	     * shorten the match using the last pattern in the closure.
+***************
+*** 2077,2089 ****
+  		char savec = *gcnode->end;
+  		*gcnode->end = '\0';
+  		pptr = gcnode->start;
+! 		if (matchonce(c) && pptr != gcnode->start) {
+  		    *gcnode->end = savec;
+  		    gcnode->end = pptr;
+  		    /* Try again to construct a list based on
+  		     * this new position
+  		     */
+! 		    addclosures(c, closlist, &done);
+  		    continue;
+  		}
+  		*gcnode->end = savec;
+--- 2092,2105 ----
+  		char savec = *gcnode->end;
+  		*gcnode->end = '\0';
+  		pptr = gcnode->start;
+! 		if (matchonce(c) && pptr != gcnode->start
+! 		    && !trystring[pptr-opptr]) {
+  		    *gcnode->end = savec;
+  		    gcnode->end = pptr;
+  		    /* Try again to construct a list based on
+  		     * this new position
+  		     */
+! 		    addclosures(c, closlist, &done, trystring+(pptr-opptr));
+  		    continue;
+  		}
+  		*gcnode->end = savec;
+***************
+*** 2099,2104 ****
+--- 2115,2121 ----
+  		break;
+  	}
+  	freelinklist(closlist, free);
++ 	zfree(trystring, strlen(opptr)+1);
+  	inclosure--;
+  
+  	return retflag;
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, Platanenallee 6, 15738 Zeuthen, Germany.
+

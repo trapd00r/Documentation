@@ -1,0 +1,176 @@
+From zsh-workers-return-9345-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Jan 18 11:37:07 2000
+Return-Path: <zsh-workers-return-9345-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1393 invoked from network); 18 Jan 2000 11:37:06 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Jan 2000 11:37:06 -0000
+Received: (qmail 4199 invoked by alias); 18 Jan 2000 11:36:55 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9345
+Received: (qmail 4190 invoked from network); 18 Jan 2000 11:36:50 -0000
+Date: Tue, 18 Jan 2000 12:36:47 +0100 (MET)
+Message-Id: <200001181136.MAA00399@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: job-control
+
+
+Here is the fix for the problem mentioned in 9332. This:
+
+  # Try
+  #   ^Z
+  #   fg
+  #   ^Z
+  #   fg
+  fn() {
+    local a
+    while read a; do :; done
+    less "$@"
+  }
+  cat foo | fn bar
+
+didn't work.
+
+The first problem was that at the time the sub-shell was created, the
+cat wasn't running anymore. So the sub-shell was put in its own process
+group and the gleader field for the job was set to that. Then bin_fg()
+didn't realise that the gleader only referred to the sub-shell and
+attached that to the terminal instead of the less, as it should
+have. I've solved this by adding another STAT_* flag (STAT_SUBLEADER)
+that gets set if a job's gleader is set to a sub-shell's pgrp because
+the other commands in the pipe have finished already and bin_fg()
+tests this flag to find out which pgrp to attach.
+
+The second problem turned out to be two problems. If one hit ^Z early
+enough to suspend the cat, the then-sub-shelled loop wasn't continued
+and the less wasn't executed. First, the sub-shell had simply returned 
+from too many functions, waiting in the execpline() for the whole loop 
+instead one of those in the loop. This was because at the time of the
+inner waitjobs() child_block() was active so it found out that the
+pipe-leader was suspended too late. This is fixed by the hunk that
+adds a child_block/unblock() before the waitjobs(). This is the hunk
+I'm least happy about. Bart, can you think of any problems with this?
+The second sub-problem was that update_job() set errflag and breaks to 
+tell the parent shell to leave the loop. But since the sub-shell
+inherits these, it left the loop, too, even though it should have
+continued it. So I made them be restored to their previous values in 
+the sub-shell.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/exec.c Src/exec.c
+--- ../z.old/Src/exec.c	Tue Jan 18 11:04:15 2000
++++ Src/exec.c	Tue Jan 18 12:20:16 2000
+@@ -949,9 +949,10 @@
+ 
+ 		    /* If the super-job contains only the sub-shell, the
+ 		       sub-shell is the group leader. */
+-		    if (!jn->procs->next || lpforked == 2)
++		    if (!jn->procs->next || lpforked == 2) {
+ 			jn->gleader = list_pipe_pid;
+-
++			jn->stat |= STAT_SUBLEADER;
++		    }
+ 		    for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+ 			if (WIFSTOPPED(pn->status))
+ 			    break;
+@@ -971,14 +972,17 @@
+ 		    lastwj = -1;
+ 	    }
+ 
++	    errbrk_saved = 0;
+ 	    for (; !nowait;) {
+ 		if (list_pipe_child) {
+ 		    jn->stat |= STAT_NOPRINT;
+ 		    makerunning(jn);
+ 		}
+-		if (!(jn->stat & STAT_LOCKED))
++		if (!(jn->stat & STAT_LOCKED)) {
++		    child_unblock();
++		    child_block();
+ 		    waitjobs();
+-
++		}
+ 		if (list_pipe_child &&
+ 		    jn->stat & STAT_DONE &&
+ 		    lastval2 & 0200)
+@@ -1042,6 +1046,10 @@
+ 			list_pipe = 0;
+ 			list_pipe_child = 1;
+ 			opts[INTERACTIVE] = 0;
++			if (errbrk_saved) {
++			    errflag = prev_errflag;
++			    breaks = prev_breaks;
++			}
+ 			break;
+ 		    }
+ 		}
+diff -ru ../z.old/Src/jobs.c Src/jobs.c
+--- ../z.old/Src/jobs.c	Tue Jan 18 11:04:16 2000
++++ Src/jobs.c	Tue Jan 18 11:53:47 2000
+@@ -64,7 +64,13 @@
+  
+ /**/
+ int ttyfrozen;
+- 
++
++/* Previous values of errflag and breaks if the signal handler had to
++ * change them. And a flag saying if it did that. */
++
++/**/
++int prev_errflag, prev_breaks, errbrk_saved;
++
+ static struct timeval dtimeval, now;
+ 
+ /* Diff two timevals for elapsed-time computations */
+@@ -311,6 +317,11 @@
+ 		/* If we have `foo|while true; (( x++ )); done', and hit
+ 		 * ^C, we have to stop the loop, too. */
+ 		if ((val & 0200) && inforeground == 1) {
++		    if (!errbrk_saved) {
++			errbrk_saved = 1;
++			prev_breaks = breaks;
++			prev_errflag = errflag;
++		    }
+ 		    breaks = loops;
+ 		    errflag = 1;
+ 		    inerrflush();
+@@ -322,6 +333,11 @@
+ 	    }
+ 	}
+     } else if (list_pipe && (val & 0200) && inforeground == 1) {
++	if (!errbrk_saved) {
++	    errbrk_saved = 1;
++	    prev_breaks = breaks;
++	    prev_errflag = errflag;
++	}
+ 	breaks = loops;
+ 	errflag = 1;
+ 	inerrflush();
+@@ -1296,6 +1312,7 @@
+ 		    thisjob = job;
+ 		    if ((jobtab[job].stat & STAT_SUPERJOB) &&
+ 			((!jobtab[job].procs->next ||
++			  (jobtab[job].stat & STAT_SUBLEADER) ||
+ 			  killpg(jobtab[job].gleader, 0) == -1)) &&
+ 			jobtab[jobtab[job].other].gleader)
+ 			attachtty(jobtab[jobtab[job].other].gleader);
+diff -ru ../z.old/Src/zsh.h Src/zsh.h
+--- ../z.old/Src/zsh.h	Tue Jan 18 11:04:19 2000
++++ Src/zsh.h	Tue Jan 18 11:10:00 2000
+@@ -636,6 +636,7 @@
+ #define STAT_NOSTTY	(1<<11)	/* the tty settings are not inherited   */
+ 				/* from this job when it exits.         */
+ #define STAT_ATTACH	(1<<12)	/* delay reattaching shell to tty       */
++#define STAT_SUBLEADER  (1<<13) /* is super-job, but leader is sub-shell */
+ 
+ #define SP_RUNNING -1		/* fake status for jobs currently running */
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

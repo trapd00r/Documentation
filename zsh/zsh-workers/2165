@@ -1,0 +1,261 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Wed Sep 25 02:59:17 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id CAA04773 for <mason@primenet.com.au>; Wed, 25 Sep 1996 02:59:13 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id MAA00326; Tue, 24 Sep 1996 12:47:44 -0400 (EDT)
+Resent-Date: Tue, 24 Sep 1996 12:47:44 -0400 (EDT)
+From: Louis.Granboulan@ens.fr (Louis Granboulan)
+Message-Id: <199609241647.SAA22028@pleurote.ens.fr>
+Subject: Re: Process substitution and shell functions
+To: zsh-workers@math.gatech.edu
+Date: Tue, 24 Sep 1996 18:47:36 +0200 (MET DST)
+In-Reply-To: <960920160213.ZM7718@candle.brasslantern.com> from "Bart Schaefer" at Sep 20, 96 04:02:13 pm
+X-Mailer: ELM [version 2.4 PL24 ME8a]
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"WVjzT2.0.05.m21Io"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2165
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+The removal of temporary files has many strange bugs.
+At the end of this message, there is a patch that should fix all this.
+
+
+
+The procedure deletepipejob (in exec.c) deletes a job without
+deleting the filelist.  The variable last_file_list keeps track
+of the filelist to delete. The value of last_file_list is
+recovered in execpline.  It is saved and restored by execsave
+and execrestore.
+
+deletepipejob is called in execshfunc and execcursh.
+The temporary files are removed at the end of the first command
+called by zsh.
+
+execshfunc
+    This is the bug we've seen...
+    First example:
+	zsh% function foo { echo $1 ; cat $1 }
+	zsh% foo =(echo hello world)
+	/tmp/zsha24295
+	cat: /tmp/zsha24295: No such file or directory
+    Second example:
+	zsh% autoload foobar
+	zsh% foobar =(echo hello world)
+	zsh: function not found: foobar
+	zsh% ls -l /tmp/zsha21572
+	-rw-------  1 granboul       12 Sep 24 18:01 /tmp/zsha21572
+	zsh% ls -l /tmp/zsha21572
+	/tmp/zsha21572 not found
+
+execcursh
+    I don't know why the removing of temporary files
+    is delayed to the end of the first command.
+
+My patch moves the recovering of last_file_list from execpline
+to execshfunc.
+I don't understand why this was in execpline...
+
+
+*** Src/zsh.h.orig	Mon Aug 12 19:57:32 1996
+--- Src/zsh.h	Tue Sep 24 18:08:07 1996
+***************
+*** 598,604 ****
+      int list_pipe_child;
+      int list_pipe_job;
+      char list_pipe_text[JOBTEXTSIZE];
+-     LinkList last_file_list;
+      int lastval;
+      int noeval;
+      int badcshglob;
+--- 598,603 ----
+*** Src/exec.c.orig	Thu Aug 15 12:38:56 1996
+--- Src/exec.c	Tue Sep 24 18:44:27 1996
+***************
+*** 119,136 ****
+  static int nowait, pline_level = 0;
+  static int list_pipe_child = 0, list_pipe_job;
+  static char list_pipe_text[JOBTEXTSIZE];
+- static LinkList last_file_list;
+- 
+- /**/
+- void
+- deletepipejob(void)
+- {
+-     if (!list_pipe) {
+- 	last_file_list = jobtab[thisjob].filelist;
+- 	jobtab[thisjob].filelist = NULL;
+- 	deletejob(jobtab + thisjob);
+-     }
+- }
+  
+  /* execute a current shell command */
+  
+--- 119,124 ----
+***************
+*** 138,144 ****
+  int
+  execcursh(Cmd cmd)
+  {
+!     deletepipejob();
+      execlist(cmd->u.list, 1, cmd->flags & CFLAG_EXEC);
+      cmd->u.list = NULL;
+      return lastval;
+--- 126,132 ----
+  int
+  execcursh(Cmd cmd)
+  {
+!     if (!list_pipe) deletejob(jobtab + thisjob);
+      execlist(cmd->u.list, 1, cmd->flags & CFLAG_EXEC);
+      cmd->u.list = NULL;
+      return lastval;
+***************
+*** 632,640 ****
+      if (how & Z_TIMED)
+  	jobtab[thisjob].stat |= STAT_TIMED;
+  
+-     jobtab[newjob].filelist = last_file_list;
+-     last_file_list = NULL;
+- 
+      if (l->flags & PFLAG_COPROC) {
+  	how = Z_ASYNC;
+  	if (coprocin >= 0) {
+--- 620,625 ----
+***************
+*** 2407,2416 ****
+  {
+      List funcdef;
+      char *nam;
+  
+      if (errflag)
+  	return;
+!     deletepipejob();
+  
+      /* Are we dealing with an autoloaded shell function? */
+      if (shf->flags & PM_UNDEFINED) {
+--- 2392,2407 ----
+  {
+      List funcdef;
+      char *nam;
++     LinkList last_file_list = NULL;
+  
+      if (errflag)
+  	return;
+! 
+!     if (!list_pipe) {
+! 	last_file_list = jobtab[thisjob].filelist;
+! 	jobtab[thisjob].filelist = NULL;
+! 	deletejob(jobtab + thisjob);
+!     }
+  
+      /* Are we dealing with an autoloaded shell function? */
+      if (shf->flags & PM_UNDEFINED) {
+***************
+*** 2418,2423 ****
+--- 2409,2415 ----
+  	if (!(funcdef = getfpfunc(nam))) {
+  	    zerr("function not found: %s", nam, 0);
+  	    lastval = 1;
++ 	    if (!list_pipe) deletefilelist(last_file_list);
+  	    return;
+  	}
+  	PERMALLOC {
+***************
+*** 2433,2443 ****
+--- 2425,2437 ----
+  	if ((shf = (Shfunc) shfunctab->getnode(shfunctab, nam))
+  	    && shf->funcdef && shf->funcdef != funcdef)
+  	    doshfunc(shf->funcdef, cmd->args, shf->flags, 0);
++ 	if (!list_pipe) deletefilelist(last_file_list);
+  	return;
+      }
+  
+      /* Normal shell function execution */
+      doshfunc(shf->funcdef, cmd->args, shf->flags, 0);
++     if (!list_pipe) deletefilelist(last_file_list);
+  }
+  
+  /* execute a shell function */
+***************
+*** 2670,2676 ****
+      es->list_pipe_child = list_pipe_child;
+      es->list_pipe_job = list_pipe_job;
+      strcpy(es->list_pipe_text, list_pipe_text);
+-     es->last_file_list = last_file_list;
+      es->lastval = lastval;
+      es->noeval = noeval;
+      es->badcshglob = badcshglob;
+--- 2664,2669 ----
+***************
+*** 2698,2704 ****
+      list_pipe_child = exstack->list_pipe_child;
+      list_pipe_job = exstack->list_pipe_job;
+      strcpy(list_pipe_text, exstack->list_pipe_text);
+-     last_file_list = exstack->last_file_list;
+      lastval = exstack->lastval;
+      noeval = exstack->noeval;
+      badcshglob = exstack->badcshglob;
+--- 2691,2696 ----
+*** Src/jobs.c.orig	Wed Jul 31 20:13:17 1996
+--- Src/jobs.c	Tue Sep 24 18:38:04 1996
+***************
+*** 368,390 ****
+  
+  /**/
+  void
+  deletejob(Job jn)
+  {
+      struct process *pn, *nx;
+-     char *s;
+  
+      for (pn = jn->procs; pn; pn = nx) {
+  	nx = pn->next;
+  	zfree(pn, sizeof(struct process));
+      }
+      zsfree(jn->pwd);
+!     if (jn->filelist) {
+! 	while ((s = (char *)getlinknode(jn->filelist))) {
+! 	    unlink(s);
+! 	    zsfree(s);
+! 	}
+! 	zfree(jn->filelist, sizeof(struct linklist));
+!     }
+      if (jn->ty)
+  	zfree(jn->ty, sizeof(struct ttyinfo));
+  
+--- 368,399 ----
+  
+  /**/
+  void
++ deletefilelist(LinkList file_list)
++ {
++     char *s;
++     if (file_list) {
++ 	while ((s = (char *)getlinknode(file_list))) {
++ 	    unlink(s);
++ 	    zsfree(s);
++ 	}
++ 	zfree(file_list, sizeof(struct linklist));
++     }
++ }
++ 
++ /**/
++ void
+  deletejob(Job jn)
+  {
+      struct process *pn, *nx;
+  
+      for (pn = jn->procs; pn; pn = nx) {
+  	nx = pn->next;
+  	zfree(pn, sizeof(struct process));
+      }
+      zsfree(jn->pwd);
+! 
+!     deletefilelist(jn->filelist);
+! 
+      if (jn->ty)
+  	zfree(jn->ty, sizeof(struct ttyinfo));
+  
+

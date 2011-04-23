@@ -1,0 +1,144 @@
+From zsh-workers-return-9982-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Mar 03 17:37:42 2000
+Return-Path: <zsh-workers-return-9982-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4797 invoked from network); 3 Mar 2000 17:37:40 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Mar 2000 17:37:40 -0000
+Received: (qmail 23763 invoked by alias); 3 Mar 2000 17:37:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9982
+Received: (qmail 23733 invoked from network); 3 Mar 2000 17:37:31 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000303173706.ZM20761@candle.brasslantern.com>
+Date: Fri, 3 Mar 2000 17:37:06 +0000
+In-Reply-To: <000301bf8505$bd6c8640$21c9ca95@mow.siemens.ru>
+Comments: In reply to "Andrej Borsenkow" <Andrej.Borsenkow@mow.siemens.ru>
+        "Running tests without installing Zsh" (Mar  3,  2:43pm)
+References: <000301bf8505$bd6c8640$21c9ca95@mow.siemens.ru>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: "ZSH workers mailing list" <zsh-workers@sunsite.auc.dk>
+Subject: PATCH: Re: Running tests without installing Zsh
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Mar 3,  2:43pm, Andrej Borsenkow wrote:
+} Subject: Running tests without installing Zsh
+}
+} If Zsh is compiled with dynamic loading, it is near to impossible to run
+} tests without installing Zsh (at least, Zsh modules and, probably,
+} functions).
+
+I'd been noticing that.  The completion test in particular requires both
+functions and dynamic loading; zregexparse needs modules.  Otherwise the
+tests have been of purely builtin functionality.
+
+Maybe we could encode this in the test-numbering scheme somehow ...
+
+} Even setting module_path to $srcdir/Src/*(/) does not help,
+} because Zsh loads modules as zsh/<module> - and we do not have zsh
+} subdirectories in this case.
+
+We can deal with that, I think.
+
+} Of course, if any test runs as interactive, it will pick up wrong module
+} anyway as we cannot override module_path at Zsh startup.
+
+That's fixable, too.  The one thing we can't fix is that modules may be
+autoloaded if the system has an /etc/zshenv file.  
+
+} Is any module loaded at non-interactive shell startup?
+
+Only the built-in pseudo-modules, unless /etc/zshenv causes one to be
+loaded.
+
+Here's a patch.  BTW, I noticed a number of inconsequential typos in
+comptest, but didn't bother to fix any of them.  It would be nice if
+comptest displayed some sort of progress indication, the way the traps
+tests do; at one point while trying the changes below one of the zsh
+running inside zpty exited prematurely, and the result was that comptest
+locked up and had to be killed.  I didn't know how long to wait before
+giving up on it.
+
+Index: Test/53completion.ztst
+===================================================================
+@@ -3,6 +3,7 @@
+ %prep
+   zmodload -i zsh/zpty
+ 
++  export ZTST_testdir ZTST_srcdir
+   comptest () { $ZTST_testdir/../Src/zsh -f $ZTST_srcdir/comptest -z $ZTST_testdir/../Src/zsh -d $ZTST_testdir/compdump.tmp "$@" }
+ 
+   mkdir comp.tmp
+Index: Test/Makefile.in
+===================================================================
+@@ -41,9 +41,14 @@
+ # ========== DEPENDENCIES FOR TESTING ==========
+ 
+ check test:
++	if test -n "$(DLLD)"; then \
++	  cd $(dir_top) && \
++	  $(MAKE) MODDIR=`pwd`/$(subdir)/Modules install.modules > /dev/null; \
++	fi
+ 	for f in $(sdir)/*.ztst; do \
+-	  ../Src/zsh -f $(sdir)/ztst.zsh $$f; \
++	  $(dir_top)/Src/zsh -f $(sdir)/ztst.zsh $$f; \
+ 	done
++	rm -rf Modules
+ 
+ # ========== DEPENDENCIES FOR CLEANUP ==========
+ 
+Index: Test/comptest
+===================================================================
+@@ -1,8 +1,12 @@
+ #!/usr/local/bin/zsh -f
+ 
++[[ -d $ZTST_testdir/Modules/zsh ]] && module_path=( $ZTST_testdir/Modules )
++
+ zmodload -i zsh/zpty
+ setopt extendedglob
+ 
++fpath=( ${ZTST_srcdir:h}/(Completion|Functions)/*~*/CVS(/) )
++
+ debug=
+ dump=(-D)
+ code=
+@@ -24,6 +28,8 @@
+ tmp=/tmp/comptest.$$
+ 
+ cat <<End >$tmp
++module_path=( $module_path )
++fpath=( $fpath )
+ stty columns 80 rows 24
+ LISTMAX=10000000
+ ZLS_COLORS='no=<NO>:fi=<FI>:di=<DI>:ln=<LN>:pi=<PI>:so=<SO>:bd=<BD>:cd=<CD>:ex=<EX>:mi=<MI>:tc=<TC>:sp=<SP>:lc=<LC>:ec=<EC>\n:rc=<RC>'
+Index: Test/ztst.zsh
+===================================================================
+@@ -22,6 +22,10 @@
+ # still not be good enough.  Maybe we should trick it somehow.
+ emulate -R zsh
+ 
++# Set the module load path to correspond to this build of zsh.
++# This Modules directory should have been created by "make check".
++[[ -d Modules/zsh ]] && module_path=( $PWD/Modules )
++
+ # We need to be able to save and restore the options used in the test.
+ # We use the $options variable of the parameter module for this.
+ zmodload -i zsh/parameter
+@@ -46,6 +50,9 @@
+ # The source directory is not necessarily the current directory
+ ZTST_srcdir=${0%/*}
+ [[ $ZTST_srcdir = /* ]] || ZTST_srcdir="$ZTST_testdir/$ZTST_srcdir"
++
++# Set the function autoload paths to correspond to this build of zsh.
++fpath=( ${ZTST_srcdir:h}/(Completion|Functions)/*~*/CVS(/) )
+ 
+ : ${TMPPREFIX:=/tmp/zsh}
+ # Temporary files for redirection inside tests.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

@@ -1,0 +1,436 @@
+From zsh-workers-request@math.gatech.edu  Wed Aug  9 23:53:02 1995
+Received: from gatech.edu (gatech.edu [130.207.244.244]) by werple.mira.net.au (8.6.12/8.6.9) with SMTP id XAA04087 for <mason@werple.mira.net.au>; Wed, 9 Aug 1995 23:52:57 +1000
+Received: from math (math.skiles.gatech.edu) by gatech.edu with SMTP id AA28397
+  (5.65c/Gatech-10.0-IDA for <mason@werple.mira.net.au>); Wed, 9 Aug 1995 09:49:48 -0400
+Received: by math (5.x/SMI-SVR4)
+	id AA17121; Wed, 9 Aug 1995 09:43:57 -0400
+Resent-Date: Wed, 09 Aug 95 14:44:36 +0100
+Old-Return-Path: <P.Stephenson@swansea.ac.uk>
+Message-Id: <22497.9508091344@pyro.swan.ac.uk>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Revised dohistexpand()
+Date: Wed, 09 Aug 95 14:44:36 +0100
+From: P.Stephenson@swansea.ac.uk
+X-Mts: smtp
+Resent-Message-Id: <"Scd_V3.0.RB4.SkBAm"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/297
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Here's another step on the way to rationalising the history code.
+It's for hzoli10.2, simply because that's the latest generally
+available version:  there have been so many patches that I don't dare
+to patch the official version at the moment.  I'll revise this when
+2.6-beta11 comes out.
+
+One of the bits I like least about the history code (and that's a bold
+statement) is the zle history expansion.  The problem is that it
+relies on calling the lexer, and via that the history code, and those
+together build up a new editing line directly.  This is one more
+reason why the history code is hard to maintain, and is also very
+wasteful:  neither the resulting tokens nor the resulting history line
+are used.
+
+This revised version eliminates the lexer and uses hgetc() to get
+history expansion directly.  As most of the work is now done specially
+in doexpandhist(), it was possible to rewrite it so that only history
+expansions in the current word are expanded, which is now in keeping
+with other forms of expansion and completion.  This alone should make
+it all worthwhile.  For example,
+  % cmd !!:1 z<TAB>
+will now do completion on the second argument, as you would expect;
+formerly it would expand the previous history reference first.
+
+There are a couple of drawbacks: single quotes don't hide this form of
+expansion (though again that's just like glob expansion: try typing
+'*' and then tab), and complex substitutions like !:s/a b/c d/ will
+sometimes be mishandled (though usually you get what you deserve,
+particularly if you've just finished typing the whole expression).  I
+don't think either of these is at all significant.  I have also made
+sure that magic-space still works.
+
+There is still some small collusion with the history code: when
+expanding, the history line is not modified and the pair \! is left as
+it is instead of being turned into !.  These are algorithmically
+simple and self-contained, however.  It may also be possible to
+simplify the qbang logic in hist.c (it's now not needed at all when
+expanding), but I don't know enough about that (yet).
+
+*** Src/globals.h.he	Mon Jul 24 18:08:29 1995
+--- Src/globals.h	Tue Aug  8 23:10:45 1995
+***************
+*** 124,133 ****
+  
+  EXTERN int expanding;
+  
+- /* these are used to modify the cursor position during expansion */
+- 
+- EXTERN int excs, exlast;
+- 
+  /* if != 0, this is the first line of the command */
+   
+  EXTERN int isfirstln;
+--- 124,129 ----
+*** Src/hist.c.he	Wed Jul 19 18:00:26 1995
+--- Src/hist.c	Wed Aug  9 12:31:40 1995
+***************
+*** 66,98 ****
+      }
+  }
+  
+- /* This function adds a character to the zle input line. It is used when *
+-  * zsh expands history (see doexpandhist() in zle_tricky.c). It also     *
+-  * calculates the new cursor position after the expansion. It is called  *
+-  * from hgetc() and from gettok() in lex.c for characters in comments.   */
+-  
+  /**/
+- void
+- addtoline(int c)
+- {
+-     if (qbang && c == bangchar && stophist < 2) {
+- 	exlast--;
+- 	spaceinline(1);
+- 	line[cs++] = '\\';
+-     }
+-     if (excs > cs) {
+- 	excs += 1 + inbufct - exlast;
+- 	if (excs < cs)
+- 	    /* this case could be handled better but it is    *
+- 	     * so rare that it does not worth it              */
+- 	    excs = cs;
+-     }
+-     exlast = inbufct;
+-     spaceinline(1);
+-     line[cs++] = itok(c) ? ztokens[c - Pound] : c;
+- }
+- 
+- /**/
+  int
+  hgetc(void)
+  {
+--- 66,72 ----
+***************
+*** 101,106 ****
+--- 75,88 ----
+      qbang = 0;
+      if (!stophist && !alstackind) {
+  	/* If necessary, expand history characters. */
++ 	if (expanding == 2) {
++ 	    /* If only expanding history, leave \! pairs alone.
++ 	     * We marked a \! pair and returned the \, but the ! should
++ 	     * still be treated as quoted.
++ 	     */
++ 	    expanding = 1;
++ 	    return c;
++ 	}
+  	c = histsubchar(c);
+  	if (c < 0) {
+  	    errflag = lexstop = 1;
+***************
+*** 126,136 ****
+  	 * history is disabled with NOBANGHIST or by someone else (e.g.  *
+  	 * when the lexer scans single quoted text).                     */
+  	qbang = c == bangchar && (stophist < 2);
+!     hwaddc(c);
+  
+-     if (expanding && !lexstop)
+- 	addtoline(c);
+- 
+      return c;
+  }
+  
+--- 108,116 ----
+  	 * history is disabled with NOBANGHIST or by someone else (e.g.  *
+  	 * when the lexer scans single quoted text).                     */
+  	qbang = c == bangchar && (stophist < 2);
+!     if (!expanding)
+! 	hwaddc(c);
+  
+      return c;
+  }
+  
+***************
+*** 203,208 ****
+--- 183,193 ----
+  	    if (g != bangchar)
+  		safeinungetc(g);
+  	    else {
++ 		if (expanding == 1) {
++ 		    expanding = 2; /* flag to return literal ! next */
++ 		    inungetc(g);
++ 		    return '\\';
++ 		}
+  		qbang = 1;
+  		return bangchar;
+  	    }
+***************
+*** 490,500 ****
+  	return;
+  
+    escape:
+-     if (expanding) {
+- 	cs--;
+- 	ll--;
+- 	exlast++;
+-     }
+      if (hlastw) {
+  	if (hlastw == hptr)
+  	    zerr("hungetc attempted at buffer start", NULL, 0);
+--- 475,480 ----
+*** Src/lex.c.he	Tue Aug  1 10:12:24 1995
+--- Src/lex.c	Tue Aug  8 17:34:02 1995
+***************
+*** 374,380 ****
+  
+      if (c == hashchar &&
+  	(isset(INTERACTIVECOMMENTS) ||
+! 	 (!zleparse && !expanding && (!interact || unset(SHINSTDIN) || strin)))) {
+      /* History is handled here to prevent extra newlines
+  		 * being inserted into the history.
+  		 *
+--- 374,380 ----
+  
+      if (c == hashchar &&
+  	(isset(INTERACTIVECOMMENTS) ||
+! 	 (!zleparse && (!interact || unset(SHINSTDIN) || strin)))) {
+      /* History is handled here to prevent extra newlines
+  		 * being inserted into the history.
+  		 *
+***************
+*** 394,406 ****
+  	    else {
+  		while (nsp) {
+  		    hwaddc(' ');
+- 		    if (expanding)
+- 			addtoline(' ');
+  		    --nsp;
+  		}
+  		hwaddc(c);
+- 		if (expanding)
+- 		    addtoline(c);
+  	    }
+  	}
+  	if (errflag)
+--- 394,402 ----
+***************
+*** 409,420 ****
+  	    hwadd();
+  	    hwbegin();
+  	    hwaddc('\n');
+- 	    if (expanding) {
+- 		while (nsp--)
+- 		    addtoline(' ');
+- 		if (!lexstop)
+- 		    addtoline('\n');
+- 	    }
+  	    peek = NEWLIN;
+  	}
+  	return peek;
+--- 405,410 ----
+*** Src/zle_tricky.c.he	Mon Jul 24 18:14:04 1995
+--- Src/zle_tricky.c	Wed Aug  9 12:38:48 1995
+***************
+*** 3691,3758 ****
+  int
+  doexpandhist(void)
+  {
+!     unsigned char *ol;
+!     int oll = ll, ocs = cs, ne = noerrs, err;
+  
+!     heapalloc();
+!     pushheap();
+!     ol = (unsigned char *)dupstring((char *)line);
+!     expanding = 1;
+!     excs = cs;
+!     ll = cs = 0;
+!     lexsave();
+!     inpush(UTOSCP(ol), 0);  /* We push ol as it will remain unchanged */
+!     strinbeg();
+!     noaliases = 1;
+      noerrs = 1;
+!     exlast = inbufct;
+!     do {
+! 	ctxtlex();
+      }
+!     while (tok != ENDINPUT && tok != LEXERR);
+!     stophist = 2;
+!     while (!lexstop)
+! 	hgetc();
+!     /* We have to save errflags because it's reset in lexrestore. Since
+!      * noerrs was set to 1 errflag is true if there was a habort() which
+!      * means that the expanded string is unusable */
+!     err = errflag;
+!     noerrs = ne;
+!     noaliases = 0;
+!     strinend();
+!     inpop();
+!     zleparse = 0;
+!     lexrestore();
+!     expanding = 0;
+!     popheap();
+!     permalloc();
+  
+!     if (!err) {
+! 	cs = excs;
+! 	if (strcmp((char *)line, (char *)ol)) {
+! 	    /* For vi mode -- reset the beginning-of-insertion pointer to the
+! 	     * beginning of the line.  This seems a little silly, if we are,
+! 	     * for example, expanding "exec !!". */
+! 	    if (viinsbegin > findbol())
+! 		viinsbegin = findbol();
+! 	    return 1;
+  	}
+      }
+  
+!     strcpy((char *)line, (char *)ol);
+!     ll = oll;
+!     cs = ocs;
+  
+!     return 0;
+  }
+  
+  /**/
+  void
+  magicspace(void)
+  {
+      c = ' ';
+      selfinsert();
+-     doexpandhist();
+  }
+  
+  /**/
+--- 3691,3815 ----
+  int
+  doexpandhist(void)
+  {
+!     int newsz = linesz, newchar, newcount;
+!     int ls = lexstop, sh = stophist, ifc = isfirstch, ne = noerrs;
+!     int hd = histdone, ret = 0, test, offs, foundbang;
+!     char *newline, *newptr, *startptr, *endptr, *spaceptr, sav;
+  
+!     if (isset(NOBANGHIST))
+! 	return 0;
+! 
+!     endptr = startptr = (char *)line + cs;
+! 
+!     foundbang = 0;
+!     while (*endptr && *endptr != ' ') {
+! 	if (*endptr == bangchar)
+! 	    foundbang = 1;
+! 	endptr++;
+!     }
+! 
+!     spaceptr = NULL;
+!     if (!foundbang) {
+! 	/* We still need to go back far enough to find a bang.
+! 	 * This is to handle stuff like !!:s/a b/c d/, though you
+! 	 * still have to be after the last space for it to work.
+! 	 * Spaceptr will point to the first character after the space
+! 	 * before the cursor.  We require that something between
+! 	 * here and endptr has changed to accept the expansion.
+! 	 */
+! 	while (startptr > (char *)line && *startptr != bangchar) {
+! 	    startptr--;
+! 	    if (*startptr == ' ' && !spaceptr)
+! 		spaceptr = startptr;
+! 	}
+! 	if (*startptr != '^' && *startptr != bangchar)
+! 	    return 0;
+!     }
+! 
+!     if (startptr == endptr) {
+! 	/* If no characters here, don't try expansion */
+! 	return 0;
+!     }
+! 
+!     /* Either we found a bangchar, or a ^ at the beginning of the line. */
+! 
+!     /* Make sure we get complete word. */
+!     while (startptr > (char *)line && startptr[-1] != ' ')
+! 	startptr--;
+!     sav = *endptr;
+!     *endptr = '\0';
+! 
+!     newptr = newline = malloc(newsz);
+! 
+!     inpush(startptr, 0);
+!     lexstop = 0;
+!     strin = 1;
+!     stophist = 0;
+!     isfirstch = (startptr == (char *)line);
+      noerrs = 1;
+!     expanding = 1;
+!     /* What about the alias stack? */
+! 
+!     for (newcount = 0;; newcount++) {
+! 	if (newcount == newsz) {
+! 	    newline = (char *)realloc(newline, (newsz *= 4));
+! 	    newptr = newline + newcount;
+! 	}
+! 	newchar = hgetc();
+! 	if (errflag || lexstop)
+! 	    break;
+! 
+! 	*newptr++ = newchar;
+      }
+!     *newptr = '\0';
+!     *endptr = sav;
+! 
+!     if (!errflag) {
+! 	/* We've now expanded from startptr to newptr; see if it's
+! 	 * changed.  If we set spaceptr, we want to make sure the
+! 	 * text after that was changed, else the expansion wasn't in
+! 	 * the current word and we reject it.
+! 	 */
+! 	if (spaceptr && (offs = newcount - (endptr - spaceptr)) > 0) {
+! 	    test = strcmp(spaceptr, newline + offs);
+! 	} else
+! 	    test = strcmp(startptr, newline);
+! 	if (test) {
+! 	    /* The right bit changed:  set cursor to end of it, */
+! 	    cs = endptr - (char *)line;
+! 	    /* delete it, */
+! 	    backdel(endptr - startptr);
+! 	    /* and insert the new stuff. */
+! 	    spaceinline(newcount);
+! 	    memcpy(line+cs, newline, newcount);
+! 	    cs += newcount;
+  
+! 	    ret = 1;
+  	}
+      }
++     zfree(newline, newsz);
+  
+!     expanding = 0;
+!     noerrs = ne;
+!     isfirstch = ifc;
+!     stophist = sh;
+!     strin = 0;
+!     lexstop = ls;
+!     histdone = hd;
+!     inpop();
+  
+!     errflag = 0;
+! 
+!     return ret;
+  }
+  
+  /**/
+  void
+  magicspace(void)
+  {
++     doexpandhist();
+      c = ' ';
+      selfinsert();
+  }
+  
+  /**/
+
+-- 
+Peter Stephenson <P.Stephenson@swansea.ac.uk>  Tel: +44 1792 205678 extn. 4461
+WWW:  http://python.swan.ac.uk/~pypeters/      Fax: +44 1792 295324
+Department of Physics, University of Wales, Swansea,
+Singleton Park, Swansea, SA2 8PP, U.K.
+

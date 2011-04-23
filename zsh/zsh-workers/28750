@@ -1,0 +1,145 @@
+From zsh-workers-return-28750-mason-zsh=primenet.com.au@zsh.org Fri Feb 11 20:39:46 2011
+Return-Path: <zsh-workers-return-28750-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9875 invoked by alias); 11 Feb 2011 20:39:46 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28750
+Received: (qmail 10258 invoked from network); 11 Feb 2011 20:39:42 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.49 as permitted sender)
+Date: Fri, 11 Feb 2011 20:39:35 +0000
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@zsh.org
+Subject: Re: Another _path_files bug?
+Message-ID: <20110211203935.4fa6af6a@pws-pc.ntlworld.com>
+In-Reply-To: <110210092820.ZM30702@torch.brasslantern.com>
+References: <110210084252.ZM30454@torch.brasslantern.com>
+	<110210092820.ZM30702@torch.brasslantern.com>
+X-Mailer: Claws Mail 3.7.8 (GTK+ 2.22.0; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Cloudmark-Analysis: v=1.1 cv=JvdXmxIgLJv2/GthKqHpGJEEHukvLcvELVXUanXFreg= c=1 sm=0 a=Wv_pRUIl9nMA:10 a=kj9zAlcOel0A:10 a=q2GGsy2AAAAA:8 a=NLZqzBF-AAAA:8 a=hBajZnRrPufOpMIxPFMA:9 a=uviUw7_k8cCqsNZE4VYA:7 a=1Hk3M7xYoO6rtbR_Zlq6qLc1rqIA:4 a=CjuIK1q_8ugA:10 a=I6wTmPyJxzYA:10 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+On Thu, 10 Feb 2011 09:28:20 -0800
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> On Feb 10,  8:42am, Bart Schaefer wrote:
+> }
+> } torch% setopt completeinword
+> } torch% ls Test/
+               ^completing here...
+> } torch% ls Test//Test/Makefile
+> } 
+> } This only happens when there is only a single completion in the directory.
+> } If the completion is ambiguous, it works correctly:
+> } 
+> } The first significant difference seems to be at around line 740 - 760 of
+> } _path_files where, in the completeinword case, $mid gets assigned on line
+> } 749.  I think, but am not yet sure, that when $tsuf contains but does not
+> } begin with a "/", then at line 754 (and possibly also at line 752, but
+> } again not sure) $cpre should NOT have a trailing slash appended.
+> 
+> That may or may not be the case, but I've narrowed this down to the compadd
+> at line 783.  In the failing case, this does:
+> 
+>     compadd -Qf -J -default- -J -default- -p Test/ \
+>             -s /Makefile -W Test// -M 'r:|/=* r:|=*' - Test
+
+This is more an experiment than a suggested fix, but I wonder if the
+problem is it's assuming there are three path sections: an initial path,
+the middle bit, that the cursor's in the middle of, and then contents of
+the directory at the end.  In the case here, we've only got two: the
+"Test/" is being treated as both the initial part and the middle part.
+So if we add a separate case for handling this it improves things.
+
+Obvious we'll need to find out if the original problem was more general,
+in which case splitting off this case may work but isn't the right fix,
+or if this has repercussions in other simple cases.
+
+The compquote stuff makes my hair stand on end, but I don't think
+it comes in to play with simple file names like this.
+
+By the way, we ought to take the opportunity to document further up that
+this is handling completion in the middle of a path --- unless I'm the
+only person in the world to feel that 'if [[ "$mid" = */ ]]' isn't
+entirely self-explanatory.
+
+Also, what does the 'if [[ -z "$tmp4" ]]' just above that signify?  I
+think (from the comment above 729) it might just mean we've finished
+collecting things and are about to add them to the completion ---
+there's no 'else' in this case.  Even if we can't decide for sure a bit
+of robust commentary speculation is probably better than the status quo.
+
+I'm just imagining a Samuel Beckett character writing this file, so it's
+time to stop and have supper.
+
+Index: Completion/Unix/Type/_path_files
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Unix/Type/_path_files,v
+retrieving revision 1.53
+diff -p -u -r1.53 _path_files
+--- Completion/Unix/Type/_path_files	6 Aug 2010 15:29:58 -0000	1.53
++++ Completion/Unix/Type/_path_files	11 Feb 2011 20:24:06 -0000
+@@ -769,21 +769,35 @@ for prepath in "$prepaths[@]"; do
+       SUFFIX="${osuf}"
+ 
+       tmp4="${testpath#${mid}}"
+-      tmp3="${mid%/*/}"
+-      tmp2="${${mid%/}##*/}"
+-      if [[ -n "$linepath" ]]; then
+-        compquote -p tmp3
++      if [[ $mid = */*/* ]]; then
++	# Multiple levels of directory involved.
++	tmp3="${mid%/*/}"
++	tmp2="${${mid%/}##*/}"
++	if [[ -n "$linepath" ]]; then
++          compquote -p tmp3
++	else
++          compquote tmp3
++	fi
++	compquote tmp4 tmp2 tmp1
++	for i in "$tmp1[@]"; do
++	  _list_files tmp2 "$prepath$realpath${mid%/*/}"
++          compadd $Uopt -Qf "$mopts[@]" -p "${Uopt:+$IPREFIX}$linepath$tmp3/" \
++	    -s "/$tmp4$i${Uopt:+$ISUFFIX}" \
++            -W "$prepath$realpath${mid%/*/}/" \
++	    "$pfxsfx[@]" $Mopts $listopts - "$tmp2"
++	done
+       else
+-        compquote tmp3
++	# Simpler case with fewer directories: avoid double counting.
++	tmp2="${${mid%/}##*/}"
++	compquote tmp4 tmp2 tmp1
++	for i in "$tmp1[@]"; do
++	  _list_files tmp2 "$prepath$realpath${mid%/*/}"
++          compadd $Uopt -Qf "$mopts[@]" -p "${Uopt:+$IPREFIX}$linepath" \
++	    -s "/$tmp4$i${Uopt:+$ISUFFIX}" \
++            -W "$prepath$realpath" \
++	    "$pfxsfx[@]" $Mopts $listopts - "$tmp2"
++	done
+       fi
+-      compquote tmp4 tmp2 tmp1
+-      for i in "$tmp1[@]"; do
+-	_list_files tmp2 "$prepath$realpath${mid%/*/}"
+-        compadd $Uopt -Qf "$mopts[@]" -p "${Uopt:+$IPREFIX}$linepath$tmp3/" \
+-	        -s "/$tmp4$i${Uopt:+$ISUFFIX}" \
+-                -W "$prepath$realpath${mid%/*/}/" \
+-	        "$pfxsfx[@]" $Mopts $listopts - "$tmp2"
+-      done
+     else
+       if [[ "$osuf" = */* ]]; then
+         PREFIX="${opre}${osuf}"
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

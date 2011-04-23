@@ -1,0 +1,129 @@
+From zsh-workers-return-21345-mason-zsh=primenet.com.au@sunsite.dk Wed Jun 15 15:32:33 2005
+Return-Path: <zsh-workers-return-21345-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 159 invoked from network); 15 Jun 2005 15:32:32 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 15 Jun 2005 15:32:32 -0000
+Received: (qmail 56723 invoked from network); 15 Jun 2005 15:32:27 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 15 Jun 2005 15:32:27 -0000
+Received: (qmail 2468 invoked by alias); 15 Jun 2005 15:32:24 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 21345
+Received: (qmail 2459 invoked from network); 15 Jun 2005 15:32:23 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 15 Jun 2005 15:32:23 -0000
+Received: (qmail 56532 invoked from network); 15 Jun 2005 15:32:23 -0000
+Received: from vms040pub.verizon.net (206.46.252.40)
+  by a.mx.sunsite.dk with SMTP; 15 Jun 2005 15:32:19 -0000
+Received: from candle.brasslantern.com ([4.11.1.68])
+ by vms040.mailsrvcs.net (Sun Java System Messaging Server 6.2 HotFix 0.04
+ (built Dec 24 2004)) with ESMTPA id <0II4009G5TTTJS07@vms040.mailsrvcs.net> for
+ zsh-workers@sunsite.dk; Wed, 15 Jun 2005 10:32:18 -0500 (CDT)
+Received: from candle.brasslantern.com (IDENT:schaefer@localhost [127.0.0.1])
+	by candle.brasslantern.com (8.12.11/8.12.11) with ESMTP id j5FFWFdk010445	for
+ <zsh-workers@sunsite.dk>; Wed, 15 Jun 2005 08:32:16 -0700
+Received: (from schaefer@localhost)	by candle.brasslantern.com
+ (8.12.11/8.12.11/Submit) id j5FFWFlQ010444	for zsh-workers@sunsite.dk; Wed,
+ 15 Jun 2005 08:32:15 -0700
+Date: Wed, 15 Jun 2005 15:32:14 +0000
+From: Bart Schaefer <schaefer@brasslantern.com>
+Subject: Re: subtle `echo' bug
+In-reply-to: <200506151356.j5FDunra015702@news01.csr.com>
+To: zsh-workers@sunsite.dk
+Message-id: <1050615153214.ZM10443@candle.brasslantern.com>
+MIME-version: 1.0
+X-Mailer: Z-Mail (5.0.0 30July97)
+Content-type: text/plain; charset=us-ascii
+References: <20050614172738.GL4685@solemn.turbinal.org>
+	<200506142212.24133.arvidjaar@newmail.ru>
+	<1050615002844.ZM7767@candle.brasslantern.com>
+	<200506150910.j5F9AEFa009630@news01.csr.com>
+	<200506151356.j5FDunra015702@news01.csr.com>
+Comments: In reply to Peter Stephenson <pws@csr.com>
+ "Re: subtle `echo' bug" (Jun 15,  2:56pm)
+X-Spam-Checker-Version: SpamAssassin 3.0.2 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=6.0 tests=BAYES_00 autolearn=ham 
+	version=3.0.2
+X-Spam-Hits: -2.6
+
+On Jun 15,  2:56pm, Peter Stephenson wrote:
+}
+} This is rather garbled: the error message shown was a write error which
+} you certainly wouldn't see if the process that failed to write received
+} a SIGPIPE.
+
+SIGPIPE is one of those signals that causes a process to exit if it is
+not trapped, and zsh does not trap it.  So there's no opportunity for
+the error message to be printed.
+
+} Experimentation suggests a SIGPIPE to a subprocess in a pipeline in
+} other shells doesn't cause the shell to abort execution.  I'm not sure
+} where the logic in zsh is that's causing this.
+
+Since SIGPIPE is causing the child process to exit, it's the SIGCHLD
+handler in the parent that's at issue.  Ultimately I believe it's this
+code in update_job():
+
+		/* If we have `foo|while true; (( x++ )); done', and hit
+		 * ^C, we have to stop the loop, too. */
+		if ((val & 0200) && inforeground == 1) {
+		    if (!errbrk_saved) {
+			errbrk_saved = 1;
+			prev_breaks = breaks;
+			prev_errflag = errflag;
+		    }
+		    breaks = loops;
+		    errflag = 1;
+		    inerrflush();
+		}
+
+I've verified that (val & 0200) == 128 in this instance, which is not
+distinguishable from the child having received a SIGINT.
+
+Related may be this comment in zwaitjob():
+
+	    /* Commenting this out makes ^C-ing a job started by a function
+	       stop the whole function again.  But I guess it will stop
+	       something else from working properly, we have to find out
+	       what this might be.  --oberon
+
+	    errflag = 0; */
+
+(Golly, I'd completely forgotten about Oberon.  That comment goes back a
+decade at least.)
+
+So, we could try this patch:
+
+Index: Src/jobs.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/jobs.c,v
+retrieving revision 1.15
+diff -c -r1.15 jobs.c
+--- Src/jobs.c	26 Mar 2005 16:14:05 -0000	1.15
++++ Src/jobs.c	15 Jun 2005 15:26:07 -0000
+@@ -383,7 +383,8 @@
+ 		}
+ 		/* If we have `foo|while true; (( x++ )); done', and hit
+ 		 * ^C, we have to stop the loop, too. */
+-		if ((val & 0200) && inforeground == 1) {
++		if ((val & 0200) && inforeground == 1 &&
++		    (val - 128 != SIGPIPE)) {
+ 		    if (!errbrk_saved) {
+ 			errbrk_saved = 1;
+ 			prev_breaks = breaks;
+@@ -399,7 +400,8 @@
+ 		adjustwinsize(0);
+ 	    }
+ 	}
+-    } else if (list_pipe && (val & 0200) && inforeground == 1) {
++    } else if (list_pipe && (val & 0200) && inforeground == 1 &&
++	       (val - 128 != SIGPIPE)) {
+ 	if (!errbrk_saved) {
+ 	    errbrk_saved = 1;
+ 	    prev_breaks = breaks;
+

@@ -1,0 +1,98 @@
+From zsh-workers-return-7349-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Aug 02 14:31:24 1999
+Return-Path: <zsh-workers-return-7349-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26454 invoked from network); 2 Aug 1999 14:31:23 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 2 Aug 1999 14:31:23 -0000
+Received: (qmail 22040 invoked by alias); 2 Aug 1999 14:31:12 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7349
+Received: (qmail 22033 invoked from network); 2 Aug 1999 14:31:12 -0000
+Date: Mon, 2 Aug 1999 16:31:10 +0200 (MET DST)
+Message-Id: <199908021431.QAA13865@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Sun, 1 Aug 1999 07:39:19 +0000
+Subject: Re: Bug: using send-break at "select" prompt breaks a bit too much
+
+
+Bart Schaefer wrote:
+
+> Check this out:
+> 
+> function oops() {
+>    setopt localoptions localtraps
+>    trap "echo got signal" 0 1 2 3 15 ZERR DEBUG
+>    select x in a b c
+>    do echo $REPLY
+>    done
+>    echo "finished select"
+> }
+> 
+> Put that in your $fpath and run "oops".  Try ^C and ^\ (or ^_ or whatever
+> you have sending QUIT).  Then use ^G (send-break).  Note that the whole
+> function is killed, but "finished select" is never printed nor are any
+> traps triggered.
+
+The patch below makes errflag be restored after the call to zleread()
+so that only the select is left.
+
+I don't get a trap for QUIT, either (and I haven't found the place
+where this is inhibited), however, I get the traps for SIGINT and
+DEBUG.
+
+But while playing with this I found a more serious bug:
+
+  % TRAPQUIT() { echo quit }
+  % foo() { setopt localtraps; trap 'echo foo quit' 3 }
+  % foo
+
+... and bang! dosavetrap() called shfunctab->removenode() which called 
+removeshfuncnode() which called dosavetrap again -- removing the list
+for the trap we want to get at the first call to dosavetrap(). We
+ended up with a savetrap struct with the ZSIG_FUNC flag and a NULL
+list pointer which gave us a SEGV in endtrapscope().
+
+Bye
+ Sven
+
+diff -u os/loop.c Src/loop.c
+--- os/loop.c	Mon Aug  2 11:44:46 1999
++++ Src/loop.c	Mon Aug  2 15:51:11 1999
+@@ -178,8 +178,13 @@
+ 	for (;;) {
+ 	    if (empty(bufstack)) {
+ 	    	if (interact && SHTTY != -1 && isset(USEZLE)) {
++		    int oef = errflag;
++
+ 		    isfirstln = 1;
+ 		    str = (char *)zleread(prompt3, NULL, 0);
++		    if (errflag)
++			str = NULL;
++		    errflag = oef;
+ 	    	} else {
+ 		    str = promptexpand(prompt3, 0, NULL, NULL);
+ 		    zputs(str, stderr);
+diff -u os/signals.c Src/signals.c
+--- os/signals.c	Mon Aug  2 11:44:47 1999
++++ Src/signals.c	Mon Aug  2 16:22:38 1999
+@@ -640,7 +640,11 @@
+ 	 */
+ 	char func[20];
+ 	sprintf(func, "TRAP%s", sigs[sig]);
+-	st->list = shfunctab->removenode(shfunctab, func);
++	/* We call removehashnode() directly because otherwise
++	 * removeshfuncnode() would be called which in turn would
++	 * call us again so that we would end up with a NULL pointer
++	 * instead of the list for the trap. */
++	st->list = removehashnode(shfunctab, func);
+     } else {
+ 	st->list = sigfuncs[sig];
+ 	unsettrap(sig);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

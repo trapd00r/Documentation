@@ -1,0 +1,142 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Fri Nov 22 12:10:41 1996
+Return-Path: zsh-workers-request@euclid.skiles.gatech.edu
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.6/8.7.3) with ESMTP id MAA10562 for <mason@primenet.com.au>; Fri, 22 Nov 1996 12:10:37 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id UAA27876; Thu, 21 Nov 1996 20:00:43 -0500 (EST)
+Resent-Date: Thu, 21 Nov 1996 20:00:43 -0500 (EST)
+Message-Id: <199611220100.RAA00623@bebop.clari.net>
+To: zsh-workers@math.gatech.edu
+Subject: Minor cleanup of code in hend()
+Date: Thu, 21 Nov 1996 17:00:33 -0800
+From: Wayne Davison <wayne@clari.net>
+Resent-Message-ID: <"TCXDW2.0.Up6.xiFbo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2447
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+During my work on the HIST_REDUCE_BLANKS patch I had changed a number
+of different things in hend() to make it clearer or more efficient.
+When I finished I decided it would be better to separate these changes
+from the new feature, so I've packaged them up here.
+
+The part that is the most in need of change is at the end of the
+function where the code is cleaning up.  The current code frees
+chline indirectly by freeing curhistent->text.  This is confusing.
+The new code is written to be explicit in why it is making a string
+copy (because it is pointing at chline) and frees chline by name.
+
+The other part that I like is the removal of the "save = 2"
+processing by putting the HISTIGNOREDUPS check lower down in the
+function.  This puts back some of the code that got moved in Peter's
+patch to its original location and also makes it a little more
+straight forward.
+
+Finally I changed the code that tweaks the previous history entry
+when it is considered to be a duplicate of the current one (when
+HISTIGNOREDUPS is turned on).  This bit is only a minor improvement
+since it avoids a free/allocate sequence, but I think it is also
+slightly clearer.  YMMV.
+
+..wayne..
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/hist.c
+@@ -669,7 +669,6 @@
+ hend(void)
+ {
+     int flag, save = 1;
+-    Histent he = NULL;
+ 
+     if (!chline)
+ 	return 1;
+@@ -693,23 +692,6 @@
+ 	if (!*chline || !strcmp(chline, "\n") ||
+ 	    (isset(HISTIGNORESPACE) && spaceflag))
+ 	    save = 0;
+-	else if (save) {
+-#ifdef DEBUG
+-	    /* debugging only */
+-	    if (chwordpos%2) {
+-		hwend();
+-		DPUTS(1, "internal:  uncompleted line in history");
+-	    }
+-#endif
+-	    /* get rid of pesky \n which we've nulled out:
+-	     * needed here by HISTIGNOREDUPS code, but needed anyway.
+-	     */
+-	    if (!chline[chwords[chwordpos-2]])
+-		chwordpos -= 2;
+-	    he = gethistent(curhist - 1);
+-	    if (isset(HISTIGNOREDUPS) && he->text && !histcmp(he))
+-		save = 2;
+-	}
+     }
+     if (flag & (HISTFLAG_DONE | HISTFLAG_RECALL)) {
+ 	char *ptr;
+@@ -732,38 +714,43 @@
+     curhistent->ftim = 0L;
+     curhistent->flags = 0;
+     if (save) {
++	Histent he;
++#ifdef DEBUG
++	/* debugging only */
++	if (chwordpos%2) {
++	    hwend();
++	    DPUTS(1, "internal:  uncompleted line in history");
++	}
++#endif
++	/* get rid of pesky \n which we've already nulled out */
++	if (!chline[chwords[chwordpos-2]])
++	    chwordpos -= 2;
+ 	/* strip superfluous blanks, if desired */
+ 	if (isset(HISTREDUCEBLANKS))
+ 	    histreduceblanks();
+-	if (save == 2) {
++	if (isset(HISTIGNOREDUPS) && (he = gethistent(curhist - 1))
++	 && he->text && !histcmp(he)) {
+ 	    /* Don't duplicate history entry, but use the current rather than
+ 	     * the previous one, in case minor changes were made to it.
+ 	     */
+-	    Histent hold = curhistent;
+ 	    zsfree(he->text);
+-	    if (he->nwords)
+-		zfree(he->words, he->nwords*2*sizeof(short));
+-	    curhist--;
+-	    *he = *curhistent;
+-	    curhistent = he;
+-	    hold->text = NULL;
++	    he->text = ztrdup(chline);
++	    if (chwordpos)
++		memcpy(he->words, chwords, chwordpos * sizeof(short));
++	    he->stim = curhistent->stim;    /* set start time */
++	    he->ftim = 0;
++	    save = 0;
++	    remhist();
+ 	}
+-	if ((curhistent->nwords = chwordpos/2)) {
+-	    curhistent->words =
+-		(short *)zalloc(curhistent->nwords*2*sizeof(short));
+-	    memcpy(curhistent->words, chwords,
+-		   curhistent->nwords*2*sizeof(short));
++	else if ((curhistent->nwords = chwordpos/2)) {
++	    curhistent->words = (short *)zalloc(chwordpos * sizeof(short));
++	    memcpy(curhistent->words, chwords, chwordpos * sizeof(short));
+ 	}
+     } else
+ 	remhist();
+-    if (chline && !curhistent->text)
+-	zfree(chline, hlinesz);
+-    if (curhistent->text) {
+-	char *s = ztrdup(curhistent->text);
+-
+-	zfree(curhistent->text, hlinesz);
+-	curhistent->text = s;
+-    }
++    if (curhistent->text == chline)
++	curhistent->text = save? ztrdup(chline) : NULL;
++    zfree(chline, hlinesz);
+     zfree(chwords, chwordlen*sizeof(short));
+     chline = NULL;
+     return !(flag & HISTFLAG_NOEXEC || errflag);
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

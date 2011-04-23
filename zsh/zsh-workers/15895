@@ -1,0 +1,337 @@
+From zsh-workers-return-15895-mason-zsh=primenet.com.au@sunsite.dk Fri Sep 28 17:23:53 2001
+Return-Path: <zsh-workers-return-15895-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3221 invoked from network); 28 Sep 2001 17:23:51 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 Sep 2001 17:23:51 -0000
+Received: (qmail 1056 invoked by alias); 28 Sep 2001 17:23:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15895
+Received: (qmail 1024 invoked from network); 28 Sep 2001 17:23:38 -0000
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-Id: <1010928172313.ZM18489@candle.brasslantern.com>
+Date: Fri, 28 Sep 2001 17:23:13 +0000
+In-Reply-To: <10779.1001590249@csr.com>
+Comments: In reply to Peter Stephenson <pws@csr.com>
+        "More tcp problems" (Sep 27, 12:30pm)
+References: <10779.1001590249@csr.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH (partial): Re: More tcp problems
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+I've just tried zftp again for the first time with 4.1.0-dev-2 + 15886,
+and I can't even get the *first* session to work.  It appears to connect
+(e.g. to ftp.zsh.org), but zfdir doesn't print anything, and zfclose
+gives a bad file descriptor error:
+
+---------
+schaefer<503> zmodload -i zsh/zftp zsh/net/tcp
+schaefer<504> autoload -U $^fpath/zf*(N:t)
+schaefer<505> zfopen ftp.zsh.org
+User: anonymous
+Password on ftp.zsh.org: 
+
+schaefer<506> zfdir
+
+
+
+
+
+
+schaefer<507> zfclose
+
+Data traffic for this session was 0 bytes in 0 files.
+Total traffic for this session was 339 bytes in 0 transfers.
+zfclose:3: connection close failed: bad file descriptor
+schaefer<508> 
+---------
+
+Here's 4.0.1 (I don't know where those blank lines spat out by zfdir both
+above and below are coming from):
+
+---------
+schaefer[501] zmodload zsh/zftp
+schaefer[502] autoload -U $^fpath/zf*(N:t)
+schaefer[503] zfopen ftp.zsh.org
+User: anonymous
+Password on ftp.zsh.org: 
+
+schaefer[504] zfdir
+
+
+
+
+
+
+
+
+
+
+
+
+total 10
+dr-x--x--x  2 zsh   zsh   512 May 20  1999 bin
+drwx--x--x  2 zsh   zsh   512 Apr  8 04:50 etc
+drwxrwxr-x  8 zsh   zsh   512 Sep 28 20:15 mla
+drwxr-xr-x  4 zsh   zsh  1024 Sep 27 22:50 pub
+dr-xr-xr-x  2 root  zsh   512 Apr 12  1999 usr
+lrwxr-xr-x  1 root  zsh     7 Mar 10  2001 zsh -> pub/zsh
+schaefer[505] zfclose
+
+Data traffic for this session was 0 bytes in 0 files.
+Total traffic for this session was 339 bytes in 0 transfers.
+schaefer[506] 
+---------
+
+Note that the total traffic is the same, so something appears to be working
+in the 4.1.0-dev-2 case, but I never get to see any of it.  (Shouldn't the
+"dir" output have been counted as data traffic, though?)
+
+Here's another problem I'm still having:
+
+../../../zsh-4.0/Src/Modules/tcp.c:605: warning: passing arg 1 of `gethostbyaddr' from incompatible pointer type
+../../../zsh-4.0/Src/Modules/tcp.c:610: warning: passing arg 1 of `gethostbyaddr' from incompatible pointer type
+
+gethostbyaddr() takes a `const char *'; it's being passed the address of
+`sess->sock.in.sin_addr', which is a `struct in_addr' which contains a
+single field `__u32 s_addr;', which is an unsigned integer.  Most likely
+this is just a casting problem, but I don't want to break something for
+some other platform.
+
+On Sep 27, 12:30pm, Peter Stephenson wrote:
+} Subject: More tcp problems
+}
+} There are a few more problems with the tcp module and its interaction with
+} zftp.  I was hoping to fix the first one before releasing a new development
+} version, but it seems it goes beyond that.
+} 
+} - Closing a zftp connection doesn't set the session pointer to NULL.  This
+}   results (in my case) in a segmentation violation when opening a second
+}   connection.  This is because the tcp_close() frees the session, so it
+}   can't be re-used or even tested again.  (Simply setting the pointer to
+}   NULL caused other problems I didn't understand, maybe related to the rest
+}   of this list.)
+
+The basic problem is that there are two ways to have a closed session:
+the ->contol field is NULL, or the ->control->fd number is -1.  This is
+just too confusing; in some cases the test for closed-ness is broken so
+that only the second case is detected, and things plunge ahead in the
+first case only to blow up later.  In other cases, ->control is invalid
+(freed) when it should be NULL.
+
+The patch below should take care of this, but doesn't help with my other
+problems above.
+
+} - Don't know if this is related, but I get
+}   BUG: attempt to free storage at invalid address
+}   when opening zftp connections, in particular the first (since I
+}   don't get as far as a second).
+
+I don't get that, but before my patch below I did get this:
+
+schaefer<508> zfopen gamera.zanshin.com
+zfparams:zftp send:26: failure sending control message: bad file descriptor
+zfparams:26: connection close failed: bad file descriptor
+User: anonymous
+Password on gamera.zanshin.com: 
+zfopen:zftp send:41: failure sending control message: bad file descriptor
+zfopen:41: connection close failed: bad file descriptor
+zfopen:zftp send:41: failure sending control message: bad file descriptor
+zfopen:41: connection close failed: bad file descriptor
+
+This patch fixes that part up.
+
+} - In general, it seems a little bit difficult to tell whether tcp_close()
+}   has actually freed the session or not.  And if it hasn't, because it
+}   encountered an error with close(), it's hard to see how the session
+}   should be freed. I think another call to tcp_close() would do it --- but
+}   it's hard to know when you need that.  If you do it when the session has
+}   already been freed, you're in big trouble.
+
+I haven't dealt with that except to add a comment that the session gets
+leaked by zftp when tcp_close() fails.
+
+} - There's a similiar problem with tests for (sess->fd == -1) in zftp.
+}   If they're true, the session is never freed; opening a new one will
+}   simply assign a different TCP session to the same pointer, so that
+}   the memory leaks.
+
+This patch should deal with that part, though.
+
+} - With a failed zfopen, I now get
+}     zfopen:42: connection close failed: bad file number
+}   (plus a segmentation violation which I guess is something to do with the
+}   previous stuff).  I don't get that message with 4.0.1.  The function tests
+}   at that point to see if $ZFTP_HOST is set, and if it is, attempts to
+}   close the file.  I *think* that all that's changed is the zfclose
+}   was silent before and isn't now, because of tcp_close().  This may be a
+}   knock-on effect of the things above, though, i.e. it goes away if
+}   the session pointers are handled properly.
+
+It doesn't appear to be a knock-on.  Perhaps tcp_close() is complaining
+for no good reason.  This patch doesn't change that.
+
+What the patch *does* do is make `zfsess->control' consistently NULL when
+it's closed, and then uses that as the single test for connected-ness.  I
+have a slightly more complicated patch that tries to maintain the duality
+of ->control and ->control->fd != -1, but it doesn't seem to accomplish
+anything that this one doesn't, so let's try this for the time being.
+
+Index: Src/Modules/zftp.c
+===================================================================
+diff -c -r1.8 zftp.c
+--- Src/Modules/zftp.c	2001/09/15 19:16:26	1.8
++++ Src/Modules/zftp.c	2001/09/28 17:08:49
+@@ -703,7 +703,7 @@
+     char line[256], *ptr, *verbose;
+     int stopit, printing = 0, tmout;
+ 
+-    if ((zfsess->control && zfsess->control->fd == -1))
++    if (!zfsess->control)
+ 	return 6;
+     zsfree(lastmsg);
+     lastmsg = NULL;
+@@ -831,7 +831,7 @@
+      */
+     int ret, tmout;
+ 
+-    if ((zfsess->control && zfsess->control->fd == -1))
++    if (!zfsess->control)
+ 	return 6;
+     tmout = getiparam("ZFTP_TMOUT");
+     if (setjmp(zfalrmbuf)) {
+@@ -1718,7 +1718,7 @@
+      * Probably this is the safest thing to do.  It's possible
+      * a `QUIT' will hang, though.
+      */
+-    if ((zfsess->control && zfsess->control->fd != -1))
++    if (zfsess->control)
+ 	zfclose(0);
+ 
+     /* this is going to give 0.  why bother? */
+@@ -1789,6 +1789,10 @@
+ 	zfsess->control = tcp_socket(af, SOCK_STREAM, 0, ZTCP_ZFTP);
+ 
+ 	if (!(zfsess->control) || (zfsess->control->fd < 0)) {
++	    if (zfsess->control) {
++		tcp_close(zfsess->control);
++		zfsess->control = NULL;
++	    }
+ 	    freehostent(zhostp);
+ 	    zfunsetparam("ZFTP_HOST");
+ 	    FAILED();
+@@ -1925,15 +1929,17 @@
+ 
+     if (zfsess->control->fd == -1) {
+ 	/* final paranoid check */
+-	return 1;
++	tcp_close(zfsess->control);
++	zfsess->control = NULL;
++	zfnopen--;
++    } else {
++	zfsetparam("ZFTP_MODE", ztrdup("S"), ZFPM_READONLY);
++	/* if remaining arguments, use them to log in. */
++	if (*++args)
++	    return zftp_login(name, args, flags);
+     }
+-	
+-    zfsetparam("ZFTP_MODE", ztrdup("S"), ZFPM_READONLY);
+-    /* if remaining arguments, use them to log in. */
+-    if (zfsess->control->fd > -1 && *++args)
+-	return zftp_login(name, args, flags);
+     /* if something wayward happened, connection was already closed */
+-    return zfsess->control->fd == -1;
++    return !zfsess->control;
+ }
+ 
+ /*
+@@ -2127,7 +2133,7 @@
+     }
+ 
+     zsfree(ucmd);
+-    if (zfsess->control->fd == -1)
++    if (!zfsess->control)
+ 	return 1;
+     if (stopit == 2 || (lastcode != 230 && lastcode != 202)) {
+ 	zwarnnam(name, "login failed", NULL, 0);
+@@ -2206,7 +2212,7 @@
+     struct timeval tv;
+ # endif /* HAVE_POLL */
+ 
+-    if (zfsess->control->fd == -1)
++    if (!zfsess->control)
+ 	return 1;
+ 
+ # ifdef HAVE_POLL
+@@ -2236,8 +2242,8 @@
+ 	zfgetmsg();
+     }
+ # endif /* HAVE_POLL */
+-    /* if we now have zfsess->control->fd == -1, then we've just been dumped out. */
+-    return (zfsess->control->fd == -1) ? 2 : 0;
++    /* if we have no zfsess->control, then we've just been dumped out. */
++    return zfsess->control ? 0 : 2;
+ #else
+     zfwarnnam(name, "not supported on this system.", NULL, 0);
+     return 3;
+@@ -2659,7 +2665,7 @@
+     char **aptr;
+     Eprog prog;
+ 
+-    if (zfsess->control->fd == -1)
++    if (!zfsess->control)
+ 	return;
+ 
+     zfclosing = 1;
+@@ -2675,9 +2681,11 @@
+ 	fclose(zfsess->cin);
+ 	zfsess->cin = NULL;
+     }
+-    if (zfsess->control->fd != -1) {
++    if (zfsess->control) {
+ 	zfnopen--;
+ 	tcp_close(zfsess->control);
++	/* We leak if the above failed */
++	zfsess->control = NULL;
+     }
+ 
+     if (zfstatfd != -1) {
+@@ -2965,7 +2973,7 @@
+ 	int oldstatus = zfstatusp[zfsessno];
+ 	lseek(zfstatfd, 0, 0);
+ 	read(zfstatfd, (char *)zfstatusp, sizeof(int)*zfsesscnt);
+-	if ((zfsess->control && zfsess->control->fd != -1) && (zfstatusp[zfsessno] & ZFST_CLOS)) {
++	if (zfsess->control && (zfstatusp[zfsessno] & ZFST_CLOS)) {
+ 	    /* got closed in subshell without us knowing */
+ 	    zcfinish = 2;
+ 	    zfclose(0);
+@@ -2986,7 +2994,7 @@
+ 	}
+     }
+ #if defined(HAVE_SELECT) || defined (HAVE_POLL)
+-    if ((zfsess->control && zfsess->control->fd != -1) && !(zptr->flags & (ZFTP_TEST|ZFTP_SESS))) {
++    if (zfsess->control && !(zptr->flags & (ZFTP_TEST|ZFTP_SESS))) {
+ 	/*
+ 	 * Test the connection for a bad fd or incoming message, but
+ 	 * only if the connection was last heard of open, and
+@@ -2996,7 +3004,7 @@
+ 	ret = zftp_test("zftp test", NULL, 0);
+     }
+ #endif
+-    if ((zptr->flags & ZFTP_CONN) && (zfsess->control && zfsess->control->fd == -1)) {
++    if ((zptr->flags & ZFTP_CONN) && !zfsess->control) {
+ 	if (ret != 2) {
+ 	    /*
+ 	     * with ret == 2, we just got dumped out in the test,
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

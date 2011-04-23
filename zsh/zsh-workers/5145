@@ -1,0 +1,599 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Date: Mon, 1 Feb 1999 10:10:55 +0100 (MET)
+Message-Id: <199902010910.KAA06912@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: compadd
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5145
+
+
+I already said that I wanted to make `compadd' more powerful.
+
+Since `compadd' is the interface to the internals of the completion
+stuff, it should be possible to use to add any words as matches. But
+sometimes you probably want to use it only to have control over the
+prefix/suffix- or the match-type stuff. In this case you would have to 
+do all the matching with what's on the line yourself which can't be
+done in a generic way since you'll never know what matchers other
+people use. So, the patch below adds the `-m' option to `compadd'
+which says that the completion code should use normal matching rules
+to the words given. Of course, for this the `-M' option known from
+`compctl' and `complist' is also supported.
+
+Another small addition: the option `-F' says that fignore should be
+used (in the same way as it's done by `compctl').
+
+And yet another one (this one may still be experimental): `-r <str>'
+says that the suffix should be removed if the next character typed is
+one of those given in `<str>'. This is parsed like a key-string to
+`bindkey', with one more backslash operator: if a `\-' apears in the
+string, this is taken to represent all characters that do not insert
+anything (e.g. `return' bound to `accept-line'). The whole string is
+taken as a character class, i.e. `a-z' means `all lower case letters'
+and a `6' or `!' at the beginning means `all characters but...'.
+
+Bye
+ Sven
+
+diff -u os/utils.c Src/utils.c
+--- os/utils.c	Fri Jan 29 15:56:16 1999
++++ Src/utils.c	Sat Jan 30 15:33:38 1999
+@@ -3349,12 +3349,19 @@
+ 	    case Meta:
+ 		*t++ = '\\', s--;
+ 		break;
++	    case '-':
++		if (fromwhere == 5) {
++		    *misc  = 1;
++		    break;
++		}
++		goto def;
+ 	    case 'c':
+ 		if (fromwhere < 2) {
+ 		    *misc = 1;
+ 		    break;
+ 		}
+ 	    default:
++	    def:
+ 		if ((idigit(*s) && *s < '8') || *s == 'x') {
+ 		    if (!fromwhere) {
+ 			if (*s == '0')
+@@ -3386,7 +3393,7 @@
+ 	} else if (fromwhere == 4 && *s == Snull) {
+ 	    for (u = t; (*u++ = *s++););
+ 	    return t + 1;
+-	} else if (*s == '^' && fromwhere == 2) {
++	} else if (*s == '^' && (fromwhere == 2 || fromwhere == 5)) {
+ 	    control = 1;
+ 	    continue;
+ 	} else if (*s == Meta)
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Fri Jan 29 15:56:32 1999
++++ Src/Zle/comp.h	Sat Jan 30 15:46:36 1999
+@@ -210,6 +210,7 @@
+     int flags;			/* see CMF_* below */
+     int brpl;			/* the place where to put the brace prefix */
+     int brsl;			/* ...and the suffix */
++    char *rems;			/* when to remove the suffix */
+ };
+ 
+ #define CMF_FILE     1		/* this is a file */
+@@ -272,3 +273,12 @@
+ 
+ #define CFN_FIRST   1
+ #define CFN_DEFAULT 2
++
++/* Flags for compadd and addmatches(). */
++
++#define CAF_QUOTE    1
++#define CAF_MENU     2
++#define CAF_NOSORT   4
++#define CAF_ALT      8
++#define CAF_FIGNORE 16
++#define CAF_MATCH   32
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Fri Jan 29 15:56:32 1999
++++ Src/Zle/comp1.c	Sat Jan 30 15:51:10 1999
+@@ -55,7 +55,7 @@
+ /* pointers to functions required by compctl and defined by zle */
+ 
+ /**/
+-void (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, int, int, int, int, int, char **));
++void (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, char *, int, int, Cmatcher, char **));
+ 
+ /**/
+ char *(*comp_strptr) _((int*,int*));
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Fri Jan 29 15:56:32 1999
++++ Src/Zle/compctl.c	Sat Jan 30 15:52:33 1999
+@@ -1703,8 +1703,9 @@
+ {
+     char *p, **sp, *e;
+     char *ipre = NULL, *ppre = NULL, *psuf = NULL, *prpre = NULL;
+-    char *pre = NULL, *suf = NULL, *group = NULL;
+-    int f = 0, q = 0, m = 0, ns = 0, a = 0;
++    char *pre = NULL, *suf = NULL, *group = NULL, *m = NULL, *rs = NULL;
++    int f = 0, a = 0, dm;
++    Cmatcher match = NULL;
+ 
+     if (incompfunc != 1) {
+ 	zerrnam(name, "can only be called from completion function", NULL, 0);
+@@ -1713,21 +1714,25 @@
+     for (; *argv && **argv ==  '-'; argv++) {
+ 	for (p = *argv + 1; *p; p++) {
+ 	    sp = NULL;
++	    dm = 0;
+ 	    switch (*p) {
+ 	    case 'q':
+ 		f |= CMF_REMOVE;
+ 		break;
+ 	    case 'Q':
+-		q = 1;
++		a |= CAF_QUOTE;
+ 		break;
+ 	    case 'f':
+ 		f |= CMF_FILE;
+ 		break;
++	    case 'F':
++		a |= CAF_FIGNORE;
++		break;
+ 	    case 'n':
+ 		f |= CMF_NOLIST;
+ 		break;
+ 	    case 'U':
+-		m = 1;
++		a |= CAF_MENU;
+ 		break;
+ 	    case 'P':
+ 		sp = &pre;
+@@ -1743,7 +1748,7 @@
+ 		break;
+ 	    case 'V':
+ 		if (!group)
+-		    ns = 1;
++		    a |= CAF_NOSORT;
+ 		sp = &group;
+ 		e = "group name expected after -%c";
+ 		break;
+@@ -1764,7 +1769,19 @@
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'a':
+-		a = 1;
++		a |= CAF_ALT;
++		break;
++	    case 'm':
++		a |= CAF_MATCH;
++		break;
++	    case 'M':
++		sp = &m;
++		e = "matching specification expected after -%c";
++		dm = 1;
++		break;
++	    case 'r':
++		sp = &rs;
++		e = "string expected after -%c";
+ 		break;
+ 	    case '-':
+ 		argv++;
+@@ -1788,6 +1805,10 @@
+ 		    zerrnam(name, e, NULL, *p);
+ 		    return 1;
+ 		}
++		if (dm && (match = parse_cmatcher(name, m)) == pcm_err) {
++		    match = NULL;
++		    return 1;
++		}
+ 	    }
+ 	}
+     }
+@@ -1796,7 +1817,7 @@
+ 	return 1;
+ 
+     addmatchesptr(ipre, ppre, psuf, prpre, pre, suf, group,
+-		  f, q, m, ns, a, argv);
++		  rs, f, a, match, argv);
+     return 0;
+ }
+ 
+--- os/Zle/zle_misc.c	Mon Feb  1 09:47:35 1999
++++ Src/Zle/zle_misc.c	Mon Feb  1 09:56:58 1999
+@@ -792,6 +792,49 @@
+     }
+ }
+ 
++/* Set up suffix given a string containing the characters on which to   *
++ * remove the suffix. */
++
++/**/
++void
++makesuffixstr(char *s, int n)
++{
++    if (s) {
++	int inv, i, v, z = 0;
++
++	if (*s == '^' || *s == '!') {
++	    inv = 1;
++	    s++;
++	} else
++	    inv = 0;
++	s = getkeystring(s, &i, 5, &z);
++	s = metafy(s, i, META_USEHEAP);
++
++	if (inv) {
++	    v = 0;
++	    for (i = 0; i < 257; i++)
++		 suffixlen[i] = n;
++	} else
++	    v = n;
++
++	if (z)
++	    suffixlen[256] = v;
++
++	while (*s) {
++	    if (s[1] == '-' && s[2]) {
++		int b = (int) *s, e = (int) s[2];
++
++		while (b <= e)
++		    suffixlen[b++] = v;
++		s += 2;
++	    } else
++		suffixlen[*s] = v;
++	    s++;
++	}
++    } else
++	makesuffix(n);
++}
++
+ /* Remove suffix, if there is one, when inserting character c. */
+ 
+ /**/
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Fri Jan 29 15:56:35 1999
++++ Src/Zle/zle_tricky.c	Sat Jan 30 16:05:25 1999
+@@ -2408,20 +2412,45 @@
+ /**/
+ void
+ addmatches(char *ipre, char *ppre, char *psuf, char *prpre, char *pre,
+-	   char *suf, char *group,
+-	   int flags, int quote, int menu, int nosort, int alt, char **argv)
++	   char *suf, char *group, char *rems, 
++	   int flags, int aflags, Cmatcher match, char **argv)
+ {
+-    char *s, *t;
+-    int lpl, lsl, i;
+-    Aminfo ai = (alt ? fainfo : ainfo);
++    char *s, *t, *e, *te, *ms, *lipre = NULL, *lpre, *lsuf;
++    int lpl, lsl, i, pl, sl, test, bpl, bsl, lsm, llpl;
++    Aminfo ai;
++    Cline lc = NULL;
++    LinkList l;
+     Cmatch cm;
++    struct cmlist mst;
++    Cmlist oms = mstack;
+ 
+-    if (menu && isset(AUTOMENU))
++    if (aflags & CAF_ALT) {
++	l = fmatches;
++	ai = fainfo;
++    } else {
++	l = matches;
++	ai = ainfo;
++    }
++    if (match) {
++	mst.next = mstack;
++	mst.matcher = match;
++	mstack = &mst;
++    }
++    if ((aflags & CAF_MENU) && isset(AUTOMENU))
+ 	usemenu = 1;
+     SWITCHHEAPS(compheap) {
+ 	HEAPALLOC {
++	    if (aflags & CAF_MATCH) {
++		ctokenize(lipre = dupstring(compiprefix));
++		remnulargs(lipre);
++		ctokenize(lpre = dupstring(compprefix));
++		remnulargs(lpre);
++		llpl = strlen(lpre);
++		ctokenize(lsuf = dupstring(compsuffix));
++		remnulargs(lsuf);
++	    }
+ 	    if (ipre)
+-		ipre = dupstring(ipre);
++		ipre = (lipre ? dyncat(lipre, ipre) : dupstring(ipre));
+ 	    if (ppre) {
+ 		ppre = dupstring(ppre);
+ 		lpl = strlen(ppre);
+@@ -2432,6 +2461,8 @@
+ 		lsl = strlen(psuf);
+ 	    } else
+ 		lsl = 0;
++	    if (aflags & CAF_MATCH)
++		lsm = (psuf ? !strcmp(psuf, lsuf) : (!lsuf || !*lsuf));
+ 	    if (pre)
+ 		pre = dupstring(pre);
+ 	    if (suf)
+@@ -2443,10 +2474,12 @@
+ 		prpre = dupstring(prpre);
+ 	    if (group) {
+ 		endcmgroup(NULL);
+-		begcmgroup(group, nosort);
+-		if (nosort)
++		begcmgroup(group, (aflags & CAF_NOSORT));
++		if (aflags & CAF_NOSORT)
+ 		    mgroup->flags |= CGF_NOSORT;
+ 	    }
++	    if (rems)
++		rems = dupstring(rems);
+     	    if (ai->pprefix) {
+ 		if (pre)
+ 		    ai->pprefix[pfxlen(ai->pprefix, pre)] = '\0';
+@@ -2455,8 +2488,52 @@
+ 	    } else
+ 		ai->pprefix = dupstring(pre ? pre : "");
+ 
+-	    for (; (s = *argv); argv++) {
+-		if (ai->firstm) {
++	    for (; (s = dupstring(*argv)); argv++) {
++		sl = strlen(s);
++		ms = NULL;
++		bpl = brpl;
++		bsl = brsl;
++		if ((!psuf || !*psuf) && (aflags & CAF_FIGNORE)) {
++		    char **pt = fignore;
++		    int filell;
++
++		    for (test = 1; test && *pt; pt++)
++			if ((filell = strlen(*pt)) < sl
++			    && !strcmp(*pt, s + sl - filell))
++			    test = 0;
++
++		    if (!test) {
++			l = fmatches;
++			ai = fainfo;
++		    } else {
++			l = matches;
++			ai = ainfo;
++		    }
++		}
++		if (aflags & CAF_MATCH) {
++		    t = (ppre ? dyncat(ppre, s) : s);
++		    pl = sl + lpl;
++		    if ((test = (llpl <= pl && !strncmp(t, lpre, pl))))
++			test = lsm;
++		    if (!test && mstack &&
++			(ms = comp_match(lpre, lsuf,
++					 (psuf ? dyncat(t, psuf) : t),
++					 &lc, (aflags & CAF_QUOTE),
++					 &bpl, &bsl)))
++			test = 1;
++		    if (!test)
++			continue;
++		    e = s + sl;
++		} else {
++		    e = s;
++		    pl = lpl;
++		}
++		if (!(aflags & CAF_QUOTE)) {
++		    te = s + pl;
++		    s = quotename(s, &e, te, &pl);
++		    sl = strlen(s);
++		}
++		if (!ms && ai->firstm) {
+ 		    if ((i = pfxlen(ai->firstm->str, s)) < ai->prerest)
+ 			ai->prerest = i;
+ 		    if ((i = sfxlen(ai->firstm->str, s)) < ai->suflen)
+@@ -2466,15 +2543,20 @@
+ 		if (ppre)
+ 		    t = dyncat(ppre, t);
+ 		if (ipre && *ipre) {
++		    Cline tlc = prepend_cline(ipre, lc);
++
+ 		    ai->noipre = 0;
+-		    if (ai->icpl > lpl)
+-			ai->icpl = lpl;
+-		    if (ai->icsl > lsl)
+-			ai->icsl = lsl;
+-		    if (ai->iaprefix)
+-			ai->iaprefix[pfxlen(ai->iaprefix, t)] = '\0';
+-		    else
+-			ai->iaprefix = dupstring(t);
++		    if (!ms) {
++			if ((aflags & CAF_MATCH) || ai->icpl > pl)
++			    ai->icpl = pl;
++			if ((aflags & CAF_MATCH) || ai->icsl > lsl)
++			    ai->icsl = lsl;
++			if (ai->iaprefix)
++			    ai->iaprefix[pfxlen(ai->iaprefix, t)] = '\0';
++			else
++			    ai->iaprefix = dupstring(t);
++		    } else
++			ai->ilinecl = join_clines(ai->ilinecl, lc);
+ 		    if (ai->iprefix) {
+ 			if (strcmp(ipre, ai->iprefix))
+ 			    ai->iprefix = "";
+@@ -2482,16 +2564,21 @@
+ 			ai->iprefix = dupstring(ipre);
+ 
+ 		    t = dyncat(ipre, t);
++		    lc = tlc;
+ 		} else
+ 		    ai->iprefix = "";
+-		if (ai->cpl > lpl)
+-		    ai->cpl = lpl;
+-		if (ai->csl > lsl)
+-		    ai->csl = lsl;
+-		if (ai->aprefix)
+-		    ai->aprefix[pfxlen(ai->aprefix, t)] = '\0';
+-		else
+-		    ai->aprefix = dupstring(t);
++		if (!ms) {
++		    if ((aflags & CAF_MATCH) || ai->cpl > pl)
++			ai->cpl = pl;
++		    if ((aflags & CAF_MATCH) || ai->csl > lsl)
++			ai->csl = lsl;
++		    if (ai->aprefix)
++			ai->aprefix[pfxlen(ai->aprefix, t)] = '\0';
++		    else
++			ai->aprefix = dupstring(t);
++		} else
++		    ai->linecl = join_clines(ai->linecl, lc);
++
+ 		mnum++;
+ 		ai->count++;
+ 
+@@ -2499,25 +2586,41 @@
+ 		cm->ppre = ppre;
+ 		cm->psuf = psuf;
+ 		cm->prpre = prpre;
+-		if (!quote)
+-		    s = quotename(s, NULL, NULL, NULL);
+-		cm->str = dupstring(s);
++		cm->str = (ms ? ms : dupstring(s));
+ 		cm->ipre = cm->ripre = ipre;
+ 		cm->pre = pre;
+ 		cm->suf = suf;
+ 		cm->flags = flags;
+-		cm->brpl = brpl;
+-		cm->brsl = brsl;
+-		addlinknode((alt ? fmatches : matches), cm);
+-
+-		if (expl)
+-		    expl->fcount++;
+-		if (!ai->firstm)
+-		    ai->firstm = cm;
++		cm->brpl = bpl;
++		cm->brsl = bsl;
++		cm->rems = rems;
++		addlinknode(l, cm);
++
++		if (expl) {
++		    if (l == matches)
++			expl->count++;
++		    else
++			expl->fcount++;
++		}
++		if (!ms) {
++		    if (!ai->firstm)
++			ai->firstm = cm;
++		    if ((aflags & CAF_MATCH) && !(e - (s + pl))) {
++			if (!ai->exact)
++			    ai->exact = 1;
++			else {
++			    ai->exact = 2;
++			    cm = NULL;
++			}
++			ai->exactm = cm;
++		    }
++		}
+ 	    }
+ 	    compnmatches = mnum;
+ 	} LASTALLOC;
+     } SWITCHBACKHEAPS;
++
++    mstack = oms;
+ }
+ 
+ /* This adds a match to the list of matches.  The string to add is given   *
+@@ -2729,8 +2832,7 @@
+ 		ai->iaprefix[pfxlen(ai->iaprefix, t)] = '\0';
+ 	    else
+ 		ai->iaprefix = dupstring(t);
+-	}
+-	else
++	} else
+ 	    ai->ilinecl = join_clines(ai->ilinecl, lc);
+ 	if (ai->iprefix) {
+ 	    if (strcmp(ipre, ai->iprefix))
+@@ -2750,8 +2852,7 @@
+ 	    ai->aprefix[pfxlen(ai->aprefix, t)] = '\0';
+ 	else
+ 	    ai->aprefix = dupstring(t);
+-    }
+-    else
++    } else
+ 	ai->linecl = join_clines(ai->linecl, lc);
+ 
+     mnum++;
+@@ -2793,6 +2894,7 @@
+     cm->flags = mflags | isf;
+     cm->brpl = bpl;
+     cm->brsl = bsl;
++    cm->rems = NULL;
+     addlinknode(l, cm);
+ 
+     /* One more match for this explanation. */
+@@ -3377,6 +3479,7 @@
+ 
+ /* This should probably be moved into tokenize(). */
+ 
++/**/
+ static char *
+ ctokenize(char *p)
+ {
+@@ -5072,6 +5175,7 @@
+     r->flags = m->flags;
+     r->brpl = m->brpl;
+     r->brsl = m->brsl;
++    r->rems = ztrdup(m->rems);
+ 
+     return r;
+ }
+@@ -5183,6 +5287,7 @@
+     zsfree(m->ppre);
+     zsfree(m->psuf);
+     zsfree(m->prpre);
++    zsfree(m->rems);
+ 
+     zfree(m, sizeof(m));
+ }
+@@ -5435,7 +5540,7 @@
+ 	if (menuwe) {
+ 	    menuend += menuinsc;
+ 	    if (m->flags & CMF_REMOVE) {
+-		makesuffix(menuinsc);
++		makesuffixstr(m->rems, menuinsc);
+ 		if (menuinsc == 1)
+ 		    suffixlen[STOUC(m->suf[0])] = 1;
+ 	    }
+diff -u om/new-completion-examples Misc/new-completion-examples
+--- om/new-completion-examples	Sat Jan 30 21:37:37 1999
++++ Misc/new-completion-examples	Sat Jan 30 21:23:38 1999
+@@ -276,7 +276,6 @@
+         s=( "${(@)s:gs.**.*.}" )
+         for i in $a; do
+           b=( $~i/(#l)$~s )
+-          eval b\=\( \$\{b:/\*\(${(j:|:)fignore}\)\} \)
+           [[ $#b -ne 0 ]] && c=( $c $i )
+         done
+         if [[ $#c -eq 0 ]] then
+@@ -284,10 +283,9 @@
+         elif [[ $#c -ne 1 ]] then
+           a="$ppre$epre$pa"
+           c=( $~c/(#l)$~s )
+-          eval c\=\( \$\{c:/\*\(${(j:|:)fignore}\)\} \)
+   	  c=( ${c#$a} )
+           for i in $c; do
+-            compadd -p "$pre$pa" -W "$a" -s "/${i#*/}" -f "${i%%/*}"
++            compadd -p "$pre$pa" -W "$a" -s "/${i#*/}" -fF -- "${i%%/*}"
+           done
+   	  continue 2
+         fi
+@@ -301,8 +299,7 @@
+     s=( $str$@ )
+     s=( "${(@)s:gs.**.*.}" )
+     b=( $~a(#l)$~s )
+-    eval b\=\( \$\{b:/\*\(${(j:|:)fignore}\)\} \)
+-    compadd -p "$pre$pa" -W "$ppre$epre$pa" -f ${b#$a}
++    compadd -p "$pre$pa" -W "$ppre$epre$pa" -fF -- ${b#$a}
+   done
+ }
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

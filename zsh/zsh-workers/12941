@@ -1,0 +1,149 @@
+From zsh-workers-return-12941-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Oct 10 08:32:20 2000
+Return-Path: <zsh-workers-return-12941-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24664 invoked from network); 10 Oct 2000 08:32:19 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 10 Oct 2000 08:32:19 -0000
+Received: (qmail 18033 invoked by alias); 10 Oct 2000 08:31:44 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12941
+Received: (qmail 17953 invoked from network); 10 Oct 2000 08:31:40 -0000
+Date: Tue, 10 Oct 2000 10:31:38 +0200 (MET DST)
+Message-Id: <200010100831.KAA23188@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 9 Oct 2000 14:59:19 +0000
+Subject: Re: PATCH: Re: Option completion after "nono"
+
+
+Bart Schaefer wrote:
+
+> On Oct 9,  2:48pm, Sven Wischnowsky wrote:
+> } 
+> } Bart Schaefer wrote:
+> } 
+> } > Speaking of using nonomatch, have you tried to complete it?
+> } 
+> } Hm, I think it should do the right thing without using match-spec
+> } hacks.
+> } 
+> } The patch below does that by preferring exact character matches over
+> } using match specs.
+> 
+> One can now complete "nomatch" and "notify" but still not "nonomatch"
+> and "nonotify".
+
+Ouch, of course. No good writing such patches between two exams.
+
+Well, this patch makes match_str() go back when it just accepted some
+exact character matches but can't match any further. It goes back to
+before those character and then tries again, using the match specs.
+
+I.e. it now tries both styles we had before.
+
+Bye
+ Sven
+
+Index: Src/Zle/compmatch.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compmatch.c,v
+retrieving revision 1.24
+diff -u -r1.24 compmatch.c
+--- Src/Zle/compmatch.c	2000/10/09 12:50:21	1.24
++++ Src/Zle/compmatch.c	2000/10/10 08:30:50
+@@ -440,7 +440,7 @@
+ match_str(char *l, char *w, Brinfo *bpp, int bc, int *rwlp,
+ 	  int sfx, int test, int part)
+ {
+-    int ll = strlen(l), lw = strlen(w), oll = ll, olw = lw;
++    int ll = strlen(l), lw = strlen(w), oll = ll, olw = lw, exact = 0, wexact = 0;
+     int il = 0, iw = 0, t, ind, add, he = 0, bpc, obc = bc, bslash;
+     VARARR(unsigned char, ea, (ll > lw ? ll : lw) + 1);
+     char *ow;
+@@ -489,11 +489,12 @@
+ 	 * Update: this once tested `test && ...' to check for exact
+ 	 * character matches only in recursive calls.  But then one
+ 	 * can't complete `nom<TAB>' to `nomatch' with a match spec
+-	 * of `B:[nN][oO]=' because that will eat the `no'. I'm almost
+-	 * certain that this will break something, but I don't know what
+-	 * or if it really is a problem (or has been fixed by other
+-	 * changes in the code handling partial word matching). And the
+-	 * completion matching tests work.
++	 * of `B:[nN][oO]=' because that will eat the `no'.
++	 * But that would break completion of strings like `nonomatch'
++	 * because the `B:[nN][oO]=' doesn't match the second `no'.
++	 * For this we added the code below that can remove already
++	 * accepted exact characters and try again, preferring match
++	 * specs.
+ 	 */
+ 
+ 	bslash = 0;
+@@ -503,10 +504,12 @@
+ 			(ind ? (w[0] == l[0]) : (w[1] == l[0])))))) {
+ 	    /* No matcher could be used, but the strings have the same
+ 	     * character here, skip over it. */
+-	    l += add; w += (bslash ? (add + add ) : add);
++	    l += add; w += (bslash ? (add + add) : add);
+ 	    il++; iw += 1 + bslash;
+ 	    ll--; lw -= 1 + bslash;
+ 	    bc++;
++	    exact++;
++	    wexact += 1 + bslash;
+ 	    if (!test)
+ 		while (bp && bc >= (useqbr ? bp->qpos : bp->pos)) {
+ 		    bp->curpos = matchbufadded + (sfx ? (ow - w) : (w - ow)) + obc;
+@@ -517,6 +520,7 @@
+ 
+ 	    continue;
+ 	}
++    retry:
+ 	/* First try the matchers. Err... see above. */
+ 	for (mp = NULL, ms = mstack; !mp && ms; ms = ms->next) {
+ 	    for (mp = ms->matcher; mp; mp = mp->next) {
+@@ -687,6 +691,7 @@
+ 		    ll -= llen; il += llen;
+ 		    lw -= alen; iw += alen;
+ 		    bc += llen;
++		    exact = 0;
+ 
+ 		    if (!test)
+ 			while (bp &&
+@@ -798,6 +803,7 @@
+ 		    il += mp->llen; iw += mp->wlen;
+ 		    ll -= mp->llen; lw -= mp->wlen;
+ 		    bc += mp->llen;
++		    exact = 0;
+ 
+ 		    if (!test)
+ 			while (bp &&
+@@ -836,6 +842,23 @@
+ 	    lm = NULL;
+ 	    he = 0;
+ 	} else {
++
++	    if (exact) {
++		/* If we just accepted some characters directly (at the
++		 * beginning of the loop) and now can't match any further,
++		 * we go back to before those characters and try again,
++		 * preferring match specs this time. */
++
++		il -= exact; iw -= wexact;
++		ll += exact; lw += wexact;
++		bc -= exact;
++		l -= add * exact; w -= add * wexact;
++
++		exact = wexact = 0;
++
++		goto retry;
++	    }
++
+ 	    if (!lw)
+ 		break;
+ 	    /* No matcher and different characters: l does not match w. */
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

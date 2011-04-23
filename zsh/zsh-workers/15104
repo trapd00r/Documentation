@@ -1,0 +1,131 @@
+From zsh-workers-return-15104-mason-zsh=primenet.com.au@sunsite.dk Tue Jun 26 16:37:06 2001
+Return-Path: <zsh-workers-return-15104-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16339 invoked from network); 26 Jun 2001 16:37:04 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 26 Jun 2001 16:37:04 -0000
+Received: (qmail 11936 invoked by alias); 26 Jun 2001 16:36:14 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15104
+Received: (qmail 11894 invoked from network); 26 Jun 2001 16:36:11 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010626163333.ZM3779@candle.brasslantern.com>
+Date: Tue, 26 Jun 2001 16:33:33 +0000
+In-Reply-To: <001301c0fe32$e11f5200$21c9ca95@mow.siemens.ru>
+Comments: In reply to "Andrej Borsenkow" <Andrej.Borsenkow@mow.siemens.ru>
+        "RE: Modules dependencies RE: PATCH: zftp/tcp abstraction" (Jun 26,  3:26pm)
+References: <001301c0fe32$e11f5200$21c9ca95@mow.siemens.ru>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: "Andrej Borsenkow" <Andrej.Borsenkow@mow.siemens.ru>,
+        <zsh-workers@sunsite.dk>
+Subject: Re: Modules dependencies RE: PATCH: zftp/tcp abstraction
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Jun 26,  3:26pm, Andrej Borsenkow wrote:
+}
+} Here is suggested change to current module system. It is actually pretty
+} trivial to implement and may have additional advantages ...
+
+Jumping way ahead:
+
+} This does not seem very hard to implement (the ugliest part is parsing of
+} zmd files; do we have something ready in zsh so as not to reinvent the
+} wheel)? Comments?
+
+I object to any solution which requires that a statically linked binary
+rely upon any external files.  I can't tell for certain whether that is
+the case with your suggestion, but that's the impression I get.
+
+Your remark about having something read to parse the extra files has
+given me an idea:
+
+} - module is represented by its module definition file.
+} 
+} - when you open a module, zsh opens zmd file. It then loads all needed
+} modules (as in moddeps) and after that loads modules object itself (as in
+} soname)
+} 
+} - zmd file is always installed for both linked-in and external modules.
+} It eliminates need to build extra list at compile-time.
+
+Why can't the module definition file itself be a loadable module?
+
+For every module that has dependencies, we compile a separate little
+shared object that has no dependencies itself.  It contains exactly one
+function, which simply calls the module loading code on each of the
+dependencies of the base module and then on the base module.  The name
+of this object is derived from the name of the base module, e.g. for
+zsh/zftp the name might be zsh/ld/zftp (and zsh/net/ld/tcp, etc.).
+
+When the module loading code is invoked, it first inserts the /ld/ and
+looks for that module and loads it if necessary, then calls the function
+to finish the loading process.  If that fails, the /ld/ module has to be
+unloaded again.
+
+Of course directly loading the /ld/ module with `zmodload' would have
+the same effect, so you end up with the base module and its dependencies
+loaded as well.
+
+If it doesn't find a /ld/ module, then it can go ahead and load the base
+module directly.  If the /ld/ module is already loaded, it can assume
+that the base module is also loaded.  (Of course we need a different
+entry point that doesn't do this check, for the function inside the /ld/
+module to call.)
+
+And the /ld/ modules would be linked into the static binary just like
+any other module, so this all continues to work there.
+
+I'm not sure about "eliminates need to build extra list at compile-time."
+I would think building the list once at compile time was preferable?
+
+There remains the question of where aliasing interacts with this, e.g.,
+do aliases get resolved after adding the /ld/ in the module code?  Is
+one allowed to do `zmodload -A foo/ld/zap=foo/bar', and if so does the
+foo/ld/bar module get loaded upon `zmodload foo/ld/zap'?  Etc.
+
+} - zsh _may_ scan $module_path and autoload objects from those modules with
+} load=yes at startup. Or it even can do it when $module_path changes (but see
+} *1). This makes it possible to have a single binary and simply drop new
+} module in place that may be of some use for packagers.
+
+If this behavior is really desirable, then let's add an /auto/ module for
+each base module that needs one.  Loading the /auto/ module installs all
+the autoloads for the base module and then unloads itself again.
+
+We have `zmodload -a' still hanging about as a synonym for `zmodload -ab';
+it could be overloaded to look for and load the /auto/ module, otherwise
+fall back on its old behavior.
+
+If you give zmodload the -a and -u options together, then after unloading
+the base module it reloads the corresponding /auto/ module; that addresses
+Andrej's (?) earlier question about autoloads disappearing when a module
+is unloaded.  (Presently -u -a is the same as -u -b; I suppose the /auto/
+module could have two functions, one to add all the autoloads and one to
+delete them again.)
+
+} Zsh first adds baz, then it adds bar and gets an error. We possibly
+} have to remove baz now (else, it will try to load zsh/mod2 on access
+} to baz and this will silently redefine bar).
+
+This problem exists independent of the scheme for manging dependencies.
+So far we've required the user to resolve it manually, and I think that
+is the only right way to go.
+ 
+} P.S. We can even completely ignore file name and rely on name= in zmd
+} file. That gives natural way to directly load any module by its path
+} name.
+
+I don't quite see what you mean is "natural" about this, but obviously
+this is one point my scheme doesn't address.  I think the other benefits
+outweigh this.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

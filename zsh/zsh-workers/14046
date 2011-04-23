@@ -1,0 +1,148 @@
+From zsh-workers-return-14046-mason-zsh=primenet.com.au@sunsite.dk Thu Apr 19 19:37:17 2001
+Return-Path: <zsh-workers-return-14046-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24112 invoked from network); 19 Apr 2001 19:37:16 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Apr 2001 19:37:16 -0000
+Received: (qmail 23481 invoked by alias); 19 Apr 2001 19:37:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14046
+Received: (qmail 23465 invoked from network); 19 Apr 2001 19:37:09 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: remove prefix bindings
+Date: Thu, 19 Apr 2001 20:39:01 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20010419193902.17FA8139C3@pwstephenson.fsnet.co.uk>
+
+This allows bindkey -rp to remove all bindings with a given prefix, not
+including a binding for the prefix itself.
+
+It also stops any single-character cursor keys from being being bound
+automatically.
+
+There's also a bug fix:  when listing keys with a given prefix, the length
+of the prefix to use is that of the prefix after metafication, not the
+length of the original prefix.
+
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.12
+diff -u -r1.12 zle.yo
+--- Doc/Zsh/zle.yo	2001/03/28 16:54:21	1.12
++++ Doc/Zsh/zle.yo	2001/04/19 19:33:21
+@@ -175,7 +175,20 @@
+ item(tt(-r) var(in-string) ...)(
+ Unbind the specified var(in-string)s in the selected keymap.
+ This is exactly equivalent to binding the strings to tt(undefined-key).
++
+ When tt(-R) is also used, interpret the var(in-string)s as ranges.
++
++When tt(-p) is also used, the var(in-string)s specify prefixes.  Any
++binding that has the given var(in-string) as a prefix, not including the
++binding for the var(in-string) itself, if any, will be removed.  For
++example,
++
++example(bindkey -rpM viins '^[')
++
++will remove all bindings in the vi-insert keymap beginning with an escape
++character (probably cursor keys), but leave the binding for the escape
++character itself (probably tt(vi-cmd-mode)).  This is incompatible with the
++option tt(-R).
+ )
+ item(tt(-s) var(in-string out-string) ...)(
+ Bind each var(in-string) to each var(out-string).
+Index: Src/Zle/zle_keymap.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_keymap.c,v
+retrieving revision 1.6
+diff -u -r1.6 zle_keymap.c
+--- Src/Zle/zle_keymap.c	2001/03/28 16:54:21	1.6
++++ Src/Zle/zle_keymap.c	2001/04/19 19:33:26
+@@ -90,6 +90,14 @@
+     int prefixlen;
+ };
+ 
++/* This structure is used when scanning for prefix bindings to remove */
++
++struct remprefstate {
++    Keymap km;
++    char *prefix;
++    int prefixlen;
++};
++
+ #define BS_LIST (1<<0)
+ #define BS_ALL  (1<<1)
+ 
+@@ -836,6 +844,19 @@
+ 	zwarnnam(name, "keymap `%s' is protected", kmname, 0);
+ 	return 1;
+     }
++    if (func == 'r' && ops['p']) {
++	char *useq, *bseq;
++	int len;
++	struct remprefstate rps;
++	rps.km = km;
++	while ((useq = *argv++)) {
++	    bseq = getkeystring(useq, &len, 2, NULL);
++	    rps.prefix = metafy(bseq, len, META_USEHEAP);
++	    rps.prefixlen = strlen(rps.prefix);
++	    scankeymap(km, 0, scanremoveprefix, &rps);
++	}
++	return 0;
++    }
+     do {
+ 	char *useq = *argv, *bseq, *seq, *str;
+ 	int len;
+@@ -880,6 +901,20 @@
+     return ret;
+ }
+ 
++/* Remove bindings for key sequences which have the given (proper) prefix. */
++
++/**/
++static void
++scanremoveprefix(char *seq, Thingy bind, char *str, void *magic)
++{
++    struct remprefstate *rps = magic;
++
++    if (strncmp(seq, rps->prefix, rps->prefixlen) || !seq[rps->prefixlen])
++	return;
++
++    bindkey(rps->km, seq, refthingy(t_undefinedkey), NULL);
++}
++
+ /* List key bindings.  If an argument is given, list just that one *
+  * binding, otherwise list the entire keymap.  If the -L option is *
+  * given, list in the form of bindkey commands.                    */
+@@ -913,6 +948,7 @@
+ 	    }
+ 	    bs.prefix = getkeystring(argv[0], &bs.prefixlen, 2, NULL);
+ 	    bs.prefix = metafy(bs.prefix, bs.prefixlen, META_HREALLOC);
++	    bs.prefixlen = strlen(bs.prefix);
+ 	} else {
+ 	    bs.prefix = NULL;
+ 	    bs.prefixlen = 0;
+@@ -1067,11 +1103,9 @@
+ 	/*
+ 	 * Sanity checking.  If the cursor key is zero-length (unlikely,
+ 	 * but this is termcap we're talking about), or it's a single
+-	 * character which is already bound, then we don't bind it.
++	 * character, then we don't bind it.
+ 	 */
+-	if (!buf[0] || (!buf[1] && km->first[STOUC(buf[0])] != t_undefinedkey))
+-	    ok = 0;
+-	else
++	if (buf[0] && buf[1] && (buf[0] != Meta || buf[2]))
+ 	    ok = 1;
+     }
+     if (!ok) {
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

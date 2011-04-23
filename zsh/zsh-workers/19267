@@ -1,0 +1,142 @@
+From zsh-workers-return-19267-mason-zsh=primenet.com.au@sunsite.dk Tue Nov 25 20:36:41 2003
+Return-Path: <zsh-workers-return-19267-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7399 invoked from network); 25 Nov 2003 20:36:41 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 25 Nov 2003 20:36:41 -0000
+Received: (qmail 9644 invoked by alias); 25 Nov 2003 20:36:29 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19267
+Received: (qmail 9591 invoked from network); 25 Nov 2003 20:36:28 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 25 Nov 2003 20:36:28 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [216.27.190.146] by sunsite.dk (MessageWall 1.0.8) with SMTP; 25 Nov 2003 20:36:28 -0000
+Received: from ceramic.fifi.org (mail@ceramic.fifi.org [216.27.190.147])
+	by tantale.fifi.org (8.9.3p2/8.9.3/Debian 8.9.3-21) with ESMTP id MAA32125
+	for <zsh-workers@sunsite.dk>; Tue, 25 Nov 2003 12:36:26 -0800
+Received: from phil by ceramic.fifi.org with local (Exim 4.22)
+	id 1AOjv6-0006F4-Qo
+	for zsh-workers@sunsite.dk; Tue, 25 Nov 2003 12:36:24 -0800
+To: zsh-workers@sunsite.dk
+Subject: Re: [PATCH] allows configure to run in the background
+References: <87fzgdcdi3.fsf@ceramic.fifi.org>
+Mail-Copies-To: nobody
+From: Philippe Troin <phil@fifi.org>
+Date: 25 Nov 2003 12:36:24 -0800
+In-Reply-To: <87fzgdcdi3.fsf@ceramic.fifi.org>
+Message-ID: <87he0srxrr.fsf@ceramic.fifi.org>
+Lines: 41
+User-Agent: Gnus/5.09 (Gnus v5.9.0) Emacs/21.2
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=-=-="
+Sender: Philippe Troin <phil@fifi.org>
+
+
+--=-=-=
+
+Philippe Troin <phil@fifi.org> writes:
+
+> The checking "if tcsetpgrp() actually works" configure test stops the
+> configure script if it is ran in the background. The enclose patch
+> prevents this from happening by ignoring SIGTTOU for the duration of
+> this test.
+
+This is a second spin on the same idea, following up on comments from
+Jens Petersen <petersen@redhat.com> in <m3d6bgq2tk.wl%petersen@redhat.com>.
+
+Extra stuff taken care of:
+
+ - works if stdin is redirected (opens /dev/tty instead of relying on stdin)
+
+ - detects if ran without controlling tty, and aborts
+
+Stuff taken care of with the first patch, included with this patch:
+
+ - does not stop if ran on the background.
+
+I think this patch will address all of Jens's concerns. There are
+still some quirks, but I believe they will only show up very
+infrequently:
+
+ - configure completely fails if ran without a controlling tty. Should
+   not be a major problem, processes running the background still have
+   a controlling tty. Running without a ctty only happens when running
+   from cron or some other batch facilities. Anybody doing that?
+
+ - there still is a tiny race window if the shell decides to switch
+   the foreground process between the tcgetpgrp() and tcsetpgrp()
+   calls.
+
+It is probably better to go this route rather than running this
+particular configure test on its own pty: this would add a lot of very
+platform specific cruft to the test itself, and configure is supposed
+to be robust.
+
+Phil.
+
+--=-=-=
+Content-Type: text/x-patch
+Content-Disposition: attachment; filename=zsh-bgconfigure-2.patch
+
+Index: zshconfig.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/zshconfig.ac,v
+retrieving revision 1.42
+diff -b -u -r1.42 zshconfig.ac
+--- zshconfig.ac	13 Nov 2003 14:34:34 -0000	1.42
++++ zshconfig.ac	25 Nov 2003 20:16:35 -0000
+@@ -1576,24 +1576,38 @@
+ dnl if found tcsetpgrp, test to see if it actually works
+ dnl for instance, BeOS R4.51 does not support it yet
+ dnl -----------
+-if test -t 0 && test $ac_cv_func_tcsetpgrp = yes; then
++if test $ac_cv_func_tcsetpgrp = yes; then
++    trap "" SIGTTOU > /dev/null 2>&1 || :
+     AC_CACHE_CHECK(if tcsetpgrp() actually works,
+     zsh_cv_sys_tcsetpgrp,
+     [AC_TRY_RUN([
+ #include <sys/types.h>
+ #include <unistd.h>
++#include <fcntl.h>
+ main() {
++    int fd;
+     int ret;
+-    ret=tcsetpgrp(0, tcgetpgrp(0));
+-    exit(ret<0);
++    fd=open("/dev/tty", O_RDWR);
++    if (fd < 0) exit(2);
++    ret=tcsetpgrp(fd, tcgetpgrp(fd));
++    if (ret < 0) exit(1);
++    exit(0);
+ }
+ ],
+-      zsh_cv_sys_tcsetpgrp=yes,
+-      zsh_cv_sys_tcsetpgrp=no,
+-      zsh_cv_sys_tcsetpgrp=yes)])
+-    if test $zsh_cv_sys_tcsetpgrp = no; then
+-      AC_DEFINE(BROKEN_TCSETPGRP)
+-    fi
++      zsh_cv_sys_tcsetpgrp=yes, [
++case $? in
++    1) zsh_cv_sys_tcsetpgrp=no;;
++    2) zsh_cv_sys_tcsetpgrp=notty;;
++    *) zsh_cv_sys_tcsetpgrp=error;;
++esac
++      ], zsh_cv_sys_tcsetpgrp=yes)])
++    case "x$zsh_cv_sys_tcsetpgrp" in
++      xno)    AC_DEFINE(BROKEN_TCSETPGRP);;
++      xyes)   :;;
++      xnotty) AC_ERROR([no controlling tty]);;
++      *)      AC_ERROR([unexpected return status]);;
++    esac
++    trap - SIGTTOU > /dev/null 2>&1 || :
+ fi
+ 
+ dnl -----------
+
+--=-=-=--
+

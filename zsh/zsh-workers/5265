@@ -1,0 +1,294 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Date: Fri, 5 Feb 1999 09:50:01 +0100 (MET)
+Message-Id: <199902050850.JAA19408@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Wed, 3 Feb 1999 17:28:18 +0100
+	(MET)
+Subject: Re: quote modifier for parameter expansion?
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5265
+
+
+I wrote:
+
+> But it's also useful if you stuff a string together in a parameter and 
+> later use the value of that parameter for globbing. With `:q' you can
+> prevent pattern characters in the original parameters from being
+> interpreted as a pattern.
+> 
+> That's what makes it useful in functions like pfiles(). Without the
+> patch below and using:
+> 
+>   zle -C my-comp complete-word main-complete
+> 
+> doing `foo *<TAB>' will give one all files as possible completions.
+
+Yesterday evening I realised that the patch for the `:q' modifier
+wasn't that useful in the form I sent it. The problem is that you
+might want to use ${foo#...} or somthing like this on the result but
+then the single quotes may become unbalanced and nasty things like
+that (in fact, the completion examples do this and hence the patch for
+the new-completion-examples-file breaks it).
+
+So we should either make :q use backslashes to quote the string or not 
+add it at all. The patch below uses the quotename() function from the
+completion code for this, moving it to utils.c and renaming it.
+Of course, this also makes it differ from the history modifier :q.
+
+As for (t)csh, the effect of $foo:q is to keep the result from being
+processed any further (namely globbing) which normally happens in
+those shells (so this is one quoting level further down).
+
+All this makes :q look less friendly for me (but it still may be
+useful).
+
+Bye
+ Sven
+
+diff -u os/subst.c Src/subst.c
+--- os/subst.c	Thu Feb  4 21:43:14 1999
++++ Src/subst.c	Thu Feb  4 21:35:54 1999
+@@ -1828,7 +1828,7 @@
+ 			    subst(&copy, hsubl, hsubr, gbal);
+ 			break;
+ 		    case 'q':
+-			quote(&copy);
++			copy = bslashquote(copy, NULL, NULL, NULL, 0);
+ 			break;
+ 		    }
+ 		    tc = *tt;
+@@ -1882,7 +1882,7 @@
+ 		    }
+ 		    break;
+ 		case 'q':
+-		    quote(str);
++		    *str = bslashquote(*str, NULL, NULL, NULL, 0);
+ 		    break;
+ 		}
+ 	    }
+diff -u os/utils.c Src/utils.c
+--- os/utils.c	Thu Feb  4 21:43:14 1999
++++ Src/utils.c	Thu Feb  4 21:39:05 1999
+@@ -3109,6 +3109,73 @@
+     return 0;
+ }
+ 
++/* Quote the string s and return the result.  If e is non-zero, the         *
++ * pointer it points to may point to a position in s and in e the position  *
++ * of the corresponding character in the quoted string is returned.  Like   *
++ * e, te may point to a position in the string and pl is used to return     *
++ * the position of the character pointed to by te in the quoted string.     *
++ * The last argument should be zero if this is to be used outside a string, *
++ * one if it is to be quoted for the inside of a single quoted string, and  *
++ * two if it is for the inside of  double quoted string.                    *
++ * The string may be metafied and contain tokens.                           */
++
++/**/
++char *
++bslashquote(const char *s, char **e, char *te, int *pl, int instring)
++{
++    const char *u, *tt;
++    char *v, buf[PATH_MAX * 2];
++    int sf = 0;
++
++    tt = v = buf;
++    u = s;
++    for (; *u; u++) {
++	if (e && *e == u)
++	    *e = v, sf |= 1;
++	if (te == u)
++	    *pl = v - tt, sf |= 2;
++	if (ispecial(*u) &&
++	    (!instring || (isset(BANGHIST) &&
++			   *u == (char)bangchar) ||
++	     (instring == 2 &&
++	      (*u == '$' || *u == '`' || *u == '\"')) ||
++	     (instring == 1 && *u == '\''))) {
++	    if (*u == '\n' || (instring == 1 && *u == '\'')) {
++		if (unset(RCQUOTES)) {
++		    *v++ = '\'';
++		    if (*u == '\'')
++			*v++ = '\\';
++		    *v++ = *u;
++		    *v++ = '\'';
++		} else if (*u == '\n')
++		    *v++ = '"', *v++ = '\n', *v++ = '"';
++		else
++		    *v++ = '\'', *v++ = '\'';
++		continue;
++	    } else
++		*v++ = '\\';
++	}
++	if(*u == Meta)
++	    *v++ = *u++;
++	*v++ = *u;
++    }
++    *v = '\0';
++    if (strcmp(buf, s))
++	tt = dupstring(buf);
++    else
++	tt = s;
++    v += tt - buf;
++    if (e && (sf & 1))
++	*e += tt - buf;
++
++    if (e && *e == u)
++	*e = v;
++    if (te == u)
++	*pl = v - tt;
++
++    return (char *) tt;
++}
++
+ /* Unmetafy and output a string, quoted if it contains special characters. */
+ 
+ /**/
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Thu Feb  4 19:56:49 1999
++++ Src/Zle/comp1.c	Thu Feb  4 21:45:24 1999
+@@ -104,14 +105,8 @@
+      *compsuffix,
+      *compiprefix;
+ 
+-/* This variable and the functions rembslash() and quotename() came from     *
+- * zle_tricky.c, but are now used in compctl.c, too.                         */
+-
+-/* 1 if we are completing in a string */
+-
+-/**/
+-int instring;
+-
++/* The function rembslash() came from zle_tricky.c, but is now used *
++ * in compctl.c, too.                                               */
+ 
+ /**/
+ static void
+@@ -393,70 +388,6 @@
+ 	    s++;
+ 
+     return t;
+-}
+-
+-/* Quote the string s and return the result.  If e is non-zero, the        *
+- * pointer it points to may point to a position in s and in e the position *
+- * of the corresponding character in the quoted string is returned.  Like  *
+- * e, te may point to a position in the string and pl is used to return    *
+- * the position of the character pointed to by te in the quoted string.    *
+- * The string is metafied and may contain tokens.                          */
+-
+-/**/
+-char *
+-quotename(const char *s, char **e, char *te, int *pl)
+-{
+-    const char *u, *tt;
+-    char *v, buf[PATH_MAX * 2];
+-    int sf = 0;
+-
+-    tt = v = buf;
+-    u = s;
+-    for (; *u; u++) {
+-	if (e && *e == u)
+-	    *e = v, sf |= 1;
+-	if (te == u)
+-	    *pl = v - tt, sf |= 2;
+-	if (ispecial(*u) &&
+-	    (!instring || (isset(BANGHIST) &&
+-			   *u == (char)bangchar) ||
+-	     (instring == 2 &&
+-	      (*u == '$' || *u == '`' || *u == '\"')) ||
+-	     (instring == 1 && *u == '\''))) {
+-	    if (*u == '\n' || (instring == 1 && *u == '\'')) {
+-		if (unset(RCQUOTES)) {
+-		    *v++ = '\'';
+-		    if (*u == '\'')
+-			*v++ = '\\';
+-		    *v++ = *u;
+-		    *v++ = '\'';
+-		} else if (*u == '\n')
+-		    *v++ = '"', *v++ = '\n', *v++ = '"';
+-		else
+-		    *v++ = '\'', *v++ = '\'';
+-		continue;
+-	    } else
+-		*v++ = '\\';
+-	}
+-	if(*u == Meta)
+-	    *v++ = *u++;
+-	*v++ = *u;
+-    }
+-    *v = '\0';
+-    if (strcmp(buf, s))
+-	tt = dupstring(buf);
+-    else
+-	tt = s;
+-    v += tt - buf;
+-    if (e && (sf & 1))
+-	*e += tt - buf;
+-
+-    if (e && *e == u)
+-	*e = v;
+-    if (te == u)
+-	*pl = v - tt;
+-
+-    return (char *) tt;
+ }
+ 
+ /**/
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Thu Feb  4 19:56:49 1999
++++ Src/Zle/compctl.c	Thu Feb  4 21:41:18 1999
+@@ -1385,7 +1385,7 @@
+ 	    untokenize(p);
+ 	    quotedzputs(p, stdout);
+ 	} else
+-	    quotedzputs(quotename(s, NULL, NULL, NULL), stdout);
++	    quotedzputs(bslashquote(s, NULL, NULL, NULL, 0), stdout);
+     }
+ 
+     /* loop through flags w/o args that are set, printing them if so */
+@@ -1515,7 +1515,7 @@
+ 		char *p = dupstring(s);
+ 
+ 		untokenize(p);
+-		quotedzputs(quotename(p, NULL, NULL, NULL), stdout);
++		quotedzputs(bslashquote(p, NULL, NULL, NULL, 0), stdout);
+ 	    }
+ 	}
+ 	putchar('\n');
+@@ -1547,8 +1547,6 @@
+     cclist = 0;
+     showmask = 0;
+ 
+-    instring = 0;
+-
+     /* Parse all the arguments */
+     if (*argv) {
+ 	/* Let's see if this is a global matcher definition. */
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Thu Feb  4 20:08:12 1999
++++ Src/Zle/zle_tricky.c	Thu Feb  4 21:40:47 1999
+@@ -487,6 +487,16 @@
+ 
+ static int insubscr;
+ 
++/* 1 if we are completing in a string */
++
++/**/
++int instring;
++
++/* Convenience macro for calling bslashquote() (formerly quotename()). *
++ * This uses the instring variable above.                              */
++
++#define quotename(s, e, te, pl) bslashquote(s, e, te, pl, instring)
++
+ /* Check if the given string is the name of a parameter and if this *
+  * parameter is one worth expanding.                                */
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

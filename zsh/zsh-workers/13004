@@ -1,0 +1,402 @@
+From zsh-workers-return-13004-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Oct 17 12:48:09 2000
+Return-Path: <zsh-workers-return-13004-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24102 invoked from network); 17 Oct 2000 12:48:07 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 Oct 2000 12:48:07 -0000
+Received: (qmail 5062 invoked by alias); 17 Oct 2000 12:39:20 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13004
+Received: (qmail 4171 invoked from network); 17 Oct 2000 12:30:31 -0000
+Date: Mon, 16 Oct 2000 10:05:17 +0200 (MET DST)
+Message-Id: <200010160805.KAA04037@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 16 Oct 2000 05:01:37 +0000
+Subject: Re: still confused about completion and matching
+
+
+I've build the patch below over the weekend which should allow one to
+come much nearer to what Jay wants. I won't commit it yet because I
+haven't tested it that much (having felt slightly sick over the
+weekend, too).
+
+There is one unconditional change, namely that the code in _path_files 
+should now be able to deal with multiple components containing
+patterns. Well, it should be able to deal with them better than
+before. Completing ** doesn't work, though (see below).
+
+Other, conditional, changes: _path_files uses a new style,
+list-suffixes. If it is set to true, the completion listing will
+contain the sub-paths from the first ambiguous component to the ends.
+And another change: the list-ambiguous style, when used by _match, may 
+also be set to `pattern'. In this case it will keep the pattern on the 
+line unchanged if there are multiple matches. Entering menu completion 
+via automenu behaviour should work, though (which hopefully gives an
+acceptable mixture, because never being able to have the pattern
+replaced if one never reaches something unambiguous...).
+
+So, if Jay or anyone else wants to test it, I suggest to use something 
+like:
+
+    zstyle ':completion:*' completer _complete _match
+    zstyle ':completion:*:paths' expand prefix suffix
+    zstyle ':completion:*:paths' list-suffixes yes
+    zstyle ':completion:*:match:*' insert-unambiguous pattern
+
+Setting `expand' to contain `suffix' (with or without `prefix') may be 
+crucial for the behaviour Jay wants.
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> It appears that _path_files isn't entirely prepared to deal with ** in
+> the input string.  The code after line 411 ("Step over to the next
+> component, if any") lops the ** out of the pattern, thus reducing the 
+> set of paths that are considered from ( u1/q1 u2/q1 u3/q1 u4/q ) to
+> just ( u4/q/a1 u4/q/a2 ).  So as things now stand:
+> 
+> 	zsh -f
+> 	% zstyle ':completion:*' completer _complete _match
+> 	% autoload -U compinit; compinit -D
+> 	% ls u?/**/a<C-D>
+> 	u4/
+> 
+> Only `u4' is listed, even though `u1' and `u2' also contain matches of
+> the recursive pattern.  This means that even if you could get _path_files
+> to insert more than just the ambiguous prefix, you still won't see all
+> four of the possible completions you desire.
+
+That's right. And having thought about it some more and played with
+it... I think this is really an expansion thing, isn't it?
+
+Or maybe it isn't, but it would require lots of changes and might be
+terribly slow. Hm.
+
+> On Oct 13,  1:03pm, Sven Wischnowsky wrote:
+> > 
+> > [...] the path-prefixes and -suffixes [...]
+> > are still matched `normally'. And it has to be this way because the
+> > completion code (the C-code) has to be able to build a common string
+> > for them which it can if they differ only as far as match specs allow, 
+> > but it can't do that for arbitrary strings matched by a pattern.
+> 
+> It seems to me that _path_files (or perhaps even the C code) could employ
+> an algorithm similar to that cooked up by PWS for "zmv -w", to identify
+> glob patterns in the string from the command line and implicitly put them
+> in parens where necessary so that "match references" (there's another
+> overloading of "match") are generated, then used to identify "equivalent"
+> substrings in each of the potential matches.
+
+Hm, hadn't thought of that. Weaving that into the existing code might
+be hard (but I haven't really thought about it yet).
+
+> > That leaves only the possibility to move the suffixes into the words
+> > given to compadd. This would be done in lines 488-510 in _path_files.
+> > That together with using a non-empty value for compstate[pattern_match]
+> > should bring you nearer to what you want. But note that this won't be
+> > added to _path_files if it is done unconditionally. Seeing only the
+> > ambiguous component is much clearer for most cases.
+> 
+> I mostly agree; however, with ** involved, there may be more than one
+> consecutive ambiguous path component.  This leads to confusing behavior
+> in which it's not clear without actually entering menu-completion exactly
+> where in the command line the listed completions would be inserted.  (The
+> `ambiguous' style notwithstanding.)
+
+... if we once get completion on ** to work. But the list-suffixes
+style in the patch would already help, I think.
+
+Bye
+ Sven
+
+diff -u -r ../oz/Completion/Builtins/_zstyle ./Completion/Builtins/_zstyle
+--- ../oz/Completion/Builtins/_zstyle	Fri Oct 13 19:41:11 2000
++++ ./Completion/Builtins/_zstyle	Sun Oct 15 20:52:39 2000
+@@ -44,7 +44,7 @@
+   ignored-patterns	 c:
+   insert-ids             c:insert-ids
+   insert-tab             c:bool
+-  insert-unambiguous	 c:bool
++  insert-unambiguous	 c:insunambig
+   keep-prefix		 c:keep-prefix
+   last-prompt		 c:bool
+   list			 c:listwhen
+@@ -52,6 +52,7 @@
+   list-packed		 c:bool
+   list-prompt            c:
+   list-rows-first	 c:bool
++  list-suffixes		 c:bool
+   local			 c:
+   match-original	 c:match-orig
+   matcher		 c:
+@@ -290,6 +291,10 @@
+ 
+     oldmatches) 
+       _wanted values expl 'use list of old matches' compadd true false only
++      ;;
++
++    insunambig) 
++      _wanted values expl 'insert unambiguous string compadd true false pattern
+       ;;
+ 
+     urgh) 
+diff -u -r ../oz/Completion/Core/_match ./Completion/Core/_match
+--- ../oz/Completion/Core/_match	Fri Oct 13 19:41:11 2000
++++ ./Completion/Core/_match	Sun Oct 15 20:44:10 2000
+@@ -11,41 +11,51 @@
+ 
+ ### Shouldn't be needed any more: [[ _matcher_num -gt 1 ]] && return 1
+ 
+-local tmp opm="$compstate[pattern_match]" ret=0 orig ins
++local tmp opm="$compstate[pattern_match]" ret=1 orig ins
++local oms="$_old_match_string"
+ 
+ # Do nothing if we don't have a pattern.
+ 
+ tmp="${${:-$PREFIX$SUFFIX}#[~=]}"
+ [[ "$tmp:q" = "$tmp" ]] && return 1
+ 
++_old_match_string="$PREFIX$SUFFIX"
++
+ zstyle -s ":completion:${curcontext}:" match-original orig
+-zstyle -b ":completion:${curcontext}:" insert-unambiguous ins
++zstyle -s ":completion:${curcontext}:" insert-unambiguous ins
+ 
+ # Try completion without inserting a `*'?
+ 
+ if [[ -n "$orig" ]]; then
+   compstate[pattern_match]='-'
+-  _complete && ret=1
++  _complete && ret=0
+   compstate[pattern_match]="$opm"
+ 
+-  if (( ret )); then
+-    [[ "$ins" = yes &&
+-       $#compstate[unambiguous] -ge ${#:-${PREFIX}${SUFFIX}} ]] && 
+-        compstate[pattern_insert]=unambiguous
+-    return 0
+-  fi
++  # No completion with inserting `*'?
++
++  [[ ret -eq 1 && "$orig" = only ]] && return 1
+ fi
+ 
+-# No completion with inserting `*'?
++if (( ret )); then
++  compstate[pattern_match]='*'
++  _complete && ret=0
++  compstate[pattern_match]="$opm"
++fi
+ 
+-[[ "$orig" = only ]] && return 1
++if (( ! ret )); then
+ 
+-compstate[pattern_match]='*'
+-_complete && ret=1
+-compstate[pattern_match]="$opm"
++  [[ "$ins" = (true|yes|on|1) &&
++     $#compstate[unambiguous] -ge ${#:-${PREFIX}${SUFFIX}} ]] && 
++      compstate[pattern_insert]=unambiguous
++
++  if [[ "$ins" = pattern && $compstate[nmatches] -gt 1 ]]; then
++    [[ "$oms" = "$PREFIX$SUFFIX" &&
++       "$compstate[insert]" = automenu-unambiguous ]] &&
++        compstate[insert]=automenu
++    [[ "$compstate[insert]" != *menu ]] &&
++        compstate[pattern_insert]= compstate[insert]=
++  fi
+ 
+-[[ ret -eq 1 && "$ins" = yes &&
+-   $#compstate[unambiguous] -ge ${#:-${PREFIX}${SUFFIX}} ]] && 
+-    compstate[pattern_insert]=unambiguous
++fi
+ 
+-return 1-ret
++return ret
+diff -u -r ../oz/Completion/Core/_path_files ./Completion/Core/_path_files
+--- ../oz/Completion/Core/_path_files	Fri Oct 13 19:41:11 2000
++++ ./Completion/Core/_path_files	Sun Oct 15 20:18:58 2000
+@@ -5,7 +5,7 @@
+ 
+ local linepath realpath donepath prepath testpath exppath skips skipped
+ local tmp1 tmp2 tmp3 tmp4 i orig eorig pre suf tpre tsuf opre osuf cpre
+-local pats haspats ignore pfxsfx sopt gopt opt sdirs ignpar cfopt
++local pats haspats ignore pfxsfx sopt gopt opt sdirs ignpar cfopt listsfx
+ local nm=$compstate[nmatches] menu matcher mopts sort match mid accex fake
+ 
+ typeset -U prepaths exppaths
+@@ -137,6 +137,8 @@
+ fi
+ 
+ zstyle -s ":completion:${curcontext}:paths" special-dirs sdirs
++zstyle -t ":completion:${curcontext}:paths" list-suffixes &&
++    listsfx=yes
+ 
+ [[ "$pats" = ((|*[[:blank:]])\*(|[[:blank:]]*)|*\([^[:blank:]]#/[^[:blank:]]#\)*) ]] &&
+     sopt=$sopt/
+@@ -460,9 +462,11 @@
+       SUFFIX="${tsuf}"
+     fi
+ 
+-    if (( tmp4 )) ||
+-       [[ -n "$compstate[pattern_match]" &&
+-          "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]; then
++    # This once tested `|| [[ -n "$compstate[pattern_match]" &&
++    # "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]' but it should now be smart
++    # enough to handle multiple components with patterns.
++
++    if (( tmp4 )); then
+       # It is. For menucompletion we now add the possible completions
+       # for this component with the unambigous prefix we have built
+       # and the rest of the string from the line as the suffix.
+@@ -480,15 +484,30 @@
+         compquote tmp1 tmp2
+       fi
+ 
++if [[ "$compstate[pattern_match]" = \*  && -n "$listsfx" ]]; then
++PREFIX="$opre"
++SUFFIX="$osuf"
++fi
++
+       if [[ -n $menu || -z "$compstate[insert]" ]] ||
+-         ! zstyle -t ":completion:${curcontext}:paths" expand suffix; then
++         ! zstyle -t ":completion:${curcontext}:paths" expand suffix ||
++           [[ -z "$listsfx" &&
++              ( -z "$compstate[pattern_match]" || "$SUFFIX" != */* ||
++                "${SUFFIX#*/}" = (|*[^\\])[][*?#~^\|\<\>]* ) ]]; then
+         (( tmp4 )) && zstyle -t ":completion:${curcontext}:paths" ambiguous &&
+             compstate[to_end]=
+         if [[ "$tmp3" = */* ]]; then
+-	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" -s "/${tmp3#*/}" \
+-	          -W "$prepath$realpath$testpath" \
+-		  "$pfxsfx[@]" -M "r:|/=* r:|=*" \
+-		  - "${(@)tmp1%%/*}"
++	  if [[ -z "$listsfx" ]]; then
++	    compadd -Qf "$mopts[@]" -p "$linepath$tmp2" -s "/${tmp3#*/}" \
++	            -W "$prepath$realpath$testpath" \
++		    "$pfxsfx[@]" -M "r:|/=* r:|=*" \
++		    - "${(@)tmp1%%/*}"
++          else
++	    compadd -Qf "$mopts[@]" -p "$linepath$tmp2" \
++	            -W "$prepath$realpath$testpath" \
++		    "$pfxsfx[@]" -M "r:|/=* r:|=*" \
++		    - "${(@)^tmp1%%/*}/${tmp3#*/}"
++          fi
+ 	else
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" \
+ 	          -W "$prepath$realpath$testpath" \
+@@ -500,9 +519,15 @@
+ 	  tmp3=( -Qf "$mopts[@]" -p "$linepath$tmp2"
+ 	         -W "$prepath$realpath$testpath"
+ 	         "$pfxsfx[@]" -M "r:|/=* r:|=*" )
+-          for i in "$tmp1[@]"; do
+-	    compadd "$tmp3[@]" -s "/${i#*/}" - "${i%%/*}"
+-	  done
++	  if [[ -z "$listsfx" ]]; then
++            for i in "$tmp1[@]"; do
++	      compadd "$tmp3[@]" -s "/${i#*/}" - "${i%%/*}"
++	    done
++          else
++            for i in "$tmp1[@]"; do
++	      compadd "$tmp3[@]" - "$i"
++	    done
++          fi
+         else
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" \
+                   -W "$prepath$realpath$testpath" \
+@@ -526,22 +551,33 @@
+     # take it from the filenames.
+ 
+     testpath="${testpath}${tmp1[1]%%/*}/"
+-    tmp1=( "${(@)tmp1#*/}" )
+ 
+     tmp3="${tmp3#*/}"
+ 
+     if [[ "$tpre" = */* ]]; then
+-      cpre="${cpre}${tpre%%/*}/"
++      if [[ -n "$compstate[pattern_match]" &&
++            "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]; then
++        cpre="${cpre}${tmp1[1]%%/*}/"
++      else
++        cpre="${cpre}${tpre%%/*}/"
++      fi
+       tpre="${tpre#*/}"
+     elif [[ "$tsuf" = */* ]]; then
+       [[ "$tsuf" != /* ]] && mid="$testpath"
+-      cpre="${cpre}${tpre}/"
++      if [[ -n "$compstate[pattern_match]" &&
++            "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]; then
++        cpre="${cpre}${tmp1[1]%%/*}/"
++      else
++        cpre="${cpre}${tpre}/"
++      fi
+       tpre="${tsuf#*/}"
+       tsuf=
+     else
+       tpre=
+       tsuf=
+     fi
++
++    tmp1=( "${(@)tmp1#*/}" )
+   done
+ 
+   if [[ -z "$tmp4" ]]; then
+diff -u -r ../oz/Doc/Zsh/compsys.yo ./Doc/Zsh/compsys.yo
+--- ../oz/Doc/Zsh/compsys.yo	Fri Oct 13 19:41:04 2000
++++ ./Doc/Zsh/compsys.yo	Sun Oct 15 21:23:34 2000
+@@ -1367,6 +1367,11 @@
+ in the context name to one of tt(correct-)var(num) or
+ tt(approximate-)var(num), where var(num) is the number of errors that
+ were accepted.
++
++When used for the tt(_match) completer, the style may also be set to
++the string `tt(pattern)'.  This makes the pattern on the line be left
++unchanged if there are multiple matches, so that it is only replaced
++when completion is unambiguous.
+ )
+ kindex(keep-prefix, completion style)
+ item(tt(keep-prefix))(
+@@ -1466,6 +1471,14 @@
+ determines if matches are to be listed in a rows-first fashion, as for the
+ tt(LIST_ROWS_FIRST) option.
+ )
++kindex(list-suffixes, completion style)
++item(tt(list-suffixes))(
++This style is used by the function used to complete filenames.  If
++completion is attempted on a string containing multiple partially
++typed pathname components and this style is set to `true', all
++components starting with the first one for which more than one match
++could be generated will be shown.
++)
+ kindex(local, completion style)
+ item(tt(local))(
+ This style is used by completion functions which generate URLs as
+@@ -2416,6 +2429,9 @@
+ tt(insert-unambiguous) style is set to `true'.  In
+ this case menu completion will only be started if no unambiguous string
+ could be generated that is at least as long as the original string.
++The style may also be set to the string `tt(pattern)'.  This will keep 
++the pattern on the line intact as long as there isn't an unambiguous
++completion with which it could be replaced.
+ 
+ Note that the matcher specifications defined globally or used by the
+ completion functions will not be used.
+@@ -3474,7 +3490,7 @@
+ `tt(-r)', and `tt(-R)' options from the tt(compadd) builtin.
+ 
+ Finally, the tt(_path_files) function  uses the styles tt(expand),
+-tt(ambiguous) and tt(special-dirs) and tt(file-sort).
++tt(ambiguous), tt(special-dirs), tt(list-suffixes) and tt(file-sort).
+ )
+ findex(_regex_arguments)
+ item(tt(_regex_arguments) var(name) var(specs) ...)(
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

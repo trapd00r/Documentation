@@ -1,0 +1,441 @@
+From zsh-workers-return-8319-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Oct 18 09:53:48 1999
+Return-Path: <zsh-workers-return-8319-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8723 invoked from network); 18 Oct 1999 09:53:47 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Oct 1999 09:53:47 -0000
+Received: (qmail 27230 invoked by alias); 18 Oct 1999 09:53:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8319
+Received: (qmail 27222 invoked from network); 18 Oct 1999 09:53:38 -0000
+Date: Mon, 18 Oct 1999 11:53:06 +0200 (MET DST)
+Message-Id: <199910180953.LAA27457@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Fri, 15 Oct 1999 08:13:08 +0200
+	(MET DST)
+Subject: Re: PATCH: Re: Associative array ordering and selective unset (Re: Example function)
+
+
+I wrote:
+
+> Anyway, this reminds me that we still haven't tried to store
+> pre-compiled patterns in the execution trees for `case' and
+> `[[ .. = ..]]'...
+
+This does that. The patterns are only compiled on demand and the
+testing is quite simple, so even in the used-only-once-in-an-init-
+script-case it shouldn't make things slower.
+
+I have only done a bit of testing and measuring. It was a bit faster,
+but don't expect miracles. Also, this was done in a debugging-compiled 
+version, not an optimised one, I don't know how big the difference is
+there (and of course it depends on the lengths and complexity of the
+patterns and of the number of executions and what not...).
+
+Bye
+ Sven
+
+diff -u -r oldsrc/cond.c Src/cond.c
+--- oldsrc/cond.c	Mon Oct 18 11:17:08 1999
++++ Src/cond.c	Mon Oct 18 11:45:08 1999
+@@ -107,16 +107,15 @@
+     left = dupstring((char *) c->left);
+     singsub(&left);
+     untokenize(left);
+-    if (c->right) {
++    if (c->right && c->type != COND_STREQ && c->type != COND_STRNEQ) {
+ 	right = dupstring((char *) c->right);
+ 	singsub(&right);
+-	if (c->type != COND_STREQ && c->type != COND_STRNEQ)
+-	    untokenize(right);
++	untokenize(right);
+     }
+ 
+     if (tracingcond) {
+ 	if (c->type < COND_MOD) {
+-	    char *rt = (char *)right;
++	    char *rt = (char *) right;
+ 	    if (c->type == COND_STREQ || c->type == COND_STRNEQ) {
+ 		rt = dupstring(rt);
+ 		untokenize(rt);
+@@ -168,9 +167,29 @@
+ 
+     switch (c->type) {
+     case COND_STREQ:
+-	return matchpat(left, right);
+     case COND_STRNEQ:
+-	return !matchpat(left, right);
++	{
++	    Patprog pprog = c->prog;
++	    int test;
++
++	    if (pprog == dummy_patprog1 || pprog == dummy_patprog2) {
++		char *opat;
++		int save;
++
++		right = opat = dupstring((char *) c->right);
++		singsub(&right);
++		save = (!strcmp(opat, right) && pprog != dummy_patprog2);
++
++		if (!(pprog = patcompile(right, (save ? PAT_ZDUP : PAT_STATIC),
++					 NULL)))
++		    zerr("bad pattern: %s", right, 0);
++		else if (save)
++		    c->prog = pprog;
++	    }		
++	    test = (pprog && pattry(pprog, left));
++
++	    return (c->type == COND_STREQ ? test : !test);
++	}
+     case COND_STRLT:
+ 	return strcmp(left, right) < 0;
+     case COND_STRGTR:
+diff -u -r oldsrc/loop.c Src/loop.c
+--- oldsrc/loop.c	Mon Oct 18 11:17:09 1999
++++ Src/loop.c	Mon Oct 18 11:45:09 1999
+@@ -422,10 +422,13 @@
+     char *word;
+     List *l;
+     char **p;
++    Patprog *pp, pprog;
++    int save;
+ 
+     node = cmd->u.casecmd;
+     l = node->lists;
+     p = node->pats;
++    pp = node->progs;
+ 
+     word = dupstring(*p++);
+     singsub(&word);
+@@ -435,22 +438,47 @@
+     if (node) {
+ 	cmdpush(CS_CASE);
+ 	while (*p) {
+-	    char *pat = dupstring(*p + 1);
+-	    singsub(&pat);
++	    char *pat = NULL, *opat;
++
++	    pprog = NULL;
++	    save = 0;
++
+ 	    if (isset(XTRACE)) {
+-		char *pat2 = dupstring(pat);
++		char *pat2;
++
++		opat = pat = dupstring(*p + 1);
++		singsub(&pat);
++		save = (!strcmp(pat, opat) && *pp != dummy_patprog2);
++
++		pat2 = dupstring(pat);
+ 		untokenize(pat2);
+ 		printprompt4();
+ 		fprintf(stderr, "case %s (%s)\n", word, pat2);
+ 		fflush(stderr);
+ 	    }
+-	    if (matchpat(word, pat)) {
++	    if (*pp != dummy_patprog1 && *pp != dummy_patprog2)
++		pprog = *pp;
++
++	    if (!pprog) {
++		if (!pat) {
++		    opat = pat = dupstring(*p + 1);
++		    singsub(&pat);
++		    save = (!strcmp(pat, opat) && *pp != dummy_patprog2);
++		}
++		if (!(pprog = patcompile(pat, (save ? PAT_ZDUP : PAT_STATIC),
++				      NULL)))
++		    zerr("bad pattern: %s", pat, 0);
++		else if (save)
++		    *pp = pprog;
++	    }
++	    if (pprog && pattry(pprog, word)) {
+ 		do {
+ 		    execlist(*l++, 1, **p == ';' && (flags & CFLAG_EXEC));
+ 		} while(**p++ == '&' && *p);
+ 		break;
+ 	    }
+ 	    p++;
++	    pp++;
+ 	    l++;
+ 	}
+ 	cmdpop();
+diff -u -r oldsrc/parse.c Src/parse.c
+--- oldsrc/parse.c	Mon Oct 18 11:17:10 1999
++++ Src/parse.c	Mon Oct 18 11:45:09 1999
+@@ -539,6 +539,7 @@
+     LinkList pats, lists;
+     int n = 1;
+     char **pp;
++    Patprog *ppp;
+     List *ll;
+     LinkNode no;
+     struct casecmd *cc;
+@@ -659,11 +660,17 @@
+     incmdpos = 1;
+     yylex();
+ 
+-    cc->pats = (char **)alloc((n + 1) * sizeof(char *));
++    cc->pats = (char **) alloc((n + 1) * sizeof(char *));
++    cc->progs = (Patprog *) alloc((n + 1) * sizeof(Patprog));
+ 
+-    for (pp = cc->pats, no = firstnode(pats); no; incnode(no))
++    for (pp = cc->pats, ppp = cc->progs, no = firstnode(pats);
++	 no; incnode(no)) {
+ 	*pp++ = (char *)getdata(no);
++	*ppp++ = dummy_patprog1;
++    }
+     *pp = NULL;
++    *ppp = NULL;
++
+     cc->lists = (List *) alloc((n + 1) * sizeof(List));
+     for (ll = cc->lists, no = firstnode(lists); no; incnode(no), ll++)
+ 	if (!(*ll = (List) getdata(no)))
+@@ -1438,18 +1445,21 @@
+     Cond n = (Cond) make_cond();
+     int t0;
+ 
+-    n->ntype = NT_SET(N_COND, NT_STR, NT_STR, 0, 0);
+     n->left = (void *) a;
+     n->right = (void *) c;
++    n->prog = dummy_patprog1;
+     if ((b[0] == Equals || b[0] == '=') &&
+-	(!b[1] || ((b[1] == Equals || b[1] == '=') && !b[2])))
++	(!b[1] || ((b[1] == Equals || b[1] == '=') && !b[2]))) {
++	n->ntype = NT_SET(N_COND, NT_STR, NT_STR, NT_PAT, 0);
+ 	n->type = COND_STREQ;
+-    else if (b[0] == '!' && (b[1] == Equals || b[1] == '=') && !b[2])
++    } else if (b[0] == '!' && (b[1] == Equals || b[1] == '=') && !b[2]) {
++	n->ntype = NT_SET(N_COND, NT_STR, NT_STR, NT_PAT, 0);
+ 	n->type = COND_STRNEQ;
+-    else if (b[0] == '-') {
+-	if ((t0 = get_cond_num(b + 1)) > -1)
++    } else if (b[0] == '-') {
++	if ((t0 = get_cond_num(b + 1)) > -1) {
++	    n->ntype = NT_SET(N_COND, NT_STR, NT_STR, 0, 0);
+ 	    n->type = t0 + COND_NT;
+-	else {
++	} else {
+ 	    char *d[3];
+ 
+ 	    n->ntype = NT_SET(N_COND, NT_STR, NT_STR | NT_ARR, 0, 0);
+diff -u -r oldsrc/pattern.c Src/pattern.c
+--- oldsrc/pattern.c	Mon Oct 18 11:17:10 1999
++++ Src/pattern.c	Mon Oct 18 11:45:09 1999
+@@ -427,8 +427,13 @@
+      * The pattern was compiled in a fixed buffer:  unless told otherwise,
+      * we stick the compiled pattern on the heap.  This is necessary
+      * for files where we will often be compiling multiple segments at once.
++     * But if we get the ZDUP flag w always put it in zalloc()ed memory.
+      */
+-    if (!(patflags & PAT_STATIC)) {
++    if (patflags & PAT_ZDUP) {
++	Patprog newp = (Patprog)zalloc(patsize);
++	memcpy((char *)newp, (char *)p, patsize);
++	p = newp;
++    } else if (!(patflags & PAT_STATIC)) {
+ 	Patprog newp = (Patprog)zhalloc(patsize);
+ 	memcpy((char *)newp, (char *)p, patsize);
+ 	p = newp;
+@@ -2186,6 +2191,32 @@
+ 
+     patinput = scan;
+     return count;
++}
++
++/* Duplicate a patprog. */
++
++/**/
++Patprog
++duppatprog(Patprog prog)
++{
++    if (prog && prog != dummy_patprog1 && prog != dummy_patprog2) {
++	Patprog ret = (Patprog) alloc(prog->size);
++
++	memcpy(ret, prog, prog->size);
++
++	return ret;
++    }
++    return prog;
++}
++
++/* Free a patprog. */
++
++/**/
++void
++freepatprog(Patprog prog)
++{
++    if (prog && prog != dummy_patprog1 && prog != dummy_patprog2)
++	zfree(prog, prog->size);
+ }
+ 
+ /**/
+diff -u -r oldsrc/utils.c Src/utils.c
+--- oldsrc/utils.c	Mon Oct 18 11:17:11 1999
++++ Src/utils.c	Mon Oct 18 11:45:10 1999
+@@ -1933,9 +1933,9 @@
+     NT_SET(N_PLINE, NT_NODE, NT_NODE, 0, 0),
+     NT_SET(N_CMD, NT_NODE, NT_STR | NT_LIST, NT_NODE | NT_LIST, NT_NODE | NT_LIST),
+     NT_SET(N_REDIR, NT_STR, 0, 0, 0),
+-    NT_SET(N_COND, NT_NODE, NT_NODE, 0, 0),
++    NT_SET(N_COND, NT_NODE, NT_NODE, NT_PAT, 0),
+     NT_SET(N_FOR, NT_STR, NT_STR, NT_STR, NT_NODE),
+-    NT_SET(N_CASE, NT_STR | NT_ARR, NT_NODE | NT_ARR, 0, 0),
++    NT_SET(N_CASE, NT_STR | NT_ARR, NT_PAT | NT_ARR, NT_NODE | NT_ARR, 0),
+     NT_SET(N_IF, NT_NODE | NT_ARR, NT_NODE | NT_ARR, 0, 0),
+     NT_SET(N_WHILE, NT_NODE, NT_NODE, 0, 0),
+     NT_SET(N_VARASG, NT_STR, NT_STR, NT_STR | NT_LIST, 0),
+@@ -1983,18 +1983,27 @@
+ 	    case NT_STR:
+ 		n = dupstring(on);
+ 		break;
++	    case NT_PAT:
++		n = duppatprog(on);
++		break;
+ 	    case NT_LIST | NT_NODE:
+ 		n = duplist(on, (VFunc) dupstruct);
+ 		break;
+ 	    case NT_LIST | NT_STR:
+ 		n = duplist(on, (VFunc) (useheap ? dupstring : ztrdup));
+ 		break;
++	    case NT_LIST | NT_PAT:
++		n = duplist(on, (VFunc) duppatprog);
++		break;
+ 	    case NT_NODE | NT_ARR:
+ 		n = duparray(on, (VFunc) dupstruct);
+ 		break;
+ 	    case NT_STR | NT_ARR:
+ 		n = duparray(on, (VFunc) (useheap ? dupstring : ztrdup));
+ 		break;
++	    case NT_PAT | NT_ARR:
++		n = duparray(on, (VFunc) duppatprog);
++		break;
+ 	    default:
+ 		DPUTS(1, "BUG: bad node type in dupstruct()");
+ 		abort();
+@@ -2055,32 +2064,49 @@
+ 	    case NT_STR:
+ 		zsfree((char *) n);
+ 		break;
++	    case NT_PAT:
++		freepatprog((Patprog) n);
++		break;
+ 	    case NT_LIST | NT_NODE:
+ 		freelinklist((LinkList) n, (FreeFunc) freestruct);
+ 		break;
+-	    case NT_NODE | NT_ARR:
+-	    {
+-		void **p = (void **) n;
+-
+-		while (*p)
+-		    freestruct(*p++);
+-		zfree(n, sizeof(void *) * (p + 1 - (void **) n));
+-		break;
+-	    }
+ 	    case NT_LIST | NT_STR:
+ 		freelinklist((LinkList) n, (FreeFunc) zsfree);
+ 		break;
++	    case NT_LIST | NT_PAT:
++		freelinklist((LinkList) n, (FreeFunc) freepatprog);
++		break;
++	    case NT_NODE | NT_ARR:
++		{
++		    void **p = (void **) n;
++
++		    while (*p)
++			freestruct(*p++);
++		    zfree(n, sizeof(void *) * (p + 1 - (void **) n));
++		    break;
++		}
+ 	    case NT_STR | NT_ARR:
+ 		freearray((char **) n);
+ 		break;
++	    case NT_PAT | NT_ARR:
++		{
++		    Patprog *p = (Patprog *) n;
++
++		    while (*p)
++			freepatprog(*p++);
++		    zfree(n, sizeof(void *) * ((void **) p + 1 - (void **) n));
++		    break;
++		}
+ 	    default:
+ 		DPUTS(1, "BUG: bad node type in freenode()");
+ 		abort();
+ 	    }
+ 	}
+     }
++#if 0
+     DPUTS(size != ((char *) nodes) - ((char *) a),
+ 	"BUG: size wrong in freenode()");
++#endif
+     zfree(a, size);
+ }
+ 
+diff -u -r oldsrc/zsh.h Src/zsh.h
+--- oldsrc/zsh.h	Mon Oct 18 11:17:12 1999
++++ Src/zsh.h	Mon Oct 18 11:45:10 1999
+@@ -392,6 +392,7 @@
+ #define NT_EMPTY 0
+ #define NT_NODE  1
+ #define NT_STR   2
++#define NT_PAT   3
+ #define NT_LIST  4
+ #define NT_ARR   8
+ 
+@@ -502,6 +503,7 @@
+     int type;		/* can be cond_type, or a single */
+ 			/* letter (-a, -b, ...)          */
+     void *left, *right;
++    Patprog prog;	/* compiled pattern for `==' and `!=' */
+ };
+ 
+ #define COND_NOT    0
+@@ -555,18 +557,11 @@
+ struct casecmd {
+ /* Cmd->args contains word to test */
+     int ntype;			/* node type       */
+-    char **pats;
++    char **pats;		/* pattern strings */
++    Patprog *progs;		/* compiled patterns (on demand) */
+     List *lists;		/* list to execute */
+ };
+ 
+-
+-/*  A command like "if foo then bar elif baz then fubar else fooble"  */
+-/*  generates a tree like:                                            */
+-/*                                                                    */
+-/*  struct ifcmd a = { next =  &b,  ifl = "foo", thenl = "bar" }      */
+-/*  struct ifcmd b = { next =  &c,  ifl = "baz", thenl = "fubar" }    */
+-/*  struct ifcmd c = { next = NULL, ifl = NULL, thenl = "fooble" }    */
+-
+ struct ifcmd {
+     int ntype;			/* node type */
+     List *ifls;
+@@ -974,12 +969,19 @@
+ #define PAT_PURES	0x0020	/* Pattern is a pure string: set internally */
+ #define PAT_STATIC	0x0040	/* Don't copy pattern to heap as per default */
+ #define PAT_SCAN	0x0080	/* Scanning, so don't try must-match test */
++#define PAT_ZDUP        0x0100  /* Copy pattern in real memory */
+ 
+ /* Globbing flags: lower 8 bits gives approx count */
+ #define GF_LCMATCHUC	0x0100
+ #define GF_IGNCASE	0x0200
+ #define GF_BACKREF	0x0400
+ #define GF_MATCHREF	0x0800
++
++/* Dummy Patprog pointers. Used mainly in executions trees, but the
++ * pattern code needs to knwo about it, too. */
++
++#define dummy_patprog1 ((Patprog) 1)
++#define dummy_patprog2 ((Patprog) 2)
+ 
+ /* node used in parameter hash table (paramtab) */
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

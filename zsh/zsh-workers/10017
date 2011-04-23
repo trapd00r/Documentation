@@ -1,0 +1,301 @@
+From zsh-workers-return-10017-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Mar 09 12:26:46 2000
+Return-Path: <zsh-workers-return-10017-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21235 invoked from network); 9 Mar 2000 12:26:45 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 9 Mar 2000 12:26:45 -0000
+Received: (qmail 13651 invoked by alias); 9 Mar 2000 12:25:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10017
+Received: (qmail 13614 invoked from network); 9 Mar 2000 12:25:44 -0000
+Date: Thu, 9 Mar 2000 11:40:18 +0100 (MET)
+Message-Id: <200003091040.LAA24124@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Andrej Borsenkow"'s message of Fri, 3 Mar 2000 12:21:58 +0300
+Subject: PATCH: wordcode stuff
+
+
+Andrej Borsenkow wrote:
+
+> parse.c  2426: [error]:   CFE1137 expression must be a modifiable lvalue
+>         fdflags(pre) = (map ? FDF_MAP : 0) | other;
+>         ^
+> ...
+> 
+> That all originates from fdbyte() macro, that looks like:
+> 
+> #define fdbyte(f, i)     ((wordcode) (((unsigned char *) (((Wordcode) (f)) +
+> 1))[i]))
+> 
+> You take a _char_ value and cast it to wordcode == int. This_is_not_lvalue
+> and can not be assigned to (most probable implementation is temporary
+> storage in stack or register). I have no idea, what GCC does with it.
+
+Ok, I hope this patch makes it work for you (and others who don't have 
+a gcc). Btw, I think gcc is a probably the best choice we have,
+because with other if cc on X accepts it you can't be sure that cc on
+Y accepts it, too. And nowadays there are systems without a (real) cc.
+
+> So, the simplest way is to provide two sets of macros - GET and SET. And,
+> BTW, why are they in lower case? I'd prefer such macros in upper case - as
+> is customary in C ...
+
+To make 'em look like functions -- just like, for example the list
+macros.
+
+
+In a different message, Bart Schaefer wrote:
+
+> On Mar 6,  7:03pm, Alexandre Duret-Lutz wrote:
+> } Subject: A weird bug
+> }
+> } phobos% zcompile foo file.bug
+> } zsh: segmentation fault (core dumped)  zsh -f
+> 
+> This looks to be a parser bug, not a compilation bug.  Try
+> 
+>     fpath=($PWD)
+>     autoload +X file.bug
+> 
+> and you'll get the same crash.  The problem is that ecadd() is running
+> over the end of ecbuf[], apparently because of an off-by-one error in
+> the value of ecfree.  But there are so many places in parse.c where
+> ecused is modified (usually decremented, but incremented in ecispace())
+> without also modifying ecfree that I'm not sure what the relationship
+> between the two is supposed to be.
+
+The patch also gets rid of ecfree. It was mainly intended as a small
+optimisation (not having to do `eclen - ecused' all the time).
+
+
+And finally it changes the #ifdef's in the wordcode file stuff to
+allow functions to be at least read from wordcode files on systems
+without mmap() (something I wrote about in a mail which I seem to have 
+accidentally sent only to Bart).
+
+
+[ With no CVS repository around I can only hope that I installed all
+patches that appeared since last Thursday correctly and that his patch 
+works for you. ]
+
+Bye
+ Sven
+
+diff -ru ../z.old/Doc/Zsh/builtins.yo Doc/Zsh/builtins.yo
+--- ../z.old/Doc/Zsh/builtins.yo	Thu Mar  9 10:57:59 2000
++++ Doc/Zsh/builtins.yo	Thu Mar  9 11:38:05 2000
+@@ -1317,7 +1317,10 @@
+ that multiple instances of the shell running on the same host will
+ share this mapped function. If neither tt(-r) nor tt(-m) are given,
+ the tt(zcompile) builtin decides which style is used based on the size 
+-of the resulting wordcode file.
++of the resulting wordcode file. On some systems it is impossible to
++map wordcode files into memory. On such systems, the functions will
++only be read from the files, independent on the mode selected when the 
++file was created.
+ 
+ In every case, the created file contains two versions of the wordcode, 
+ one for big-endian machines and one for small-endian machines. The
+diff -ru ../z.old/Src/lex.c Src/lex.c
+--- ../z.old/Src/lex.c	Thu Mar  9 10:57:46 2000
++++ Src/lex.c	Thu Mar  9 11:19:04 2000
+@@ -191,7 +191,7 @@
+     void (*hwend) _((void));
+     void (*addtoline) _((int));
+ 
+-    int eclen, ecused, ecfree, ecnpats;
++    int eclen, ecused, ecnpats;
+     Wordcode ecbuf;
+     Eccstr ecstrs;
+     int ecsoffs, ecssub, ecnfunc;
+@@ -250,7 +250,6 @@
+     ls->addtoline = addtoline;
+     ls->eclen = eclen;
+     ls->ecused = ecused;
+-    ls->ecfree = ecfree;
+     ls->ecnpats = ecnpats;
+     ls->ecbuf = ecbuf;
+     ls->ecstrs = ecstrs;
+@@ -311,7 +310,6 @@
+     addtoline = lstack->addtoline;
+     eclen = lstack->eclen;
+     ecused = lstack->ecused;
+-    ecfree = lstack->ecfree;
+     ecnpats = lstack->ecnpats;
+     ecbuf = lstack->ecbuf;
+     ecstrs = lstack->ecstrs;
+diff -ru ../z.old/Src/parse.c Src/parse.c
+--- ../z.old/Src/parse.c	Thu Mar  9 10:57:48 2000
++++ Src/parse.c	Thu Mar  9 11:27:15 2000
+@@ -225,7 +225,7 @@
+  */
+ 
+ /**/
+-int eclen, ecused, ecfree, ecnpats;
++int eclen, ecused, ecnpats;
+ /**/
+ Wordcode ecbuf;
+ /**/
+@@ -240,13 +240,12 @@
+ {
+     int m;
+ 
+-    if (ecfree < n) {
++    if ((eclen - ecused) < n) {
+ 	int a = (n > 256 ? n : 256);
+ 
+ 	ecbuf = (Wordcode) hrealloc((char *) ecbuf, eclen * sizeof(wordcode),
+ 				    (eclen + a) * sizeof(wordcode));
+ 	eclen += a;
+-	ecfree += a;
+     }
+     if ((m = ecused - p) > 0)
+ 	memmove(ecbuf + p + n, ecbuf + p, m * sizeof(wordcode));
+@@ -258,15 +257,13 @@
+ static int
+ ecadd(wordcode c)
+ {
+-    if (ecfree < 1) {
++    if ((eclen - ecused) < 1) {
+ 	ecbuf = (Wordcode) hrealloc((char *) ecbuf, eclen * sizeof(wordcode),
+ 				    (eclen + 256) * sizeof(wordcode));
+ 	eclen += 256;
+-	ecfree += 256;
+     }
+     ecbuf[ecused] = c;
+     ecused++;
+-    ecfree--;
+ 
+     return ecused - 1;
+ }
+@@ -347,7 +344,7 @@
+ static void
+ init_parse(void)
+ {
+-    ecbuf = (Wordcode) zhalloc((eclen = ecfree = 256) * sizeof(wordcode));
++    ecbuf = (Wordcode) zhalloc((eclen = 256) * sizeof(wordcode));
+     ecused = 0;
+     ecstrs = NULL;
+     ecsoffs = ecnpats = 0;
+@@ -2209,14 +2206,17 @@
+ #define fdheaderlen(f) (((Wordcode) (f))[FD_PRELEN])
+ 
+ #define fdmagic(f)       (((Wordcode) (f))[0])
+-#define fdbyte(f, i)     ((wordcode) (((unsigned char *) (((Wordcode) (f)) + 1))[i]))
++#define fdsetbyte(f,i,v) \
++    ((((unsigned char *) (((Wordcode) (f)) + 1))[i]) = ((unsigned char) (v)))
++#define fdbyte(f,i)      ((wordcode) (((unsigned char *) (((Wordcode) (f)) + 1))[i]))
+ #define fdflags(f)       fdbyte(f, 0)
++#define fdsetflags(f,v)  fdsetbyte(f, 0, v)
+ #define fdother(f)       (fdbyte(f, 1) + (fdbyte(f, 2) << 8) + (fdbyte(f, 3) << 16))
+ #define fdsetother(f, o) \
+     do { \
+-        fdbyte(f, 1) = (o & 0xff); \
+-        fdbyte(f, 2) = (o >> 8) & 0xff; \
+-        fdbyte(f, 3) = (o >> 16) & 0xff; \
++        fdsetbyte(f, 1, ((o) & 0xff)); \
++        fdsetbyte(f, 2, (((o) >> 8) & 0xff)); \
++        fdsetbyte(f, 3, (((o) >> 16) & 0xff)); \
+     } while (0)
+ #define fdversion(f)     ((char *) ((f) + 2))
+ 
+@@ -2423,7 +2423,7 @@
+ 
+     for (ohlen = hlen; ; hlen = ohlen) {
+ 	fdmagic(pre) = (other ? FD_OMAGIC : FD_MAGIC);
+-	fdflags(pre) = (map ? FDF_MAP : 0) | other;
++	fdsetflags(pre, ((map ? FDF_MAP : 0) | other));
+ 	fdsetother(pre, tlen);
+ 	strcpy(fdversion(pre), ZSH_VERSION);
+ 	write(dfd, pre, FD_PRELEN * sizeof(wordcode));
+@@ -2536,6 +2536,8 @@
+     d->count = 0;
+ }
+ 
++#endif
++
+ /* See if `dump' is the name of a dump file and it has the definition
+  * for the function `name'. If so, return an eprog for it. */
+ 
+@@ -2551,14 +2553,28 @@
+ 
+     file = (strsfx(FD_EXT, dump) ? dump : dyncat(dump, FD_EXT));
+ 
++#ifdef USE_MMAP
++
+  rec:
+ 
++#endif
++
+     d = NULL;
++
++#ifdef USE_MMAP
++
+     for (f = dumps; f; f = f->next)
+ 	if (!strcmp(file, f->name)) {
+ 	    d = f->map;
+ 	    break;
+ 	}
++
++#else
++
++    f = NULL;
++
++#endif
++
+     if (!f && (isrec || !(d = load_dump_header(file)))) {
+ 	if (!isrec) {
+ 	    struct stat stc, stn;
+@@ -2580,6 +2596,9 @@
+     if ((h = dump_find_func(d, name))) {
+ 	/* Found the name. If the file is already mapped, return the eprog,
+ 	 * otherwise map it and just go up. */
++
++#ifdef USE_MMAP
++
+ 	if (f) {
+ 	    Eprog prog = (Eprog) zalloc(sizeof(*prog));
+ 	    Patprog *pp;
+@@ -2604,7 +2623,11 @@
+ 	    load_dump_file(file, (fdflags(d) & FDF_OTHER), fdother(d));
+ 	    isrec = 1;
+ 	    goto rec;
+-	} else {
++	} else
++
++#endif
++
++	    {
+ 	    Eprog prog;
+ 	    Patprog *pp;
+ 	    int np, fd, po = h->npats * sizeof(Patprog);
+@@ -2646,6 +2669,8 @@
+     return NULL;
+ }
+ 
++#ifdef USE_MMAP
++
+ /* Increment the reference counter for a dump file. */
+ 
+ /**/
+@@ -2679,12 +2704,6 @@
+ }
+ 
+ #else
+-
+-Eprog
+-try_dump_file(char *dump, char *name, char *func)
+-{
+-    return NULL;
+-}
+ 
+ void
+ incrdumpcount(FuncDump f)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

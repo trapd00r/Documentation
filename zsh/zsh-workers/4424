@@ -1,0 +1,198 @@
+From zsh-workers-request@math.gatech.edu Sat Oct 10 16:52:43 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28373 invoked from network); 10 Oct 1998 16:52:40 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 10 Oct 1998 16:52:40 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id MAA06513;
+	Sat, 10 Oct 1998 12:42:28 -0400 (EDT)
+Resent-Date: Sat, 10 Oct 1998 12:42:28 -0400 (EDT)
+Message-Id: <9810101633.AA27872@ibmth.df.unipi.it>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: PATCH: 3.1.4: universal-argument upgrade
+In-Reply-To: ""Bart Schaefer""'s message of "Fri, 09 Oct 1998 08:44:44 DFT."
+             <981009084444.ZM24902@candle.brasslantern.com> 
+Date: Sat, 10 Oct 1998 18:33:13 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"WZNPT2.0.fb1.qvu7s"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4424
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+"Bart Schaefer" wrote:
+> } I couldn't see a way of doing this without
+> } adding a new flag, though that doesn't mean there isn't one.
+> 
+> Has the whole multiplier thing become more complicated than necessary in
+> 3.1.4?  MOD_TMULT obviously does more than the `gotmult' global in 3.0.5
+> did.
+
+Looks like it, I have to admit I was confused to begin with.
+
+> } Is there any enthusiasm for upgrading universal-argument to do what
+> } emacs does, that is to take any following digits as part of the
+> } argument?
+> 
+> YES!  That would be so much easier than having to clamp down Alt or hit
+> ESC repeatedly to enter the digits.  Just remember that it also needs
+> to take a following `-' as part of the argument.
+
+OK, here it is.  This replaces the previous patch, since instead of
+MOD_NEG I use MOD_REPL:  a 4 from universal-argument becomes
+replaceable in the same way as a -1 from neg-argument.  It remains
+unbound by default.  It's annoying that ^U for backward-kill-line is
+so engrained in the shell-user psyche.
+
+The only compatibility issue is that you can't repeat digits with
+universal-argument, i.e (after rebinding universal-argument to ^U)
+^U2 doesn't give you four twos any more, for obvious reasons.  I take
+it this is entirely minor.
+
+Is it OK to assume 0..9 and - are bound to self-insert?  It's a little
+messier to test for them earlier: the problem is that you can't tell
+after you've retrieved the binding whether it was a real `0' etc. or a
+multi-key sequence ending in `0' such as `^X0', since that information
+is buried inside getkeymapcmd() --- which I don't want to hack about
+--- and on the latter occasion you certainly don't want digit-argument
+behaviour.  It means it won't work in vi command mode, although the
+digit handling is in any case different there.  (Actually, that's a
+partial lie: unless you attempt to enter a -, it looks like it works
+OK because the normal vi digit behaviour comes into play after you
+enter universal-argument, i.e. the latter is then ignored.)
+
+*** Doc/Zsh/zle.yo.mult	Sun May 11 13:24:01 1997
+--- Doc/Zsh/zle.yo	Sat Oct 10 18:06:25 1998
+***************
+*** 779,785 ****
+  )
+  tindex(universal-argument)
+  item(tt(universal-argument))(
+! Multiply the argument of the next command by 4.
+  )
+  enditem()
+  texinode(Completion)(Miscellaneous)(Arguments)(Zsh Line Editor)
+--- 779,792 ----
+  )
+  tindex(universal-argument)
+  item(tt(universal-argument))(
+! Multiply the argument of the next command by 4.  Alternatively, if
+! this command is followed by an integer (positive or negative), use
+! that as the argument for the next command.  Thus digits cannot be
+! repeated using this command.  For example, if this command occurs
+! twice, followed immediately by tt(forward-char), move forward sixteen
+! spaces; if instead it is followed by tt(-2), then tt(forward-char),
+! move backward two spaces.  Note that this assumes the digits and dash
+! are bound to tt(self-insert), as is usually the case.
+  )
+  enditem()
+  texinode(Completion)(Miscellaneous)(Arguments)(Zsh Line Editor)
+*** Src/Zle/zle.h.mult	Thu Jul  9 13:27:28 1998
+--- Src/Zle/zle.h	Sat Oct 10 18:04:44 1998
+***************
+*** 90,95 ****
+--- 90,97 ----
+  #define MOD_TMULT (1<<1)   /* a repeat count is being entered */
+  #define MOD_VIBUF (1<<2)   /* a vi cut buffer has been selected */
+  #define MOD_VIAPP (1<<3)   /* appending to the vi cut buffer */
++ #define MOD_REPL  (1<<4)   /* current tmult is replaceable */
++ #define MOD_UNIV  (1<<5)   /* universal argument in progress */
+  
+  /* current modifier status */
+  
+*** Src/Zle/zle_misc.c.mult	Thu Jul  9 12:04:41 1998
+--- Src/Zle/zle_misc.c	Sat Oct 10 17:48:56 1998
+***************
+*** 62,67 ****
+--- 62,76 ----
+  {
+      char s[3], *p = s;
+  
++     if (zmod.flags & MOD_UNIV) {
++ 	if (c >= '0' && c <= '9') {
++ 	    digitargument();
++ 	    return;
++ 	} else if (c == '-' && (zmod.flags & MOD_REPL)) {
++ 	    negargument();
++ 	    return;
++ 	}
++     }
+      if(imeta(c)) {
+  	*p++ = Meta;
+  	c ^= 32;
+***************
+*** 442,448 ****
+  
+      if (!(zmod.flags & MOD_TMULT))
+  	zmod.tmult = 0;
+!     zmod.tmult = zmod.tmult * 10 + sign * (c & 0xf);
+      zmod.flags |= MOD_TMULT;
+      prefixflag = 1;
+  }
+--- 451,463 ----
+  
+      if (!(zmod.flags & MOD_TMULT))
+  	zmod.tmult = 0;
+!     if (zmod.flags & MOD_REPL) {
+! 	/* If we just had a negative or universal argument, this is *
+! 	 * the digit, rather than the -1 or 4 at first assumed.     */
+! 	zmod.tmult = sign * (c & 0xf);
+! 	zmod.flags &= ~MOD_REPL;
+!     } else
+! 	zmod.tmult = zmod.tmult * 10 + sign * (c & 0xf);
+      zmod.flags |= MOD_TMULT;
+      prefixflag = 1;
+  }
+***************
+*** 451,462 ****
+  void
+  negargument(void)
+  {
+!     if(zmod.flags & MOD_TMULT) {
+  	feep();
+  	return;
+      }
+      zmod.tmult = -1;
+!     zmod.flags |= MOD_TMULT;
+      prefixflag = 1;
+  }
+  
+--- 466,478 ----
+  void
+  negargument(void)
+  {
+!     if((zmod.flags & MOD_TMULT) && 
+!        (zmod.flags & (MOD_REPL|MOD_UNIV)) != (MOD_REPL|MOD_UNIV)) {
+  	feep();
+  	return;
+      }
+      zmod.tmult = -1;
+!     zmod.flags |= MOD_TMULT|MOD_REPL;
+      prefixflag = 1;
+  }
+  
+***************
+*** 465,471 ****
+  universalargument(void)
+  {
+      zmod.tmult *= 4;
+!     zmod.flags |= MOD_TMULT;
+      prefixflag = 1;
+  }
+  
+--- 481,487 ----
+  universalargument(void)
+  {
+      zmod.tmult *= 4;
+!     zmod.flags |= MOD_TMULT|MOD_UNIV|MOD_REPL;
+      prefixflag = 1;
+  }
+  
+  
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarotti 2, 56100 Pisa, Italy
+

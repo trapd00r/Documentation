@@ -1,0 +1,140 @@
+From zsh-workers-return-13497-mason-zsh=primenet.com.au@sunsite.dk Sun Feb 18 00:54:07 2001
+Return-Path: <zsh-workers-return-13497-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10267 invoked from network); 18 Feb 2001 00:54:06 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Feb 2001 00:54:06 -0000
+Received: (qmail 10258 invoked by alias); 18 Feb 2001 00:54:01 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13497
+Received: (qmail 10247 invoked from network); 18 Feb 2001 00:54:01 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: Re: 4.0.1-pre-1 
+In-reply-to: ""Bart Schaefer""'s message of "Wed, 14 Feb 2001 17:32:57 GMT."
+             <1010214173257.ZM1128@candle.brasslantern.com> 
+Date: Sat, 17 Feb 2001 00:53:59 +0000
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20010217005359.7B9C8139BA@pwstephenson.fsnet.co.uk>
+
+Ignoring most of the items which are associated with long discussions
+(pah!) or the ones which may not even be bugs (pah! pah!):
+
+> There's the ksh incompatibility with array export, 9576.
+
+There's some commented-out code in there in one place already.  I think we
+should make ksharrays export the first word and with noksharrays, to be
+logical, export the array joined the same way we always get an array as a
+single word (c.f. singsub()).  We should make sure we don't export the
+array if it's tied to a colon-array.  I don't think we should export
+associative arrays at all --- the order is undefined, so we can't guarantee
+compatibility with ksh, nor promise a particular form for the non-ksh
+exported value.  Unless anyone has ideas.
+
+This needs some work on the addenv() call in typeset_single(), and
+some work in export_param(), and some additions to call export_param() from
+array code.  It's probably not hard, but it's also absurdly easy to miss
+consequent changes in the parameter code.
+
+> There's the SIGPIPE issue from 12223 (only partly fixed by 12222?).
+
+I haven't thought about this since, but after jogging my memory by reading
+12223, 12222 is good enough for the real problem, and the rest was just my
+paranoia.  The issue was that if a `tee' spawned by a multio exits early,
+the parent shell will get SIGPIPE and exit, too; but that's probably not a
+bug.
+
+> Andrej reported an associative array subscripting problem in 12484, and
+> brought up something similar in 12676.
+
+There is a fairly basic, though not necessarily intractable, difficulty in
+parsing associative array subscripts.  There's a (clumsy) workaround using
+scalar parameters as the subscript.
+
+I didn't even notice the problem with patterns of the form 'foo?##bar'
+before, oops.  (You're expected to use `foo?*bar', but it should still
+work.)  There's a fix below --- seems to work, but I've completely
+forgotten about the pattern code.
+
+> Apparently nobody had any better ideas about 12724.
+
+Probably a yodl bug.  Well, hope so.
+
+> We never did anything about the thread that includes 12805, 12807, and
+> 12812.
+>
+> We never did anything about 12834.
+
+These are new features, rather than bugs.  Pah.
+
+> Nothing ever came of 12871.
+
+Coprocesses.  Painful.
+
+> There were some cygwin issues in 12981, 12982, 12987 that I don't know
+> whether were ever addressed.  (Andrej?)
+>
+> Andrej has already mentioned 13142 and 13144, though not by number.
+
+I think there are still real problems within cygwin, but it's not that easy
+to tell.  Certainly stuff involving pty's and job control is still
+sufficiently unlike genuine UNIX to warrant our not diving in without a
+good reason.
+
+> Are we going to accept 13280, or not?
+
+Alexandre's :r patch.  I think the answer is now `yes'.
+
+> There was an apparent race condition discussed in 13297 and 13298.
+
+Yup, that's still there.
+
+> There's a bug report in 13338 that was never addressed.
+
+The current cd behaviour is related to the loooong discussion about
+following or not following links.  The neatest solution was Zefram's, of
+keeping the modes completely separate: either just use the logical $PWD
+with no second-guessing, or just pass the system exactly what the user
+types in and always ask the system for the current directory.  But this
+isn't going to get sorted out in a hurry.
+
+> And that covers everything that I've been informally keeping track of.
+
+Wow.
+
+Index: Src/pattern.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/pattern.c,v
+retrieving revision 1.8
+diff -u -r1.8 pattern.c
+--- Src/pattern.c	2000/05/31 08:56:24	1.8
++++ Src/pattern.c	2001/02/18 00:53:28
+@@ -1103,13 +1103,19 @@
+      * each time we fail on a non-empty branch, we try the empty branch,
+      * which is equivalent to backtracking.
+      */
+-    if ((flags & P_SIMPLE) && op == P_ONEHASH &&
++    if ((flags & P_SIMPLE) && (op == P_ONEHASH || op == P_TWOHASH) &&
+ 	P_OP((Upat)patout+starter) == P_ANY) {
+ 	/* Optimize ?# to *.  Silly thing to do, since who would use
+ 	 * use ?# ? But it makes the later code shorter.
+ 	 */
+ 	Upat uptr = (Upat)patout + starter;
+-	uptr->l = (uptr->l & ~0xff) | P_STAR;
++	if (op == P_TWOHASH) {
++	    /* ?## becomes ?* */
++	    uptr->l = (uptr->l & ~0xff) | P_ANY;
++	    pattail(starter, patnode(P_STAR));
++	} else {
++	    uptr->l = (uptr->l & ~0xff) | P_STAR;
++	}
+     } else if ((flags & P_SIMPLE) && op && !(patglobflags & 0xff)) {
+ 	/* Don't simplify if we need to look for approximations. */
+ 	patinsert(op, starter, NULL, 0);
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

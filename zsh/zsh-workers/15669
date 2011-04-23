@@ -1,0 +1,137 @@
+From zsh-workers-return-15669-mason-zsh=primenet.com.au@sunsite.dk Mon Aug 20 13:12:19 2001
+Return-Path: <zsh-workers-return-15669-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3600 invoked from network); 20 Aug 2001 13:12:17 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 20 Aug 2001 13:12:17 -0000
+Received: (qmail 1308 invoked by alias); 20 Aug 2001 13:12:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15669
+Received: (qmail 1295 invoked from network); 20 Aug 2001 13:12:10 -0000
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+Message-ID: <15233.3222.677881.103871@gargle.gargle.HOWL>
+Date: Mon, 20 Aug 2001 15:11:50 +0200
+To: zsh-workers@sunsite.dk
+Subject: Re: Bug in _approximate with ~/
+In-Reply-To: <1010817143606.ZM13860@candle.brasslantern.com>
+References: <OF524CF0A0.53B4D539-ON80256AAA.00568ADE@uk.jpmorgan.com>
+	<1010816174501.ZM12190@candle.brasslantern.com>
+	<15228.57578.582005.656806@gargle.gargle.HOWL>
+	<1010817143606.ZM13860@candle.brasslantern.com>
+X-Mailer: VM 6.92 under 21.1 (patch 3) "Acadia" XEmacs Lucid
+
+
+Bart Schaefer wrote:
+
+> On Aug 17, 11:16am, Sven Wischnowsky wrote:
+> }
+> } Bart Schaefer wrote:
+> } 
+> } > the other completions that are attempted in command position are this
+> } > intelligent -- they all interpret `(#a1)~/test/f' as `(#a1)()~/test/f',
+> } > that is, allow one correction to the empty string as long as that does
+> } > not match `/test/f'.  Consequently you get all the one-letter commands,
+> } 
+> } Hmhm.  To be fixed in C-code where the globbing flags are moved
+> } farther into the prefix if needed.
+> 
+> Is that really right?  What if I actually type `(#a1)~/test/f' before I
+> hit TAB?
+
+Hrmpf, yes, I always forget that one might type something like that by 
+hand.  Still, since _approximate works by faking a different PREFIX,
+some things will never be possible, I fear.
+
+All this will become more manageable when all of this stuff is in
+shell code, I hope.
+
+
+Bye
+  Sven
+
+Index: Completion/Base/Completer/_approximate
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/Completer/_approximate,v
+retrieving revision 1.5
+diff -u -r1.5 _approximate
+--- Completion/Base/Completer/_approximate	2001/08/16 08:07:42	1.5
++++ Completion/Base/Completer/_approximate	2001/08/20 13:09:25
+@@ -49,15 +49,16 @@
+ 
+ if (( ! $+functions[compadd] )); then
+   compadd() {
++    local ppre="$argv[(I)-p]"
++
+     [[ ${argv[(I)-[a-zA-Z]#U[a-zA-Z]#]} -eq 0 &&
+        "${#:-$PREFIX$SUFFIX}" -le _comp_correct ]] && return
+ 
+-    ### This distinction doesn't seem to be needed anymore
+-    # if [[ "$PREFIX" = \~*/* ]]; then
+-    #   PREFIX="${PREFIX%%/*}/(#a${_comp_correct})${PREFIX#*/}"
+-    # else
++    if [[ "$PREFIX" = \~* && ( ppre -eq 0 || "$argv[ppre+1]" != \~* ) ]]; then
++      PREFIX="~(#a${_comp_correct})${PREFIX[2,-1]}"
++    else
+       PREFIX="(#a${_comp_correct})$PREFIX"
+-    # fi
++    fi
+ 
+     (( $_correct_group && $argv[(I)-*[JV]] )) &&
+         _correct_expl[_correct_group]=${argv[(R)-*[JV]]}
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.49
+diff -u -r1.49 compcore.c
+--- Src/Zle/compcore.c	2001/08/17 09:25:22	1.49
++++ Src/Zle/compcore.c	2001/08/20 13:09:26
+@@ -1782,23 +1782,21 @@
+ 	} else
+ 	    lsl = 0;
+ 	if (dat->aflags & CAF_MATCH) {
+-	    int ml, gfl = 0, tildepat = 0;
++	    int ml, gfl = 0;
+ 	    char *globflag = NULL;
+ 
+ 	    if (comppatmatch && *comppatmatch &&
+-		lpre[0] == '(' && lpre[1] == '#') {
++		dat->ppre && lpre[0] == '(' && lpre[1] == '#') {
+ 		char *p;
+ 
+ 		for (p = lpre + 2; *p && *p != ')'; p++);
+ 
+-		if (*p == ')' && (dat->ppre || p[1] == '~')) {
++		if (*p == ')') {
+ 		    char sav = p[1];
+ 
+ 		    p[1] = '\0';
+ 		    globflag = dupstring(lpre);
+ 		    gfl = p - lpre + 1;
+-                    if (!dat->ppre)
+-                        tildepat = 1;
+ 		    p[1] = sav;
+ 
+ 		    lpre = p + 1;
+@@ -1861,11 +1859,7 @@
+ 		int is = (*comppatmatch == '*');
+ 		char *tmp = (char *) zhalloc(2 + llpl + llsl + gfl);
+ 
+-		if (tildepat) {
+-                    tmp[0] = '~';
+-                    strcpy(tmp + 1, globflag);
+-                    strcat(tmp, lpre + 1);
+-                } else if (gfl) {
++		if (gfl) {
+ 		    strcpy(tmp, globflag);
+ 		    strcat(tmp, lpre);
+ 		} else
+
+-- 
+Sven Wischnowsky                    wischnow@informatik.hu-berlin.de
+

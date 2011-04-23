@@ -1,0 +1,247 @@
+From zsh-workers-return-6970-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Jul 04 17:03:17 1999
+Return-Path: <zsh-workers-return-6970-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10324 invoked from network); 4 Jul 1999 17:03:15 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 4 Jul 1999 17:03:15 -0000
+Received: (qmail 19477 invoked by alias); 4 Jul 1999 17:03:05 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6970
+Received: (qmail 19470 invoked from network); 4 Jul 1999 17:03:03 -0000
+Message-Id: <9907041634.AA26457@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: pws-25: more completion goodies
+Date: Sun, 04 Jul 1999 18:34:19 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+As promised, here are a few completion function additions.
+
+_default:  if magicequalsubst is set, no files matched, and the word
+contains an =, try to match files after the =.  This is where the
+_path_files return status is important.
+
+_cd: if cdablevars is set and the PREFIX is not an absolute pathname and
+is not a directory, try expanding it with a tilde in front --- in other
+words, just what cdablevars is supposed to do (the name is a misnomer, it
+should be cdablenameddirs, or something).
+
+_read_comp: This I like.  It's a new directly bindable widget which (thanks
+to Sven's key reading and redisplay changes) reads a string from the
+`minibuffer' which is taken to be a set of arguments for compgen (complete
+with minus signs, spaces, and any quotations).  Hence you can generate any
+of the builtin completions on the fly.  Alternatively, you can enter a
+string beginning with _ and it will be taken to be a completion function to
+be called directly.  The longest unambiguous part of this string will be
+completed automatically, sort of like emacs.  For ease of typing, the same
+completion is regenerated on subsequent calls; to enter a new on-the-fly
+completion, you need to give it a numeric argument.
+
+It was a nice surprise to discover read -k and zle -R worked inside
+completion widgets; the first time I hacked it as a zle widget which
+defined and called a completion widget.  It wouldn't be a bad idea to allow
+things like zle beep inside completion widgets too, but maybe that will
+become irrelevant if we eventually merge the widget types somehow.  Maybe.
+
+--- Completion/Base/_default.c2	Tue Apr 13 09:37:36 1999
++++ Completion/Base/_default	Sun Jul  4 16:11:11 1999
+@@ -11,4 +11,11 @@
+ 
+ compcall || return 0
+ 
+-_files
++_files && return
++
++# magicequalsubst allows arguments like <any-old-stuff>=~/foo to do
++# file name expansion after the =.  In that case, it's natural to
++# allow completion to handle file names after any equals sign.
++if [[ -o magicequalsubst ]] && compset -P 1 '*='; then
++  _files
++fi
+--- Completion/Builtins/_cd.c2	Fri Jul  2 18:57:55 1999
++++ Completion/Builtins/_cd	Sun Jul  4 16:11:02 1999
+@@ -11,11 +11,8 @@
+ #    it's not a lot of use.  If you don't type the + or - it will
+ #    complete directories as normal.
+ 
+-local pushdminus
+-[[ -o pushdminus ]] && pushdminus=1
+-
+-emulate -LR zsh
+-setopt extendedglob
++emulate -L zsh
++setopt extendedglob nonomatch
+ 
+ if [[ CURRENT -eq 3 ]]; then
+   # cd old new: look for old in $PWD and see what can replace it
+@@ -40,8 +37,8 @@
+   lines="$(dirs -v)"
+   # turn the lines into an array, removing the current directory
+   list=(${${(f)lines}##0*})
+-  if [[ ( $IPREFIX = - && -z $pushdminus ) ||
+-        ( $IPREFIX = + && -n $pushdminus ) ]]; then
++  if [[ ( $IPREFIX = - && ! -o pushdminus ) ||
++        ( $IPREFIX = + && -o pushdminus ) ]]; then
+     # reverse the numbering: it counts the last one as -0, which
+     # is a little strange.
+     integer tot i
+@@ -59,7 +56,19 @@
+ 
+   return ret
+ elif [[ $PREFIX != (\~|/|./|../)* && $#cdpath -ne 0 ]]; then
+-  _path_files -W "(. $cdpath)" -/
++  local tdir
++  # With cdablevars, we can convert foo/bar/... to ~foo/bar/... if
++  # there is no directory foo.  In that case we could also complete
++  # variable names, but it hardly seems worth it.
++  # Note we need a tilde because cdablevars also allows user home
++  # directories, hence we also need nonomatch to suppress error messages.
++  if [[ -o cdablevars && ! -d ${tdir::=${PREFIX%%/*}} &&
++    -d ${~tdir2::="~$tdir"} ]]; then
++      PREFIX="~$PREFIX"
++      _path_files -/
++  else
++    _path_files -W "(. $cdpath)" -/
++  fi
+ else
+   _path_files -/
+ fi
+--- Completion/Commands/_read_comp.c2	Sun Jul  4 16:10:30 1999
++++ Completion/Commands/_read_comp	Sun Jul  4 18:28:14 1999
+@@ -0,0 +1,128 @@
++#compdef -k complete-word \C-x\C-r
++
++# This allows an on-the-fly choice of completions.  On typing the key
++# sequence given above, you will be prompted for a string of arguments.  If
++# this string begins with `_', it will be taken as the name of a function to
++# evaluate to generate the completions; unambiguous strings in the function
++# name are automatically completed.
++#
++# Else it is taken to be a set of arguments for compgen to generate a list
++# of choices.  The possibilities are the same as the flags for generating
++# completions given in the zshcompctl manual page.  Note the arguments are
++# verbatim:  include minus signs, spaces, quotes, etc.
++#
++# On subsequent calls, the same completion will be re-performed.  To
++# force a new type of completion to be read, supply a numeric argument.
++#
++# For example,
++#  % bindkey | grep rever<C-xC-r>
++#  Completion: -b<RET>
++#  % bindkey | grep reverse-menu-complete _
++#
++# Global variables used:
++#  _read_comp         Last completion string read from user
++
++emulate -L zsh
++
++# Took me ages to work this out.  If we're not on the first global
++# matcher specification, we mustn't do any I/O.
++if [[ compstate[matcher] -gt 1 && -n $_read_comp ]]; then
++  return 1
++fi
++
++if [[ compstate[matcher] -gt 1 ||
++  ( ${+NUMERIC} = 0 && -n $_read_comp ) ]]; then
++  if [[ $_read_comp = _* ]]; then
++    eval $_read_comp
++  else
++    eval "compgen $_read_comp"
++  fi
++  return
++fi
++
++local key search str str2 newch funcs funcs2 exact msg
++integer pos
++
++msg="Completion: "
++
++zle -R $msg
++
++if ! read -k key; then
++  zle -R ''
++  return 1
++fi
++
++while [[ '#key' -ne 10 && '#key' -ne 13 ]]; do
++  if [[ '#key' -eq 3 || '#key' -eq 7 ]]; then
++    zle -R ''
++    return 1
++  fi
++  if [[ '#key' -eq 8 || '#key' -eq 127 ]]; then
++    str="$str[1,-2]"
++    exact=
++  elif [[ -n $exact ]]; then
++    if [[ -n $ZBEEP ]]; then
++      print -nb $ZBEEP
++    elif [[ -o beep ]]; then
++      print "\a"
++    fi
++  else
++    str="$str$key"
++    if [[ $str = _* ]]; then
++      # Rudimentary completion for function names.
++      funcs=(${$(whence -m "$str*")%: function})
++      if (( $#funcs == 1 )); then
++	# Exact match; prompt the user for a newline to confirm
++	str=$funcs[1]
++	exact=" (Confirm)"
++      elif (( $#funcs == 0 )); then
++	# We can't call zle beep, because this isn't a zle widget.
++	if [[ -n $ZBEEP ]]; then
++	  print -nb $ZBEEP
++	elif [[ -o beep ]]; then
++	  print "\a"
++	fi
++	str="$str[1,-2]"
++      else
++	# Add characters to the string until a name doesn't
++	# match any more, then backtrack one character to get
++	# the longest unambiguous match.
++	str2=$str
++	pos=$#str2
++	while true; do
++	  (( pos++ ))
++	  newch=${funcs[1][pos]}
++	  [[ -z $newch ]] && break
++	  str2=$str2$newch
++	  funcs2=(${funcs##$str2*})
++	  (( $#funcs2 )) && break
++	  str=$str2
++	done
++      fi
++    fi
++  fi
++  zle -R "$msg$str$exact"
++  if ! read -k key; then
++    zle -R ''
++    return 1
++  fi
++done
++
++if [[ -z $str ]]; then
++  # string must be non-zero
++  return 1
++elif [[ $str = _* ]] && ! whence $str >& /dev/null; then
++  # a function must be known to the shell
++  return 1
++else
++  # remember the string for re-use
++  _read_comp=$str
++fi
++
++zle -R ''
++
++if [[ $str = _* ]]; then
++  eval $str
++else
++  eval "compgen $str"
++fi
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

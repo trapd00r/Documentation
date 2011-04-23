@@ -1,0 +1,134 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Fri May 16 07:23:23 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 17035 invoked from network); 16 May 1997 07:23:20 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 16 May 1997 07:23:20 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id DAA10099; Fri, 16 May 1997 03:08:33 -0400 (EDT)
+Resent-Date: Fri, 16 May 1997 03:08:33 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@ny.frontiercomm.net>
+Message-Id: <199705160711.DAA06524@hzoli.home>
+Subject: Re: stopping "wait" in (sub)script ?
+In-Reply-To: <199705151547.LAA00880@hzoli.home> from Zoltan Hidvegi at "May 15, 97 11:47:16 am"
+To: zsh-workers@math.gatech.edu (Zsh hacking and development)
+Date: Fri, 16 May 1997 03:11:58 -0400 (EDT)
+X-Mailer: ELM [version 2.4ME+ PL31 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"7rh5a.0.kT2.mV0Vp"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3155
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I wrote:
+> No.  The problem is that $(...) does not enter the new process to the
+> process table.  $(<...) does not fork, so it is not surprising that it
+> works.  The problem is that `cat ss` forks, and does an entersubsh after
+> the fork().  When a process terminates the SIGCHLD handler calls
+> update_job, which should reattach the terminal, but it does not do that
+> since the terminated job was not in the process table so update_job() is
+> not even called :-(.
+
+I checked bash, ksh and pdksh, and all run command substituion in the same
+process group as the shell.  This is logical, since a command substitution
+cannot be backgrounded, and it solvs all the problems I described above,
+plus some more.  The patch below should be applied on the top of my
+previous patch (it does not depend on it, it just fixes an other bug).
+What's also fix is:
+
+% trap 'echo TERM' TERM
+% echo `sh -c 'kill -TERM $$'`
+TERM
+
+As you see, the TERM trap is executed although the sell did not receive the
+term signal, only the command substitution process terminated.  This
+happened with all signals, not just SIGTERM (funny that bash has the same
+bug, although only with the INT signal).
+
+In most places where MONITOR is unset the terminal signals are set to
+defaul.  This does not seems to be necessary here.  This copies the ksh93
+behavious (pdksh and bash simply hangs when ^Z is pressed during command
+substitution).  I have no idea why zsh need to change the SIGPIPE handler
+when MONITOR is changed.  Anyone who knows better, please explain.  I also
+wonder if we should add these signal changes to dosetopt() when MONITOR is
+(un)set.  Examining ksh, pdksh and bash it seems that an interactive shell
+should get a new process group and attach the terminal to this process
+group on startup and it shoud restore its original process group and
+reattach the terminal to this process group upon exit or before exec.  Any
+comments about this?  It would be helpful if someone could look up the
+relevant informations from POSIX 2a UPE.
+
+Zoltan
+
+
+*** Src/signals.c	1997/05/08 07:16:47	3.1.2.4
+--- Src/signals.c	1997/05/16 05:05:35
+***************
+*** 422,434 ****
+  	    for (;;) {
+  		if (pid == *procsubpid) {
+  		    *procsubpid = 0;
+! 		    if (WIFSIGNALED(status)) {
+  			*procsubval = (0200 | WTERMSIG(status));
+! 			if (WTERMSIG(status) == SIGINT)
+! 			    kill(getpid(), SIGINT);
+! 			else if (sigtrapped[WTERMSIG(status)])
+! 			    dotrap(WTERMSIG(status));
+! 		    } else
+  			*procsubval = WEXITSTATUS(status);
+  		    times(&shtms);
+  		    goto cont;
+--- 422,430 ----
+  	    for (;;) {
+  		if (pid == *procsubpid) {
+  		    *procsubpid = 0;
+! 		    if (WIFSIGNALED(status))
+  			*procsubval = (0200 | WTERMSIG(status));
+! 		    else
+  			*procsubval = WEXITSTATUS(status);
+  		    times(&shtms);
+  		    goto cont;
+*** Src/exec.c	1997/05/09 05:36:44	3.1.2.8
+--- Src/exec.c	1997/05/16 06:31:45
+***************
+*** 2109,2116 ****
+      child_unblock();
+      zclose(pipes[0]);
+      redup(pipes[1], 1);
+      entersubsh(Z_SYNC, 1, 0);
+-     signal_ignore(SIGTSTP);
+      execlist(list, 0, 1);
+      close(1);
+      _exit(lastval);
+--- 2109,2116 ----
+      child_unblock();
+      zclose(pipes[0]);
+      redup(pipes[1], 1);
++     opts[MONITOR] = 0;
+      entersubsh(Z_SYNC, 1, 0);
+      execlist(list, 0, 1);
+      close(1);
+      _exit(lastval);
+***************
+*** 2233,2240 ****
+  
+      /* pid == 0 */
+      redup(fd, 1);
+      entersubsh(Z_SYNC, 1, 0);
+-     signal_ignore(SIGTSTP);
+      execlist(list, 0, 1);
+      close(1);
+      _exit(lastval);
+--- 2233,2240 ----
+  
+      /* pid == 0 */
+      redup(fd, 1);
++     opts[MONITOR] = 0;
+      entersubsh(Z_SYNC, 1, 0);
+      execlist(list, 0, 1);
+      close(1);
+      _exit(lastval);
+

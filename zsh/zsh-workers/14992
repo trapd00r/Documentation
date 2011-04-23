@@ -1,0 +1,251 @@
+From zsh-workers-return-14992-mason-zsh=primenet.com.au@sunsite.dk Wed Jun 20 14:45:48 2001
+Return-Path: <zsh-workers-return-14992-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16335 invoked from network); 20 Jun 2001 14:45:47 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 20 Jun 2001 14:45:47 -0000
+Received: (qmail 15732 invoked by alias); 20 Jun 2001 14:45:07 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14992
+Received: (qmail 15713 invoked from network); 20 Jun 2001 14:45:06 -0000
+Message-ID: <Tc0a88d015442f20480@mailsweeper01.cambridgesiliconradio.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: 4.1: multi-parameter for loop
+Date: Wed, 20 Jun 2001 15:45:12 +0100
+From: Peter Stephenson <pws@csr.com>
+
+This is meddling with things one probably shouldn't touch, unless one's
+working on a particularly annoying and sporadic bug in something else.
+
+This extends the for syntax to take multiple parameters after it; they take
+multiple words from the argument list.  The main intended use of this is
+for imitating perl's `each' feature:
+
+  typeset -A assoc
+  assoc=(key1 val1 key2 val2)
+  for key value in ${(kv)assoc}; do
+    print $key $value
+  done
+
+prints
+  
+  key1 val1
+  key2 val2
+
+(though ordering of elements isn't guaranteed, of course).
+
+My main worry is that the wordcode stuff is as clear as mud to me.  In
+particular, I don't know what WC_FOR_SKIP is doing, why it divides the data
+size(?) by 4, and whether it needs changing when there's more stuff in
+the for structure.
+
+I probably won't be committing this for a while, if at all.  All tests
+still pass, though.
+
+Index: Src/loop.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/loop.c,v
+retrieving revision 1.4
+diff -u -r1.4 loop.c
+--- Src/loop.c	2000/06/17 17:05:53	1.4
++++ Src/loop.c	2001/06/20 14:34:48
+@@ -52,15 +52,15 @@
+     Wordcode end, loop;
+     wordcode code = state->pc[-1];
+     int iscond = (WC_FOR_TYPE(code) == WC_FOR_COND), ctok = 0, atok = 0;
++    int last = 0;
+     char *name, *str, *cond = NULL, *advance = NULL;
+     zlong val = 0;
+-    LinkList args = NULL;
++    LinkList vars = NULL, args = NULL;
+ 
+-    name = ecgetstr(state, EC_NODUP, NULL);
+     end = state->pc + WC_FOR_SKIP(code);
+ 
+     if (iscond) {
+-	str = dupstring(name);
++	str = dupstring(ecgetstr(state, EC_NODUP, NULL));
+ 	singsub(&str);
+ 	if (isset(XTRACE)) {
+ 	    char *str2 = dupstring(str);
+@@ -77,28 +77,32 @@
+ 	}
+ 	cond = ecgetstr(state, EC_NODUP, &ctok);
+ 	advance = ecgetstr(state, EC_NODUP, &atok);
+-    } else if (WC_FOR_TYPE(code) == WC_FOR_LIST) {
+-	int htok = 0;
+-
+-	if (!(args = ecgetlist(state, *state->pc++, EC_DUPTOK, &htok))) {
+-	    state->pc = end;
+-	    return 0;
+-	}
+-	if (htok)
+-	    execsubst(args);
+     } else {
+-	char **x;
++	vars = ecgetlist(state, *state->pc++, EC_NODUP, NULL);
++
++	if (WC_FOR_TYPE(code) == WC_FOR_LIST) {
++	    int htok = 0;
++
++	    if (!(args = ecgetlist(state, *state->pc++, EC_DUPTOK, &htok))) {
++		state->pc = end;
++		return 0;
++	    }
++	    if (htok)
++		execsubst(args);
++	} else {
++	    char **x;
+ 
+-	args = newlinklist();
+-	for (x = pparams; *x; x++)
+-	    addlinknode(args, dupstring(*x));
++	    args = newlinklist();
++	    for (x = pparams; *x; x++)
++		addlinknode(args, dupstring(*x));
++	}
+     }
+     lastval = 0;
+     loops++;
+     pushheap();
+     cmdpush(CS_FOR);
+     loop = state->pc;
+-    for (;;) {
++    while (!last) {
+ 	if (iscond) {
+ 	    if (ctok) {
+ 		str = dupstring(cond);
+@@ -127,14 +131,29 @@
+ 	    if (!val)
+ 		break;
+ 	} else {
+-	    if (!args || !(str = (char *) ugetnode(args)))
+-		break;
+-	    if (isset(XTRACE)) {
+-		printprompt4();
+-		fprintf(xtrerr, "%s=%s\n", name, str);
+-		fflush(xtrerr);
++	    LinkNode node;
++	    int count = 0;
++	    for (node = firstnode(vars); node; incnode(node))
++	    {
++		name = (char *)getdata(node);
++		if (!args || !(str = (char *) ugetnode(args)))
++		{
++		    if (count) { 
++			str = "";
++			last = 1;
++		    } else
++			break;
++		}
++		if (isset(XTRACE)) {
++		    printprompt4();
++		    fprintf(xtrerr, "%s=%s\n", name, str);
++		    fflush(xtrerr);
++		}
++		setsparam(name, ztrdup(str));
++		count++;
+ 	    }
+-	    setsparam(name, ztrdup(str));
++	    if (!count)
++		break;
+ 	}
+ 	state->pc = loop;
+ 	execlist(state, 1, do_exec && args && empty(args));
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.23
+diff -u -r1.23 parse.c
+--- Src/parse.c	2001/06/18 07:34:34	1.23
++++ Src/parse.c	2001/06/20 14:34:49
+@@ -903,15 +903,25 @@
+ 	yylex();
+ 	type = WC_FOR_COND;
+     } else {
++	int np, n, isin = 0;
+ 	infor = 0;
+ 	if (tok != STRING || !isident(tokstr))
+ 	    YYERRORV(oecused);
+-	ecstr(tokstr);
++	np = ecadd(0);
++	n = 0;
+ 	incmdpos = 1;
+-	yylex();
+-	if (tok == STRING && !strcmp(tokstr, "in")) {
+-	    int np, n;
++	for (;;) {
++	    n++;
++	    ecstr(tokstr);
++	    yylex();	
++	    if (tok != STRING || (isin = !strcmp(tokstr, "in")) || sel)
++		break;
++	    if (!isident(tokstr))
++		YYERRORV(oecused);
++	}
++	ecbuf[np] = n;
+ 
++	if (isin) {
+ 	    incmdpos = 0;
+ 	    yylex();
+ 	    np = ecadd(0);
+@@ -921,8 +931,6 @@
+ 	    ecbuf[np] = n;
+ 	    type = (sel ? WC_SELECT_LIST : WC_FOR_LIST);
+ 	} else if (tok == INPAR) {
+-	    int np, n;
+-
+ 	    incmdpos = 0;
+ 	    yylex();
+ 	    np = ecadd(0);
+Index: Doc/Zsh/grammar.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/grammar.yo,v
+retrieving revision 1.4
+diff -u -r1.4 grammar.yo
+--- Doc/Zsh/grammar.yo	2000/08/29 06:35:40	1.4
++++ Doc/Zsh/grammar.yo	2001/06/20 14:34:49
+@@ -149,12 +149,20 @@
+ findex(for)
+ cindex(for loops)
+ cindex(loops, for)
+-item(tt(for) var(name) [ tt(in) var(word) ... var(term) ] tt(do) var(list) tt(done))(
++item(tt(for) var(name) ... [ tt(in) var(word) ... ] var(term) tt(do) var(list) tt(done))(
+ where var(term) is at least one newline or tt(;).
+ Expand the list of var(word)s, and set the parameter
+ var(name) to each of them in turn, executing
+ var(list) each time.  If the tt(in) var(word) is omitted,
+ use the positional parameters instead of the var(word)s.
++
++More than one parameter var(name) can appear before the list of
++var(word)s.  If var(N) var(name)s are given, then on each execution of the
++loop the next tt(N) var(word)s are assigned to the corresponding
++parameters.  If there are more var(name)s than remaining var(word)s, the
++remaining parameters are each set to the empty string.  Execution of the
++loop ends when there is no remaining var(word) to assign to the first
++var(name).
+ )
+ item(tt(for LPAR()LPAR()) [var(expr1)] tt(;) [var(expr2)] tt(;) [var(expr3)] tt(RPAR()RPAR() do) var(list) tt(done))(
+ The arithmetic expression var(expr1) is evaluated first (see
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

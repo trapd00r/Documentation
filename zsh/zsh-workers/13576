@@ -1,0 +1,166 @@
+From zsh-workers-return-13576-mason-zsh=primenet.com.au@sunsite.dk Tue Mar 06 12:59:08 2001
+Return-Path: <zsh-workers-return-13576-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10596 invoked from network); 6 Mar 2001 12:58:54 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 6 Mar 2001 12:58:54 -0000
+Received: (qmail 5195 invoked by alias); 6 Mar 2001 12:58:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13576
+Received: (qmail 5161 invoked from network); 6 Mar 2001 12:57:55 -0000
+Date: Tue, 6 Mar 2001 13:57:51 +0100 (MET)
+Message-Id: <200103061257.NAA02830@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+In-reply-to: Alexandre Duret-Lutz's message of 06 Mar 2001 09:44:54 +0100
+Subject: PATCH: Re: 4.0.1-pre-1
+
+
+Alexandre Duret-Lutz wrote:
+
+> X-Seq: 13573
+> 
+> Hi!
+> 
+> >>> "Peter" == Peter Stephenson <pws@csr.com> writes:
+> 
+> [...]
+> 
+>  Peter> If there are any outstanding bugs you feel still need to
+>  Peter> be fixed, please report them again.
+> 
+> [...]
+> 
+> I don't know if this can be considered as an `outstanding bug'
+> but I haven't seen any mention of zsh-users/3574 in this thread.
+> 
+> I've tried to run that script (testsuite) with Zsh: it takes a
+> *while* to start (i.e., to parse, I guess), acquires all the
+> memory, most of the swap, brings the machine to its knees, and
+> eventually run script as would other shells.  Althought it
+> actually works, this behavior is quite uncomfortable :)  
+> Any idea?
+
+Yes, lots ;-)
+
+About this particular problem: the reason was hrealloc(), a function
+I've never really been comfortable with. The parser used heap memory
+when building the word code and used hrealloc() to increase the size
+of the memory block when needed. Unfortunately, hrealloc() is only
+seldom able to do what its name seems to imply. Often (very often) it
+has to allocate a new block -- and since this is heap memory, the old
+one won't be freed. That lead to the out-of-memory we were seeing.
+
+The patch below changes the code in parse.c to use real memory for the 
+`ecbuf'. It would be very nice if we could avoid that and instead
+write a better hrealloc(), but that's non-trivial to say the least.
+
+The patch makes that testsuite work, roughly consuming as much memory
+as bash on this machine here (both sh and ksh use less memory, sigh).
+
+I think I got the freeing right, but I'd be thankful if someone with 
+an allocation profiler could verify that.
+
+Bye
+ Sven
+
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.15
+diff -u -r1.15 lex.c
+--- Src/lex.c	2001/02/28 09:12:57	1.15
++++ Src/lex.c	2001/03/06 12:56:12
+@@ -270,6 +270,7 @@
+     inredir = 0;
+     hdocs = NULL;
+     histactive = 0;
++    ecbuf = NULL;
+ 
+     ls->next = lstack;
+     lstack = ls;
+@@ -318,6 +319,8 @@
+     hwbegin = lstack->hwbegin;
+     hwend = lstack->hwend;
+     addtoline = lstack->addtoline;
++    if (ecbuf)
++	zfree(ecbuf, eclen);
+     eclen = lstack->eclen;
+     ecused = lstack->ecused;
+     ecnpats = lstack->ecnpats;
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.17
+diff -u -r1.17 parse.c
+--- Src/parse.c	2001/01/22 12:03:55	1.17
++++ Src/parse.c	2001/03/06 12:56:13
+@@ -235,6 +235,11 @@
+ /**/
+ int ecsoffs, ecssub, ecnfunc;
+ 
++#define EC_INIT_SIZE         256
++#define EC_DOUBLE_THRESHOLD  32768
++#define EC_INCREMENT         1024
++
++
+ /* Adjust pointers in here-doc structs. */
+ 
+ static void
+@@ -255,10 +260,11 @@
+     int m;
+ 
+     if ((eclen - ecused) < n) {
+-	int a = (n > 256 ? n : 256);
++	int a = (eclen < EC_DOUBLE_THRESHOLD ? eclen : EC_INCREMENT);
+ 
+-	ecbuf = (Wordcode) hrealloc((char *) ecbuf, eclen * sizeof(wordcode),
+-				    (eclen + a) * sizeof(wordcode));
++	if (n > a) a = n;
++
++	ecbuf = (Wordcode) zrealloc((char *) ecbuf, (eclen + a) * sizeof(wordcode));
+ 	eclen += a;
+     }
+     if ((m = ecused - p) > 0)
+@@ -273,9 +279,10 @@
+ ecadd(wordcode c)
+ {
+     if ((eclen - ecused) < 1) {
+-	ecbuf = (Wordcode) hrealloc((char *) ecbuf, eclen * sizeof(wordcode),
+-				    (eclen + 256) * sizeof(wordcode));
+-	eclen += 256;
++	int a = (eclen < EC_DOUBLE_THRESHOLD ? eclen : EC_INCREMENT);
++
++	ecbuf = (Wordcode) zrealloc((char *) ecbuf, (eclen + a) * sizeof(wordcode));
++	eclen += a;
+     }
+     ecbuf[ecused] = c;
+     ecused++;
+@@ -360,7 +367,9 @@
+ static void
+ init_parse(void)
+ {
+-    ecbuf = (Wordcode) zhalloc((eclen = 256) * sizeof(wordcode));
++    if (ecbuf) zfree(ecbuf, eclen);
++
++    ecbuf = (Wordcode) zalloc((eclen = EC_INIT_SIZE) * sizeof(wordcode));
+     ecused = 0;
+     ecstrs = NULL;
+     ecsoffs = ecnpats = 0;
+@@ -398,6 +407,9 @@
+ 	l = strlen(p->str) + 1;
+ 	memcpy(q, p->str, l);
+     }
++    zfree(ecbuf, eclen);
++    ecbuf = NULL;
++
+     return ret;
+ }
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

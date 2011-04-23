@@ -1,0 +1,146 @@
+From zsh-workers-return-28010-mason-zsh=primenet.com.au@zsh.org Wed Jun 09 09:26:01 2010
+Return-Path: <zsh-workers-return-28010-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13882 invoked by alias); 9 Jun 2010 09:26:01 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28010
+Received: (qmail 16125 invoked from network); 9 Jun 2010 09:25:48 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Wed, 9 Jun 2010 10:25:38 +0100
+From: Peter Stephenson <Peter.Stephenson@csr.com>
+To: zsh-workers@zsh.org
+Subject: Re: Bug in zsh builtin pwd when option CHASE_LINKS is set
+Message-ID: <20100609102538.0c5e9f1d@csr.com>
+In-Reply-To: <20100607180046.20860b48@csr.com>
+References: <20040924074842.GJ2973@ay.vinc17.org>
+	<20100607131339.GA21964@prunille.vinc17.org>
+	<20100607174358.551f2350@csr.com>
+	<20100607180046.20860b48@csr.com>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.5 (GTK+ 2.18.9; i686-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 09 Jun 2010 09:25:38.0566 (UTC) FILETIME=[B9127260:01CB07B5]
+X-Scanned-By: MailControl A_09_40_00 (www.mailcontrol.com) on 10.71.0.132
+
+On Mon, 7 Jun 2010 18:00:46 +0100
+Peter Stephenson <Peter.Stephenson@csr.com> wrote:
+> + * We could fall back to getcwd() instead.
+
+I can't see how this could be worse.  It gets the right answer for
+.snapshot directories, i.e. it follows symbolic links further up the path
+while still locating the tail end of the path.  It takes a while, though.
+
+Index: configure.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/configure.ac,v
+retrieving revision 1.129
+diff -p -u -r1.129 configure.ac
+--- configure.ac	18 Dec 2009 19:50:45 -0000	1.129
++++ configure.ac	9 Jun 2010 09:19:26 -0000
+@@ -1170,7 +1170,7 @@ AC_CHECK_FUNCS(strftime strptime mktime 
+ 	       regcomp regexec regerror regfree \
+ 	       gdbm_open getxattr \
+ 	       realpath canonicalize_file_name \
+-	       symlink)
++	       symlink getcwd)
+ AC_FUNC_STRCOLL
+ 
+ if test x$enable_cap = xyes; then
+@@ -1898,6 +1898,34 @@ if test x$zsh_cv_use_getcwd = xyes; then
+   AC_DEFINE(USE_GETCWD)
+ fi
+ 
++dnl GNU getcwd() can allocate as much space as necessary for a
++dnl directory name, preventing guessing games.
++AH_TEMPLATE([GETCWD_CALLS_MALLOC],
++[Define to 1 if getcwd() calls malloc to allocate memory.])
++if test x$ac_cv_func_getcwd = xyes; then
++  AC_CACHE_CHECK(whether getcwd calls malloc to allocate memory,
++  zsh_cv_getcwd_malloc,
++  [AC_TRY_RUN([
++#include <unistd.h>
++#include <string.h>
++int main() {
++    char buf[1024], *ptr1, *ptr2;
++    ptr1 = getcwd(buf, 1024);
++    ptr2 = getcwd(NULL, 0);
++    if (ptr1 && ptr2 && !strcmp(ptr1, ptr2)) {
++      return 0;
++    }
++    return 1;
++}
++],
++  zsh_cv_getcwd_malloc=yes,
++  zsh_cv_getcwd_malloc=no,
++  zsh_cv_getcwd_malloc=no)])
++  if test x$zsh_cv_getcwd_malloc = xyes; then
++    AC_DEFINE(GETCWD_CALLS_MALLOC)
++  fi
++fi
++
+ dnl CHECK FOR setproctitle() FOR jobs -Z / ARGV0
+ AH_TEMPLATE([HAVE_SETPROCTITLE],
+ [Define to 1 if the system supports `setproctitle' to change process name])
+Index: Src/compat.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/compat.c,v
+retrieving revision 1.20
+diff -p -u -r1.20 compat.c
+--- Src/compat.c	8 Jun 2010 08:51:04 -0000	1.20
++++ Src/compat.c	9 Jun 2010 09:19:26 -0000
+@@ -420,9 +420,9 @@ zgetdir(struct dirsav *d)
+ 
+ /*
+  * Try to find the current directory.
++ * If we couldn't work it out internally, fall back to getcwd().
+  * If it fails, fall back to pwd; if zgetcwd() is being used
+  * to set pwd, pwd should be NULL and we just return ".".
+- * We could fall back to getcwd() instead.
+  */
+ 
+ /**/
+@@ -430,6 +430,23 @@ char *
+ zgetcwd(void)
+ {
+     char *ret = zgetdir(NULL);
++#ifdef HAVE_GETCWD
++    if (!ret) {
++#ifdef GETCWD_CALLS_MALLOC
++	char *cwd = getcwd(NULL, 0);
++	if (cwd) {
++	    ret = dupstring(cwd);
++	    free(cwd);
++	}
++#else
++	char *cwdbuf = zalloc(PATH_MAX);
++	ret = getcwd(cwdbuf, PATH_MAX);
++	if (ret)
++	    ret = dupstring(ret);
++	free(cwdbuf);
++#endif /* GETCWD_CALLS_MALLOC */
++    }
++#endif /* HAVE_GETCWD */
+     if (!ret)
+ 	ret = pwd;
+     if (!ret)
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

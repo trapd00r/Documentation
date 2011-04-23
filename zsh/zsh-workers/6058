@@ -1,0 +1,209 @@
+From zsh-workers-return-6058-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Apr 19 08:41:09 1999
+Return-Path: <zsh-workers-return-6058-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17202 invoked from network); 19 Apr 1999 08:41:08 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Apr 1999 08:41:08 -0000
+Received: (qmail 16499 invoked by alias); 19 Apr 1999 08:40:47 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6058
+Received: (qmail 16492 invoked from network); 19 Apr 1999 08:40:47 -0000
+Date: Mon, 19 Apr 1999 10:40:46 +0200 (MET DST)
+Message-Id: <199904190840.KAA19073@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: small fixes for completion examples
+
+
+A bug: in `_path_files' with `compconf path_expand' set completing a
+non-existing filename after a tilde expanded that tilde.
+
+A small optimisation: the eval in `_path_files' to expand tildes can,
+of course, be avoided.
+
+Another optimisation: in `comp{init,dump}' using the pattern
+`_(|*[^~])' avoids the need for extendedglob and is noticeably
+faster.
+
+A small addition: now that `compconf' can list settings, it should
+probably support the `-L' option to print something executable (I'm
+not sure if this is really needed, but...).
+
+Bye
+ Sven
+
+diff -u ooc/Core/_path_files Completion/Core/_path_files
+--- ooc/Core/_path_files	Wed Apr 14 09:33:42 1999
++++ Completion/Core/_path_files	Mon Apr 19 10:33:05 1999
+@@ -153,7 +153,7 @@
+   # prefix path by setting `prepaths'.
+   
+   linepath="${pre%%/*}/"
+-  eval realpath\=$linepath
++  realpath=$~linepath
+   [[ "$realpath" = "$linepath" ]] && return 1
+   pre="${pre#*/}"
+   orig="${orig#*/}"
+@@ -236,8 +236,14 @@
+       # the outer loop.
+ 
+       if [[ $#tmp2 -eq 0 ]]; then
+- 	[[ "$tmp1[1]" = */* ]] &&
+-	    exppaths=( "$exppaths[@]" ${^tmp1%/*}/${tpre}${tsuf} )
++ 	if [[ "$tmp1[1]" = */* ]]; then
++	  tmp2=( "${(@)tmp1#${prepath}${realpath}}" )
++	  if [[ "$tmp2[1]" = */* ]]; then
++	    exppaths=( "$exppaths[@]" ${^tmp2%/*}/${tpre}${tsuf} )
++          else
++	    exppaths=( "$exppaths[@]" ${tpre}${tsuf} )
++	  fi
++        fi
+         continue 2
+       fi
+ 
+@@ -249,8 +255,6 @@
+         tmp1=( "${(@M)tmp1:#(${(j:|:)~${(@)tmp2:q}})}" )
+       fi
+     elif (( ! $#tmp1 )); then
+-      [[ "$tmp1[1]" = */* ]] &&
+-          exppaths=( "$exppaths[@]" ${^tmp1%/*}/${tpre}${tsuf} )
+       continue 2
+     fi
+ 
+@@ -375,8 +379,8 @@
+ 
+ if [[ -n "$compconfig[path_expand]" &&
+       $#exppaths -ne 0 && nm -eq compstate[nmatches] ]]; then
+-  compadd -U -S '' "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" - \
+-          "${(@)exppaths}"
++  compadd -U -S '' "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++          -p "$linepath" - "${(@)exppaths}"
+ fi
+ 
+ [[ nm -eq compstate[nmatches] ]]
+diff -u ooc/Core/compdump Completion/Core/compdump
+--- ooc/Core/compdump	Mon Mar 22 18:54:04 1999
++++ Completion/Core/compdump	Mon Apr 19 10:35:46 1999
+@@ -18,7 +18,7 @@
+ _d_file=${compconfig[dumpfile]-${0:h}/compinit.dump}
+ 
+ typeset -U _d_files
+-_d_files=( ${^~fpath}/_*~*~(N:t) )
++_d_files=( ${^~fpath}/_(|*[^~])(N:t) )
+ 
+ print "#files: $#_d_files" > $_d_file
+ 
+diff -u ooc/Core/compinit Completion/Core/compinit
+--- ooc/Core/compinit	Tue Apr 13 13:38:39 1999
++++ Completion/Core/compinit	Mon Apr 19 10:35:36 1999
+@@ -217,15 +217,30 @@
+ # With the option `-l' as the first argument, the other arguments are
+ # taken to be key names and the values for theses keys are printed, one
+ # per line.
++# When listing is done and the `-L' option is given, the keys and
++# values are printed as invocations for this function, usable to be put
++# inte a setup script.
+ 
+ compconf() {
+-  local i
++  local i opt list
++
++  while getopts "lL" opt; do
++    if [[ "$opt" = l ]]; then
++      [[ -z "$list" ]] && list=yes
++    else
++      list=long
++    fi
++  done
++  shift OPTIND-1
+ 
+   if (( $# )); then
+-    if [[ "$1" = -l ]]; then
+-      shift
++    if [[ -n $list ]]; then
+       for i; do
+-        print $compconfig[$i]
++        if [[ $list = long ]]; then
++	  (( ${+compconfig[$i]} )) && print "compconf $i='$compconfig[$i]'"
++	else
++          print $compconfig[$i]
++	fi
+       done
+     else
+       for i; do
+@@ -238,20 +253,19 @@
+     fi
+   else
+     for i in ${(k)compconfig}; do
+-      print ${(r:25:)i} $compconfig[$i]
++      if [[ $list = long ]]; then
++	print "compconf $i='$compconfig[$i]'"
++      else
++        print ${(r:25:)i} $compconfig[$i]
++      fi
+     done
+   fi
+ }
+ 
+ # Now we automatically make the definition files autoloaded.
+ 
+-if [[ ! -o extendedglob ]]; then
+-  _i_noextglob=yes
+-  setopt extendedglob
+-fi
+-
+ typeset -U _i_files
+-_i_files=( ${^~fpath}/_*~*~(N:t) )
++_i_files=( ${^~fpath}/_(|*[^~])(N:t) )
+ _i_initname=$0
+ _i_done=''
+ 
+@@ -268,7 +282,7 @@
+ if [[ -z "$_i_done" ]]; then
+   for _i_dir in $fpath; do
+     [[ $_i_dir = . ]] && continue
+-    for _i_file in $_i_dir/_*~*~(N); do
++    for _i_file in $_i_dir/_(|*[^~])(N); do
+       read -rA _i_line < $_i_file
+       _i_tag=$_i_line[1]
+       shift _i_line
+@@ -306,6 +320,4 @@
+   (( _i_autodump )) && builtin . ${_i_initname:h}/compdump
+ fi
+ 
+-[[ -z "$_i_noextglob" ]] || unsetopt extendedglob
+-
+-unset _i_files _i_initname _i_done _i_autodump _i_noextglob
++unset _i_files _i_initname _i_done _i_autodump
+diff -u ood/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- ood/Zsh/compsys.yo	Wed Apr 14 13:21:36 1999
++++ Doc/Zsh/compsys.yo	Mon Apr 19 10:31:34 1999
+@@ -165,8 +165,8 @@
+ tt(autoload )var(function)).
+ )
+ xitem(tt(compconf) var(definitions...))
+-xitem(tt(compconf))
+-item(tt(compconf) [ tt(-l) ] var(keys...))(
++xitem(tt(compconf) [ tt(-L) ] )
++item(tt(compconf) [ tt(-l) ] [ tt(-L) ] var(keys...))(
+ Several aspects of the completion system can be configured by the
+ user. The configuration values are stored under the keys described
+ below in the associative array `tt(compconfig)'.  After sourcing
+@@ -183,7 +183,9 @@
+ In the second form (without arguments), this function lists all keys
+ and their values. If given the tt(-l) option as its first argument, as 
+ in the last form, the other arguments are taken as names of keys and
+-the values of these keys are printed one per line.
++the values of these keys are printed one per line. In either case, if the
++tt(-L) option is given, the keys and values are printed as calls to this
++function, usable to be put in a setup script.
+ )
+ enditem()
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

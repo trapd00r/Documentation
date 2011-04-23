@@ -1,0 +1,347 @@
+From zsh-workers-return-22281-mason-zsh=primenet.com.au@sunsite.dk Sat Feb 18 17:32:14 2006
+Return-Path: <zsh-workers-return-22281-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23636 invoked from network); 18 Feb 2006 17:32:11 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.0 (2005-09-13) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 18 Feb 2006 17:32:11 -0000
+Received: (qmail 52999 invoked from network); 18 Feb 2006 17:32:05 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 18 Feb 2006 17:32:05 -0000
+Received: (qmail 10694 invoked by alias); 18 Feb 2006 17:32:03 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22281
+Received: (qmail 10684 invoked from network); 18 Feb 2006 17:32:02 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 18 Feb 2006 17:32:02 -0000
+Received: (qmail 52680 invoked from network); 18 Feb 2006 17:32:02 -0000
+Received: from mta07-winn.ispmail.ntl.com (81.103.221.47)
+  by a.mx.sunsite.dk with SMTP; 18 Feb 2006 17:32:00 -0000
+Received: from aamta12-winn.ispmail.ntl.com ([81.103.221.35])
+          by mta07-winn.ispmail.ntl.com with ESMTP
+          id <20060218173159.OWKA15056.mta07-winn.ispmail.ntl.com@aamta12-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Sat, 18 Feb 2006 17:31:59 +0000
+Received: from pwslaptop.csr.com ([81.105.238.64])
+          by aamta12-winn.ispmail.ntl.com with ESMTP
+          id <20060218173159.HQDE20737.aamta12-winn.ispmail.ntl.com@pwslaptop.csr.com>
+          for <zsh-workers@sunsite.dk>; Sat, 18 Feb 2006 17:31:59 +0000
+Received: from pwslaptop.csr.com (pwslaptop.csr.com [127.0.0.1])
+	by pwslaptop.csr.com (8.13.4/8.13.4) with ESMTP id k1IHVqYi010920
+	for <zsh-workers@sunsite.dk>; Sat, 18 Feb 2006 17:31:52 GMT
+Received: from pwslaptop.csr.com (pws@localhost)
+	by pwslaptop.csr.com (8.13.4/8.13.4/Submit) with ESMTP id k1IHVoxk010917
+	for <zsh-workers@sunsite.dk>; Sat, 18 Feb 2006 17:31:51 GMT
+Message-Id: <200602181731.k1IHVoxk010917@pwslaptop.csr.com>
+X-Authentication-Warning: pwslaptop.csr.com: pws owned process doing -bs
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk
+Subject: Re: [4.2/4.3] Bug with wait and trapped signals 
+In-Reply-To: Your message of "Fri, 17 Feb 2006 15:28:16 +0100."
+             <20060217142816.GE1708@prunille.vinc17.org> 
+Date: Sat, 18 Feb 2006 17:31:50 +0000
+
+Vincent Lefevre wrote:
+> zsh (all versions?) does not interrupt a "wait" when it receives
+> a signal for which a trap has been set.
+> 
+> For instance, consider the following script:
+> 
+> #!/usr/bin/env zsh
+> echo "PID = $$"
+> sleep 60 &
+> trap 'echo term; exit 0' TERM
+> wait
+> 
+> When I send SIGTERM to the shell process, zsh does nothing, waiting
+> for the child to terminate before executing the trap. POSIX says:
+> 
+>  2.11 Signals and Error Handling
+> 
+>    [...] When the shell is waiting, by means of the wait utility, for
+>    asynchronous commands to complete, the reception of a signal for
+>    which a trap has been set shall cause the wait utility to return
+>    immediately with an exit status >128, immediately after which the
+>    trap associated with that signal shall be taken.
+
+Here's an attempt at fixing that.  I'm unlikely to check this in before
+4.3.1.
+
+I'm reasonably happy with replacing the passing of SIGINT with a flag
+indicating special handling for "wait" and allowing trapped signals to
+interrupt.  I'm less happy with the way last_signal is set by the signal
+handler and examined after sigsuspend() or equivalent returns.  However,
+it may be that this is the right way to do it after all.
+
+I would prefer if there was someone more proficient in the dark art of
+signals to look at this.
+
+By the way, I think I introduced a bug with TRAPSASYNC with BSD_SIGNALS,
+if anyone's still using them...it wouldn't actually wait for a signal.
+
+I also inserted an "else" which seemed to want to be present where it's
+marked "HERE" (another CSR habit).
+
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.43
+diff -u -r1.43 jobs.c
+--- Src/jobs.c	7 Feb 2006 16:55:58 -0000	1.43
++++ Src/jobs.c	18 Feb 2006 17:21:09 -0000
+@@ -1116,11 +1116,16 @@
+ 
+ }
+ 
+-/* wait for a particular process */
++/*
++ * Wait for a particular process.
++ * wait_cmd indicates this is from the interactive wait command,
++ * in which case the behaviour is a little different:  the command
++ * itself can be interrupted by a trapped signal.
++ */
+ 
+ /**/
+-void
+-waitforpid(pid_t pid)
++int
++waitforpid(pid_t pid, int wait_cmd)
+ {
+     int first = 1, q = queue_signal_level();
+ 
+@@ -1133,18 +1138,30 @@
+ 	else
+ 	    kill(pid, SIGCONT);
+ 
+-	signal_suspend(SIGCHLD, SIGINT);
++	last_signal = -1;
++	signal_suspend(SIGCHLD, wait_cmd);
++	if (last_signal != SIGCHLD && wait_cmd) {
++	    /* wait command interrupted, but no error: return */
++	    restore_queue_signals(q);
++	    return 128 + last_signal;
++	}
+ 	child_block();
+     }
+     child_unblock();
+     restore_queue_signals(q);
++
++    return 0;
+ }
+ 
+-/* wait for a job to finish */
++/*
++ * Wait for a job to finish.
++ * wait_cmd indicates this is from the wait builtin; see
++ * wait_cmd in waitforpid().
++ */
+ 
+ /**/
+-static void
+-zwaitjob(int job, int sig)
++static int
++zwaitjob(int job, int wait_cmd)
+ {
+     int q = queue_signal_level();
+     Job jn = jobtab + job;
+@@ -1158,7 +1175,13 @@
+ 	while (!errflag && jn->stat &&
+ 	       !(jn->stat & STAT_DONE) &&
+ 	       !(interact && (jn->stat & STAT_STOPPED))) {
+-	    signal_suspend(SIGCHLD, sig);
++	    signal_suspend(SIGCHLD, wait_cmd);
++	    if (last_signal != SIGCHLD && wait_cmd)
++	    {
++		/* builtin wait interrupted by trapped signal */
++		restore_queue_signals(q);
++		return 128 + last_signal;
++	    }
+ 	    /* Commenting this out makes ^C-ing a job started by a function
+ 	       stop the whole function again.  But I guess it will stop
+ 	       something else from working properly, we have to find out
+@@ -1181,6 +1204,8 @@
+     }
+     child_unblock();
+     restore_queue_signals(q);
++
++    return 0;
+ }
+ 
+ /* wait for running job to finish */
+@@ -1692,9 +1717,9 @@
+ 	} else {   /* Must be BIN_WAIT, so wait for all jobs */
+ 	    for (job = 0; job <= maxjob; job++)
+ 		if (job != thisjob && jobtab[job].stat)
+-		    zwaitjob(job, SIGINT);
++		    retval = zwaitjob(job, 1);
+ 	    unqueue_signals();
+-	    return 0;
++	    return retval;
+ 	}
+     }
+ 
+@@ -1712,11 +1737,19 @@
+ 	    Job j;
+ 	    Process p;
+ 
+-	    if (findproc(pid, &j, &p, 0))
+-		waitforpid(pid);
+-	    else
++	    if (findproc(pid, &j, &p, 0)) {
++		/*
++		 * returns 0 for normal exit, else signal+128
++		 * in which case we should return that status.
++		 */
++		retval = waitforpid(pid, 1);
++		if (!retval)
++		    retval = lastval2;
++	    } else {
+ 		zwarnnam(name, "pid %d is not a child of this shell", 0, pid);
+-	    retval = lastval2;
++		/* presumably lastval2 doesn't tell us a heck of a lot? */
++		retval = 1;
++	    }
+ 	    thisjob = ocj;
+ 	    continue;
+ 	}
+@@ -1796,8 +1829,18 @@
+ 		killjb(jobtab + job, SIGCONT);
+ 	    }
+ 	    if (func == BIN_WAIT)
+-		zwaitjob(job, SIGINT);
+-	    if (func != BIN_BG) {
++	    {
++		retval = zwaitjob(job, 1);
++		if (!retval)
++		    retval = lastval2;
++	    }
++	    else if (func != BIN_BG) {
++		/*
++		 * HERE: there used not to be an "else" above.  How
++		 * could it be right to wait for the foreground job
++		 * when we've just been told to wait for another
++		 * job (and done it)?
++		 */
+ 		waitjobs();
+ 		retval = lastval2;
+ 	    } else if (ofunc == BIN_DISOWN)
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.38
+diff -u -r1.38 signals.c
+--- Src/signals.c	15 Dec 2005 04:24:04 -0000	1.38
++++ Src/signals.c	18 Feb 2006 17:21:10 -0000
+@@ -347,9 +347,38 @@
+ static signal_jmp_buf suspend_jmp_buf;
+ #endif
+  
++#if defined(POSIX_SIGNALS) || defined(BSD_SIGNALS)
++static void
++signal_suspend_setup(sigset_t *set, int sig, int wait_cmd)
++{
++    if (isset(TRAPSASYNC)) {
++	sigemptyset(set);
++    } else {
++	sigfillset(set);
++	sigdelset(set, sig);
++#ifdef POSIX_SIGNALS
++	sigdelset(set, SIGHUP);  /* still don't know why we add this? */
++#endif
++	if (wait_cmd)
++	{
++	    /*
++	     * Using "wait" builtin.  We should allow SIGINT and
++	     * execute traps delivered to the shell.
++	     */
++	    int sigtr;
++	    sigdelset(set, SIGINT);
++	    for (sigtr = 1; sigtr <= NSIG; sigtr++) {
++		if (sigtrapped[sigtr] & ~ZSIG_IGNORED)
++		    sigdelset(set, sigtr);
++	    }
++	}
++    }
++}
++#endif
++
+ /**/
+ int
+-signal_suspend(int sig, int sig2)
++signal_suspend(int sig, int wait_cmd)
+ {
+     int ret;
+  
+@@ -359,15 +388,7 @@
+     sigset_t oset;
+ #endif /* BROKEN_POSIX_SIGSUSPEND */
+ 
+-    if (isset(TRAPSASYNC)) {
+-	sigemptyset(&set);
+-    } else {
+-	sigfillset(&set);
+-	sigdelset(&set, sig);
+-	sigdelset(&set, SIGHUP);  /* still don't know why we add this? */
+-	if (sig2)
+-	    sigdelset(&set, sig2);
+-    }
++    signal_suspend_setup(&set, sig, wait_cmd);
+ #ifdef BROKEN_POSIX_SIGSUSPEND
+     sigprocmask(SIG_SETMASK, &set, &oset);
+     pause();
+@@ -379,15 +400,8 @@
+ # ifdef BSD_SIGNALS
+     sigset_t set;
+ 
+-    if (isset(TRAPSASYNC)) {
+-	sigemptyset(&set);
+-    } else {
+-	sigfillset(&set);
+-	sigdelset(&set, sig);
+-	if (sig2)
+-	    sigdelset(&set, sig2);
+-	ret = sigpause(set);
+-    }
++    signal_suspend_setup(&set, sig, wait_cmd);
++    ret = sigpause(set);
+ # else
+ #  ifdef SYSV_SIGNALS
+     ret = sigpause(sig);
+@@ -397,7 +411,7 @@
+      * between the child_unblock() and pause()           */
+     if (signal_setjmp(suspend_jmp_buf) == 0) {
+         suspend_longjmp = 1;   /* we want to signal_longjmp after catching signal */
+-        child_unblock();       /* do we need to unblock sig2 as well?             */
++        child_unblock();       /* do we need to do wait_cmd stuff as well?             */
+         ret = pause();
+     }
+     suspend_longjmp = 0;       /* turn off using signal_longjmp since we are past *
+@@ -409,6 +423,10 @@
+     return ret;
+ }
+ 
++/* last signal we handled: race prone, or what? */
++/**/
++int last_signal;
++
+ /* the signal handler */
+  
+ /**/
+@@ -422,6 +440,7 @@
+     signal_jmp_buf jump_to;
+ #endif
+  
++    last_signal = sig;
+     signal_process(sig);
+  
+     sigfillset(&newmask);
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page still at http://www.pwstephenson.fsnet.co.uk/
+

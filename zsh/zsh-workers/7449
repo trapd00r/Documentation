@@ -1,0 +1,157 @@
+From zsh-workers-return-7449-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Aug 19 11:23:56 1999
+Return-Path: <zsh-workers-return-7449-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19202 invoked from network); 19 Aug 1999 11:23:54 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Aug 1999 11:23:53 -0000
+Received: (qmail 4144 invoked by alias); 19 Aug 1999 11:23:44 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7449
+Received: (qmail 4136 invoked from network); 19 Aug 1999 11:23:42 -0000
+Date: Thu, 19 Aug 1999 13:23:37 +0200 (MET DST)
+Message-Id: <199908191123.NAA18221@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Zefram's message of Thu, 19 Aug 1999 09:46:46 +0100 (BST)
+Subject: Re: some notes on 3.1.6
+
+
+[Hi, Zefram!]
+
+Zefram wrote:
+
+> When an autoloaded special parameter is not actually defined by the module
+> loaded, there is no error message (compare "autoload failed" when it's
+> a builtin).  Instead, the parameter remains in an autoloadable state.
+> Try, for example:
+> 
+> 	zmodload -ap example foobar
+> 	foobar=1
+> 	foobar=2
+> 	foobar=3
+
+Oops. This should be fixed by the patch below.
+
+> When autoloading of condition codes fails, there is a similar problem.
+> There is an error message ("unrecognized condition"), but the condition
+> code remains autoloadable.
+
+The patch should also fix this.
+
+> Now that we have autoloadable parameters, the watch system (the watch
+> parameter and the log builtin) can be relegated to a loadable module
+> like sched.
+> 
+> getopts can probably go the same way.
+
+Yes, maybe.
+
+> We ought to have autoloadable builtin widgets (for the deltochar module).
+> This could be implemented in user space by defining the widget as a
+> user-defined widget which, when run, loads the module in question and
+> then calls the new definition.
+
+I've wished that, too (menu-select!). Hadn't thought about doing it in 
+user-code, and we can't do it in C because all the widget stuff is
+itself in a module (unless we add something that lets modules define
+things that can be autoloaded -- which is probably not possible or
+extremly hard or something).
+
+However, one of the things I really want to do before the next
+official stable release is to change the auto-autoloading stuff we now 
+have for completion to something like a generic package system -- with 
+autoloading, dumping and configuration which can then also be used for 
+widgets (and I was already thinking about widgets and probably about
+zftp). Zsh packages could then contain a module and some shell code
+and the package system should ensure that all this can be easily used
+-- doing most things automatically.
+
+> #compdef -k tagged functions, when processed by compinit, add key bindings
+> to the current main keymap.  Unfortunately, all the key bindings are
+> appropriate for emacs, and cause real trouble if the vi key bindings
+> are being used.
+
+The widget and keymap stuff is on our list anyway. Since widget shell
+functions have already become more useful (and no doubt we will make
+them even more powerful) we've been discussing all this lately
+anyway. Especially the keymap stuff should be changed to allow real
+overlay keymaps, to allow shell-function widgets to define local
+keymaps more easily (NB: this is the place where I don't like the
+concept of a widget: if a autoloadable shell function widget which is
+not yet loaded uses a overlay keymap, users should be able to bind
+keys in that map without first loading the function; I think requiring 
+that they first define the keymap may be ok, but requiring that all
+widgets they want to bind have to be defined by the user first is a
+bit too much, I think), to change function like menu-select and
+execute-named-command to use overlay maps with `pseudo' widgets (like
+`menu-select-next'), and other things I may have forgotten now.
+
+> The new parameters and condition codes in the example module are not
+> documented.
+
+Right, but it is documented in the zsh-development-guide (which
+really, really should be moved into another directory -- Etc?). That's 
+the place where someone else forgot to describe all the basic module
+stuff so that I had to describe it, too (ahem ;-).
+
+> After doing a "compinit" (on a shell started with zsh -f), completion
+> of parameter names now adds a space suffix when it shouldn't (e.g.,
+> during menu completion).  AUTO_PARAM_SLASH then has no effect, and suffix
+> removal is partly broken; for example, after completing a parameter name
+> in braces, a typed close brace doesn't remove anything.
+
+7448 at least should fix the space-with-menu problem. The
+AUTO_PARAM_SLASH problem was already mentioned (the problem is that we 
+made such parameter completions be handled almost completely in shell
+code, so we would have to add the slashes there, too, which is a bit
+slowish). The suffix removal is just the way I want it -- and noone
+complained so far (btw. after a brace-parameter the closing brace
+removes the space for me (well, ok, it removes the `} ' and then
+inserts the closing brace)).
+
+> The documentation says that the parameter module provides a parameter
+> called "command".  Actually it's "commands".
+
+This is hidden in 7448, too.
+
+
+Bye
+ Sven
+
+diff -u os/module.c Src/module.c
+--- os/module.c	Mon Aug  9 10:40:42 1999
++++ Src/module.c	Thu Aug 19 12:57:14 1999
+@@ -1228,8 +1228,10 @@
+ 		load_module(p->module);
+ 		f = 0;
+ 		p = NULL;
+-	    } else
+-		break;
++	    } else {
++		deleteconddef(p);
++		return NULL;
++	    }
+ 	} else
+ #endif
+ 	    break;
+diff -u os/params.c Src/params.c
+--- os/params.c	Mon Aug  9 10:40:42 1999
++++ Src/params.c	Thu Aug 19 12:51:30 1999
+@@ -292,6 +292,10 @@
+ 	if (!load_module(mn))
+ 	    return NULL;
+ 	hn = gethashnode2(ht, nam);
++	if (((Param) hn) == pm) {
++	    pm->flags &= ~PM_AUTOLOAD;
++	    zwarnnam(nam, "autoload failed", NULL, 0);
++	}
+     }
+     return hn;
+ }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

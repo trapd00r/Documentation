@@ -1,0 +1,241 @@
+From zsh-workers-return-6302-mason-zsh=primenet.com.au@sunsite.auc.dk Tue May 18 09:39:02 1999
+Return-Path: <zsh-workers-return-6302-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17748 invoked from network); 18 May 1999 09:38:52 -0000
+Received: from postoffice.telstra.net (139.130.4.7)
+  by ns1.primenet.com.au with SMTP; 18 May 1999 09:38:52 -0000
+Received: from sunsite.auc.dk (sunsite.auc.dk [130.225.51.30])
+	by postoffice.telstra.net (8.8.8/8.8.8) with SMTP id TAA15117
+	for <mason-zsh@primenet.com.au>; Tue, 18 May 1999 19:24:43 +1000 (EST)
+	(envelope-from zsh-workers-return-6302-mason-zsh=primenet.com.au@sunsite.auc.dk)
+Received: (qmail 10092 invoked by alias); 18 May 1999 09:35:31 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6302
+Received: (qmail 10084 invoked from network); 18 May 1999 09:35:28 -0000
+Date: Tue, 18 May 1999 11:35:22 +0200 (MET DST)
+Message-Id: <199905180935.LAA11212@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: more list_pipe horrors
+
+
+Whew.
+
+The examples are a bit silly -- never mind.
+
+1) x=0; cat foo | while [[ x++ -lt 10000 ]]; do :; done
+
+   ...and then try to ^C it. These are actually two problems, the
+   first one is that, if the cat is still running, the loop will not
+   be stopped because there is no external command in it and thus the
+   jobbing code can't send it a signal or something.
+   If the cat isn't running anymore, Peter's latest change made the
+   jobbing code not immediately attach the shell process-group to the
+   tty, so the ^C was simply lost -- noone listening to it.
+   I've solved the first one by setting `breaks=loops' and all that
+   when the super-job gets signaled. And I've solved the second one by 
+   avoiding the attachtty() only if there are still living processes
+   in the process group currently attached. Peter, do you think this
+   is correct or can you come up with an example how this fails?
+
+2) cat foo | while read a; do sleep 1; done
+
+   ...and then suspend it, fg it, suspend it, and fg it again -- the
+   shell hangs. Again, there are two problems. If the cat has finished 
+   at the time of the first ^Z, the sub-shell is put in the process
+   group of the parent shell. The first fg succeeds because the parent 
+   shell has the sleep in the sub-job, but the second one fails
+   because now the parent shell has invalidated the sub-job and it
+   thinks it has to use the group leader of the super-job as the
+   process group to continue/attach -- which is wrong. I hope I solved 
+   this by modifying the gleader field of the super-job in such cases.
+   But (this is what I call the second problem), this should only be
+   done when the cat has exited.
+
+3) the problem I mentioned in 6285: for things like
+
+      cat foo | while read a; do grep -c $a bar; done
+
+   I sometimes needed to hit ^Z twice to stop the whole thing. It
+   seems that this happened only if grep finished very quickly, so
+   quickly that I didn't have the time to go to another terminal and
+   have a look at thing with ps or something like that. It seemed that 
+   the first ^Z stopped only the grep, not the cat. Maybe there is
+   some weird race-condition I simply can't find, but I could solve
+   the problem by sending SIGSTOP to the super-job in update_job() if
+   a process from a sub-job is suspended.
+
+
+Since some on this list may wonder why we have so much trouble with
+pipelines ending in shell constructs, I have put a comment in exec.c
+which hopefully explains at least some of the problems we have with
+them.
+
+Bye
+ Sven
+
+diff -u oos/exec.c Src/exec.c
+--- oos/exec.c	Tue May 18 09:16:58 1999
++++ Src/exec.c	Tue May 18 10:53:46 1999
+@@ -213,6 +213,78 @@
+     return pid;
+ }
+ 
++/*
++ *   Allen Edeln gebiet ich Andacht,
++ *   Hohen und Niedern von Heimdalls Geschlecht;
++ *   Ich will list_pipe's Wirken kuenden
++ *   Die aeltesten Sagen, der ich mich entsinne...
++ *
++ * In most shells, if you do something like:
++ *
++ *   cat foo | while read a; do grep $a bar; done
++ *
++ * the shell forks and executes the loop in the sub-shell thus created.
++ * In zsh this traditionally executes the loop in the current shell, which
++ * is nice to have if the loop does something to change the shell, like
++ * setting parameters or calling builtins.
++ * Putting the loop in a sub-shell makes live easy, because the shell only
++ * has to put it into the job-structure and then treats it as a normal
++ * process. Suspending and interrupting is no problem then.
++ * Some years ago, zsh either couldn't suspend such things at all, or
++ * it got really messed up when users tried to do it. As a solution, we
++ * implemented the list_pipe-stuff, which has since then become a reason
++ * for many nightmares.
++ * Pipelines like the one above are executed by the functions in this file
++ * which call each other (and sometimes recursively). The one above, for
++ * example would lead to a function call stack roughly like:
++ *
++ *  execlist->execpline->execcmd->execwhile->execlist->execpline
++ *
++ * (when waiting for the grep, ignoring execpline2 for now). At this time,
++ * zsh has build two job-table entries for it: one for the cat and one for
++ * the grep. If the user hits ^Z at this point (and jobbing is used), the 
++ * shell is notified that the grep was suspended. The list_pipe flag is
++ * used to tell the execpline where it was waiting that it was in a pipeline
++ * with a shell construct at the end (which may also be a shell function or
++ * several other things). When zsh sees the suspended grep, it forks to let
++ * the sub-shell execute the rest of the while loop. The parent shell walks
++ * up in the function call stack to the first execpline. There it has to find
++ * out that it has just forked and then has to add information about the sub-
++ * shell (its pid and the text for it) in the job entry of the cat. The pid
++ * is passed down in the list_pipe_pid variable.
++ * But there is a problem: the suspended grep is a child of the parent shell
++ * and can't be adopted by the sub-shell. So the parent shell also has to 
++ * keep the information about this process (more precisely: this pipeline)
++ * by keeping the job table entry it created for it. The fact that there
++ * are two jobs which have to be treated together is remembered by setting
++ * the STAT_SUPERJOB flag in the entry for the cat-job (which now also
++ * contains a process-entry for the whole loop -- the sub-shell) and by
++ * setting STAT_SUBJOB in the job of the grep-job. With that we can keep
++ * sub-jobs from being displayed and we can handle an fg/bg on the super-
++ * job correctly. When the super-job is continued, the shell also wakes up
++ * the sub-job. But then, the grep will exit sometime. Now the parent shell
++ * has to remember not to try to wake it up again (in case of another ^Z).
++ * It also has to wake up the sub-shell (which suspended itself immediately
++ * after creation), so that the rest of the loop is executed by it.
++ * But there is more: when the sub-shell is created, the cat may already
++ * have exited, so we can't put the sub-shell in the process group of it.
++ * In this case, we put the sub-shell in the process group of the parent
++ * shell and in any case, the sub-shell has to put all commands executed
++ * by it into its own process group, because only this way the parent
++ * shell can control them since it only knows the process group of the sub-
++ * shell. Of course, this information is also important when putting a job
++ * in the foreground, where we have to attach its process group to the
++ * controlling tty.
++ * All this is made more difficult because we have to handle return values
++ * correctly. If the grep is signaled, its exit status has to be propagated
++ * back to the parent shell which needs it to set the exit status of the
++ * super-job. And of course, when the grep is signaled (including ^C), the
++ * loop has to be stopped, etc.
++ * The code for all this is distributed over three files (exec.c, jobs.c,
++ * and signals.c) and none of them is a simple one. So, all in all, there
++ * may still be bugs, but considering the complexity (with race conditions,
++ * signal handling, and all that), this should probably be expected.
++ */
+ 
+ /**/
+ int list_pipe = 0, simple_pline = 0;
+diff -u oos/jobs.c Src/jobs.c
+--- oos/jobs.c	Tue May 18 09:16:59 1999
++++ Src/jobs.c	Tue May 18 10:01:55 1999
+@@ -175,8 +175,23 @@
+ 	    jn->ty = (struct ttyinfo *) zalloc(sizeof(struct ttyinfo));
+ 	    gettyinfo(jn->ty);
+ 	}
+-	if (jn->stat & STAT_STOPPED)
++	if (jn->stat & STAT_STOPPED) {
++	    if (jn->stat & STAT_SUBJOB) {
++		/* If we have `cat foo|while read a; grep $a bar;done'
++		 * and have hit ^Z, the sub-job is stopped, but the
++		 * super-job may still be running, waiting to be stopped
++		 * or to exit. So we have to send it a SIGSTOP. */
++		int i;
++
++		for (i = 1; i < MAXJOB; i++)
++		    if ((jobtab[i].stat & STAT_SUPERJOB) &&
++			jobtab[i].other == job) {
++			killpg(jobtab[i].gleader, SIGSTOP);
++			break;
++		    }
++	    }
+ 	    return;
++	}
+     } else {                   /* job is done, so remember return value */
+ 	lastval2 = val;
+ 	/* If last process was run in the current shell, keep old status
+@@ -202,14 +217,27 @@
+ 	if (mypgrp != pgrp && inforeground &&
+ 	    (jn->gleader == pgrp || (pgrp > 1 && kill(-pgrp, 0) == -1))) {
+ 	    if (list_pipe) {
+-		/*
+-		 * Oh, dear, we're right in the middle of some confusion
+-		 * of shell jobs on the righthand side of a pipeline, so
+-		 * it's death to call attachtty() just yet.  Mark the
+-		 * fact in the job, so that the attachtty() will be called
+-		 * when the job is finally deleted.
+-		 */
+-		jn->stat |= STAT_ATTACH;
++		if (pgrp > 1 && kill(-pgrp, 0) == -1) {
++		    attachtty(mypgrp);
++		    /* check window size and adjust if necessary */
++		    adjustwinsize(0);
++		} else {
++		    /*
++		     * Oh, dear, we're right in the middle of some confusion
++		     * of shell jobs on the righthand side of a pipeline, so
++		     * it's death to call attachtty() just yet.  Mark the
++		     * fact in the job, so that the attachtty() will be called
++		     * when the job is finally deleted.
++		     */
++		    jn->stat |= STAT_ATTACH;
++		}
++		/* If we have `foo|while true; (( x++ )); done', and hit
++		 * ^C, we have to stop the loop, too. */
++		if ((val & 0200) && inforeground == 1) {
++		    breaks = loops;
++		    errflag = 1;
++		    inerrflush();
++		}
+ 	    } else {
+ 		attachtty(mypgrp);
+ 		/* check window size and adjust if necessary */
+@@ -765,8 +793,10 @@
+ 			}
+ 		    if (!p) {
+ 			jn->stat &= ~STAT_SUPERJOB;
++			if (WIFEXITED(jn->procs->status))
++			    jn->gleader = mypgrp;
+ 			/* This deleted the job too early if the parent
+-			   shell waited for a command in list that will
++			   shell waited for a command in a list that will
+ 			   be executed by the sub-shell (e.g.: if we have
+ 			   `ls|if true;then sleep 20;cat;fi' and ^Z the
+ 			   sleep, the rest will be executed by a sub-shell,
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

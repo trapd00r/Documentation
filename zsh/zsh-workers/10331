@@ -1,0 +1,157 @@
+From zsh-workers-return-10331-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Mar 30 11:33:12 2000
+Return-Path: <zsh-workers-return-10331-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2273 invoked from network); 30 Mar 2000 11:33:10 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 30 Mar 2000 11:33:10 -0000
+Received: (qmail 9058 invoked by alias); 30 Mar 2000 11:32:51 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10331
+Received: (qmail 9045 invoked from network); 30 Mar 2000 11:32:50 -0000
+Date: Thu, 30 Mar 2000 13:32:34 +0200 (MET DST)
+Message-Id: <200003301132.NAA30426@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Wed, 29 Mar 2000 16:33:38 +0000
+Subject: PATCH: Re: Really wierd problems with autoload
+
+
+Bart Schaefer wrote:
+
+> I have a function "zman" that gets set up in my .zshrc:
+> --------------------------------------------------------
+> zman() {
+>   local f
+>   for f in ${^fpath:-/usr/local/lib/zsh/functions}/run-help
+>   do
+>     if [[ -f $f && -r $f ]]
+>     then
+>         unalias run-help
+>         autoload run-help
+>         HELPDIR=/usr/local/lib/zsh/help
+>         FPATH=$f \run-help $1
+>         return $?
+>     elif [[ -f /usr/local/lib/zsh/help/$1 ]]
+>     then less /usr/local/lib/zsh/help/$1
+>     else man $1
+>     fi
+>   done
+> }
+> alias run-help zman
+               ^^^
+`alias run-help=zman', right?
+
+> 
+> This used to work, but in 3.1.6-dev-20 when I type ESC-h I get
+> 
+> run-help:9: run-help: function definition file not found
+> 
+> Now, it's not run-help line 9, it's zman line 9;
+
+That's because we do autoloading via the execautofn() function. For
+the execution code, the function currently active is the dummy
+function created for autoloading the real function.
+
+The patch below makes doshfunc() set scriptname only if called for a
+real function and makes execautofn() handle the scriptname, too.
+
+> and further by the time
+> zman finishes the function run-help IS correctly loaded, it just for some
+> reason won't execute.  Subsequent uses of ESC-h execute the new run-help.
+
+And it is really weird? And a problem? With FPATH=$f you say it should 
+search the directory .../run-help for a file run-help. It should be
+FPATH=$f:h, I think. Or maybe everybody thinks we should also check if 
+the elements of $fpath are the names of the funtions searched?
+
+(Did it ever do that? I'm pretty sure I didn't change that.)
+
+> ...
+> 
+> the (autoload -U) returns nonzero when the new shell starts up, even though
+> it really is 3.1.6-dev-20, and I end up with the wrong fpath so compinit
+> fails, etc.  Once I've actually got a prompt, I can run (autoload -U) with
+> or without the subshell and get a zero exit status, but for some strange
+> reason it fails during reading of the .zshenv when there's an FPATH in the
+> environment.  And it only happens on "exec", not upon running $ZSH_NAME as
+> a simple external command.
+
+Can't help here, because neither this nor...
+
+> I noticed this because (wierd thing #3) FPATH becomes exported when zman
+> does "FPATH=$f \run-help $1" ... the old value of FPATH appears to be
+> restored properly after run-help fails, but if it was not exported before,
+> it is afterwards.
+
+...this happens for me.
+
+> This is completely mystifying ... perhaps a garbage pointer is getting put
+> into the environment when FPATH is exported?  But what does that have to
+> do with autoload -U failing?  Maybe the whole subshell is crashing and the
+> fact that it's got an autoload command in it is a red herring?  But it
+> fails completely silently and without leaving a core file or anything.
+
+Sounds scary.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/exec.c Src/exec.c
+--- ../z.old/Src/exec.c	Thu Mar 30 12:40:40 2000
++++ Src/exec.c	Thu Mar 30 13:21:13 2000
+@@ -3167,11 +3167,16 @@
+ execautofn(Estate state, int do_exec)
+ {
+     Shfunc shf;
++    char *oldscriptname;
+ 
+     if (!(shf = loadautofn(state->prog->shf, 1, 0)))
+ 	return 1;
+ 
++    oldscriptname = scriptname;
++    scriptname = dupstring(state->prog->shf->nam);
+     execode(shf->funcdef, 1, 0);
++    scriptname = oldscriptname;
++
+     return lastval;
+ }
+ 
+@@ -3243,7 +3248,7 @@
+ {
+     char **tab, **x, *oargv0;
+     int oldzoptind, oldlastval, oldoptcind;
+-    char saveopts[OPT_SIZE], *oldscriptname, *fname = dupstring(name);
++    char saveopts[OPT_SIZE], *oldscriptname = NULL, *fname = dupstring(name);
+     int obreaks;
+     struct funcstack fstack;
+ 
+@@ -3258,8 +3263,10 @@
+     starttrapscope();
+ 
+     tab = pparams;
+-    oldscriptname = scriptname;
+-    scriptname = dupstring(name);
++    if (!(flags & PM_UNDEFINED)) {
++	oldscriptname = scriptname;
++	scriptname = dupstring(name);
++    }
+     oldzoptind = zoptind;
+     zoptind = 1;
+     oldoptcind = optcind;
+@@ -3328,7 +3335,8 @@
+     pparams = tab;
+     optcind = oldoptcind;
+     zoptind = oldzoptind;
+-    scriptname = oldscriptname;
++    if (oldscriptname)
++	scriptname = oldscriptname;
+ 
+     if (isset(LOCALOPTIONS)) {
+ 	/* restore all shell options except PRIVILEGED and RESTRICTED */
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,155 @@
+From zsh-workers-return-11722-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jun 02 08:08:44 2000
+Return-Path: <zsh-workers-return-11722-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17754 invoked from network); 2 Jun 2000 08:08:43 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 2 Jun 2000 08:08:43 -0000
+Received: (qmail 4253 invoked by alias); 2 Jun 2000 08:08:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11722
+Received: (qmail 4245 invoked from network); 2 Jun 2000 08:08:32 -0000
+Date: Fri, 2 Jun 2000 10:08:27 +0200 (MET DST)
+Message-Id: <200006020808.KAA26614@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Felix Rosencrantz's message of Thu, 1 Jun 2000 23:06:40 -0700
+	(PDT)
+Subject: PATCH: Re: Memory leaks.
+
+
+Felix Rosencrantz wrote:
+
+> ...
+> 
+> Memory leak from bin_compadd():
+> 	malloc         [rtlib.o]
+> 	zcalloc        [mem.c:469]
+> 	parse_cmatcher [complete.c:294]
+> 	bin_compadd    [complete.c:580]
+> 	execbuiltin    [builtin.c:368]
+> 	execcmd        [exec.c:2257]
+
+Oops. parse_cmatcher() should use heap memory, maybe this got confused 
+when removing useheap.
+
+> Another leak in bin_compadd:
+>         malloc         [rtlib.o]
+>         zalloc         [mem.c:453]
+>         ztrdup         [mem.c:530]
+>         bin_compadd    [complete.c:574]
+>         execbuiltin    [builtin.c:368]
+>         execcmd        [exec.c:2257]
+> 
+> I think this is due to the fact that we do a tricat on complete.c:572, without
+> freeing the previous values of mstr.
+
+Right.
+
+> Memory leak from addvars():
+> 	malloc         [rtlib.o]
+> 	zalloc         [mem.c:453]
+> 	ztrdup         [mem.c:530]
+> 	addvars        [exec.c:1510]
+> 	execsimple     [exec.c:750]
+> 	execlist       [exec.c:801]
+
+Hmm. Maybe we get this because some parameter setfn() neither uses nor 
+frees the string it gets.
+
+> Memory leak out of mkautofn():
+> 	malloc         [rtlib.o]
+> 	zalloc         [mem.c:453]
+> 	mkautofn       [builtin.c:2161]
+> 	bin_functions  [builtin.c:2143]
+> 	execbuiltin    [builtin.c:368]
+> 	execcmd        [exec.c:2257]
+
+I can't see where this comes from. mkautofn() creates the
+autofn-program wich is then freed in loadautofn() (or
+freeshfuncnode(), with ksh-autoloading).
+
+All these autofn-progs won't be freed at the end, though (together
+with many other things).
+
+> ...
+> 
+> Memory leak from memory allocated in permmatches():
+> 	malloc         [rtlib.o]
+> 	zcalloc        [mem.c:469]
+> 	permmatches    [compcore.c:2771]
+> 	get_nmatches   [complete.c:1057]
+> 	getstrvalue    [params.c:1367]
+> 	getarg         [params.c:967]
+
+Whoa. Right.
+
+> Memory leak from set_gmatcher():
+>         malloc         [rtlib.o]
+>         zcalloc        [mem.c:469]
+>         parse_cmatcher [complete.c:294]
+>         set_gmatcher   [compctl.c:313]
+>         get_gmatcher   [compctl.c:341]
+>         bin_compctl    [compctl.c:1587]
+
+This is the same one as the first.
+
+> (I guess this is still in my startup files...)
+
+Tststs ;-)
+
+Bye
+ Sven
+
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.27
+diff -u -r1.27 compcore.c
+--- Src/Zle/compcore.c	2000/05/31 09:56:12	1.27
++++ Src/Zle/compcore.c	2000/06/02 08:07:26
+@@ -2879,6 +2879,7 @@
+ 
+ 	for (m = g->matches; *m; m++)
+ 	    freematch(*m, g->nbrbeg, g->nbrend);
++	free(g->matches);
+ 
+ 	if (g->ylist)
+ 	    freearray(g->ylist);
+Index: Src/Zle/complete.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complete.c,v
+retrieving revision 1.10
+diff -u -r1.10 complete.c
+--- Src/Zle/complete.c	2000/06/02 01:54:33	1.10
++++ Src/Zle/complete.c	2000/06/02 08:07:26
+@@ -291,7 +291,7 @@
+ 	if (err)
+ 	    return pcm_err;
+ 
+-	n = (Cmatcher) zcalloc(sizeof(*ret));
++	n = (Cmatcher) hcalloc(sizeof(*ret));
+ 	n->next = NULL;
+ 	n->flags = fl;
+ 	n->line = line;
+@@ -568,9 +568,11 @@
+ 		    return 1;
+ 		}
+ 		if (dm) {
+-		    if (mstr)
+-			mstr = tricat(mstr, " ", m);
+-		    else
++		    if (mstr) {
++			char *tmp = tricat(mstr, " ", m);
++			zsfree(mstr);
++			mstr = tmp;
++		    } else
+ 			mstr = ztrdup(m);
+ 		    m = NULL;
+ 		}
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

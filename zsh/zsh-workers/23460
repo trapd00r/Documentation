@@ -1,0 +1,224 @@
+From zsh-workers-return-23460-mason-zsh=primenet.com.au@sunsite.dk Wed May 23 10:13:01 2007
+Return-Path: <zsh-workers-return-23460-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17867 invoked from network); 23 May 2007 10:12:57 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.0 (2007-05-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=no
+	version=3.2.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 23 May 2007 10:12:57 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 48228 invoked from network); 23 May 2007 10:12:48 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 23 May 2007 10:12:48 -0000
+Received: (qmail 29887 invoked by alias); 23 May 2007 10:12:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23460
+Received: (qmail 29878 invoked from network); 23 May 2007 10:12:45 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 23 May 2007 10:12:45 -0000
+Received: (qmail 47910 invoked from network); 23 May 2007 10:12:45 -0000
+Received: from cluster-d.mailcontrol.com (217.69.20.190)
+  by a.mx.sunsite.dk with SMTP; 23 May 2007 10:12:41 -0000
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly33d.srv.mailcontrol.com (MailControl) with ESMTP id l4NAA0Rk006732
+	for <zsh-workers@sunsite.dk>; Wed, 23 May 2007 11:12:18 +0100
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.1830);
+	 Wed, 23 May 2007 11:12:04 +0100
+Date: Wed, 23 May 2007 11:12:03 +0100
+From: Peter Stephenson <pws@csr.com>
+To: Zsh-Workers <zsh-workers@sunsite.dk>
+Subject: Re: Subshell with multios causes hang
+Message-ID: <20070523111203.299233ec@news01.csr.com>
+In-Reply-To: <20070522182925.4c43a67e@news01.csr.com>
+References: <1179832903.3015.505.camel@aston.uk.cyberscience.com>
+	<20070522182925.4c43a67e@news01.csr.com>
+Organization: CSR
+X-Mailer: Claws Mail 2.9.1 (GTK+ 2.10.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 23 May 2007 10:12:04.0140 (UTC) FILETIME=[CFA38EC0:01C79D22]
+X-Scanned-By: MailControl A-06-00-00 (www.mailcontrol.com) on 10.68.0.143
+
+On Tue, 22 May 2007 18:29:25 +0100
+Peter Stephenson <pws@csr.com> wrote:
+> On Tue, 22 May 2007 12:21:43 +0100
+> John Buddery <jvb@cyberscience.com> wrote:
+> > Essentially I run the equivalent of:
+> > 
+> >    ( echo hello ) >| /tmp/out >| /tmp/out2
+> > 
+> > and in an interactive shell (or any with job control) this hangs.
+>...
+> Wossgoingon?
+>...
+> I'll carry on looking at this when I get a chance, but for now I'm
+> confused enough to go to the beer festival.
+
+Success, I think.  The answer started to come to me in the queue.  John
+sent me another email; the basic problem seems to be the obscure
+interaction between forking, job control and multios in this case.
+
+execpline() is not the right place to handle this.  The pipeline
+contains the contents of the subshell; after that, we return to
+execcmd() where we forked for the subshell, which is the appropriate
+level.  At this point, we're done with the subshell, so we simply
+_exit().  That's where things need fixing up to ensure the multios are
+happy.
+
+So what I've done is:
+
+- When we clear the job table, initialise a fresh job.  This is
+solely used for anything that happens to want a job in the subshell.
+This doesn't rely on any accidental hangovers from the main shell.
+The execpline() will still initialise its own new job, but as
+I argued above that's the right thing to do.  execpline() saves
+and restores thisjob, so we get the value we want back in execcmd().
+
+- When we _exit() after handling the subshell, close all fd's.  This is
+bound be to be OK given that we're about to bail out.  (The logic only
+applies if we have forked, obviously.)
+
+- Then wait for any processes in the current job.  Usually there will be
+none, and this goes straight through.  If there are multios we wait for
+those processes.
+
+This ensures that the multio processes are properly waited for.  I don't
+think that ever happened before, even when this apparently worked (as
+John noted, largely by accident).
+
+This doesn't break any of the existing tests; I've added a new one.
+
+I don't think it's straightforward to set up the multios before we fork,
+since globbing is allowed in multios and that's done after forking.
+However, it's all so complicated that reasoning may be too simplistic
+(there are multiple forks involved).
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.111
+diff -u -r1.111 exec.c
+--- Src/exec.c	8 May 2007 10:02:59 -0000	1.111
++++ Src/exec.c	23 May 2007 10:08:49 -0000
+@@ -1098,10 +1098,10 @@
+     child_block();
+ 
+     /*
+-     * Get free entry in job table and initialize it.
+-     * This is currently the only call to initjob(), so this
+-     * is also the only place where we can expand the job table
+-     * under us.
++     * Get free entry in job table and initialize it.  This is
+currently
++     * the only call to initjob() (apart from a minor exception in
++     * clearjobtab()), so this is also the only place where we can
++     * expand the job table under us.
+      */
+     if ((thisjob = newjob = initjob()) == -1) {
+ 	child_unblock();
+@@ -2816,8 +2816,38 @@
+     }
+ 
+   err:
+-    if (forked)
++    if (forked) {
++	/*
++	 * So what's going on here then?  Well, I'm glad you asked.
++	 *
++	 * If we create multios for use in a subshell we do
++	 * this after forking, in this function above.  That
++	 * means that the current (sub)process is responsible
++	 * for clearing them up.  However, the processes won't
++	 * go away until we have closed the fd's talking to them.
++	 * Since we're about to exit the shell there's nothing
++	 * to stop us closing all fd's (including the ones 0 to 9
++	 * that we usually leave alone).
++	 *
++	 * Then we wait for any processes.  When we forked,
++	 * we cleared the jobtable and started a new job just for
++	 * any oddments like this, so if there aren't any we won't
++	 * need to wait.  The result of not waiting is that
++	 * the multios haven't flushed the fd's properly, leading
++	 * to obscure missing data.
++	 *
++	 * It would probably be cleaner to ensure that the
++	 * parent shell handled multios, but that requires
++	 * some architectural changes which are likely to be
++	 * hairy.
++	 */
++	for (i = 0; i < 10; i++)
++	    if (fdtable[i] != FDT_UNUSED)
++		close(i);
++	closem(FDT_UNUSED);
++	waitjobs();
+ 	_exit(lastval);
++    }
+     fixfds(save);
+ 
+  done:
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.56
+diff -u -r1.56 jobs.c
+--- Src/jobs.c	27 Mar 2007 15:16:57 -0000	1.56
++++ Src/jobs.c	23 May 2007 10:08:49 -0000
+@@ -1296,6 +1296,15 @@
+ 
+     memset(jobtab, 0, jobtabsize * sizeof(struct job)); /* zero out
+table */ maxjob = 0;
++
++    /*
++     * Although we don't have job control in subshells, we
++     * sometimes needs control structures for other purposes such
++     * as multios.  Grab a job for this purpose; any will do
++     * since we've freed them all up (so there's no question
++     * of problems with the job table size here).
++     */
++    thisjob = initjob();
+ }
+ 
+ static int initnewjob(int i)
+Index: Test/E01options.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/E01options.ztst,v
+retrieving revision 1.17
+diff -u -r1.17 E01options.ztst
+--- Test/E01options.ztst	1 Nov 2006 12:25:22 -0000	1.17
++++ Test/E01options.ztst	23 May 2007 10:08:49 -0000
+@@ -655,6 +655,18 @@
+ >This is in1
+ >This is in2
+ 
++# This is trickier than it looks.  There's a hack at the end of
++# execcmd() to catch the multio processes attached to the
++# subshell, which otherwise sort of get lost in the general turmoil.
++# Without that, the multios aren't synchronous with the subshell
++# or the main shell starting the "cat", so the output files appear
++# empty.
++  setopt multios
++  ( echo hello ) >multio_out1 >multio_out2 && cat multio_out*
++0:Multios attached to a subshell
++>hello
++>hello
++
+ # tried this with other things, but not on its own, so much.
+   unsetopt nomatch
+   print with nonomatch: flooble*
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+To access the latest news from CSR copy this link into a web browser:  http://www.csr.com/email_sig.php
+
+To get further information regarding CSR, please visit our Investor Relations page at http://ir.csr.com/csr/about/overview
+

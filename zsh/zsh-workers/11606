@@ -1,0 +1,140 @@
+From zsh-workers-return-11606-mason-zsh=primenet.com.au@sunsite.auc.dk Sat May 27 08:14:13 2000
+Return-Path: <zsh-workers-return-11606-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8655 invoked from network); 27 May 2000 08:14:12 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 May 2000 08:14:12 -0000
+Received: (qmail 26193 invoked by alias); 27 May 2000 08:14:00 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11606
+Received: (qmail 26186 invoked from network); 27 May 2000 08:13:58 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000527081347.ZM21296@candle.brasslantern.com>
+Date: Sat, 27 May 2000 08:13:47 +0000
+In-Reply-To: <0FV6007MP80O0S@la-la.cambridgesiliconradio.com>
+Comments: In reply to Peter Stephenson <pws@cambridgesiliconradio.com>
+        "PATCH: (very) bad syntax error checking" (May 26,  3:24pm)
+References: <0FV6007MP80O0S@la-la.cambridgesiliconradio.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Peter Stephenson <pws@cambridgesiliconradio.com>,
+        zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH (!): Re: PATCH: (very) bad syntax error checking
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On May 26,  3:24pm, Peter Stephenson wrote:
+} Subject: PATCH: (very) bad syntax error checking
+}
+} It's rather late in the day to come across problems like this.
+} 
+} % zsh -f ./test.zsh
+} ./test.zsh:3: parse error near `fi'
+} This line should not be executed.
+
+This was supposedly fixed, by PWS, in zsh-workers/4191, before the 3.1.5
+release; though Zefram changed it slightly, according to the ChangeLog.
+
+As it happens, one of the customizations I have in my local copy of 3.1.6
+is the patch from zsh-workers/4196, which I've been stubbornly hanging on
+to ever since Zefram chose not to include it in 3.1.5, so I tried it with
+ARGV0=ksh:
+
+zagzig[274] Src/zsh -f /tmp/foo/test.zsh
+/tmp/foo/test.zsh:3: parse error near `fi'
+This line should not be executed.
+zagzig[275] ARGV0=ksh Src/zsh -f /tmp/foo/test.zsh
+/tmp/foo/test.zsh:3: parse error near `fi'
+zagzig[276] 
+
+That would seem to mean the problem is with the value of `noerrexit' around
+line 123 of init.c, but in fact that's NOT the case.  Here again is the
+shell code in question:
+
+    if true; # then missing
+      print hello
+    fi
+
+Remove the first two lines; then:
+
+zagzig[277] Src/zsh -f /tmp/foo/test.zsh
+/tmp/foo/test.zsh:1: parse error near `fi'
+This line should not be executed.
+zagzig[278] ARGV0=ksh Src/zsh -f /tmp/foo/test.zsh
+/tmp/foo/test.zsh:1: parse error near `fi'
+This line should not be executed.
+
+So the problem is twofold; first, there appears to be some very old cruft
+in par_if() in parse.c left over from when the SHORT_LOOPS option affected
+the bodies of "if" statements.  This causes the ksh/zsh difference I first
+noticed.  Unfortunately, I don't know how to remove it without breaking
+still-valid csh-compat syntax like `if (true) print hello'.  It probably
+doesn't need to be removed after fixing the next problem.
+
+Second, encountering the token "fi" alone on a line is not setting the
+returned token to LEXERR, so in init.c the test of (tok == LEXERR) fails
+(the value of `tok' is, not surpisingly, `FI').
+
+What follows appears to fix it, but Sven should confirm.  For one thing,
+I wonder why parse_list() doesn't use YYERROR() ... is there some reason
+why `ecused' should not be set to 0 in that specific case?
+
+I included a hunk for the grammar test, but why is the line number `-1'?
+
+(The init.c hunk is just some whitespace cleanup.)
+
+Index: Src/parse.c
+===================================================================
+@@ -459,6 +459,7 @@
+ 	}
+     }
+     if (!r) {
++	tok = LEXERR;
+ 	if (errflag) {
+ 	    yyerror(0);
+ 	    ecused--;
+@@ -491,10 +492,8 @@
+     yylex();
+     init_parse();
+     par_list(&c);
+-#if 0 
+-   if (tok == LEXERR)
+-#endif
+-   if (tok != ENDINPUT) {
++    if (tok != ENDINPUT) {
++	tok = LEXERR;
+ 	yyerror(0);
+ 	return NULL;
+     }
+Index: Src/init.c
+===================================================================
+@@ -944,7 +944,7 @@
+ 	execode(prog, 1, 0);
+ 	popheap();
+     } else
+-	loop(0, 0);		     /* loop through the file to be sourced        */
++	loop(0, 0);		     /* loop through the file to be sourced  */
+     sourcelevel--;
+ 
+     /* restore the current shell state */
+Index: Test/01grammar.ztst
+===================================================================
+@@ -105,6 +105,11 @@
+   fi
+ 0:`if ...' (iii)
+ >false
++  if true;
++    :
++  fi
++1d:`if ...' (iv)
++?ZTST_execchunk:-1: parse error near `fi'
+ 
+   for name in word to term; do
+     print $name
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

@@ -1,0 +1,183 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Thu Jan 11 03:52:48 1996
+Received: from euclid.skiles.gatech.edu (euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with ESMTP id DAA01817 for <mason@werple.mira.net.au>; Thu, 11 Jan 1996 03:52:40 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id LAA12555; Wed, 10 Jan 1996 11:22:34 -0500 (EST)
+Resent-Date: Wed, 10 Jan 1996 11:22:34 -0500 (EST)
+Message-Id: <9601101622.AA24841@sgi.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: Two bugs 
+In-Reply-To: "a.main@dcs.warwick.ac.uk"'s message of "Wed, 10 Jan 1996 10:46:57 MET."
+             <18716.199601101047@stone.dcs.warwick.ac.uk> 
+Date: Wed, 10 Jan 1996 17:22:37 +0100
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"rdPMB2.0.543.9V-ym"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/735
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+a.main@dcs.warwick.ac.uk wrote:
+> >% Src/zsh -f
+> >bolyai% bindkey '^j' self-insert
+> >bolyai%
+> >
+> >Now press ^J twice type anything and press ^J again.  The first character yo
+> u
+> >typed will disappear from the screen.  If there are more lines the first
+> >character after each blank lines will disappear.  It is very bad in zed.
+> 
+> Actually, the symtom, more precisely, is that the last line preceded by
+> a blank line gets as its first character the first character on the
+> last line, and the first character of every other line preceded by a
+> blank line disappears.  I'm 99% certain that this is related to
+> am_char, as the characters that disappear are the ones that are output
+> by the code that outputs am_char.  (Change it to output, say, 'X'
+> instead of am_char, and you'll see what I mean.)
+
+Yes, my changes seem to have brought this on.  I don't feel morally
+responsible, however... The problem was that the character for
+automatic margin stored was always the one for the line being changed,
+which is not necessarily where the cursor currently is.  Consequently,
+if the cursor is at the end of some other line the wrong am_char is
+printed.  I've fixed this by turning this into an array.  (However, it
+still shouldn't actually be happening because you don't need to print
+out all those 80 spaces...)
+
+> Actually, I find that the recent refresh changes, outputting spaces to
+> the end of lines instead of merely moving onto the next line, results
+> in an unacceptable performance penalty.  I'm working at 19200 baud
+> here, and multi-line command editing is now painfully slow.  Would it
+> work to merely clear with spaces the *first* time a line needs it, and
+> go back to the old behaviour thereafter?
+
+This shouldn't all be necessary:  we only need to go to the lengths of
+printing out all the spaces if they're `really' there, which is only
+likely to be a couple of spaces at the end of a line with a
+continuation, so that the difference in efficiency should be
+unnoticeable.
+
+What is confusing me is the condition for using delete-eol or not,
+which is in the following chunk of code:
+
+/* 2: see if we can clear to end-of-line, and if it's faster, work out where
+   to do it from - we can normally only do so if there's no right-prompt.
+   With automatic margins, we shouldn't do it if there is another line, in
+   case it messes up cut and paste. */
+
+    col_cleareol = -1;
+    if (tccan(TCCLEAREOL) && (!hasam || ln == nlnct - 1) && 
+	(nllen == winw ||	/* new buffer goes to the end of the line */
+	put_rpmpt != oput_rpmpt)) {
+
+
+I just added the (!hasam || ln == nlnct - 1); it should really be
+(!hasam || nllen != winw || ln == nlnct -1), but the last part of the
+condition suggests this was only arising anyway if the line would fill
+to the end of the line, either by being long or by having an altered
+rpmpt.  It should be possible to alter it so that only *really* long
+lines have this !hasam test applied.  I'll think about it myself if I
+get another chance, but at the moment I've got several other things to
+do.  Perhaps some else understands the logic here.
+
+Here's the patch to fix the first problem (except may be in
+pathological cases).
+
+*** Src/zle_refresh.c.orig	Thu Dec 21 23:44:43 1995
+--- Src/zle_refresh.c	Wed Jan 10 16:51:38 1996
+***************
+*** 56,62 ****
+      winpos;			/* singlelinezle: line's position in window */
+  static unsigned pmpt_attr = 0,	/* text attributes after displaying prompt  */
+      rpmpt_attr = 0;		/* text attributes after displaying rprompt */
+! static char am_char = ' ';	/* first col char if needed for automargin  */
+  
+  /**/
+  void
+--- 56,62 ----
+      winpos;			/* singlelinezle: line's position in window */
+  static unsigned pmpt_attr = 0,	/* text attributes after displaying prompt  */
+      rpmpt_attr = 0;		/* text attributes after displaying rprompt */
+! static char *am_chars;		/* first col chars if needed for automargin  */
+  
+  /**/
+  void
+***************
+*** 79,89 ****
+--- 79,92 ----
+  	    }
+  	    free(nbuf);
+  	    free(obuf);
++ 	    free(am_chars);
+  	}
+  	nbuf = (char **)zcalloc((winh + 1) * sizeof(char *));
+  	obuf = (char **)zcalloc((winh + 1) * sizeof(char *));
+  	nbuf[0] = (char *)zalloc(winw + 1);
+  	obuf[0] = (char *)zalloc(winw + 1);
++ 	am_chars = (char *)zcalloc(winh * sizeof(char *));
++ 	memset(am_chars, ' ', winh);
+  
+  	lwinw = winw;
+  	lwinh = winh;
+***************
+*** 482,488 ****
+  
+  /* 3: set character for first column, in case automargin stuff needs doing:
+     to begin with, this is the first char of the old screen line, if any. */
+!     am_char = *ol ? *ol : *nl;
+  
+  /* 4: main display loop - write out the buffer using whatever tricks we can */
+  
+--- 485,492 ----
+  
+  /* 3: set character for first column, in case automargin stuff needs doing:
+     to begin with, this is the first char of the old screen line, if any. */
+!     if (ln)
+!       am_chars[ln-1] = *ol ? *ol : *nl;
+  
+  /* 4: main display loop - write out the buffer using whatever tricks we can */
+  
+***************
+*** 597,614 ****
+  	return;
+  
+      if (vcs == winw) {
+! 	if (!hasam) {
+  	    putc('\r', shout);
+  	    putc('\n', shout);
+  	    SELECT_ADD_COST(2);
+  	} else {
+! 	    putc(am_char, shout);
+  	    tcout(TCLEFT);
+  	    SELECT_ADD_COST(1 + tclen[TCLEFT]);
+  	}
+  	vln++, vcs = 0;
+      }
+-     am_char = ' ';
+  
+  /* move up */
+      if (ln < vln) {
+--- 601,617 ----
+  	return;
+  
+      if (vcs == winw) {
+! 	if (!hasam || vln >= nlnct) {
+  	    putc('\r', shout);
+  	    putc('\n', shout);
+  	    SELECT_ADD_COST(2);
+  	} else {
+! 	    putc(am_chars[vln], shout);
+  	    tcout(TCLEFT);
+  	    SELECT_ADD_COST(1 + tclen[TCLEFT]);
+  	}
+  	vln++, vcs = 0;
+      }
+  
+  /* move up */
+      if (ln < vln) {
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

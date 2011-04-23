@@ -1,0 +1,143 @@
+From zsh-workers-return-16907-mason-zsh=primenet.com.au@sunsite.dk Tue Mar 26 16:56:08 2002
+Return-Path: <zsh-workers-return-16907-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15381 invoked from network); 26 Mar 2002 16:56:07 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 26 Mar 2002 16:56:07 -0000
+Received: (qmail 340 invoked by alias); 26 Mar 2002 16:55:55 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16907
+Received: (qmail 318 invoked from network); 26 Mar 2002 16:55:50 -0000
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <1020326165536.ZM32209@candle.brasslantern.com>
+Date: Tue, 26 Mar 2002 16:55:36 +0000
+In-Reply-To: <20020326110908.GA2544@logica.com>
+Comments: In reply to Oliver Kiddle <okiddle@yahoo.co.uk>
+        "Re: special/readonly variables in sh emulation" (Mar 26, 11:09am)
+References: <20020320125519.GA18479@logica.com>  <12215.1016632380@csr.com> 
+	<20020326110908.GA2544@logica.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Oliver Kiddle <okiddle@yahoo.co.uk>
+Subject: Re: special/readonly variables in sh emulation
+Cc: Zsh hackers list <zsh-workers@sunsite.dk>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Mar 26, 11:09am, Oliver Kiddle wrote:
+} 
+} What is the second parameter to the unsetfn function? Do we need it?
+
+It's telling the unset function whether the parameter is being unset at
+the end of a local parameter scope (value 0), or either globally or by
+explicit `unset' command (1).  I don't know if anything actually uses it,
+and there's at least one place where it may not be getting propagated
+correctly.
+
+} Should I be looking to remove the overloading of ct in the param
+} struct?
+
+It wouldn't hurt.
+
+} How essential was the arr cache in the value struct? I don't think
+} it should be in the value struct but either a local in getarg() or
+} internal to the hash variable implementation.
+
+It's used in several places via getvaluearr(), so at this point it is
+relied on by ordinary arrays as well; it's merely not as expensive to
+recompute an ordinary array (unless maybe it's a special of some kind).
+
+If your patch is going to do away with getvaluearr(), Value.arr can go
+as well.
+
+} Also, what is isarr in the value struct used for? I have a suspicion
+} that it is being overloaded a lot?
+
+At its basest level, it tells the parameter substitution code whether the
+parameter whose value was fetched may be treated as an array.  It has in
+fact been overloaded to pass flags to the associative array scanning code
+to tell whether keys or values should be returned and whether to return
+all matching items or just the first one found.
+
+} Should we allow attributes like uppercase and integer to apply across
+} an array like in ksh (this is messier for hashes as each element has
+} its own param)?
+
+I don't know what the ksh implementation of this is like -- does it apply
+the conversion at fetch time, or at assign time?
+
+Zsh has the added complication of being able to fetch the keys of an
+assoc -- those attributes should not apply in that case.
+
+} What worries me more is that it is making it messier to implement
+} all the noddy specials because they then have to worry about things
+} like assigning to a string subrange.
+} 
+} We basically have two interfaces to the parameter system to worry
+} about: the places where we can add hooks for specials (currently the
+} gets, sets and unsetfn functions) and the interface which the rest of
+} zsh can use the manipulate parameters.
+
+Right, and I think these should remain separate.  The problem so far has
+been that other code would use whichever level was the fastest or simplest,
+rather than respecting what should have been API boundaries.
+
+The way I would structure this is:
+
+The lowest-level API provides functions to set and get scalars (strings,
+ints, etc.), arrays, array elements, and associative array elements
+(including getting the keys or values).
+
+An intermediate API provides functions implemented in terms of the above
+to set and get string ranges, array slices, and arrays of associative
+array elements.  Special parameters have the option of implementing only
+the lowest-level API and using the functions from the intermediate one,
+or of providing the intermediate ones for efficiency or other effects.
+
+The highest level API, used by the rest of zsh, provides all this and
+everything else (such as mapping some attributes across array values at
+fetch time, if that's appropriate), implemented by calling the two lower
+level APIs.
+
+The complication arises when we add in nested substitutions, where the
+result of an inner substitution has to be treated as a parameter value
+for purposes of outer substitutions.  I suggest we actually create a
+dummy parameter in this case rather than trying to handle everything via
+manipulation of the Value structure -- but that means some pretty heavy
+rewriting of paramsubst() and getarg().
+
+If we did create a dummy parameter, we could even give it a name and
+let the surrounding substitutions refer to it explicitly, e.g.:
+
+	... ${$(some command):+blah blah $_ blah blah} ...
+
+could be the same as
+
+	tmp=$(some command)
+	... ${tmp:+blah blah $tmp blah blah} ...
+
+} A comment in parameter.c says "the zsh core doesn't support creation of
+} special hashes, yet". What functions would we need to provide to better
+} support special hashes here?
+
+I think we can defer this until we have the rest of the mess straightened
+out.
+
+} Do we ever want to have control over the conversion of a parameter's
+} type for the purposes of a special? [...]
+} 
+} What about other functionality in typeset_single - might that need to
+} be overridden for the purposes of a special, e.g. changing the output
+} format of a float?
+
+I haven't looked at your patch in detail yet, but these seems like things
+that could go in the optional intermediate-level API.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,334 @@
+From zsh-workers-request@math.gatech.edu  Fri Nov 24 22:43:42 1995
+Received: from math.gatech.edu (euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with SMTP id WAA24267 for <mason@werple.mira.net.au>; Fri, 24 Nov 1995 22:43:31 +1100 (EST)
+Received: by math.gatech.edu (5.x/SMI-SVR4)
+	id AA03054; Fri, 24 Nov 1995 06:12:21 -0500
+Resent-Date: Fri, 24 Nov 1995 12:11:52 +0100
+Old-Return-Path: <pws@ifh.de>
+Message-Id: <9511241111.AA03623@sgi.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: timing builtins: it works!
+Date: Fri, 24 Nov 1995 12:11:52 +0100
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-Id: <"kyb2k2.0.bl.KYQjm"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/642
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I thought some more about how to get current shell procedures to be
+timed and realised that the correct maxim for the list_pipe code was
+`if you can't beat it, join it'.  I've therefore written this in a
+similar way.  It now works for builtins, shell functions, current
+shell procedures, and even structures like for and while.
+
+What happens is that the timing is all handled in execcmd() (I hate
+having to add things to that, but it's the only possibility here).  It
+then gets saved on another of these list_pipe things.  When we get
+back to the pipeline level which is really handling all the code, it
+then gets added in to the job and printed out.  Unless there's really
+going to be a substantial rewrite (which I frankly doubt, since none
+of us knows enough about it), this is about the best way of doing it.
+
+(There's one alternative I can think of but haven't tried: actually
+print out the timing information straight away in execcmd(), without
+worrying about jobs and so on.  There will surely be problems
+synchronising the output with other bits of pipelines in this case ---
+the timing will print before the other bits of the pipeline have been
+harvested and printed in their turn --- but it's otherwise simpler.)
+
+For the record, the way of doing it without list_pipe would be just
+with the call to addproc() in execcmd() (the one now with
+ADDPROC_NOADD), letting it add the process structure at that point.
+Since this struct would carry the status, as added, it could also
+replace the STAT_CURSH flag which is simply to tell the job code not
+to use a process status since there isn't a process struct for the
+tail of the pipeline.
+
+By the way, despite the list_pipe code, it looks like current shell
+structures at the end of pipelines are *still* uninterruptible --- I
+thought this was what it was designed to solve?  This doesn't seem to
+be a result of my new code (it's in 2.6-beta11-test10) and I don't see
+why it should be, since I've been very carefully not to tread on
+anything's toes.
+
+I had to split addproc() up into two halves for this:  one which
+creates the process structure, one which adds it to the job table.
+This is controlled by the flags argument, with either ADDPROC_USE and
+ADDPROC_NOADD (it makes no sense to have both, normally there will be
+none).
+
+It now seems to work, so I thought I'd better post it before it
+decided to stop working again.  Here are some sample results
+(by the way, what happened to %K, %M and so on?  I woke up one
+morning and they were gone and I've never bothered mentioning it).
+I haven't checked whether these numbers are actually right...
+
+% time print foo
+foo
+print foo: 0.00s(r) 0.00s(u) 0.00s(s) (0%): %K kb, max %M kb, %F pf
+% fn() { sleep 1; }
+% time fn
+fn: 1.03s(r) 0.01s(u) 0.05s(s) (5%): %K kb, max %M kb, %F pf
+% time { print foo; print bar }
+foo
+bar
+{ print foo; print bar }: 0.01s(r) 0.00s(u) 0.00s(s) (0%): %K kb, max %M kb, %F pf
+% echo foo | time { print oof }            
+oof
+{ print oof }: 0.01s(r) 0.00s(u) 0.00s(s) (0%): %K kb, max %M kb, %F pf
+% time print foo | {read bar; print $bar | { read rod; print rod; } } 
+rod
+print foo: 0.08s(r) 0.01s(u) 0.03s(s) (48%): %K kb, max %M kb, %F pf
+{ read bar; print $bar | { read rod; print rod } }: 0.09s(r) 0.01s(u) 0.07s(s) (88%): %K kb, max %M kb, %F pf
+
+*** Src/exec.c.time	Wed Nov 22 15:36:58 1995
+--- Src/exec.c	Fri Nov 24 11:24:40 1995
+***************
+*** 95,100 ****
+--- 95,101 ----
+  
+  int list_pipe = 0, simple_pline = 0;
+  
++ static struct process *list_pipe_timeproc;
+  static pid_t list_pipe_pid;
+  static int nowait, pline_level = 0;
+  static int list_pipe_child = 0, list_pipe_job;
+***************
+*** 641,646 ****
+--- 642,648 ----
+  	nowait = 0;
+      }
+      list_pipe_pid = lastwj = 0;
++     list_pipe_timeproc = 0;
+      if (pline_level == 1)
+  	simple_pline = (l->left->type == END);
+      execpline2(l->left, how, opipe[0], ipipe[1], last1);
+***************
+*** 669,675 ****
+  		    struct process *pn, *qn;
+  
+  		    curjob = newjob;
+! 		    addproc(list_pipe_pid, list_pipe_text);
+  
+  		    for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+  			if (WIFSTOPPED(pn->status))
+--- 671,677 ----
+  		    struct process *pn, *qn;
+  
+  		    curjob = newjob;
+! 		    addproc(list_pipe_pid, list_pipe_text, NULL, 0);
+  
+  		    for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+  			if (WIFSTOPPED(pn->status))
+***************
+*** 689,694 ****
+--- 691,707 ----
+  	    }
+  
+  	    for (; !nowait;) {
++ 		if (list_pipe_timeproc) {
++ 		    /* We have an already timed current-shell construct
++ 		     * waiting to be printed out.  Put it in the job table
++ 		     * and coerse the current job to being timed.
++ 		     */
++ 		    addproc(0, NULL, &list_pipe_timeproc, ADDPROC_USE);
++ 		    jn->stat |= STAT_TIMED;
++ 		    jn->stat &= ~STAT_NOPRINT;
++ 		    updatestatus(jobtab+thisjob);
++ 		    list_pipe_timeproc = 0;
++ 		}
+  		if (list_pipe_child) {
+  		    jn->stat |= STAT_NOPRINT;
+  		    makerunning(jn);
+***************
+*** 811,817 ****
+  		char dummy, *text;
+  
+  		text = getjobtext((void *) pline->left);
+! 		addproc(pid, text);
+  		close(synch[1]);
+  		read(synch[0], &dummy, 1);
+  		close(synch[0]);
+--- 824,830 ----
+  		char dummy, *text;
+  
+  		text = getjobtext((void *) pline->left);
+! 		addproc(pid, text, NULL, 0);
+  		close(synch[1]);
+  		read(synch[0], &dummy, 1);
+  		close(synch[0]);
+***************
+*** 1133,1138 ****
+--- 1146,1153 ----
+      int fil, is_cursh, type, i;
+      int nullexec = 0, assign = 0, forked = 0;
+      int is_shfunc = 0, is_builtin = 0;
++     struct process *curshproc = 0;
++     struct timezone dummy_tz;
+  
+      doneps4 = 0;
+      args = cmd->args;
+***************
+*** 1354,1360 ****
+  			break;
+  		    }
+  	    }
+! 	    addproc(pid, text);
+  	    return;
+  	}
+  	/* pid == 0 */
+--- 1369,1375 ----
+  			break;
+  		    }
+  	    }
+! 	    addproc(pid, text, NULL, 0);
+  	    return;
+  	}
+  	/* pid == 0 */
+***************
+*** 1373,1378 ****
+--- 1388,1405 ----
+  	 * This includes current shell procedures that are being exec'ed, *
+  	 * as well as null execs.                                         */
+  	jobtab[thisjob].stat |= STAT_CURSH;
++ 	/* If timing a current shell procedure, we need a fake
++ 	 * entry for it in the process list.  We need to remember the entry so
++ 	 * we can update the times.
++ 	 *
++ 	 * To get round the list_pipe magic for handling current-shell
++ 	 * structures at the ends of pipelins, we need to be cleverer when we
++ 	 * are in the parent shell with no existing pipeline:  we must save
++ 	 * the process struct and add it to the job when we get back to the
++ 	 * parent call to pipeline().
++ 	 */
++ 	if (how & Z_TIMED)
++ 	    addproc(mypid, text, &curshproc, ADDPROC_NOADD);
+      } else {
+  	/* This is an exec (real or fake) for an external command.    *
+  	 * Note that any form of exec means that the subshell is fake *
+***************
+*** 1598,1603 ****
+--- 1625,1642 ----
+  		execlist(cmd->u.list, last1 || forked);
+  	    }
+  	}
++ 
++ 	if (curshproc) {
++ 	    times(&shtms);
++ 	    curshproc->ti.st = shtms.tms_cstime - curshproc->ti.st;
++ 	    curshproc->ti.ut = shtms.tms_cutime - curshproc->ti.ut;
++ 	    /* Status mustn't look like we've had a signal */
++ 	    curshproc->status = lastval & 0x7f;
++ 	    gettimeofday(&curshproc->endtime, &dummy_tz);
++ 	    if (!list_pipe_timeproc)
++ 		list_pipe_timeproc = curshproc;
++ 	}
++ 	
+      }
+  
+    err:
+*** Src/jobs.c.time	Wed Nov 22 15:36:54 1995
+--- Src/jobs.c	Fri Nov 24 10:06:52 1995
+***************
+*** 397,426 ****
+  
+  /**/
+  void
+! addproc(pid_t pid, char *text)
+  {
+      struct process *process;
+      struct timezone dummy_tz;
+  
+!     if (!jobtab[thisjob].gleader)
+! 	jobtab[thisjob].gleader = pid;
+!     process = (struct process *)zcalloc(sizeof *process);
+!     process->pid = pid;
+!     if (text)
+! 	strcpy(process->text, text);
+!     else
+! 	*process->text = '\0';
+!     process->next = NULL;
+!     process->status = SP_RUNNING;
+!     gettimeofday(&process->bgtime, &dummy_tz);
+!     if (jobtab[thisjob].procs) {  /* attach process to end of list */
+! 	struct process *n;
+! 
+! 	for (n = jobtab[thisjob].procs; n->next; n = n->next);
+  	process->next = NULL;
+! 	n->next = process;
+!     } else                        /* first process for this job */
+! 	jobtab[thisjob].procs = process;
+  }
+  
+  /* Check if we have files to delete.  We need to check this to see *
+--- 397,443 ----
+  
+  /**/
+  void
+! addproc(pid_t pid, char *text, struct process **procarg, int flags)
+  {
+      struct process *process;
+      struct timezone dummy_tz;
+  
+!     /* With ADDPROC_USE flag, use supplied process struct, else new one. */
+!     if (flags & ADDPROC_USE)
+! 	process = *procarg;
+!     else {
+! 	process = (struct process *)zcalloc(sizeof *process);
+! 	process->pid = pid;
+! 	if (text)
+! 	    strcpy(process->text, text);
+! 	else
+! 	    *process->text = '\0';
+! 	process->status = SP_RUNNING;
+  	process->next = NULL;
+! 	gettimeofday(&process->bgtime, &dummy_tz);
+!     }
+!     /* With ADDPROC_NOADD flag, don't put this in the job table, else do. */
+!     if (!(flags & ADDPROC_NOADD)) {
+! 	if (!jobtab[thisjob].gleader)
+! 	    jobtab[thisjob].gleader = pid;
+! 	if (jobtab[thisjob].procs) {  /* attach process to end of list */
+! 	    struct process *n;
+! 
+! 	    for (n = jobtab[thisjob].procs; n->next; n = n->next);
+! 	    process->next = NULL;
+! 	    n->next = process;
+! 	} else                        /* first process for this job */
+! 	    jobtab[thisjob].procs = process;
+!     }
+!     if (procarg && !(flags & ADDPROC_USE)) {
+! 	/* We're going to process this process elsewhere.
+! 	 * We need the current shell times to subtract later on.
+! 	 */
+! 	times(&shtms);
+! 	process->ti.st = shtms.tms_cstime;
+! 	process->ti.ut = shtms.tms_cutime;
+! 	*procarg = process;
+!     }
+  }
+  
+  /* Check if we have files to delete.  We need to check this to see *
+*** Src/zsh.h.time	Fri Nov 24 09:50:44 1995
+--- Src/zsh.h	Fri Nov 24 10:03:44 1995
+***************
+*** 573,578 ****
+--- 573,582 ----
+      struct timeval endtime;	/* time job exited                  */
+  };
+  
++ /* definitions for use by addproc() when manipulating struct process */
++ 
++ #define ADDPROC_USE	(1<<0)	/* use supplied struct, not new one */
++ #define ADDPROC_NOADD	(1<<1)	/* don't add the struct to the job table */
+  
+  /*******************************/
+  /* Definitions for Hash Tables */
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

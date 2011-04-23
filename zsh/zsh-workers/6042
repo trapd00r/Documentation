@@ -1,0 +1,155 @@
+From zsh-workers-return-6042-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Apr 15 11:10:24 1999
+Return-Path: <zsh-workers-return-6042-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8115 invoked from network); 15 Apr 1999 11:10:22 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 Apr 1999 11:10:22 -0000
+Received: (qmail 8233 invoked by alias); 15 Apr 1999 11:10:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6042
+Received: (qmail 8212 invoked from network); 15 Apr 1999 11:10:02 -0000
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <990415040310.ZM8670@candle.brasslantern.com>
+Date: Thu, 15 Apr 1999 04:03:10 -0700
+In-Reply-To: <199904150649.IAA01607@beta.informatik.hu-berlin.de>
+Comments: In reply to Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+        "Re: BUG: zsh-3.1.5-pws-14: parameter expansion not working properly" (Apr 15,  8:49am)
+References: <199904150649.IAA01607@beta.informatik.hu-berlin.de>
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>,
+        zsh-workers@sunsite.auc.dk
+Subject: Re: BUG: zsh-3.1.5-pws-14: parameter expansion not working properly
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Apr 15,  8:49am, Sven Wischnowsky wrote:
+} Subject: Re: BUG: zsh-3.1.5-pws-14: parameter expansion not working proper
+}
+} Bart Schaefer wrote:
+} 
+} > effect when the array has more than one element:
+} > 
+} > 	foo=(xa yb zc)
+} > 	print -l "${${(@)foo}[1]}" "${(@)${foo}[1]}"
+} > 
+} > Zsh 3.0.5 prints
+} > 
+} > 	xa
+} > 	x
+} > 
+} > But 3.1.5-pws-14 prints
+} > 
+} > 	x
+} > 	xa
+} 
+} (Do you really get `xa' in the last case?)
+
+I really did, but with a just-compiled -pws-15, I get
+
+    x
+    xa yb zc
+
+so I'm not sure what was up.  In any case, this is just as bad.
+
+} This (and the need to repeat the `(@)') comes from the fact that
+} multsub() doesn't get any information about where the words came
+} from. I.e. if they are an `array' (even if only one string) or not.
+} I already said this at least once.
+
+Yes, I know, but ...
+
+} To solve this better we would need a way to make `paramsubst()' notify
+} `multsub()' if the thing is an array.
+
+In what direction is the data flowing at this point?  Up or down the call
+stack?  I think you mean up; but paramsubst() is of course the caller of
+multsub() as well ...
+
+} This could be done by using a subst.c-global variable that is set in
+} multsub() and paramsubst() and tested in multsub() after prefork(), of
+} course.
+
+Yes.  This is a little sloppy, but aside from completely rewriting the
+whole multsub->prefork->stringsubst->paramsubst call chain, I think it
+is the only way.  Unless we can stick something in the linklist that is
+passed back, but that's probably even sloppier.
+
+} And then we would have to decide when we want to accept an array at
+} the call of multsub().
+
+I've lost the direction of data flow again.  Do you mean accept an array
+when prefork() returns to multsub()?  Or are you somehow talking about
+what paramsubst() passes down to multsub()?
+
+} Always, if the sub-expression is an array? Even if the whole thing
+} is in double quotes? If it is in double quotes and we don't want it
+} always, when?
+
+I think what you're getting at is, when the expansion is in double
+quotes, how soon do we perform sepjoin() on the words being passed up
+from a nested substitution?
+
+Right now, the answer is "always join in multsub(), unless the (@) flag
+appears at the same level where the join would occur."  As best I can
+tell -- and I have to go all the way back to 3.0.5, because the (P) flag
+stuff has muddled it -- the answer used to be "never join in multsub()
+unless performing a non-array assignment."  In both cases, still "do the
+join in paramsubst() iff multsub() [via &isarr] said that it returned an
+array, and the (@) flag does not appear."
+
+The subtle difference comes in at this point, around subst.c:1057 in
+pws-15:
+
+              pm = createparam(nulstring, isarr ? PM_ARRAY : PM_SCALAR);
+              if (isarr)
+                  pm->u.arr = aval;
+              else
+                  pm->u.str = val;
+
+When the join happens in multsub(), isarr is zero at that line, and we
+create a dummy scalar parameter instead of a dummy array.  The code goes
+on:
+
+            v = (Value) hcalloc(sizeof *v);
+            v->isarr = isarr;
+            v->pm = pm;
+            v->b = -1;
+            if (getindex(&s, v) || s == os)
+                break;
+
+Because we have a dummy scalar, the interpretation of getindex() is
+completely changed, and we see the effect I reported above.  The crucial
+bit is whether the join happens before or after that getindex() call.
+In all past versions of zsh, it happened *after*.
+
+Ideally, I think, it should still happen after, but the (non-)array-ness
+of whatever comes back from prefork() should be propagated up through
+isarr by multsub() -- which brings us back to the static global.
+
+} Hm, maybe when the `(@)' flag is given or the things came from an
+} array. But then there would be no way to make an array be treated as
+} a scalar further down up then by using the `(j:...:)' flag. But then
+} again, this may be ok.
+
+I think I know what you mean, but "farther down up" isn't helping.
+
+} Or maybe we make the inner expression be taken as an array if it is a
+} parameter expansion that results in an array and make it be used as a
+} scalar value in all other cases, independent of quoting
+
+No, that's too confusing and not necessary.  The only real issue is the
+"precedence" if you will, of subscripting vs. joining.  We "solved" the
+problem of subscripting scalars that were accidentally treated as arrays,
+by forcing all quoted arrays to be taken as scalars; I think we need to
+back off from that and concentrate on not accidentally treating scalars
+as arrays.
+
+I don't think that's going to mess up the "substitution rules" too badly.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

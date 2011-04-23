@@ -1,0 +1,230 @@
+From zsh-workers-return-13589-mason-zsh=primenet.com.au@sunsite.dk Wed Mar 07 12:55:15 2001
+Return-Path: <zsh-workers-return-13589-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15729 invoked from network); 7 Mar 2001 12:55:14 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 7 Mar 2001 12:55:14 -0000
+Received: (qmail 5221 invoked by alias); 7 Mar 2001 12:55:04 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13589
+Received: (qmail 5188 invoked from network); 7 Mar 2001 12:55:01 -0000
+Date: Wed, 7 Mar 2001 13:54:59 +0100 (MET)
+Message-Id: <200103071254.NAA09059@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+In-reply-to: Alexandre Duret-Lutz's message of 06 Mar 2001 17:07:22 +0100
+Subject: Re: PATCH: Re: 4.0.1-pre-1
+
+
+Alexandre Duret-Lutz wrote:
+
+> ...
+> 
+> Here zsh now consumes less memory that bash, and the testsuite
+> is really usable, that's great!  However it is still
+> significantly slower:
+> 
+> % time bash testsuite > /dev/null
+> bash testsuite > /dev/null  0.88s user 0.44s system 101% cpu 1.302 total
+> % time zsh testsuite > /dev/null
+> zsh testsuite > /dev/null  7.13s user 0.27s system 100% cpu 7.357 total
+> 
+> (this is a testsuite that exists before the first test, as I explained.)
+> 
+> I don't really care myself, 7s doesn't sound too much for such a
+> big script, but maybe you'll have another great idea... This
+> testsuite seems like a good benchmark for the parsing code.
+
+Whew, been playing with gprof...
+
+
+There were two main reasons:
+
+1) ecstrcode() used a list of strings alreayd used to avoid having to
+encode strings more than once. Searching that list was rather
+expensive (lots of calls to strcmp()), so the patch below changes this 
+to use a binary tree.
+
+Interestingly, though, changing the function to not search for
+duplicates made things even slower because then we had to allocate
+more and that was even more expensive. I hadn't expected that when I
+wrote ecstrcode(). Interesting.
+
+2) zhalloc(), the main culprit. There we have this loop that searches
+a heap with enough free memory to satisfy the request. With many small 
+allocations as in the script this meant several millon tries, because
+new heaps are appended to the list. Slightly changing the way we use
+fheap (a pointer that may point to the first heap with free memory)
+made it significantly faster (for the test case I used gprof reported
+0.03 seconds instead of 2.80). The change is simply that we let fheap
+point to a newly allocated heap if we just created it (lots of free
+memory and the loop doesn't loop).
+
+
+With these changes zsh is even slightly faster than bash here (without 
+memory debugging code, with -O2 and all that).
+
+Bye
+ Sven
+
+Index: Src/mem.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/mem.c,v
+retrieving revision 1.4
+diff -u -r1.4 mem.c
+--- Src/mem.c	2001/01/16 13:44:20	1.4
++++ Src/mem.c	2001/03/07 12:53:29
+@@ -105,7 +105,8 @@
+ 
+ static Heap heaps;
+ 
+-/* first heap with free space, not always correct */
++/* a heap with free space, not always correct (it will be the last heap
++ * if that was newly allocated but it may also be another one) */
+ 
+ static Heap fheap;
+ 
+@@ -297,7 +298,8 @@
+ 
+     /* find a heap with enough free space */
+ 
+-    for (h = (fheap ? fheap : heaps); h; h = h->next) {
++    for (h = ((fheap && HEAP_ARENA_SIZE >= (size + fheap->used)) ? fheap : heaps);
++	 h; h = h->next) {
+ 	if (HEAP_ARENA_SIZE >= (n = size + h->used)) {
+ 	    void *ret;
+ 
+@@ -364,7 +366,7 @@
+ 	    hp->next = h;
+ 	else
+ 	    heaps = h;
+-	fheap = NULL;
++	fheap = h;
+ 
+ 	unqueue_signals();
+ 	return arena(h);
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.18
+diff -u -r1.18 parse.c
+--- Src/parse.c	2001/03/06 13:00:41	1.18
++++ Src/parse.c	2001/03/07 12:53:30
+@@ -211,9 +211,9 @@
+  * containing the characters. Longer strings are encoded as the offset
+  * into the strs character array stored in the eprog struct shifted by
+  * two and ored with the bit pattern 0x.
+- * The ecstr() function that adds the code for a string uses a simple
+- * list of strings already added so that long strings are encoded only
+- * once.
++ * The ecstrcode() function that adds the code for a string uses a simple
++ * binary tree of strings already added so that long strings are encoded
++ * only once.
+  *
+  * Note also that in the eprog struct the pattern, code, and string
+  * arrays all point to the same memory block.
+@@ -320,19 +320,18 @@
+ 	}
+ 	return c;
+     } else {
+-	Eccstr p, q = NULL;
++	Eccstr p, *pp;
++	int cmp;
+ 
+-	for (p = ecstrs; p; q = p, p = p->next)
+-	    if (p->nfunc == ecnfunc && !strcmp(s, p->str))
++	for (pp = &ecstrs; (p = *pp); ) {
++	    if (!(cmp = p->nfunc - ecnfunc) && !(cmp = strcmp(p->str, s)))
+ 		return p->offs;
+-
+-	p = (Eccstr) zhalloc(sizeof(*p));
+-	p->next = NULL;
+-	if (q)
+-	    q->next = p;
+-	else
+-	    ecstrs = p;
++	    pp = (cmp < 0 ? &(p->left) : &(p->right));
++	}
++	p = *pp = (Eccstr) zhalloc(sizeof(*p));
++	p->left = p->right = 0;
+ 	p->offs = ((ecsoffs - ecssub) << 2) | (t ? 1 : 0);
++	p->aoffs = ecsoffs;
+ 	p->str = s;
+ 	p->nfunc = ecnfunc;
+ 	ecsoffs += l;
+@@ -341,12 +340,7 @@
+     }
+ }
+ 
+-static int
+-ecstr(char *s)
+-{
+-    return ecadd(ecstrcode(s));
+-}
+-
++#define ecstr(S) ecadd(ecstrcode(S))
+ 
+ #define par_save_list(C) \
+     do { \
+@@ -379,12 +373,20 @@
+ 
+ /* Build eprog. */
+ 
++static void
++copy_ecstr(Eccstr s, char *p)
++{
++    while (s) {
++	memcpy(p + s->aoffs, s->str, strlen(s->str) + 1);
++	copy_ecstr(s->left, p);
++	s = s->right;
++    }
++}
++
+ static Eprog
+ bld_eprog(void)
+ {
+     Eprog ret;
+-    Eccstr p;
+-    char *q;
+     int l;
+ 
+     ecadd(WCB_END());
+@@ -403,10 +405,8 @@
+     for (l = 0; l < ecnpats; l++)
+ 	ret->pats[l] = dummy_patprog1;
+     memcpy(ret->prog, ecbuf, ecused * sizeof(wordcode));
+-    for (p = ecstrs, q = ret->strs; p; p = p->next, q += l) {
+-	l = strlen(p->str) + 1;
+-	memcpy(q, p->str, l);
+-    }
++    copy_ecstr(ecstrs, ret->strs);
++
+     zfree(ecbuf, eclen);
+     ecbuf = NULL;
+ 
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.25
+diff -u -r1.25 zsh.h
+--- Src/zsh.h	2001/02/28 09:12:57	1.25
++++ Src/zsh.h	2001/03/07 12:53:31
+@@ -522,9 +522,9 @@
+ typedef struct eccstr *Eccstr;
+ 
+ struct eccstr {
+-    Eccstr next;
++    Eccstr left, right;
+     char *str;
+-    wordcode offs;
++    wordcode offs, aoffs;
+     int nfunc;
+ };
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

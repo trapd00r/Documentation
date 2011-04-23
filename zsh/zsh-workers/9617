@@ -1,0 +1,228 @@
+From zsh-workers-return-9617-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Feb 08 10:56:25 2000
+Return-Path: <zsh-workers-return-9617-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1800 invoked from network); 8 Feb 2000 10:56:23 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 Feb 2000 10:56:23 -0000
+Received: (qmail 202 invoked by alias); 8 Feb 2000 10:56:16 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9617
+Received: (qmail 193 invoked from network); 8 Feb 2000 10:56:15 -0000
+To: zsh-workers@math.gatech.edu
+Subject: *suggestion* for NULLCMD and emulate [ck]sh
+X-Attribution: adl
+From: Alexandre Duret-Lutz <duret_g@epita.fr>
+Date: 08 Feb 2000 11:54:31 +0100
+Message-ID: <mvbog9sotg8.fsf@phobos.lrde.epita.fr>
+Lines: 203
+User-Agent: Gnus/5.0803 (Gnus v5.8.3) Emacs/20.5
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+I'm sure this must have already been discussed on the list,
+but I couldn't find anything on this in the archive.
+
+When doing redirections with no file, shells can show three behaviours:
+
+> file
+
+is equivalent to 
+
+[k]sh)     : > file
+csh)       forbiden
+zsh)       $NULLCMD > file
+
+Zsh can emulate the to first by setting NULLCMD to ':' or unsetting NULLCMD.
+
+The documentation say 
+
+       The standard Bourne shell behaviour is obtained by setting
+       NULLCMD and READNULLCMD to `:'.  This is the default  when
+       zsh is emulating sh or ksh.
+
+which is quite wrong.  This is the default only when zsh is *started*
+as sh or ksh, since the builtin `emulate' won't modify the parameter
+NULLCMD.
+
+What I would like zsh do is:
+
+~/tmp/tmp % > foo                                                      11:30 #1
+bar
+~/tmp/tmp % emulate sh                                                 11:31 #2
+~/tmp/tmp % > foo                                                      11:31 #3
+~/tmp/tmp % emulate csh                                                11:31 #4
+~/tmp/tmp % > foo                                                      11:31 #5
+zsh: redirection with no command
+~/tmp/tmp %                                                            Err 1 #6
+
+Presently this is not the case.
+
+I thought this could be accomplished by adding two options to zsh,
+one would tell wether the NULLCMD parameter should be considered 
+or not by the exec.c code, and the other could say what the
+default behaviour (sh or csh) when NULLCMD is unset.
+
+We would have
+
+               [k]sh  csh  zsh
+IGNORE_NULLCMD   on   on   off
+SH_NULLCMD       on   off  off
+
+I'm not sure this is the right way to handle this. You will
+certainly have better ideas.  Anyway, the patch below is my
+attempt to implement this.
+
+Index: Src/zsh.h
+--- Src/zsh.h Thu, 03 Feb 2000 00:03:47 +0100 Alexandre
++++ Src/zsh.h Tue, 08 Feb 2000 11:47:38 +0100 Alexandre
+@@ -1301,6 +1301,7 @@
+     HUP,
+     IGNOREBRACES,
+     IGNOREEOF,
++    IGNORENULLCMD,
+     INCAPPENDHISTORY,
+     INTERACTIVE,
+     INTERACTIVECOMMENTS,
+@@ -1352,6 +1353,7 @@
+     SHFILEEXPANSION,
+     SHGLOB,
+     SHINSTDIN,
++    SHNULLCMD,
+     SHOPTIONLETTERS,
+     SHORTLOOPS,
+     SHWORDSPLIT,
+Index: Src/options.c
+--- Src/options.c Fri, 31 Dec 1999 13:32:44 +0100 Alexandre
++++ Src/options.c Tue, 08 Feb 2000 11:47:39 +0100 Alexandre
+@@ -134,6 +134,7 @@
+ {NULL, "hup",		      OPT_EMULATE|OPT_ZSH,	 HUP},
+ {NULL, "ignorebraces",	      OPT_EMULATE|OPT_SH,	 IGNOREBRACES},
+ {NULL, "ignoreeof",	      0,			 IGNOREEOF},
++{NULL, "ignorenullcmd",	      OPT_EMULATE|OPT_NONZSH,	 IGNORENULLCMD},
+ {NULL, "incappendhistory",    0,			 INCAPPENDHISTORY},
+ {NULL, "interactive",	      OPT_SPECIAL,		 INTERACTIVE},
+ {NULL, "interactivecomments", OPT_BOURNE,		 INTERACTIVECOMMENTS},
+@@ -185,6 +186,7 @@
+ {NULL, "shfileexpansion",     OPT_EMULATE|OPT_BOURNE,	 SHFILEEXPANSION},
+ {NULL, "shglob",	      OPT_EMULATE|OPT_BOURNE,	 SHGLOB},
+ {NULL, "shinstdin",	      OPT_SPECIAL,		 SHINSTDIN},
++{NULL, "shnullcmd",           OPT_EMULATE|OPT_BOURNE,	 SHNULLCMD},
+ {NULL, "shoptionletters",     OPT_EMULATE|OPT_BOURNE,	 SHOPTIONLETTERS},
+ {NULL, "shortloops",	      OPT_EMULATE|OPT_NONBOURNE, SHORTLOOPS},
+ {NULL, "shwordsplit",	      OPT_EMULATE|OPT_BOURNE,	 SHWORDSPLIT},
+Index: Src/init.c
+--- Src/init.c Mon, 07 Feb 2000 17:48:28 +0100 Alexandre
++++ Src/init.c Tue, 08 Feb 2000 11:47:40 +0100 Alexandre
+@@ -666,17 +666,8 @@
+     mypid = (zlong) getpid();
+     term  = ztrdup("");
+ 
+-    /* The following variable assignments cause zsh to behave more *
+-     * like Bourne and Korn shells when invoked as "sh" or "ksh".  *
+-     * NULLCMD=":" and READNULLCMD=":"                             */
+-
+-    if (emulation == EMULATE_KSH || emulation == EMULATE_SH) {
+-	nullcmd     = ztrdup(":");
+-	readnullcmd = ztrdup(":");
+-    } else {
+-	nullcmd     = ztrdup("cat");
+-	readnullcmd = ztrdup("more");
+-    }
++    nullcmd     = ztrdup("cat");
++    readnullcmd = ztrdup("more");
+ 
+     /* We cache the uid so we know when to *
+      * recheck the info for `USERNAME'     */
+Index: Src/exec.c
+--- Src/exec.c Tue, 08 Feb 2000 10:59:23 +0100 Alexandre
++++ Src/exec.c Tue, 08 Feb 2000 11:48:13 +0100 Alexandre
+@@ -1661,11 +1661,16 @@
+ 		    } else if (varspc) {
+ 			nullexec = 2;
+ 			break;
+-		    } else if (!nullcmd || !*nullcmd ||
+-			       (cflags & BINF_PREFIX)) {
++		    } else if (((!nullcmd || !*nullcmd || opts[IGNORENULLCMD])
++				&& !opts[SHNULLCMD]) 
++			       ||(cflags & BINF_PREFIX)) {
+ 			zerr("redirection with no command", NULL, 0);
+ 			errflag = lastval = 1;
+ 			return;
++		    } else if (!nullcmd || !*nullcmd || opts[IGNORENULLCMD]) {
++			if (!args)
++			    args = newlinklist();
++			addlinknode(args, dupstring(":"));
+ 		    } else if (readnullcmd && *readnullcmd &&
+ 			       ((Redir) peekfirst(redir))->type == READ &&
+ 			       !nextnode(firstnode(redir))) {
+Index: Doc/Zsh/redirect.yo
+--- Doc/Zsh/redirect.yo Fri, 31 Dec 1999 13:32:44 +0100 Alexandre
++++ Doc/Zsh/redirect.yo Tue, 08 Feb 2000 11:48:19 +0100 Alexandre
+@@ -198,6 +198,8 @@
+ sect(Redirections with no command)
+ vindex(NULLCMD, use of)
+ vindex(READNULLCMD, use of)
++pindex(IGNORE_NULLCMD, use of)
++pindex(SH_NULLCMD, use of)
+ If a simple command consists of one or more redirection operators
+ and zero or more parameter assignments, but no command name, and the
+ parameter tt(NULLCMD) is not set, an error is caused.  If the parameter
+@@ -212,6 +214,15 @@
+ shows the contents of tt(file) on standard output, with paging if that is a
+ terminal.  tt(NULLCMD) and tt(READNULLCMD) may refer to shell functions.
+ 
+-The standard Bourne shell behaviour is obtained by setting tt(NULLCMD) and
+-tt(READNULLCMD) to `tt(:)'.  This is the default when zsh is emulating bf(sh)
+-or bf(ksh).
++The above default behaviour can be affected by the options
++tt(IGNORE_NULLCMD) and tt(SH_NULLCMD).  tt(SH_NULLCMD) forces the Bourne
++shell behaviour when the parameter tt(NULLCMD) is not set (i.e. the
++implicit command used with the redirections is `tt(:)'), while
++tt(IGNORE_NULLCMD) is used to obtain the same behaviour as if tt(NULLCMD)
++was unset.
++
++The standard Bourne shell behaviour is obtained by setting the options
++tt(IGNORE_NULLCMD) and tt(SH_NULLCMD).  This is the default when zsh is
++emulating bf(sh) or bf(ksh).  The tt(csh) behaviour can be obtained by
++setting only tt(IGNORE_NULLCMD), which is the default when emulating
++bf(csh).
+Index: Doc/Zsh/options.yo
+--- Doc/Zsh/options.yo Fri, 31 Dec 1999 13:32:44 +0100 Alexandre
++++ Doc/Zsh/options.yo Tue, 08 Feb 2000 11:48:21 +0100 Alexandre
+@@ -533,6 +533,13 @@
+ However, ten consecutive EOFs will cause the shell to exit anyway,
+ to avoid the shell hanging if its tty goes away.
+ )
++pindex(IGNORE_NULLCMD)
++vindex(NULLCMD, ignoring)
++vindex(READNULLCMD, ignoring)
++item(tt(IGNORE_NULLCMD) <C> <K> <S>)(
++The values of tt(NULLCMD) and tt(READNULLCMD) are not used when running
++redirections with no commands (see noderef(Redirection)).
++)
+ pindex(INC_APPEND_HISTORY)
+ cindex(history, incremental appending to a file)
+ item(tt(INC_APPEND_HISTORY))(
+@@ -977,6 +984,14 @@
+ running - that is purely an indicator of whether on not commands are
+ em(actually) being read from standard input.
+ The value of this option cannot be changed anywhere other than the command line.
++)
++pindex(SH_NULLCMD)
++cindex(sh, redirections with no command)
++cindex(ksh, redirections with no command)
++item(tt(SH_NULLCMD) <K> <S>)(
++If the variable tt(NULLCMD) is unset or if the option tt(IGNORE_NULLCMD) 
++is set, this option make redirections with no command have the
++standard Bourn shell behaviour (see noderef(Redirection)).
+ )
+ pindex(SH_OPTION_LETTERS)
+ cindex(sh, single letter options style)
+
+
+-- 
+Alexandre Duret-Lutz
+

@@ -1,0 +1,589 @@
+From zsh-workers-return-11971-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jun 19 09:29:37 2000
+Return-Path: <zsh-workers-return-11971-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9523 invoked from network); 19 Jun 2000 09:29:33 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Jun 2000 09:29:33 -0000
+Received: (qmail 20251 invoked by alias); 19 Jun 2000 09:29:24 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11971
+Received: (qmail 20242 invoked from network); 19 Jun 2000 09:29:23 -0000
+Date: Mon, 19 Jun 2000 11:29:10 +0200 (MET DST)
+Message-Id: <200006190929.LAA21068@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: files and paths and...
+
+
+I'm trying to group my patches... this one's for _path_files and
+friends.
+
+
+Tanaka Akira wrote:
+
+> Accidentaly, I found that zsh dumps core as follows.
+> 
+> Z(2):akr@flux% Src/zsh -f
+> flux% bindkey -e; autoload -U compinit; compinit -D; compdef _tst tst
+> flux% _tst() { _files -g -/ }
+> flux% zstyle ':completion:*' ignored-patterns '*'
+> flux% tst -<TAB>
+> zsh: segmentation fault (core dumped)  Src/zsh -f
+> Z(2):akr@flux% 
+> 
+> Note that I couldn't get proper backtrace.
+
+Missing initialisation for a string buffer when adding zero-length
+matches.
+
+
+The other things we were discussing:
+
+Peter Stephenson wrote:
+
+> Andrej wrote:
+> > Even if
+> > we cannot find out all drives (is it possible?) _path_files still has to
+> > treat /cygdrive/?/ specially, and not try to glob it. It can also always
+> > offer ``cygdrive'' for the first component (of course, if it matches
+> > current prefix/suffix).
+> 
+> Sven will have to answer for the feasibility of all of this, but...
+> 
+> One thing that might fit our needs here and elsewhere (e.g. speedups of
+> path completion when you know you don't want initial path components
+> re-jigged) is a style along the lines of fix-path-prefix, only maybe with a
+> better name.  A number would fix that many components (`2', here), while
+> something else e.g. `all' would turn off completion of earlier bits of the
+> path altogether.  A more generic `fix-prefix' might possibly be useful in
+> certain other completions.
+
+I decided that this is really an accept-exact thingy, applied to
+in-path completion. Good idea? I mean... it really *is* about
+accepting prefix paths if they exist, i.e. if there are exact matches.
+
+So, the patch enhances the accept-exact style to take not only boolean 
+values, but also patterns, BUT ONLY when looked up with the `files'
+tag. When one of the patterns matches the path typed so far and there
+are such directories, _path_files will not try to glob them. The
+change below this is, of course, that _path_files now looks up the
+accept-exact style at all. One thing I couldn't decide is if
+_path_files should use the setting of REC_EXACT, too. Currently it
+doesn't, because if the style isn't set, but REC_EXACT is, that would
+mean to behave as if the style were set to `true' and then _path_files 
+would skip all fully typed paths, so that if there is `foobar/yyy',
+and `foo/xxx', completing `foo/y<TAB>' would not complete to
+`foobar/yyy'. It's easy to make it use REC_EXACT, though. Should we?
+
+The foo/foobar thing is the example I used to say that we can't always 
+accept path prefixes, so the patch takes it back, or, more precisely,
+replaces it with that accep-exact thing.
+
+Then there is the other thing:
+
+> While this may be useful, I meant something different. I'd prefer if
+> /c/d/t would still complete to /cygdrive/d/temp. I meant, that
+> _path_files (BTW I agree that it already deserves to be converted to
+> shell code. It may even give old compctl the ability to complete paths)
+
+I suggested adding a way to `fake' matches and the patch adds the
+`fake' style (is that a good name? I used a rather generic name
+because there may be other places where something like this might
+become useful). It's values are of the form `dir:names...', which
+means that when completing inside directory `dir', completion will
+also complete to the `names'. So, if I got that cygwin stuff right,
+one could do:
+
+  zstyle '*:files' fake '/:cygdrive' '/cygdrive:a b c...'
+
+Does that work?
+
+I haven't yet tried to use this mechanism to automatically complete
+automounted directories, but I think this would be a nice use. This
+should probably be detected and done automatically, I think.
+
+
+And then the patch also contains the optimisations I already talked
+about but had forgotten to include in the patches I committed.
+
+Bye
+ Sven
+
+Index: Completion/Core/_path_files
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_path_files,v
+retrieving revision 1.21
+diff -u -r1.21 _path_files
+--- Completion/Core/_path_files	2000/06/13 09:05:37	1.21
++++ Completion/Core/_path_files	2000/06/19 09:28:41
+@@ -6,7 +6,7 @@
+ local linepath realpath donepath prepath testpath exppath skips skipped
+ local tmp1 tmp2 tmp3 tmp4 i orig eorig pre suf tpre tsuf opre osuf cpre
+ local pats haspats ignore pfxsfx sopt gopt opt sdirs ignpar cfopt
+-local nm=$compstate[nmatches] menu matcher mopts sort match mid
++local nm=$compstate[nmatches] menu matcher mopts sort match mid accex fake
+ 
+ typeset -U prepaths exppaths
+ 
+@@ -139,12 +139,14 @@
+   skips='((.|..)/)##'
+ fi
+ 
+-zstyle -s ":completion:${curcontext}:paths" special-dirs sdirs &&
+-    [[ "$sdirs" = (yes|true|on|1) ]] && sdirs=yes
++zstyle -s ":completion:${curcontext}:paths" special-dirs sdirs
+ 
+ [[ "$pats" = ((|*[[:blank:]])\*(|[[:blank:]]*)|*\([^[:blank:]]#/[^[:blank:]]#\)*) ]] &&
+     sopt=$sopt/
+ 
++zstyle -a ":completion:${curcontext}:files" accept-exact accex
++zstyle -a ":completion:${curcontext}:files" fake fake
++
+ zstyle -s ":completion:${curcontext}:files" ignore-parents ignpar
+ 
+ if [[ -n "$compstate[pattern_match]" &&
+@@ -314,33 +316,33 @@
+     # Get the matching files by globbing.
+ 
+     if [[ "$tpre$tsuf" = */* ]]; then
+-      compfiles -P$cfopt tmp1 "$skipped" "$_matcher" "$sdirs"
++      compfiles -P$cfopt tmp1 accex "$skipped" "$_matcher" "$sdirs" fake
+     elif [[ "$sopt" = *[/f]* ]]; then
+-      compfiles -p$cfopt tmp1 "$skipped" "$_matcher" "$sdirs" "$pats[@]"
++      compfiles -p$cfopt tmp1 accex "$skipped" "$_matcher" "$sdirs" fake "$pats[@]"
+     else
+-      compfiles -p$cfopt tmp1 "$skipped" "$_matcher" '' "$pats[@]"
++      compfiles -p$cfopt tmp1 accex "$skipped" "$_matcher" '' fake "$pats[@]"
+     fi
+     tmp1=( $~tmp1 )
+ 
+     if [[ -n "$PREFIX$SUFFIX" ]]; then
+       # See which of them match what's on the line.
+ 
+-      if [[ -n "$_comp_correct" ]]; then
+-        tmp2=( "$tmp1[@]" )
+-        builtin compadd -D tmp1 -F _comp_ignore "$matcher[@]" - "${(@)tmp1:t}"
+-
+-        if [[ $#tmp1 -eq 0 ]]; then
+-          tmp1=( "$tmp2[@]" )
+-	  compadd -D tmp1 -F _comp_ignore "$matcher[@]" - "${(@)tmp2:t}"
+-        fi
+-      else
+-        if [[ "$tmp1[1]" = */* ]]; then
++      if [[ "$tmp1[1]" = */* ]]; then
++        if [[ -n "$_comp_correct" ]]; then
+           tmp2=( "$tmp1[@]" )
++          builtin compadd -D tmp1 -F _comp_ignore "$matcher[@]" - "${(@)tmp1:t}"
++
++          if [[ $#tmp1 -eq 0 ]]; then
++            tmp1=( "$tmp2[@]" )
++	    compadd -D tmp1 -F _comp_ignore "$matcher[@]" - "${(@)tmp2:t}"
++          fi
+         else
+-          tmp2=( '' )
++          tmp2=( "$tmp1[@]" )
++          compadd -D tmp1 -F _comp_ignore "$matcher[@]" - "${(@)tmp1:t}"
+         fi
+-
+-        compadd -D tmp1 -F _comp_ignore "$matcher[@]" - "${(@)tmp1:t}"
++      else
++        tmp2=( '' )
++        compadd -D tmp1 -F _comp_ignore "$matcher[@]" -a tmp1
+       fi
+ 
+       # If no file matches, save the expanded path and continue with
+@@ -431,26 +433,18 @@
+   tmp3="$pre$suf"
+   tpre="$pre"
+   tsuf="$suf"
+-  tmp1=( "${(@)tmp1#${prepath}${realpath}${testpath}}" )
++  [[ -n "${prepath}${realpath}${testpath}" ]] &&
++      tmp1=( "${(@)tmp1#${prepath}${realpath}${testpath}}" )
+ 
+   while true; do
+ 
+     # First we check if some of the files match the original string
+     # for this component. If there are some we remove all other
+     # names. This avoids having `foo' complete to `foo' and `foobar'.
+-
+-    if [[ "$tmp3" = */* ]]; then
+-      tmp4=( "${(@M)tmp1:#${tmp3%%/*}/*}" )
+-      (( $#tmp4 )) && tmp1=( "$tmp4[@]" )
+-    fi
++    # The return value is non-zero if the component is ambiguous.
+ 
+-    # Next we see if this component is ambiguous.
+-
+-    if [[ "$tmp3" = */* ]]; then
+-       tmp4=$tmp1[(I)^${${tmp1[1]%%/*}//(#b)([][\\<>(|)^#~*?])/\\$match[1]}/*]
+-    else
+-       tmp4=$tmp1[(I)^${tmp1[1]//(#b)([][\\<>(|)^#~*?])/\\$match[1]}]
+-    fi
++    compfiles -r tmp1 "$tmp3"
++    tmp4=$?
+ 
+     if [[ "$tpre" = */* ]]; then
+       tmp2="${cpre}${tpre%%/*}"
+Index: Doc/Zsh/compsys.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compsys.yo,v
+retrieving revision 1.68
+diff -u -r1.68 compsys.yo
+--- Doc/Zsh/compsys.yo	2000/06/19 08:47:44	1.68
++++ Doc/Zsh/compsys.yo	2000/06/19 09:28:43
+@@ -780,6 +780,13 @@
+ same as the string on the line, this match will immediately be
+ accepted.
+ 
++When completing filenames (where it is looked up for the tt(files)
++tag), this style also accepts any number of patterns as the value. If
++this is used, pathnames matching one of these patterns will be
++accepted immediately even if the command line contains some more
++partially typed pathname components and these match no file under the
++directory accepted.
++
+ Note that this is also used by the tt(_expand) completer to decide if
+ words beginning with a tilde or parameter expansion should be
+ expanded. This means that if, for example, there are parameters
+@@ -967,6 +974,17 @@
+ generated this way (e.g. due to the option tt(AUTO_MENU) being set),
+ this will also cycle through the names of the files in pathname
+ components after the first ambiguous one.
++)
++kindex(fake, completion style)
++item(tt(fake))(
++Currently, this style is only used when completing files and lookup up 
++with the tag tt(files).  Its values are of the form
++`var(dir)tt(:)var(names...)'.  This will add the var(names) as
++possible matches when completing in the directory var(dir), even if no 
++such files really exist.
++
++This can be useful on systems that support special filesystems whose
++top-level pathnames can not be listed or generated with glob patterns.
+ )
+ kindex(file-patterns, completion style)
+ item(tt(file-patterns))(
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.31
+diff -u -r1.31 compcore.c
+--- Src/Zle/compcore.c	2000/06/09 11:14:34	1.31
++++ Src/Zle/compcore.c	2000/06/19 09:28:44
+@@ -1914,8 +1914,8 @@
+ 	    if (aign || pign) {
+ 		int il = ppl + sl + psl, addit = 1;
+ 
+-		if (il > ilen)
+-		    ibuf = (char *) zhalloc((ilen = il) + 1);
++		if (il + 1> ilen)
++		    ibuf = (char *) zhalloc((ilen = il) + 2);
+ 
+ 		if (ppl)
+ 		    memcpy(ibuf, dat->ppre, ppl);
+Index: Src/Zle/computil.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/computil.c,v
+retrieving revision 1.30
+diff -u -r1.30 computil.c
+--- Src/Zle/computil.c	2000/06/15 08:09:09	1.30
++++ Src/Zle/computil.c	2000/06/19 09:28:45
+@@ -3058,17 +3058,37 @@
+ #define PATH_MAX2 (PATH_MAX * 2)
+ 
+ static LinkList
+-cfp_test_exact(LinkList names, char *skipped)
++cfp_test_exact(LinkList names, char **accept, char *skipped)
+ {
+     char buf[PATH_MAX2 + 1], *suf, *p;
+     int l, sl, found = 0;
+     struct stat st;
+     LinkNode node;
+-    LinkList ret = newlinklist();
++    LinkList ret = newlinklist(), alist = NULL;
+ 
+-    if (!(compprefix && *compprefix) && !(compsuffix && *compsuffix))
++    if ((!(compprefix && *compprefix) && !(compsuffix && *compsuffix)) ||
++	(!accept || !*accept ||
++	 ((!strcmp(*accept, "false") || !strcmp(*accept, "no") ||
++	   !strcmp(*accept, "off") || !strcmp(*accept, "0")) && !accept[1])))
+ 	return NULL;
+ 
++    if (accept[1] ||
++	(strcmp(*accept, "true") && strcmp(*accept, "yes") &&
++	 strcmp(*accept, "on") && strcmp(*accept, "1"))) {
++	Patprog prog;
++
++	alist = newlinklist();
++
++	for (; (p = *accept); accept++) {
++	    if (*p == '*' && !p[1]) {
++		alist = NULL;
++		break;
++	    }
++	    tokenize(p = dupstring(p));
++	    if ((prog = patcompile(p, 0, NULL)))
++		addlinknode(alist, prog);
++	}
++    }
+     sl = strlen(skipped) + (compprefix ? strlen(compprefix) : 0) +
+ 	(compsuffix ? strlen(compsuffix) : 0);
+ 
+@@ -3078,11 +3098,22 @@
+     suf = dyncat(skipped, rembslash(dyncat(compprefix, compsuffix)));
+ 
+     for (node = firstnode(names); node; incnode(node)) {
+-	if ((l = strlen(p = (char *) getdata(node))) && l + sl < PATH_MAX2) {
++	l = strlen(p = (char *) getdata(node));
++	if (l + sl < PATH_MAX2) {
+ 	    strcpy(buf, p);
+ 	    strcpy(buf + l, suf);
++
++	    if (!ztat(buf, &st, 0)) {
++		if (alist) {
++		    LinkNode anode;
+ 
+-	    if (!ztat(buf, &st, 0) && S_ISDIR(st.st_mode)) {
++		    for (anode = firstnode(alist); anode; incnode(anode))
++			if (pattry((Patprog) getdata(anode), buf))
++			    break;
++
++		    if (!anode)
++			continue;
++		}
+ 		found = 1;
+ 		addlinknode(ret, dupstring(buf));
+ 	    }
+@@ -3334,12 +3365,14 @@
+ }
+ 
+ static LinkList
+-cfp_add_sdirs(LinkList final, LinkList orig, char *skipped, char *sdirs)
++cfp_add_sdirs(LinkList final, LinkList orig, char *skipped,
++	      char *sdirs, char **fake)
+ {
+     int add = 0;
+ 
+-    if (*sdirs) {
+-	if (!strcmp(sdirs, "yes"))
++    if (*sdirs && (isset(GLOBDOTS) || (compprefix && *compprefix == '.'))) {
++	if (!strcmp(sdirs, "yes") || !strcmp(sdirs, "true") ||
++	    !strcmp(sdirs, "on") || !strcmp(sdirs, "1"))
+ 	    add = 2;
+ 	else if (!strcmp(sdirs, ".."))
+ 	    add = 1;
+@@ -3350,25 +3383,77 @@
+ 	char *s2 = (add == 2 ? dyncat(skipped, ".") : NULL), *m;
+ 
+ 	for (node = firstnode(orig); node; incnode(node)) {
+-	    if (*(m = (char *) getdata(node))) {
+-		addlinknode(final, dyncat((char *) getdata(node), s1));
++	    if ((m = (char *) getdata(node))) {
++		addlinknode(final, dyncat(m, s1));
+ 		if (s2)
+-		    addlinknode(final, dyncat((char *) getdata(node), s2));
++		    addlinknode(final, dyncat(m, s2));
+ 	    }
+ 	}
+     }
++    if (fake && *fake) {
++	LinkNode node;
++	char *m, *f, *p, *t, *a, c;
++	int sl = strlen(skipped) + 1;
++	struct stat st1, st2;
++
++	for (; (f = *fake); fake++) {
++	    f = dupstring(f);
++	    for (p = t = f; *p; p++) {
++		if (*p == ':')
++		    break;
++		else if (*p == '\\' && p[1])
++		    p++;
++		*t++ = *p;
++	    }
++	    if (*p) {
++		*t = *p++ = '\0';
++		if (!*p)
++		    continue;
++
++		for (node = firstnode(orig); node; incnode(node)) {
++		    if ((m = (char *) getdata(node)) &&
++			(!strcmp(f, m) ||
++			 (!stat(f, &st1) && !stat((*m ? m : "."), &st2) &&
++			  st1.st_dev == st2.st_dev &&
++			  st1.st_ino == st2.st_ino))) {
++			while (*p) {
++			    while (*p && inblank(*p))
++				p++;
++			    if (!*p)
++				break;
++			    for (f = t = p; *p; p++) {
++				if (inblank(*p))
++				    break;
++				else if (*p == '\\' && p[1])
++				    p++;
++				*t++ = *p;
++			    }
++			    c = *t;
++			    *t = '\0';
++			    a = (char *) zhalloc(strlen(m) + sl + strlen(f));
++			    strcpy(a, m);
++			    strcat(a, skipped);
++			    strcat(a, f);
++			    addlinknode(final, a);
++			    *t = c;
++			}
++		    }
++		}
++	    }
++	}
++    }
+     return final;
+ }
+ 
+ static LinkList
+-cf_pats(int dirs, int noopt, LinkList names, char *skipped, char *matcher,
+-	char *sdirs, char **pats)
++cf_pats(int dirs, int noopt, LinkList names, char **accept, char *skipped,
++	char *matcher, char *sdirs, char **fake, char **pats)
+ {
+     LinkList ret;
+     char *dpats[2];
+ 
+-    if (dirs && (ret = cfp_test_exact(names, skipped)))
+-	return cfp_add_sdirs(ret, names, skipped, sdirs);
++    if ((ret = cfp_test_exact(names, accept, skipped)))
++	return cfp_add_sdirs(ret, names, skipped, sdirs, fake);
+ 
+     if (dirs) {
+ 	dpats[0] = "*(-/)";
+@@ -3379,7 +3464,7 @@
+ 	cfp_opt_pats(pats, matcher);
+ 
+     return cfp_add_sdirs(cfp_bld_pats(dirs, names, skipped, pats),
+-			 names, skipped, sdirs);
++			 names, skipped, sdirs, fake);
+ }
+ 
+ static void
+@@ -3421,6 +3506,61 @@
+     }
+ }
+ 
++static LinkList
++cf_remove_other(char **names, char *pre, int *amb)
++{
++    char *p;
++
++    if ((p = strchr(pre, '/'))) {
++	char **n;
++
++	*p = '\0';
++	pre = dyncat(pre, "/");
++	*p = '/';
++
++	for (n = names; *n; n++)
++	    if (strpfx(pre, *n))
++		break;
++
++	if (*n) {
++	    LinkList ret = newlinklist();
++
++	    for (; *names; names++)
++		if (strpfx(pre, *names))
++		    addlinknode(ret, dupstring(*names));
++
++	    *amb = 0;
++
++	    return ret;
++	} else {
++	    if (!(p = *names++))
++		*amb = 0;
++	    else {
++		char *q;
++
++		if ((q = strchr((p = dupstring(p)), '/')))
++		    *q = '\0';
++
++		for (; *names; names++)
++		    if (!strpfx(p, *names)) {
++			*amb = 1;
++			return NULL;
++		    }
++	    }
++	}
++    } else {
++	if (!(p = *names++))
++	    *amb = 0;
++	else
++	    for (; *names; names++)
++		if (strcmp(p, *names)) {
++		    *amb = 1;
++		    return NULL;
++		}
++    }
++    return NULL;
++}
++
+ static int
+ bin_compfiles(char *nam, char **args, char *ops, int func)
+ {
+@@ -3438,8 +3578,8 @@
+ 	    char **tmp;
+ 	    LinkList l;
+ 
+-	    if (!args[1] || !args[2] || !args[3] || !args[4] ||
+-		(args[0][1] == 'p' && !args[5])) {
++	    if (!args[1] || !args[2] || !args[3] || !args[4] || !args[5] ||
++		!args[6] || (args[0][1] == 'p' && !args[7])) {
+ 		zwarnnam(nam, "too few arguments", NULL, 0);
+ 		return 1;
+ 	    }
+@@ -3450,8 +3590,9 @@
+ 	    for (l = newlinklist(); *tmp; tmp++)
+ 		addlinknode(l, *tmp);
+ 	    set_list_array(args[1], cf_pats((args[0][1] == 'P'), !!args[0][2],
+-					    l, args[2], args[3], args[4],
+-					    args + 5));
++					    l, getaparam(args[2]), args[3],
++					    args[4], args[5],
++					    getaparam(args[6]), args + 7));
+ 	    return 0;
+ 	}
+     case 'i':
+@@ -3482,6 +3623,28 @@
+ 	    cf_ignore(tmp, l, args[3], args[4]);
+ 	    set_list_array(args[2], l);
+ 	    return 0;
++	}
++    case 'r':
++	{
++	    char **tmp;
++	    LinkList l;
++	    int ret = 0;
++
++	    if (!args[1] || !args[2]) {
++		zwarnnam(nam, "too few arguments", NULL, 0);
++		return 1;
++	    }
++	    if (args[3]) {
++		zwarnnam(nam, "too many arguments", NULL, 0);
++		return 1;
++	    }
++	    if (!(tmp = getaparam(args[1]))) {
++		zwarnnam(nam, "unknown parameter: %s", args[1], 0);
++		return 0;
++	    }
++	    if ((l = cf_remove_other(tmp, args[2], &ret)))
++		set_list_array(args[1], l);
++	    return ret;
+ 	}
+     }
+     zwarnnam(nam, "invalid option: %s", *args, 0);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

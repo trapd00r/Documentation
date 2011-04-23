@@ -1,0 +1,435 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Mon Dec 02 12:57:19 1996
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 19745 invoked from network); 2 Dec 1996 12:57:12 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 2 Dec 1996 12:57:12 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA14563; Mon, 2 Dec 1996 07:29:00 -0500 (EST)
+Resent-Date: Mon, 2 Dec 1996 07:29:00 -0500 (EST)
+Message-Id: <199612021229.NAA08805@hydra.ifh.de>
+X-Authentication-Warning: hydra.ifh.de: Host pws@localhost didn't use HELO protocol
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: infinite loop with aliases 
+In-reply-to: "Zefram"'s message of "Fri, 29 Nov 1996 21:46:51 MET."
+             <10256.199611292146@stone.dcs.warwick.ac.uk> 
+Date: Mon, 02 Dec 1996 13:29:08 +0100
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"A360e.0.TZ3.Bkieo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2515
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Zefram wrote:
+> % foo<
+> zsh: parse error near `\n'
+> % alias foo='a=b foo'
+> % foo<
+> 
+> zsh goes into an infinite loop and can't be interrupted.  It seems to
+> be looping in the lexer or the parser; I'm not familiar with that code
+> so I can't easily diagnose it.
+
+That's my fault: it's another result of my not having properly
+considered backing up of more than one input character when I wrote
+the input code.
+
+This patch makes the handling of popping the alias stack much more
+reliable by getting rid of all the alstack paraphernalia and replacing
+it with a couple of static variables and an extra bit flag.  The zsh.h
+alteration is not visible outside input.c.
+
+> One other oddity:
+> 
+> % zsh -fc 'foo<'
+> zsh: parse error near `<'
+> % zsh -f
+> % foo<
+> zsh: parse error near `\n'
+> 
+> Why the difference in error messages?
+
+I think it's simply that in the first case there's isn't a terminating
+character, only a null which it doesn't try and print.  Perhaps some
+fiddling could get it to say `parse error near eof'.
+
+% zsh -fc 'foo<
+'
+zsh: parse error near `\n'
+
+*** Src/input.c.inal	Sun Sep  1 00:37:59 1996
+--- Src/input.c	Mon Dec  2 13:26:13 1996
+***************
+*** 56,61 ****
+--- 56,69 ----
+   * the previous input state,
+   *
+   * PWS 1995/06/30
++  * 
++  * 1996/11/02: The INP_ALIAS flag is now attached to the line pushed onto
++  * the stack, rather than the line which replaces it.  After the line is
++  * popped, the alias is popped from alstack when starting to read it, or
++  * if the line is discarded, and recorded as inalias.  The INP_ALPOP
++  * flag indicates that this has already happened.  If the line is
++  * inungetc()'d back to the previous point, inbufpush, the alias is
++  * pushed again.  None of this is visible to the calling code.
+   */
+  
+  #include "zsh.h"
+***************
+*** 63,68 ****
+--- 71,78 ----
+  /* Input buffer variables:  only inbufct is global, see globals.h. */
+  static char *inbuf;		/* Current input buffer */
+  static char *inbufptr;		/* Pointer into input buffer */
++ static char *inbufpush;		/* Character at which to re-push alias */
++ static Alias inalias;		/* Alias to be popped at start of read */
+  static int inbufleft;		/* Characters left in current input
+  				   stack element */
+  static int inbufflags;		/* flags: see INP_* in zsh.h  */
+***************
+*** 91,119 ****
+  
+  static int instacksz = INSTACK_INITIAL;
+  
+- /*
+-  * Stack to deal with popped aliases.
+-  * The problem is that we reach the end of the alias text and pop
+-  * the alias at the point where we read the next character
+-  * afterwards, which is probably whitespace, *then* go back and
+-  * look to see if the expanded text needs re-expanding.  This
+-  * means we need to keep track of the aliases we've popped and
+-  * maybe add them back in if we unget the whitespace character.
+-  *
+-  * What happens is that ingetc(), when it pops an alias, sticks it on the
+-  * stack, and inungetc() looks at that to see if it has to restore the
+-  * alias(es); if so, the commands to pop an alias go back in the input
+-  * queue. If ingetc() is called again, it sets the stack to zero.
+-  * 
+-  * We also need to be careful about `lexstop' when reading from a string.
+-  * 
+-  * Historical note:  the code used to add a bogus space to the end of
+-  * aliases, after which the alias would be popped.  With the new
+-  * history code, which keeps track of spaces correctly, this won't work.
+-  */
+- static Alias *inalstack, *inalstacktop;
+- static int inalstacksz = INSTACK_INITIAL;
+- 
+  /* Read a line from bshin.  Convert tokens and   *
+   * null characters to Meta c^32 character pairs. */
+  
+--- 101,106 ----
+***************
+*** 157,162 ****
+--- 144,179 ----
+      }
+  }
+  
++ 
++ /*
++  * Pop the alias stack at this point.  This is called when we are at
++  * the start of the next segment of input text.
++  */
++ 
++ /**/
++ void
++ inpopalias(void)
++ {
++     char *t;
++ 
++     if (!alstackind || inbufflags & INP_ALPOP)
++ 	return;
++ 	    
++     inalias = alstack[--alstackind];
++     if (inalias) {
++ 	/* a real alias:  mark it as unused. */
++ 	inalias->inuse = 0;
++ 	t = inalias->text;
++ 	if (*t && t[strlen(t) - 1] == ' ') {
++ 	    alstat = ALSTAT_MORE;
++ 	    histbackword();
++ 	} else
++ 	    alstat = ALSTAT_JUNK;
++     }
++     inbufflags |= INP_ALPOP;
++ }
++ 
++ 
+  /* Get the next character from the input.
+   * Will call inputline() to get a new line where necessary.
+   */
+***************
+*** 165,172 ****
+  int
+  ingetc(void)
+  {
+-     inalstacktop = inalstack;
+      for (;;) {
+  	if (inbufleft) {
+  	    inbufleft--;
+  	    inbufct--;
+--- 182,190 ----
+  int
+  ingetc(void)
+  {
+      for (;;) {
++ 	if ((inbufflags & (INP_ALIAS|INP_ALPOP)) == INP_ALIAS)
++ 	    inpopalias();
+  	if (inbufleft) {
+  	    inbufleft--;
+  	    inbufct--;
+***************
+*** 174,210 ****
+  		continue;
+  	    return lastc;
+  	}
+- 	/*
+- 	 * No characters in input buffer.
+- 	 * See if we can pop the alias stack at this point.
+- 	 */
+- 	if ((inbufflags & INP_ALIAS) && alstackind > 0) {
+- 	    /*
+- 	     * Flag that we should pop the alias stack at this point.
+- 	     * Either we have reached the end of an alias expansion,
+- 	     * or the end of a history expansion.
+- 	     */
+- 	    Alias ix;
+- 	    char *t;
+- 	    
+- 	    ix = alstack[--alstackind];
+- 	    if (ix) {
+- 		/* a real alias:  mark it as unused. */
+- 		ix->inuse = 0;
+- 		t = ix->text;
+- 		if (*t && t[strlen(t) - 1] == ' ') {
+- 		    alstat = ALSTAT_MORE;
+- 		    histbackword();
+- 		} else
+- 		    alstat = ALSTAT_JUNK;
+- 		inalpush(ix);
+- 	    }
+- 	}
+  
+  	/* If the next element down the input stack is a continuation of
+  	 * this, use it.
+  	 */ 
+! 	if (inbufflags & (INP_CONT|INP_ALIAS)) {
+  	    inpoptop();
+  	    continue;
+  	}
+--- 192,202 ----
+  		continue;
+  	    return lastc;
+  	}
+  
+  	/* If the next element down the input stack is a continuation of
+  	 * this, use it.
+  	 */ 
+! 	if (inbufflags & INP_CONT) {
+  	    inpoptop();
+  	    continue;
+  	}
+***************
+*** 312,317 ****
+--- 304,311 ----
+  void
+  inputsetline(char *str, int flags)
+  {
++     if ((inbufflags & (INP_ALIAS|INP_ALPOP)) == INP_ALIAS)
++ 	inpopalias();
+      if ((inbufflags & INP_FREE) && inbuf) {
+  	free(inbuf);
+      }
+***************
+*** 324,330 ****
+       * of whether the input stack continues, and whether there
+       * is an extra space to add on at the end.
+       */
+!     if (flags & (INP_ALIAS|INP_CONT))
+  	inbufct += inbufleft;
+      else
+  	inbufct = inbufleft;
+--- 318,324 ----
+       * of whether the input stack continues, and whether there
+       * is an extra space to add on at the end.
+       */
+!     if (flags & INP_CONT)
+  	inbufct += inbufleft;
+      else
+  	inbufct = inbufleft;
+***************
+*** 359,365 ****
+  	    inbufleft++;
+  	}
+  #ifdef DEBUG
+!         else if (!(inbufflags & (INP_ALIAS|INP_CONT))) {
+  	    /* Just for debugging */
+  	    fprintf(stderr, "Attempt to inungetc() at start of input.\n");
+  	}
+--- 353,359 ----
+  	    inbufleft++;
+  	}
+  #ifdef DEBUG
+!         else if (!(inbufflags & INP_CONT)) {
+  	    /* Just for debugging */
+  	    fprintf(stderr, "Attempt to inungetc() at start of input.\n");
+  	}
+***************
+*** 375,383 ****
+  	    cback[0] = (char) c;
+  	    inpush(cback, INP_FREE|INP_CONT);
+  	}
+      }
+-     if (inalstacktop > inalstack)
+- 	inalrestore();
+  }
+  
+  /* stuff a whole file into the input queue and print it */
+--- 369,384 ----
+  	    cback[0] = (char) c;
+  	    inpush(cback, INP_FREE|INP_CONT);
+  	}
++ 	/* If we are back at the start of a segment,
++ 	 * we may need to restore an alias popped from the stack.
++ 	 * Note this may be a dummy (history expansion) entry.
++ 	 */
++ 	if (inbufptr == inbufpush && inbufflags & INP_ALPOP) {
++ 	    if ((alstack[alstackind++] = inalias))
++ 		inalias->inuse = 1;
++ 	    inbufflags &= ~INP_ALPOP;
++ 	}
+      }
+  }
+  
+  /* stuff a whole file into the input queue and print it */
+***************
+*** 449,459 ****
+      instacktop->bufptr = inbufptr;
+      instacktop->bufleft = inbufleft;
+      instacktop->bufct = inbufct;
+!     instacktop->flags = inbufflags;
+  
+      instacktop++;
+  
+!     inbuf = 0;
+  
+      inputsetline(str, flags);
+  }
+--- 450,467 ----
+      instacktop->bufptr = inbufptr;
+      instacktop->bufleft = inbufleft;
+      instacktop->bufct = inbufct;
+!     inbufflags &= ~(INP_ALIAS|INP_ALPOP);
+!     if (flags & INP_ALIAS && alstackind) {
+! 	flags = (flags & ~INP_ALIAS) | INP_CONT;
+! 	instacktop->flags = inbufflags | INP_ALIAS;
+!     } else {
+! 	instacktop->flags = inbufflags;
+!     }
+  
+      instacktop++;
+  
+!     inbufpush = inbuf = NULL;
+!     inalias = NULL;
+  
+      inputsetline(str, flags);
+  }
+***************
+*** 464,476 ****
+  void
+  inpoptop(void)
+  {
+      if (inbuf && (inbufflags & INP_FREE))
+  	free(inbuf);
+! 	
+      instacktop--;
+  
+      inbuf = instacktop->buf;
+!     inbufptr = instacktop->bufptr;
+      inbufleft = instacktop->bufleft;
+      inbufct = instacktop->bufct;
+      inbufflags = instacktop->flags;
+--- 472,487 ----
+  void
+  inpoptop(void)
+  {
++     if ((inbufflags & (INP_ALIAS|INP_ALPOP)) == INP_ALIAS)
++ 	inpopalias();
++ 
+      if (inbuf && (inbufflags & INP_FREE))
+  	free(inbuf);
+! 
+      instacktop--;
+  
+      inbuf = instacktop->buf;
+!     inbufptr = inbufpush = instacktop->bufptr;
+      inbufleft = instacktop->bufleft;
+      inbufct = instacktop->bufct;
+      inbufflags = instacktop->flags;
+***************
+*** 485,520 ****
+      int remcont;
+  
+      do {
+! 	remcont = inbufflags & (INP_CONT|INP_ALIAS);
+  
+  	inpoptop();
+      } while (remcont);
+- }
+- 
+- /**/
+- void
+- inalpush(Alias al)
+- {
+-     if (!inalstack) {
+- 	 inalstack = (Alias *)zalloc(inalstacksz*sizeof(Alias));
+- 	 inalstacktop = inalstack;
+-     } else if (inalstacktop - inalstack == inalstacksz) {
+- 	inalstack = (Alias *)
+- 	    realloc(inalstack, (inalstacksz + INSTACK_EXPAND)*sizeof(Alias));
+- 	inalstacktop = inalstack + inalstacksz;
+- 	inalstacksz += INSTACK_EXPAND;
+-     }
+-     *inalstacktop++ = al;
+- }
+- 
+- /**/
+- void
+- inalrestore(void)
+- {
+-     while (inalstacktop > inalstack) {
+- 	Alias al = *--inalstacktop;
+- 	alstack[alstackind++] = al;
+- 	al->inuse = 1;
+- 	inpush("", INP_ALIAS);
+-     }
+  }
+--- 496,503 ----
+      int remcont;
+  
+      do {
+! 	remcont = inbufflags & INP_CONT;
+  
+  	inpoptop();
+      } while (remcont);
+  }
+*** Src/zsh.h.inal	Mon Dec  2 11:34:03 1996
+--- Src/zsh.h	Mon Dec  2 11:34:35 1996
+***************
+*** 196,201 ****
+--- 196,202 ----
+  #define INP_FREE      (1<<0)	/* current buffer can be free'd            */
+  #define INP_ALIAS     (1<<1)	/* alias or history mark at end of word    */
+  #define INP_CONT      (1<<2)	/* continue onto previously stacked input  */
++ #define INP_ALPOP     (1<<3)	/* alias/history mark was already popped   */
+  
+  /* Flags for metafy */
+  #define META_REALLOC	0
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

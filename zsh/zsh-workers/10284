@@ -1,0 +1,124 @@
+From zsh-workers-return-10284-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Mar 27 21:18:10 2000
+Return-Path: <zsh-workers-return-10284-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13714 invoked from network); 27 Mar 2000 21:18:09 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Mar 2000 21:18:09 -0000
+Received: (qmail 22525 invoked by alias); 27 Mar 2000 21:18:00 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10284
+Received: (qmail 22515 invoked from network); 27 Mar 2000 21:18:00 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: Bugs with exclusion using file paths.
+Date: Sun, 26 Mar 2000 23:17:24 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E12Zgt3-0000L5-00.2000-03-27-22-17-25@cmailg1.svr.pol.co.uk>
+
+Fixes for the bugs I mentioned earlier.  For globbing, a top level ~
+is handled specially, leading to these two.  Getting exclusion to work
+properly is extremely complicated, so I can't promise this is the last of
+it.  Maybe someone out there knows better algorithms.
+
+
+1. Some idiot messed up the exclusion of absolute paths when he was optimizing
+the pattern matching code.
+
+5:32% print /*
+/bin /boot /data /dev /etc /home /lib /lost+found /mnt /opt /proc /root /sbin /tmp /usr /var /windows
+5:32% print /*~/b*
+/*~/b*
+
+The problem is that / is treated as an end of path segment, which it isn't
+in the exclusion part, so it first parses /*~ as a string, then finds
+garbage at the end.
+
+
+2. print **/*~(.)# dumped core
+
+This is because the pattern is handled in two parts.  The path before the
+last slash is tried first, then the final bit is matched against whatever's
+in the directory.  However, the exclusion is supposed to exclude the entire
+pattern, treating / as an ordinary character.  Hence the pre-path has to be
+prepended for the exclusion matching only.  I forgot to do this with the
+pointer to the start of the pattern, so pointer arithmetic was off.  I
+didn't fix up the variable holding the total length of the pattern, either.
+This is all a recipe for disaster, and I love to know how else to do it.
+
+We need some real globbing tests to pick up this sort of thing; pattern
+matching in tests is insensitive to it.
+
+
+Index: Src/pattern.c
+===================================================================
+RCS file: /home/pws/CVSROOT/projects/zsh/Src/pattern.c,v
+retrieving revision 1.6
+diff -u -r1.6 pattern.c
+--- Src/pattern.c	2000/02/23 18:29:27	1.6
++++ Src/pattern.c	2000/03/26 22:05:05
+@@ -486,7 +486,8 @@
+ 
+     while (*patparse == Bar ||
+ 	   (isset(EXTENDEDGLOB) && *patparse == Tilde &&
+-	    !memchr(patendseg, patparse[1], patendseglen))) {
++	    (patparse[1] == '/' ||
++	     !memchr(patendseg, patparse[1], patendseglen)))) {
+ 	int tilde = *patparse++ == Tilde;
+ 	long gfnode = 0, newbr;
+ 
+@@ -634,7 +635,7 @@
+ 
+     starter = chain = 0;
+     while (!memchr(patendseg, *patparse, patendseglen) ||
+-	   (*patparse == Tilde &&
++	   (*patparse == Tilde && patparse[1] != '/' &&
+ 	    memchr(patendseg, patparse[1], patendseglen))) {
+ 	if (isset(EXTENDEDGLOB) &&
+ 	    ((!isset(SHGLOB) &&
+@@ -811,6 +812,7 @@
+ 	 */
+ 	if (kshchar || (memchr(patendstr, *patparse, patendstrlen) &&
+ 			(*patparse != Tilde ||
++			 patparse[1] == '/' ||
+ 			 !memchr(patendseg, patparse[1], patendseglen))))
+ 	    break;
+ 
+@@ -1754,7 +1756,8 @@
+ 			while ((ret = patmatch(P_OPERAND(scan)))) {
+ 			    unsigned char *syncpt;
+ 			    char savchar, *testptr;
+-			    int savforce = forceerrs;
++			    char *savpatinstart = patinstart;
++			    int savforce = forceerrs, savpatinlen = patinlen;
+ 			    forceerrs = -1;
+ 			    savglobdots = globdots;
+ 			    matchederrs = errsfound;
+@@ -1799,7 +1802,8 @@
+ 					zalloc(pathpos + patinlen);
+ 				    strcpy(buf, pathbuf);
+ 				    strcpy(buf + pathpos, patinput);
+-				    patinput = buf;
++				    patinput = patinstart = buf;
++				    patinlen += pathpos;
+ 				}
+ 				if (patmatch(opnd)) {
+ 				    ret = 0;
+@@ -1810,8 +1814,11 @@
+ 				     */
+ 				    parsfound = savparsfound;
+ 				}
+-				if (buf)
++				if (buf) {
+ 				    zfree(buf, pathpos + patinlen);
++				    patinstart = savpatinstart;
++				    patinlen = savpatinlen;
++				}
+ 				if (!ret)
+ 				    break;
+ 				next = PATNEXT(next);
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+

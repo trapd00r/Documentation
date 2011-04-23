@@ -1,0 +1,169 @@
+From zsh-workers-return-6618-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jun 14 10:19:44 1999
+Return-Path: <zsh-workers-return-6618-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28600 invoked from network); 14 Jun 1999 10:19:43 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Jun 1999 10:19:43 -0000
+Received: (qmail 10815 invoked by alias); 14 Jun 1999 10:19:28 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6618
+Received: (qmail 10797 invoked from network); 14 Jun 1999 10:19:22 -0000
+Message-Id: <9906140950.AA22727@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: function declaration parentheses 
+In-Reply-To: "Clint Adams"'s message of "Sun, 13 Jun 1999 13:21:54 DFT."
+             <19990613132154.B30550@dman.com> 
+Date: Mon, 14 Jun 1999 11:50:22 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Clint Adams wrote:
+> ARGV0=sh zsh -c 'functest( ) { echo here; }; functest' does not
+> work, though other sh's accept "( )" as valid in addition to "()"
+> for function declarations.
+
+Oh, great.  Well, they shouldn't. `()' is a clear and unambiguous token.
+This comes from zsh's cavalier attitude to parentheses:  read first, and
+decide what they mean afterwards.
+
+Luckily, this isn't as bad as I first thought.  There's no real reason for
+providing this except for compatibility, and there's already a
+compatibility option which fits this case nicely: the option SH_GLOB forces
+raw parentheses not to be special to globbing, and is set in sh and ksh
+emulation.  So if we find space after a left parenthesis with SH_GLOB set,
+we force the left parenthesis to start a separate token if it doesn't
+already, and then we record what's going on after that, so that when we get
+to the ')' we know if it's still possible as a function definition.  Even
+history word splitting still works.
+
+Note that though this is the same piece of code as I altered last week to
+allow `(' inside the command word, the problem is different:  `( )' wasn't
+handled anyway, and the problem for zsh is not just in the command word
+because you can define multiple functions at once.  However, in ksh you
+can't, so  I managed to get things like `print @( |foo)' still to work
+properly.  You'll be delighted to know that cases like `funcdef@( ) { ... }'
+don't work in ksh, but do in zsh with ksh emulation.
+
+I can't see myself mentioning this patch on my CV, however.
+
+--- Doc/Zsh/func.yo.pfd	Wed Jan  7 23:09:38 1998
++++ Doc/Zsh/func.yo	Mon Jun 14 11:03:24 1999
+@@ -5,7 +5,8 @@
+ )\
+ cindex(functions)
+ findex(function)
+-The tt(function) reserved word is used to define shell functions.
++Shell functions are defined with the tt(function) reserved word or the
++special syntax `var(funcname) tt(())'.
+ Shell functions are read in and stored internally.
+ Alias names are resolved when the function is read.
+ Functions are executed like commands with the arguments
+--- Doc/Zsh/grammar.yo.pfd	Thu Dec 17 17:10:14 1998
++++ Doc/Zsh/grammar.yo	Mon Jun 14 11:32:50 1999
+@@ -203,6 +203,11 @@
+ are usually only useful for setting traps.
+ The body of the function is the var(list) between
+ the tt({) and tt(}).  See noderef(Functions).
++
++If the option tt(SH_GLOB) is set for compatibility with other shells, then
++whitespace may appear between between the left and right parentheses when
++there is a single var(word);  otherwise, the parentheses will be treated as
++forming a globbing pattern in that case.
+ )
+ cindex(timing)
+ item(tt(time) [ var(pipeline) ])(
+--- Src/lex.c.pfd	Mon Jun 14 09:28:58 1999
++++ Src/lex.c	Mon Jun 14 11:46:05 1999
+@@ -801,7 +801,7 @@
+ static int
+ gettokstr(int c, int sub)
+ {
+-    int bct = 0, pct = 0, brct = 0;
++    int bct = 0, pct = 0, brct = 0, fdpar = 0;
+     int intpos = 1, in_brace_param = 0;
+     int peek, inquote;
+ #ifdef DEBUG
+@@ -816,8 +816,12 @@
+     for (;;) {
+ 	int act;
+ 	int e;
++	int inbl = inblank(c);
++	
++	if (fdpar && !inbl && c != ')')
++	    fdpar = 0;
+ 
+-	if (inblank(c) && !in_brace_param && !pct)
++	if (inbl && !in_brace_param && !pct)
+ 	    act = LX2_BREAK;
+ 	else {
+ 	    act = lexact2[STOUC(c)];
+@@ -840,6 +844,12 @@
+ 	    add(Meta);
+ 	    break;
+ 	case LX2_OUTPAR:
++	    if (fdpar) {
++		/* this is a single word `(   )', treat as INOUTPAR */
++		add(c);
++		*bptr = '\0';
++		return INOUTPAR;
++	    }
+ 	    if ((sub || in_brace_param) && isset(SHGLOB))
+ 		break;
+ 	    if (!in_brace_param && !pct--) {
+@@ -916,22 +926,40 @@
+ 		    e = hgetc();
+ 		    hungetc(e);
+ 		    lexstop = 0;
+-#if 1
+ 		    /* For command words, parentheses are only
+ 		     * special at the start.  But now we're tokenising
+ 		     * the remaining string.  So I don't see what
+ 		     * the old incmdpos test here is for.
+ 		     *   pws 1999/6/8
++		     *
++		     * Oh, no.
++		     *  func1(   )
++		     * is a valid function definition in [k]sh.  The best
++		     * thing we can do, without really nasty lookahead tricks,
++		     * is break if we find a blank after a parenthesis.  At
++		     * least this can't happen inside braces or brackets.  We
++		     * only allow this with SHGLOB (set for both sh and ksh).
++		     *
++		     * Things like `print @( |foo)' should still
++		     * work, because [k]sh don't allow multiple words
++		     * in a function definition, so we only do this
++		     * in command position.
++		     *   pws 1999/6/14
+ 		     */
+-		    if (e == ')')
+-			goto brk;
+-#else
+-		    if (e == ')' ||
+-			(incmdpos && !brct && peek != ENVSTRING))
++		    if (e == ')' || (isset(SHGLOB) && inblank(e) && !bct &&
++				     !brct && !intpos && incmdpos))
+ 			goto brk;
+-#endif
+ 		}
+-		pct++;
++		/*
++		 * This also handles the [k]sh `foo( )' function definition.
++		 * Maintain a variable fdpar, set as long as a single set of
++		 * parentheses contains only space.  Then if we get to the
++		 * closing parenthesis and it is still set, we can assume we
++		 * have a function definition.  Only do this at the start of
++		 * the word, since the (...) must be a separate token.
++		 */
++		if (!pct++ && isset(SHGLOB) && intpos && !bct && !brct)
++		    fdpar = 1;
+ 	    }
+ 	    c = Inpar;
+ 	    break;
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

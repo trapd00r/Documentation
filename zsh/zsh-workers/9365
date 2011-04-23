@@ -1,0 +1,130 @@
+From zsh-workers-return-9365-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jan 19 12:46:39 2000
+Return-Path: <zsh-workers-return-9365-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29449 invoked from network); 19 Jan 2000 12:46:38 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Jan 2000 12:46:38 -0000
+Received: (qmail 10643 invoked by alias); 19 Jan 2000 12:46:29 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9365
+Received: (qmail 10635 invoked from network); 19 Jan 2000 12:46:27 -0000
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: If someone wants to try... 
+In-reply-to: "Sven Wischnowsky"'s message of "Mon, 17 Jan 2000 13:50:03 +0100."
+             <200001171250.NAA21712@beta.informatik.hu-berlin.de> 
+Date: Wed, 19 Jan 2000 12:48:50 +0000
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E12AuUe-0006zi-00.2000-01-19-12-45-49@cmailg2.svr.pol.co.uk>
+
+Sven Wischnowsky wrote:
+> Note that I'm not sure if this should be used in the distribution
+> before the next official beta.
+
+Well, we can't (or, rather, won't) test it if it isn't in.  I've found
+three problems, described and supposedly fixed below.
+
+If all the basic things get fixed, I'm tempted to put the whole thing in to
+the source and see what happens.  In particular, I'm not sad that
+dupstruct() and all its relatives have vanished.  That was the main use for
+having routines that either used the heap or permanent allocation.  If this
+means we're now (nearly) in a position to use either explicitly, and hence
+junk all the HEAPALLOC/PERMALLOC stuff, it would make me very happy.
+
+
+Problems:
+
+First `[ ... ]' dumps core.  Is this the right fix (the middle parse.c
+hunk)?  It seems to work.  I've added a debugging test for other unhandled
+codes, and a couple of tests to Test/07cond.ztst (strictly these were
+waiting for tests for builtins to come along, but the more the merrier).
+
+Second:
+
+% [[ ( -z foo && -z foo ) || -z foo ]]
+zsh: bad cond code
+
+It looks like the offsets for skipping chunks of `&&' and `||' weren't
+right.  The text.c bit did work (e.g. if you embed that test in a function
+and look at it), so I've assumed it's the chunk in evalcond() that's
+wrong.  The offsets now seem to be right, although it's possible I've been
+unnecessarily conservative in using variables. I've added a test for this,
+too.
+
+Third, the point already noted by Tanaka Akira, but fixed by Sven in 9361,
+which boils down to:
+  unset NULLCMD
+  print "$(<anyfile)"
+  zsh: redirection with no command
+
+Looking more closely, the problem occurs at the test in getoutput() which
+should pick up anything that's a simple read redirection and treat it
+specially.  This wasn't happening because there was no WC_END marker at the
+end of the wordcode programme.  According to parse.c, WC_END only gets put
+there if the programme is empty, so this is not surprising, hence Sven's
+fix.
+
+But the fact that there's no marker unsettles me from another point of
+view, namely execlist() ploughs on until it something which isn't a
+WC_LIST, and if there's no WC_END marker it can in principle find any old
+rubbish --- it seems usually to be the strings needed by the programme.  So
+I would think that adding a WC_END marker unconditionally is the right
+thing (four bytes per programme isn't so much).  I'm willing to take higher
+counsel --- which means, if Sven can explain what I've missed about the
+code that makes sure it knows when it's at the end of the programme.  I've
+added another redirection test to pick this up.  This would make 9361
+unnecessary, although maybe it would still be desirable?
+
+--- Src/cond.c.cond	Tue Jan 18 22:01:34 2000
++++ Src/cond.c	Wed Jan 19 11:18:08 2000
+@@ -43,7 +43,8 @@
+ {
+     struct stat *st;
+     char *left, *right = NULL;
+-    wordcode code = *state->pc++;
++    Wordcode pcode = state->pc++;
++    wordcode code = *pcode;
+     int ctype = WC_COND_TYPE(code);
+ 
+     switch (ctype) {
+@@ -57,7 +58,7 @@
+ 		fprintf(stderr, " %s", condstr[ctype]);
+ 	    return evalcond(state);
+ 	} else {
+-	    state->pc += WC_COND_SKIP(code) - 1;
++	    state->pc = pcode + (WC_COND_SKIP(code) + 1);
+ 	    return 0;
+ 	}
+     case COND_OR:
+@@ -66,7 +67,7 @@
+ 		fprintf(stderr, " %s", condstr[ctype]);
+ 	    return evalcond(state);
+ 	} else {
+-	    state->pc += WC_COND_SKIP(code) - 1;
++	    state->pc = pcode + (WC_COND_SKIP(code) + 1);
+ 	    return 1;
+ 	}
+     case COND_MOD:
+--- Src/parse.c.cond	Tue Jan 18 21:35:08 2000
++++ Src/parse.c	Tue Jan 18 21:43:42 2000
+@@ -2217,6 +2217,14 @@
+ 	    }
+ 	}
+ 	break;
++    case N_COND:
++	eccond((Cond) n);
++	break;
++#ifdef DEBUG
++    default:
++	dputs("BUG: node type not handled in ecomp().");
++	break;
++#endif
+     }
+ }
+ 
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+

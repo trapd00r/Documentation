@@ -1,0 +1,153 @@
+From zsh-workers-return-12093-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jun 28 07:28:26 2000
+Return-Path: <zsh-workers-return-12093-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12200 invoked from network); 28 Jun 2000 07:28:25 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 Jun 2000 07:28:25 -0000
+Received: (qmail 4179 invoked by alias); 28 Jun 2000 07:28:18 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12093
+Received: (qmail 4172 invoked from network); 28 Jun 2000 07:28:17 -0000
+Date: Wed, 28 Jun 2000 09:28:16 +0200 (MET DST)
+Message-Id: <200006280728.JAA31591@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Andrej Borsenkow"'s message of Tue, 27 Jun 2000 18:50:23 +0400
+Subject: PATCH: Re: undo in menu selection broken
+
+
+Andrej Borsenkow wrote:
+
+> It is probably the result of recent patch and hence partially my fault.
+> undo'ing after accept-and-infer-next-history does not goes up but rather
+> deletes one character on the line.
+> 
+> bor@itsrm2% cd ./AIX/
+> Completing directory
+> AIX/       Bsd/       CVS/       Core/      Linux/     X/
+> Base/      Builtins/  Commands/  Debian/    User/
+> bor@itsrm2% cd ./AIX/ (after a-a-i-n-h)
+> bor@itsrm2% cd .AIX/  (after undo)
+
+This patch makes menu-selection work with only one match when using
+a-a-i-n-h. You can't move the cursor very much, for obvious reasons,
+but at least it doesn't leave selection.
+
+The patch should also fix the undoing behaviour (Andrej, in your
+example you had typed `.', `/' and then TAB, right? guess what...).
+
+
+What this patch does *not* do is fix the behaviour of a-a-i-n-h when
+there is no match. I was thinking about making it just show some
+message and let undo bring you back. Or maybe let it stay in the
+selection it currently is in and show some message. But:
+
+1) I wouldn't like to hard-wire this message, but adding a parameter
+   just for this looks kinda weird.
+   Or maybe just add a ZLS_COLOURS capability for it.
+2) Setting the format style for the warnings tag to a value without a
+   `%d' makes it add the descriptions of the things it tried as
+   matches which gives a much better output than using `%d'. But with
+   this, there's never a completion without matches and a-a-i-n-h
+   happily starts completing the descriptions. So maybe a-a-i-n-h
+   in menu-selection should set some parameter so that the shell code
+   can find that out. Even better would be to change the complete
+   module so that other modules like complist can put things into
+   $compstate.
+
+Well, we're getting vom hundertsten ins tausendste here...
+
+Bye
+ Sven
+
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.33
+diff -u -r1.33 compcore.c
+--- Src/Zle/compcore.c	2000/06/22 08:42:37	1.33
++++ Src/Zle/compcore.c	2000/06/28 07:27:22
+@@ -37,7 +37,7 @@
+ /* Flags saying what we have to do with the result. */
+ 
+ /**/
+-int useexact, useline, uselist, forcelist, startauto;
++int useexact, useline, uselist, forcelist, iforcemenu, startauto;
+ 
+ /* Non-zero if we should go back to the last prompt. */
+ 
+@@ -349,7 +349,10 @@
+ 
+     if (comppatmatch && *comppatmatch && comppatmatch != opm)
+ 	haspattern = 1;
+-    if (useline < 0)
++    if (iforcemenu) {
++	do_ambig_menu();
++	ret = 0;
++    } else if (useline < 0)
+ 	ret = selfinsert(zlenoargs);
+     else if (!useline && uselist) {
+ 	/* All this and the guy only wants to see the list, sigh. */
+Index: Src/Zle/complist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complist.c,v
+retrieving revision 1.29
+diff -u -r1.29 complist.c
+--- Src/Zle/complist.c	2000/06/22 08:42:37	1.29
++++ Src/Zle/complist.c	2000/06/28 07:27:22
+@@ -1782,11 +1782,15 @@
+ 	    menucmp = menuacc = hasoldlist = 0;
+ 	    minfo.cur = NULL;
+ 	    fixsuffix();
++	    handleundo();
+ 	    validlist = 0;
+ 	    amatches = pmatches = lastmatches = NULL;
+ 	    invalidate_list();
++	    iforcemenu = 1;
+ 	    menucomplete(zlenoargs);
+-	    if (dat->num < 2 || !minfo.cur || !*(minfo.cur)) {
++	    iforcemenu = 0;
++
++	    if (dat->num < 1 || !minfo.cur || !*(minfo.cur)) {
+ 		noselect = clearlist = listshown = 1;
+ 		onlyexpl = 0;
+ 		zrefresh();
+@@ -1821,6 +1825,7 @@
+ 	    s->origcs = origcs;
+ 	    s->origll = origll;
+ 	    accept_last();
++	    handleundo();
+ 	    do_menucmp(0);
+ 	    mselect = (*(minfo.cur))->gnum;
+ 
+@@ -1852,6 +1857,7 @@
+ 	    if (!u)
+ 		break;
+ 
++	    handleundo();
+ 	    cs = 0;
+ 	    foredel(ll);
+ 	    spaceinline(l = strlen(u->line));
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.20
+diff -u -r1.20 compresult.c
+--- Src/Zle/compresult.c	2000/06/16 07:52:05	1.20
++++ Src/Zle/compresult.c	2000/06/28 07:27:22
+@@ -1093,7 +1093,7 @@
+ /* This handles the beginning of menu-completion. */
+ 
+ /**/
+-static void
++void
+ do_ambig_menu(void)
+ {
+     Cmatch *mc;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

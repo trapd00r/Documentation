@@ -1,0 +1,459 @@
+From zsh-workers-return-7514-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Aug 27 08:16:07 1999
+Return-Path: <zsh-workers-return-7514-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11106 invoked from network); 27 Aug 1999 08:16:04 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Aug 1999 08:16:04 -0000
+Received: (qmail 3868 invoked by alias); 27 Aug 1999 08:15:30 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7514
+Received: (qmail 3809 invoked from network); 27 Aug 1999 08:14:00 -0000
+Date: Fri, 27 Aug 1999 10:13:51 +0200 (MET DST)
+Message-Id: <199908270813.KAA17331@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Zefram's message of Thu, 26 Aug 1999 13:27:29 +0100 (BST)
+Subject: Re: PATCH: Re: Files modified after a given date
+
+
+Zefram wrote:
+
+> Sven Wischnowsky wrote:
+> >;-) I first tried to implement it that way, but then... No, we can't
+> >do it that way because as soon as something is executed $_ gets set
+> >from exec.c to the last command word, as usual. And then it's too late 
+> >to get at the filname.
+> 
+> Hmm.  Probably better to put it in $1 then.  Actually, execute the code
+> as if it were the body of a shell function.
+
+I couldn't convince myself to do that, so I just turned `REPLY' into
+an in/out parameter (initially set to the filename and after the execution the
+value is used as before).
+
+Most of this patch is to save/restore the global globbing state,
+though (in case the string or a function called from it does itself
+some globbing).
+
+Bye
+ Sven
+
+diff -u os/glob.c Src/glob.c
+--- os/glob.c	Thu Aug 26 13:36:26 1999
++++ Src/glob.c	Fri Aug 27 10:03:29 1999
+@@ -82,14 +82,6 @@
+ /**/
+ char *pathbuf;		/* pathname buffer (needed by pattern code) */
+ 
+-static int matchsz;		/* size of matchbuf                     */
+-static int matchct;		/* number of matches found              */
+-static int pathbufsz;		/* size of pathbuf			*/
+-static int pathbufcwd;		/* where did we chdir()'ed		*/
+-static Gmatch matchbuf;		/* array of matches                     */
+-static Gmatch matchptr;		/* &matchbuf[matchct]                   */
+-static char *colonmod;		/* colon modifiers in qualifier list    */
+-
+ typedef struct stat *Statptr;	 /* This makes the Ultrix compiler happy.  Go figure. */
+ 
+ /* modifier for unit conversions */
+@@ -121,20 +113,86 @@
+     char *sdata;		/* currently only: expression to eval        */
+ };
+ 
+-/* Qualifiers pertaining to current pattern */
+-static struct qual *quals;
+-
+-/* Other state values for current pattern */
+-static int qualct, qualorct;
+-static int range, amc, units;
+-static int gf_nullglob, gf_markdirs, gf_noglobdots, gf_listtypes, gf_follow;
+-static int gf_sorts, gf_nsorts, gf_sortlist[11];
+-
+ /* Prefix, suffix for doing zle trickery */
+ 
+ /**/
+ char *glob_pre, *glob_suf;
+ 
++/* struct to easily save/restore current state */
++
++struct globdata {
++    int gd_badcshglob;
++    int gd_pathpos;
++    char *gd_pathbuf;
++
++    int gd_matchsz;		/* size of matchbuf                     */
++    int gd_matchct;		/* number of matches found              */
++    int gd_pathbufsz;		/* size of pathbuf			*/
++    int gd_pathbufcwd;		/* where did we chdir()'ed		*/
++    Gmatch gd_matchbuf;		/* array of matches                     */
++    Gmatch gd_matchptr;		/* &matchbuf[matchct]                   */
++    char *gd_colonmod;		/* colon modifiers in qualifier list    */
++
++    /* Qualifiers pertaining to current pattern */
++    struct qual *gd_quals;
++
++    /* Other state values for current pattern */
++    int gd_qualct, gd_qualorct;
++    int gd_range, gd_amc, gd_units;
++    int gd_gf_nullglob, gd_gf_markdirs, gd_gf_noglobdots, gd_gf_listtypes;
++    int gd_gf_follow, gd_gf_sorts, gd_gf_nsorts, gd_gf_sortlist[11];
++
++    char *gd_glob_pre, *gd_glob_suf;
++};
++
++/* The variable with the current globbing state and convenience macros */
++
++static struct globdata curglobdata;
++
++#define matchsz       (curglobdata.gd_matchsz)
++#define matchct       (curglobdata.gd_matchct)
++#define pathbufsz     (curglobdata.gd_pathbufsz)
++#define pathbufcwd    (curglobdata.gd_pathbufcwd)
++#define matchbuf      (curglobdata.gd_matchbuf)
++#define matchptr      (curglobdata.gd_matchptr)
++#define colonmod      (curglobdata.gd_colonmod)
++#define quals         (curglobdata.gd_quals)
++#define qualct        (curglobdata.gd_qualct)
++#define qualorct      (curglobdata.gd_qualorct)
++#define g_range       (curglobdata.gd_range)
++#define g_amc         (curglobdata.gd_amc)
++#define g_units       (curglobdata.gd_units)
++#define gf_nullglob   (curglobdata.gd_gf_nullglob)
++#define gf_markdirs   (curglobdata.gd_gf_markdirs)
++#define gf_noglobdots (curglobdata.gd_gf_noglobdots)
++#define gf_listtypes  (curglobdata.gd_gf_listtypes)
++#define gf_follow     (curglobdata.gd_gf_follow)
++#define gf_sorts      (curglobdata.gd_gf_sorts)
++#define gf_nsorts     (curglobdata.gd_gf_nsorts)
++#define gf_sortlist   (curglobdata.gd_gf_sortlist)
++
++/* and macros for save/restore */
++
++#define save_globstate(N) \
++  do { \
++    memcpy(&(N), &curglobdata, sizeof(struct globdata)); \
++    (N).gd_badcshglob = badcshglob; \
++    (N).gd_pathpos = pathpos; \
++    (N).gd_pathbuf = pathbuf; \
++    (N).gd_glob_pre = glob_pre; \
++    (N).gd_glob_suf = glob_suf; \
++  } while (0)
++
++#define restore_globstate(N) \
++  do { \
++    memcpy(&curglobdata, &(N), sizeof(struct globdata)); \
++    badcshglob = (N).gd_badcshglob; \
++    pathpos = (N).gd_pathpos; \
++    pathbuf = (N).gd_pathbuf; \
++    glob_pre = (N).gd_glob_pre; \
++    glob_suf = (N).gd_glob_suf; \
++  } while (0)
++
+ /* pathname component in filename patterns */
+ 
+ struct complist {
+@@ -250,9 +308,9 @@
+ 	statted = 1;
+ 	qo = quals;
+ 	for (qn = qo; qn && qn->func;) {
+-	    range = qn->range;
+-	    amc = qn->amc;
+-	    units = qn->units;
++	    g_range = qn->range;
++	    g_amc = qn->amc;
++	    g_units = qn->units;
+ 	    if ((qn->sense & 2) && !(statted & 2)) {
+ 		/* If (sense & 2), we're following links */
+ 		if (!S_ISLNK(buf.st_mode) || statfullpath(s, &buf2, 0))
+@@ -819,11 +877,15 @@
+ 					/* chops it up                   */
+     int first = 0, last = -1;		/* index of first/last match to  */
+ 				        /* return */
++    struct globdata saved;		/* saved glob state              */
++
+     MUSTUSEHEAP("glob");
+     if (unset(GLOBOPT) || !haswilds(ostr)) {
+ 	untokenize(ostr);
+ 	return;
+     }
++    save_globstate(saved);
++
+     str = dupstring(ostr);
+     sl = strlen(str);
+     uremnode(list, np);
+@@ -997,7 +1059,7 @@
+ 		    case 'l':
+ 			/* Match files with the given no. of hard links */
+ 			func = qualnlink;
+-			amc = -1;
++			g_amc = -1;
+ 			goto getrange;
+ 		    case 'U':
+ 			/* Match files owned by effective user ID */
+@@ -1115,48 +1177,48 @@
+ 			break;
+ 		    case 'a':
+ 			/* Access time in given range */
+-			amc = 0;
++			g_amc = 0;
+ 			func = qualtime;
+ 			goto getrange;
+ 		    case 'm':
+ 			/* Modification time in given range */
+-			amc = 1;
++			g_amc = 1;
+ 			func = qualtime;
+ 			goto getrange;
+ 		    case 'c':
+ 			/* Inode creation time in given range */
+-			amc = 2;
++			g_amc = 2;
+ 			func = qualtime;
+ 			goto getrange;
+ 		    case 'L':
+ 			/* File size (Length) in given range */
+ 			func = qualsize;
+-			amc = -1;
++			g_amc = -1;
+ 			/* Get size multiplier */
+-			units = TT_BYTES;
++			g_units = TT_BYTES;
+ 			if (*s == 'p' || *s == 'P')
+-			    units = TT_POSIX_BLOCKS, ++s;
++			    g_units = TT_POSIX_BLOCKS, ++s;
+ 			else if (*s == 'k' || *s == 'K')
+-			    units = TT_KILOBYTES, ++s;
++			    g_units = TT_KILOBYTES, ++s;
+ 			else if (*s == 'm' || *s == 'M')
+-			    units = TT_MEGABYTES, ++s;
++			    g_units = TT_MEGABYTES, ++s;
+ 		      getrange:
+ 			/* Get time multiplier */
+-			if (amc >= 0) {
+-			    units = TT_DAYS;
++			if (g_amc >= 0) {
++			    g_units = TT_DAYS;
+ 			    if (*s == 'h')
+-				units = TT_HOURS, ++s;
++				g_units = TT_HOURS, ++s;
+ 			    else if (*s == 'm')
+-				units = TT_MINS, ++s;
++				g_units = TT_MINS, ++s;
+ 			    else if (*s == 'w')
+-				units = TT_WEEKS, ++s;
++				g_units = TT_WEEKS, ++s;
+ 			    else if (*s == 'M')
+-				units = TT_MONTHS, ++s;
++				g_units = TT_MONTHS, ++s;
+ 			    else if (*s == 's')
+-				units = TT_SECONDS, ++s;
++				g_units = TT_SECONDS, ++s;
+ 			}
+ 			/* See if it's greater than, equal to, or less than */
+-			if ((range = *s == '+' ? 1 : *s == '-' ? -1 : 0))
++			if ((g_range = *s == '+' ? 1 : *s == '-' ? -1 : 0))
+ 			    ++s;
+ 			data = qgetnum(&s);
+ 			break;
+@@ -1175,12 +1237,14 @@
+ 			    case 'c': t = GS_CTIME; break;
+ 			    default:
+ 				zerr("unknown sort specifier", NULL, 0);
++				restore_globstate(saved);
+ 				return;
+ 			    }
+ 			    if ((sense & 2) && t != GS_NAME)
+ 				t <<= GS_SHIFT;
+ 			    if (gf_sorts & t) {
+ 				zerr("doubled sort specifier", NULL, 0);
++				restore_globstate(saved);
+ 				return;
+ 			    }
+ 			    gf_sorts |= t;
+@@ -1202,16 +1266,11 @@
+ 				func = qualsheval;
+ 				sdata = dupstring(s + 1);
+ 				untokenize(sdata);
+-				if (!parsestr(sdata)) {
+-				    *tt = sav;
+-				    if (sav)
+-					s = tt + 1;
+-				    else
+-					s = tt;
+-				} else {
+-				    func = NULL;
+-				    sdata = NULL;
+-				}
++				*tt = sav;
++				if (sav)
++				    s = tt + 1;
++				else
++				    s = tt;
+ 			    }
+ 			    break;
+ 			}
+@@ -1227,6 +1286,7 @@
+ 			    v.inv = 0;
+ 			    if (getindex(&s, &v) || s == os) {
+ 				zerr("invalid subscript", NULL, 0);
++				restore_globstate(saved);
+ 				return;
+ 			    }
+ 			    first = v.a;
+@@ -1235,6 +1295,7 @@
+ 			}
+ 		    default:
+ 			zerr("unknown file attribute", NULL, 0);
++			restore_globstate(saved);
+ 			return;
+ 		    }
+ 		if (func) {
+@@ -1250,19 +1311,22 @@
+ 		    qn->sense = sense;
+ 		    qn->data = data;
+ 		    qn->sdata = sdata;
+-		    qn->range = range;
+-		    qn->units = units;
+-		    qn->amc = amc;
++		    qn->range = g_range;
++		    qn->units = g_units;
++		    qn->amc = g_amc;
+ 		    qn = NULL;
+ 		    qualct++;
+ 		}
+-		if (errflag)
++		if (errflag) {
++		    restore_globstate(saved);
+ 		    return;
++		}
+ 	    }
+ 	}
+     }
+     q = parsepat(str);
+     if (!q || errflag) {	/* if parsing failed */
++	restore_globstate(saved);
+ 	if (unset(BADPATTERN)) {
+ 	    untokenize(ostr);
+ 	    insertlinknode(list, node, ostr);
+@@ -1326,6 +1390,8 @@
+ 	}
+     }
+     free(matchbuf);
++
++    restore_globstate(saved);
+ }
+ 
+ /* Return the order of two strings, taking into account *
+@@ -2234,8 +2300,8 @@
+ static int
+ qualnlink(char *name, struct stat *buf, off_t ct, char *dummy)
+ {
+-    return (range < 0 ? buf->st_nlink < ct :
+-	    range > 0 ? buf->st_nlink > ct :
++    return (g_range < 0 ? buf->st_nlink < ct :
++	    g_range > 0 ? buf->st_nlink > ct :
+ 	    buf->st_nlink == ct);
+ }
+ 
+@@ -2372,7 +2438,7 @@
+     unsigned long scaled = (unsigned long)buf->st_size;
+ #endif
+ 
+-    switch (units) {
++    switch (g_units) {
+     case TT_POSIX_BLOCKS:
+ 	scaled += 511l;
+ 	scaled /= 512l;
+@@ -2387,8 +2453,8 @@
+ 	break;
+     }
+ 
+-    return (range < 0 ? scaled < QS_CAST_SIZE() size :
+-	    range > 0 ? scaled > QS_CAST_SIZE() size :
++    return (g_range < 0 ? scaled < QS_CAST_SIZE() size :
++	    g_range > 0 ? scaled > QS_CAST_SIZE() size :
+ 	    scaled == QS_CAST_SIZE() size);
+ #undef QS_CAST_SIZE
+ }
+@@ -2402,10 +2468,10 @@
+     time_t now, diff;
+ 
+     time(&now);
+-    diff = now - (amc == 0 ? buf->st_atime : amc == 1 ? buf->st_mtime :
++    diff = now - (g_amc == 0 ? buf->st_atime : g_amc == 1 ? buf->st_mtime :
+ 		  buf->st_ctime);
+     /* handle multipliers indicating units */
+-    switch (units) {
++    switch (g_units) {
+     case TT_DAYS:
+ 	diff /= 86400l;
+ 	break;
+@@ -2423,8 +2489,8 @@
+ 	break;
+     }
+ 
+-    return (range < 0 ? diff < days :
+-	    range > 0 ? diff > days :
++    return (g_range < 0 ? diff < days :
++	    g_range > 0 ? diff > days :
+ 	    diff == days);
+ }
+ 
+@@ -2435,19 +2501,12 @@
+ qualsheval(char *name, struct stat *buf, off_t days, char *str)
+ {
+     List list;
+-    char *usav = underscore;
+-
+-    underscore = name;
+-    str = dupstring(str);
+-    singsub(&str);
+-    underscore = usav;
+-    untokenize(str);
+ 
+     if ((list = parse_string(str, 0))) {
+ 	int ef = errflag, lv = lastval, ret;
+ 
+ 	unsetparam("reply");
+-	unsetparam("REPLY");
++	setsparam("REPLY", ztrdup(name));
+ 
+ 	execlist(list, 1, 0);
+ 
+diff -u od/Zsh/expn.yo Doc/Zsh/expn.yo
+--- od/Zsh/expn.yo	Thu Aug 26 13:36:20 1999
++++ Doc/Zsh/expn.yo	Fri Aug 27 10:10:21 1999
+@@ -1384,17 +1384,16 @@
+ separator and anything up to the next matching separator will be taken 
+ as the var(string) (`tt([)', `tt({)', and `tt(<)' match `tt(])',
+ `tt(})', and `tt(>)' respectively, any other character matches
+-itself). Before the string is executed, expansion is performed on it
+-with the parameter tt($_) being set to the filename currently being
+-tested. Note that parameter expansions in the var(string) have to be
+-quoted to prevent them from being expanded before globbing is done.
++itself). Note that expansions have to be quoted in the var(string) to
++prevent them from being expanded before globbing is done.
+ 
+-If during the execution of var(string) the parameter tt(reply) is set
+-to an array or to a string or if the parameter tt(REPLY) is set to a
+-string, then these strings will be inserted into the generated list
+-instead of the original filename. For security reasons, these
+-parameters will be unset by the shell before the var(string) is
+-executed.
++During the execution of var(string) the parameter tt(REPLY) is set to
++the filename currently being tested. It may also be set to any string
++to make this string be inserted into the list instead of the original
++filename. Also, the parameter tt(reply) may be set to an array or a
++string and if it is, these strings will be inserted instead of the
++value of the tt(REPLY) parameter. For security reasons, tt(reply)
++will be unset by the shell before the var(string) is executed.
+ )
+ item(tt(d)var(dev))(
+ files on the device var(dev)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

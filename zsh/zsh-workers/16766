@@ -1,0 +1,246 @@
+From zsh-workers-return-16766-mason-zsh=primenet.com.au@sunsite.dk Tue Mar 05 14:50:07 2002
+Return-Path: <zsh-workers-return-16766-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3126 invoked from network); 5 Mar 2002 14:50:07 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 5 Mar 2002 14:50:07 -0000
+Received: (qmail 3405 invoked by alias); 5 Mar 2002 14:49:58 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16766
+Received: (qmail 3385 invoked from network); 5 Mar 2002 14:49:57 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: Re: insert-last-word/copy-prev-word/... question 
+In-reply-to: "Dominik Vogt"'s message of "Fri, 01 Mar 2002 15:33:13 +0100."
+             <20020301153313.A8129@lifebits.de> 
+Date: Tue, 05 Mar 2002 14:48:50 +0000
+Message-ID: <21415.1015339730@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+Dominik Vogt wrote:
+> Let's assume I have this in the history
+> 
+>   ls xxx xxx foo
+>   ls xxx xxx bar
+>   ls yyy zzz baz
+> 
+> And I'm typing a new command line:
+> 
+>   $ ls first second next 
+>                          ^
+>                          cursor
+> 
+> with insert-last word, I can copy "baz", "bar", "foo" to the
+> cursor position.  With copy-prev-word I can copy "next".  But I'd
+> like to
+> 
+>  - Call some function multiple times.  With the first call I get
+>    "next".  WIth the second call I get "second" and with the
+>    third call I get "first".
+>  - The same should work on previous lines in the history:  First I
+>    call insert-last and get "baz", then I call said function and
+>    get "zzz", then I call it again and get "yyy".
+> 
+> Is that possible?
+
+Here's a proposed addition to the internals which should make much of
+that possible (comments welcome).  Extending insert-last-word was by far
+the simplest method of doing this, although the name is now inaccurate.
+You can try out some function widgets to use this.  For example,
+
+copyearlierword() { 
+  if [[ -n $__copyword && $WIDGET = $LASTWIDGET ]]; then
+    (( __copyword-- ))
+  else
+    # assume this follows a normal insert-last-word...
+    __copyword=-2
+  fi
+  zle insert-last-word 0 $__copyword
+}
+zle -N copyearlierword
+bindkey '\eE' copyearlierword
+
+Currently this only works properly after a normal insert-last-word.
+
+What I'm still thinking about (and why this has taken a long time) is
+how to make this work on the current command line in the same was as on
+the others.  You would refer to the current command line with first
+argument 0 and a non-empty last argument.  However, it's more difficult
+to get to work.  I've only just remembered bufferwords(), which ought to
+do the trick (which saves a visit to our dirty-tricks-with-the-lexer
+department in Berlin).  I may present a more complete solution when I've
+looked at that.  Meanwhile, someone may have explained why this is all
+pointless.
+
+
+Index: Src/Zle/zle_hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_hist.c,v
+retrieving revision 1.6
+diff -u -r1.6 zle_hist.c
+--- Src/Zle/zle_hist.c	17 Sep 2001 18:30:49 -0000	1.6
++++ Src/Zle/zle_hist.c	5 Mar 2002 14:35:50 -0000
+@@ -410,38 +410,81 @@
+ int
+ insertlastword(char **args)
+ {
+-    int n;
++    int n, histstep = -1, wordpos = 0, deleteword = 0, lastlen;
+     char *s, *t;
+     Histent he;
+ 
+-/* multiple calls will now search back through the history, pem */
+     static char *lastinsert;
+     static int lasthist, lastpos;
+-    int evhist = addhistnum(curhist, -1, HIST_FOREIGN), save;
++    int evhist, save;
+ 
+-    if (lastinsert) {
+-	int lastlen = ztrlen(lastinsert);
+-	int pos = cs;
+-
+-	if (lastpos <= pos &&
+-	    lastlen == pos - lastpos &&
+-	    memcmp(lastinsert, (char *)&line[lastpos], lastlen) == 0) {
+-	    evhist = addhistnum(lasthist, -1, HIST_FOREIGN);
+-	    cs = lastpos;
+-	    foredel(pos - cs);
++    /*
++     * If we have at least one argument, the first is the history
++     * step.  The default is -1 (go back).  Repeated calls take
++     * a step in this direction.  A value of 0 is allowed and doesn't
++     * move the line.
++     *
++     * If we have two arguments, the second is the position of
++     * the word to extract, 1..N.  The default is to use the
++     * numeric argument, or the last word if that is not set.
++     *
++     * If we have three arguments, we reset the history pointer to
++     * the current history event before applying the history step.
++     */
++    if (*args)
++    {
++	histstep = (int)zstrtol(*args, NULL, 10);
++	if (*++args)
++	{
++	    wordpos = (int)zstrtol(*args, NULL, 10);
++	    if (*++args)
++		lasthist = curhist;
+ 	}
+-	zsfree(lastinsert);
+-	lastinsert = NULL;
+     }
++
++    if (lastinsert && (lastlen = ztrlen(lastinsert)) &&
++	lastpos <= cs &&
++	lastlen == cs - lastpos &&
++	memcmp(lastinsert, (char *)&line[lastpos], lastlen) == 0)
++	deleteword = 1;
++    else
++	lasthist = curhist;
++    evhist = histstep ? addhistnum(lasthist, histstep, HIST_FOREIGN) :
++	lasthist;
++
+     if (!(he = quietgethist(evhist)) || !he->nwords)
+ 	return 1;
+-    if (zmult > 0) {
++    if (wordpos) {
++	n = (wordpos > 0) ? wordpos : he->nwords + wordpos + 1;
++    } else if (zmult > 0) {
+ 	n = he->nwords - (zmult - 1);
+     } else {
+ 	n = 1 - zmult;
+     }
+-    if (n < 1 || n > he->nwords)
++    if (n < 1 || n > he->nwords) {
++	/*
++	 * We can't put in the requested word, but we did find the
++	 * history entry, so we remember the position in the history
++	 * list.  This avoids getting stuck on a history line with
++	 * fewer words than expected.  The cursor location cs
++	 * has not changed, and lastinsert is still valid.
++	 */
++	lasthist = evhist;
+ 	return 1;
++    }
++    /*
++     * Only remove the old word from the command line if we have
++     * successfully found a new one to insert.
++     */
++    if (deleteword) {
++	int pos = cs;
++	cs = lastpos;
++	foredel(pos - cs);
++    }
++    if (lastinsert) {
++	zsfree(lastinsert);
++	lastinsert = NULL;
++    }
+     s = he->text + he->words[2*n-2];
+     t = he->text + he->words[2*n-1];
+     save = *t;
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.16
+diff -u -r1.16 zle.yo
+--- Doc/Zsh/zle.yo	15 Sep 2001 20:58:33 -0000	1.16
++++ Doc/Zsh/zle.yo	5 Mar 2002 14:35:51 -0000
+@@ -941,6 +941,36 @@
+ replaces the word just inserted with the last word from the
+ history event prior to the one just used; numeric arguments can be used in
+ the same way to pick a word from that event.
++
++When called from a shell function invoked from a user-defined widget, the
++command can take one to three arguments.  The first argument specifies a
++history offset which applies to successive calls to this widget: if is -1,
++the default behaviour is used, while if it is 1, successive calls will move
++forwards through the history.  The value 0 is valid and history line
++examined by the previous execution of the command will be reexamined.  Note
++that negative numbers should be preceeded with a `tt(-)tt(-)' argument to
++avoid confusing them with options.
++
++If two arguments are given, the second specifies the word on the command
++line in normal array index notation (as a more natural alternative to the
++prefix argument).  Hence 1 is the first word, and -1 is the last word.
++
++If a third argument is given, its value is ignored, but it is used to
++signify that the history offset is relative to the current history line,
++rather than the one remembered after previous invocations of
++tt(insert-last-word).
++
++For example, the default behaviour of the command corresponds to
++
++example(zle insert-last-word -- -1 -1)
++
++while the command
++
++example(zle insert-last-word -- -1 1 -)
++
++always copies the first word of the line in the history immediately before
++the line being edited.  This has the side effect that later invocations of
++the widget will be relative to that line.
+ )
+ tindex(vi-repeat-search)
+ item(tt(vi-repeat-search) (unbound) (n) (unbound))(
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

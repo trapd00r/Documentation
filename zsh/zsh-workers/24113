@@ -1,0 +1,127 @@
+From zsh-workers-return-24113-mason-zsh=primenet.com.au@sunsite.dk Thu Nov 22 07:41:22 2007
+Return-Path: <zsh-workers-return-24113-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15005 invoked from network); 22 Nov 2007 07:41:14 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.3 (2007-08-08) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00 autolearn=ham
+	version=3.2.3
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 22 Nov 2007 07:41:14 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 2712 invoked from network); 22 Nov 2007 07:41:06 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 22 Nov 2007 07:41:06 -0000
+Received: (qmail 20497 invoked by alias); 22 Nov 2007 07:41:03 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 24113
+Received: (qmail 20474 invoked from network); 22 Nov 2007 07:41:02 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 22 Nov 2007 07:41:02 -0000
+Received: (qmail 2430 invoked from network); 22 Nov 2007 07:41:02 -0000
+Received: from vms042pub.verizon.net (206.46.252.42)
+  by a.mx.sunsite.dk with SMTP; 22 Nov 2007 07:40:55 -0000
+Received: from torch.brasslantern.com ([71.121.18.67])
+ by vms042.mailsrvcs.net (Sun Java System Messaging Server 6.2-6.01 (built Apr
+ 3 2006)) with ESMTPA id <0JRW005QSDC3F680@vms042.mailsrvcs.net> for
+ zsh-workers@sunsite.dk; Thu, 22 Nov 2007 01:40:54 -0600 (CST)
+Received: from torch.brasslantern.com (localhost.localdomain [127.0.0.1])
+	by torch.brasslantern.com (8.13.1/8.13.1) with ESMTP id lAM7emNq006266	for
+ <zsh-workers@sunsite.dk>; Wed, 21 Nov 2007 23:40:50 -0800
+Received: (from schaefer@localhost)	by torch.brasslantern.com
+ (8.13.1/8.13.1/Submit) id lAM7elAm006265	for zsh-workers@sunsite.dk; Wed,
+ 21 Nov 2007 23:40:47 -0800
+Date: Wed, 21 Nov 2007 23:40:47 -0800
+From: Bart Schaefer <schaefer@brasslantern.com>
+Subject: Re: PATCH: fix memory leak in new setenv code
+In-reply-to: <20071122025711.GA4745@primenet.com.au>
+To: Zsh Hackers <zsh-workers@sunsite.dk>
+Message-id: <071121234047.ZM6264@torch.brasslantern.com>
+MIME-version: 1.0
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+Content-type: text/plain; charset=us-ascii
+References: <2755.1193848735@dcle12>  <20071122025711.GA4745@primenet.com.au>
+Comments: In reply to Geoff Wing <gcw@zsh.org>
+ "Re: PATCH: fix memory leak in new setenv code" (Nov 22,  1:57pm)
+
+On Nov 22,  1:57pm, Geoff Wing wrote:
+} Subject: Re: PATCH: fix memory leak in new setenv code
+}
+} On Thursday 2007-11-01 03:39 +1100, Oliver Kiddle output:
+} :
+} :--- Src/params.c.orig	Wed Oct 31 17:30:57 2007
+} :+++ Src/params.c	Wed Oct 31 17:28:49 2007
+} :@@ -3998,6 +3998,8 @@
+} :       * the other branch?  If so, we don't actually need to
+} :       * store pm->env at all, just a flag that the value was set.
+} :       */
+} :+     if (pm->env)
+} :+         zsfree(pm->env);
+} :      pm->env = newenv;
+} : #else
+} :     /*
+} :
+} 
+} This can't be right and corrupts my environment (using zsh memory
+} routines).  Running "env" spews out lots of bad stuff.
+
+I've just spent a few minutes looking at this.
+
+newenv comes from mkenvstr() which allocates with zalloc(), and is
+then assigned to pm->env.
+
+pm->env() does indeed point to a string allocated with zalloc(), so
+it should be correct to zsfree().
+
+However, I think createparamtable() is incompletely converted to the
+USE_SET_UNSET_ENV case, so that the initial environment is not being
+properly maintained.  In particular we have *envp pointing into the
+global environ, which is modified in the "incorporate environment
+variables we are inheriting" loop (look around line 695 in params.c).
+
+This could cause setenv() to leak or corrupt memory.  I'm not quite
+sure about the patch below, but it seems to match the other cases, to
+wit, the memory in pm->env is not shared with the global environ [the
+latter instead being left unchanged in that loop in createparamtable()
+and thereafter mananged only by setenv()/unsetenv()].
+ 
+} If we're supposed to be zsfree()ing that, why aren't we doing it
+} consistently, i.e. around the line which assigns newenv and before
+} the call to zputenv()?
+
+newenv is a newly allocated string, which (in the USE_SET_UNSET_ENV
+case) is then copied into the environment.  If that fails (zputenv
+returns nonzero) we discard it; there probably should be a call to
+zsfree(pm->env) before pm->env = NULL in that branch as well.  I'm
+not sure whether pm->env = NULL is correct there, though; failure of 
+zputenv means newenv was not added to the environment, but does it
+also mean that the previous value of the parameter is no longer in
+the enviroment, or does it mean that the environment was unchanged?
+
+So the patch below is at best incomplete.  Try it with Oliver's
+patch still in place and see if it resolves your corruption problem.
+
+--- current/Src/params.c	2007-11-01 08:23:52.000000000 -0700
++++ Src/params.c	2007-11-21 23:30:46.000000000 -0800
+@@ -692,13 +692,17 @@
+ 					    getsparam(pm->node.nam), pm->node.flags);
+ 		    else
+ 			pm->env = ztrdup(*envp2);
++#ifndef USE_SET_UNSET_ENV
+ 		    *envp++ = pm->env;
++#endif
+ 		}
+ 	    }
+ 	}
+     }
+     popheap();
++#ifndef USE_SET_UNSET_ENV
+     *envp = '\0';
++#endif
+     opts[ALLEXPORT] = oae;
+ 
+     if (emulation == EMULATE_ZSH)
+

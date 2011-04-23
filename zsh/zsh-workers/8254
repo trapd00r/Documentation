@@ -1,0 +1,224 @@
+From zsh-workers-return-8254-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Oct 14 14:27:21 1999
+Return-Path: <zsh-workers-return-8254-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3335 invoked from network); 14 Oct 1999 14:27:11 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Oct 1999 14:27:11 -0000
+Received: (qmail 19744 invoked by alias); 14 Oct 1999 14:26:49 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8254
+Received: (qmail 19675 invoked from network); 14 Oct 1999 14:26:09 -0000
+Date: Thu, 14 Oct 1999 16:25:58 +0200 (MET DST)
+Message-Id: <199910141425.QAA16346@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 1 Feb 1999 11:09:19 -0800
+Subject: PATCH: Re: Associative array ordering and selective unset (Re: Example function)
+
+
+Bart Schaefer wrote (in 5156, hah!):
+
+> I just thought of a really clever way to do the specific example that I
+> gave.  Assume for a moment that the (q) modifier were implemented, i.e.
+> that (almost repeating the original example) given
+> 
+>         typeset -A map
+>         map=('*.(gz|Z)' zcat
+>              '*.bz2' 'bzip2 -dc'
+>              '*.bz' 'bzip -dc'
+>              '*' '<')
+> 
+> then ${map[(q)$argv[i]]} returns the value for the first subscript match
+> found, and ${map[(Q)$argv[i]]} returns the array of values for every key
+> that matches the subscript.
+> 
+> (Note that I moved the (qQ) into the subscript flags, which is probably
+> where it really has to be.  And I still hope for a better letter.)
+
+This implements that -- but uses the characters `k' and `K' although I 
+don't know if this is better.
+
+I hope I tested everything important this time (it seemed so
+simple). But it seems to work and `(k)' is as useless as expected.
+
+The manual entry may be a bit short...
+
+Bye
+ Sven
+
+diff -u oldsrc/params.c Src/params.c
+--- oldsrc/params.c	Thu Oct 14 13:41:49 1999
++++ Src/params.c	Thu Oct 14 16:16:42 1999
+@@ -359,6 +359,7 @@
+ }
+ 
+ static Patprog scanprog;
++static char *scanstr;
+ static char **paramvals;
+ 
+ /**/
+@@ -366,12 +367,20 @@
+ scanparamvals(HashNode hn, int flags)
+ {
+     struct value v;
+-    if (numparamvals && (flags & (SCANPM_MATCHVAL|SCANPM_MATCHKEY)) &&
+-	!(flags & SCANPM_MATCHMANY))
++    Patprog prog;
++
++    if (numparamvals && !(flags & SCANPM_MATCHMANY) &&
++	(flags & (SCANPM_MATCHVAL|SCANPM_MATCHKEY|SCANPM_KEYMATCH)))
+ 	return;
+     v.pm = (Param)hn;
+-    if ((flags & SCANPM_MATCHKEY) &&
+-	!pattry(scanprog, v.pm->nam)) {
++    if ((flags & SCANPM_KEYMATCH)) {
++	char *tmp = dupstring(v.pm->nam);
++
++	tokenize(tmp);
++
++	if (!(prog = patcompile(tmp, 0, NULL)) || !pattry(prog, scanstr))
++	    return;
++    } else if ((flags & SCANPM_MATCHKEY) && !pattry(scanprog, v.pm->nam)) {
+ 	return;
+     }
+     if (flags & SCANPM_WANTKEYS) {
+@@ -736,9 +745,10 @@
+ getarg(char **str, int *inv, Value v, int a2, zlong *w)
+ {
+     int hasbeg = 0, word = 0, rev = 0, ind = 0, down = 0, l, i, ishash;
++    int keymatch = 0;
+     char *s = *str, *sep = NULL, *t, sav, *d, **ta, **p, *tt;
+     zlong num = 1, beg = 0, r = 0;
+-    Patprog pprog;
++    Patprog pprog = NULL;
+ 
+     ishash = (v->pm && PM_TYPE(v->pm->flags) == PM_HASHED);
+ 
+@@ -750,18 +760,29 @@
+ 	    switch (*s) {
+ 	    case 'r':
+ 		rev = 1;
+-		down = ind = 0;
++		keymatch = down = ind = 0;
+ 		break;
+ 	    case 'R':
+ 		rev = down = 1;
++		keymatch = ind = 0;
++		break;
++	    case 'k':
++		keymatch = ishash;
++		rev = 1;
++		down = ind = 0;
++		break;
++	    case 'K':
++		keymatch = ishash;
++		rev = down = 1;
+ 		ind = 0;
+ 		break;
+ 	    case 'i':
+ 		rev = ind = 1;
+-		down = 0;
++		down = keymatch = 0;
+ 		break;
+ 	    case 'I':
+ 		rev = ind = down = 1;
++		keymatch = 0;
+ 		break;
+ 	    case 'w':
+ 		/* If the parameter is a scalar, then make subscription *
+@@ -818,7 +839,7 @@
+ 	    default:
+ 	      flagerr:
+ 		num = 1;
+-		word = rev = ind = down = 0;
++		word = rev = ind = down = keymatch = 0;
+ 		sep = NULL;
+ 		s = *str - 1;
+ 	    }
+@@ -841,7 +862,7 @@
+ 		v->isarr &= ~SCANPM_WANTVALS;
+ 	    } else if (rev)
+ 		v->isarr |= SCANPM_WANTVALS;
+-	    if (!down && ishash)
++	    if (!down && !keymatch && ishash)
+ 		v->isarr &= ~SCANPM_MATCHMANY;
+ 	}
+ 	*inv = ind;
+@@ -938,13 +959,16 @@
+ 	}
+ 	tokenize(s);
+ 
+-	if ((pprog = patcompile(s, 0, NULL))) {
++	if (keymatch || (pprog = patcompile(s, 0, NULL))) {
+ 	    int len;
+ 
+ 	    if (v->isarr) {
+ 		if (ishash) {
+ 		    scanprog = pprog;
+-		    if (ind)
++		    scanstr = s;
++		    if (keymatch)
++			v->isarr |= SCANPM_KEYMATCH;
++		    else if (ind)
+ 			v->isarr |= SCANPM_MATCHKEY;
+ 		    else
+ 			v->isarr |= SCANPM_MATCHVAL;
+@@ -952,7 +976,8 @@
+ 			v->isarr |= SCANPM_MATCHMANY;
+ 		    if ((ta = getvaluearr(v)) &&
+ 			(*ta || ((v->isarr & SCANPM_MATCHMANY) &&
+-				 (v->isarr & (SCANPM_MATCHKEY | SCANPM_MATCHVAL))))) {
++				 (v->isarr & (SCANPM_MATCHKEY | SCANPM_MATCHVAL |
++					      SCANPM_KEYMATCH))))) {
+ 			*inv = v->inv;
+ 			*w = v->b;
+ 			return 1;
+@@ -1131,7 +1156,8 @@
+ 		s++;
+ 		if (v->isarr && a == b && 
+ 		    (!(v->isarr & SCANPM_MATCHMANY) ||
+-		     !(v->isarr & (SCANPM_MATCHKEY | SCANPM_MATCHVAL))))
++		     !(v->isarr & (SCANPM_MATCHKEY | SCANPM_MATCHVAL |
++				   SCANPM_KEYMATCH))))
+ 		    v->isarr = 0;
+ 		v->a = a;
+ 		v->b = b;
+diff -u oldsrc/zsh.h Src/zsh.h
+--- oldsrc/zsh.h	Thu Oct 14 13:41:51 1999
++++ Src/zsh.h	Thu Oct 14 15:25:46 1999
+@@ -1086,6 +1086,7 @@
+ #define SCANPM_MATCHVAL   (1<<4)
+ #define SCANPM_MATCHMANY  (1<<5)
+ #define SCANPM_ASSIGNING  (1<<6)
++#define SCANPM_KEYMATCH   (1<<7)
+ #define SCANPM_ISVAR_AT   ((-1)<<15)	/* Only sign bit is significant */
+ 
+ /*
+diff -u olddoc/Zsh/params.yo Doc/Zsh/params.yo
+--- olddoc/Zsh/params.yo	Thu Oct 14 13:42:07 1999
++++ Doc/Zsh/params.yo	Thu Oct 14 16:21:16 1999
+@@ -139,6 +139,17 @@
+ Like `tt(r)', but gives the last match.  For associative arrays, gives
+ all possible matches.
+ )
++item(tt(k))(
++If used in a subscript on a parameter that is not an associative
++array, this behaves like `tt(r)', but if used on an association, it
++makes the keys be interpreted as patterns and returns the first value
++whose key matches the var(exp).
++)
++item(tt(K))(
++On an associtation this is like `tt(k)' but returns all values whose
++keys match the var(exp). On other types of parameters this has the
++same effect as `tt(R)'.
++)
+ item(tt(i))(
+ like `tt(r)', but gives the index of the match instead; this may not
+ be combined with a second argument.  For associative arrays, the key
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

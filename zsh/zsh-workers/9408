@@ -1,0 +1,194 @@
+From zsh-workers-return-9408-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Jan 22 19:51:25 2000
+Return-Path: <zsh-workers-return-9408-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5773 invoked from network); 22 Jan 2000 19:51:23 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 22 Jan 2000 19:51:23 -0000
+Received: (qmail 22547 invoked by alias); 22 Jan 2000 19:51:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9408
+Received: (qmail 22539 invoked from network); 22 Jan 2000 19:51:18 -0000
+To: zsh-workers@math.gatech.edu
+Subject: Re: playing with backreferences in list-colors 
+In-reply-to: "Alexandre Duret-Lutz"'s message of "22 Jan 2000 18:17:55 +0100."
+             <mvbzotyqb3w.fsf@phobos.lrde.epita.fr> 
+Date: Sat, 22 Jan 2000 19:53:28 +0000
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E12C6Yl-0005Xn-00.2000-01-22-19-50-59@cmailg1.svr.pol.co.uk>
+
+Alexandre Duret-Lutz wrote:
+> 
+> I have been playing with list-colors to colorize 
+> process listing and so on.  This is quite fun.
+> The snipsets below show two problems I had
+> 1) patterns containing letters don't seems to match;
+> 2) backreferences when (x)# style patterns don't match make zsh segfault.
+
+This is just an answer to half the story, namely the second part.  I hadn't
+thought about backreferences which completely fail to match.  That happens
+not just in this case, but also in for example:
+  [[ abab = (#b)(([ab])#|([cd])#) ]]
+where the second alternative, containing the third set of parentheses,
+never matches, and you get the same segementation violation.
+
+Luckily there's a variable around to check for whether they really
+matched.  If they didn't, the matched string will now be set to the null
+string, and both indices to -1.  -1 also gets passed back for the
+complist code, although Sven can decide if he would prefer some other
+behaviour since the chunk in pattryrefs() used in that case is different.
+
+One thing is that without a great deal of rewriting it's not possible to
+make (...)# do anything other than match one of the occurrences, so:
+
+> (I know, `(a)#' is weird, but actualy I would like to be able
+> to write something like `(*/)#([^ ]*)*' at the end of the pattern
+> for my processes listings, to colorize only basename of processes)
+
+... you should use (*/)([^ /]#)*, or something like that.  If you really
+need to iterate parentheses, you could get away with using
+`((*/)#)([^ ]*)*' and then making sure match 1 and match 2 are coloured the
+same way (match 2 is a subset of match 1, but you need to specify some
+behaviour for it anyway).  You can also sprinkle (#B)...(#b) pairs around,
+to turn backreferences off temporarily, which is actually slightly more
+efficient, but a bit ugly.
+
+By the way:
+
+       All three forms of name may be preceded by  a  pattern  in
+       parentheses. If such a pattern is given, the value will be
+       used only for matches in groups whose names are matched by
+       the  pattern  given  in the parentheses. E.g. `(g*)~m*=43'
+       says to highlight all matches beginning with `m' in groups
+       whose  names  begin with `g' using the color code `43'. In
+       case of the `lc', `rc', and `ec' codes, the group  pattern
+       is ignored.
+
+What does the `~' in the example mean here?   Is that a misprint?
+
+
+Index: Src/pattern.c
+===================================================================
+RCS file: /home/pws/CVSROOT/projects/zsh/Src/pattern.c,v
+retrieving revision 1.4
+diff -u -r1.4 pattern.c
+--- Src/pattern.c	1999/12/21 15:18:28	1.4
++++ Src/pattern.c	2000/01/22 19:45:17
+@@ -1376,13 +1376,18 @@
+ 		ep = patendp;
+ 
+ 		for (i = 0; i < prog->patnpar && i < maxnpos; i++) {
+-		    DPUTS(!*sp || !*ep, "BUG: backrefs not set.");
++		    if (parsfound & (1 << i)) {
++			if (begp)
++			    *begp++ = ztrsub(*sp, patinstart) + patoffset;
++			if (endp)
++			    *endp++ = ztrsub(*ep, patinstart) + patoffset - 1;
++		    } else {
++			if (begp)
++			    *begp++ = -1;
++			if (endp)
++			    *endp++ = -1;
++		    }
+ 
+-		    if (begp)
+-			*begp++ = ztrsub(*sp, patinstart) + patoffset;
+-		    if (endp)
+-			*endp++ = ztrsub(*ep, patinstart) + patoffset - 1;
+-
+ 		    sp++;
+ 		    ep++;
+ 		}
+@@ -1403,25 +1408,36 @@
+ 
+ 		PERMALLOC {
+ 		    for (i = 0; i < prog->patnpar; i++) {
+-			DPUTS(!*sp || !*ep, "BUG: backrefs not set.");
+-			matcharr[i] = dupstrpfx(*sp, *ep - *sp);
+-			/*
+-			 * mbegin and mend give indexes into the string
+-			 * in the standard notation, i.e. respecting
+-			 * KSHARRAYS, and with the end index giving
+-			 * the last character, not one beyond.
+-			 * For example, foo=foo; [[ $foo = (f)oo ]] gives
+-			 * (without KSHARRAYS) indexes 1 and 1, which
+-			 * corresponds to indexing as ${foo[1,1]}.
+-			 */
+-			sprintf(numbuf, "%ld",
+-				(long)(ztrsub(*sp, patinstart) + patoffset +
+-				       !isset(KSHARRAYS)));
+-			mbeginarr[i] = ztrdup(numbuf);
+-			sprintf(numbuf, "%ld",
+-				(long)(ztrsub(*ep, patinstart) + patoffset +
+-				       !isset(KSHARRAYS) - 1));
+-			mendarr[i] = ztrdup(numbuf);
++			if (parsfound & (1 << i)) {
++			    matcharr[i] = dupstrpfx(*sp, *ep - *sp);
++			    /*
++			     * mbegin and mend give indexes into the string
++			     * in the standard notation, i.e. respecting
++			     * KSHARRAYS, and with the end index giving
++			     * the last character, not one beyond.
++			     * For example, foo=foo; [[ $foo = (f)oo ]] gives
++			     * (without KSHARRAYS) indexes 1 and 1, which
++			     * corresponds to indexing as ${foo[1,1]}.
++			     */
++			    sprintf(numbuf, "%ld",
++				    (long)(ztrsub(*sp, patinstart) + 
++					   patoffset +
++					   !isset(KSHARRAYS)));
++			    mbeginarr[i] = ztrdup(numbuf);
++			    sprintf(numbuf, "%ld",
++				    (long)(ztrsub(*ep, patinstart) + 
++					   patoffset +
++					   !isset(KSHARRAYS) - 1));
++			    mendarr[i] = ztrdup(numbuf);
++			} else {
++			    /* Pattern wasn't set: either it was in an
++			     * unmatched branch, or a hashed parenthesis
++			     * that didn't match at all.
++			     */
++			    matcharr[i] = ztrdup("");
++			    mbeginarr[i] = ztrdup("-1");
++			    mendarr[i] = ztrdup("-1");
++			}
+ 			sp++;
+ 			ep++;
+ 		    }
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /home/pws/CVSROOT/projects/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.1.1.1
+diff -u -r1.1.1.1 expn.yo
+--- Doc/Zsh/expn.yo	1999/11/28 17:42:27	1.1.1.1
++++ Doc/Zsh/expn.yo	2000/01/22 19:30:06
+@@ -1246,8 +1246,22 @@
+ last match remains available.  In the case of global replacements this may
+ still be useful.  See the example for the tt(m) flag below.
+ 
++The numbering of backreferences strictly follows the order of the opening
++parentheses from left to right in the pattern string, although sets of
++parentheses may be nested.  There are special rules for parentheses followed
++by `tt(#)' or `tt(##)'.  Only the last match of the parenthesis is
++remembered: for example, in `tt([[ abab = (#b)([ab])# ]])', only the final
++`tt(b)' is stored in tt(match[1]).  Thus extra parentheses may be necessary
++to match the complete segment: for example, use `tt(X((ab|cd)#)Y)' to match
++a whole string of either `tt(ab)' or `tt(cd)' between `tt(X)' and `tt(Y)',
++using the value of tt($match[1]) rather than tt($match[2]).
++
+ If the match fails none of the parameters is altered, so in some cases it
+-may be necessary to initialise them beforehand.
++may be necessary to initialise them beforehand.  If some of the
++backreferences fail to match --- which happens if they are in an alternate
++branch which fails to match, or if they are followed by tt(#) and matched
++zero times --- then the matched string is set to the empty string, and the
++start and end indices are set to -1.
+ 
+ Pattern matching with backreferences is slightly slower than without.
+ )
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+

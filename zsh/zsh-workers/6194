@@ -1,0 +1,161 @@
+From zsh-workers-return-6194-mason-zsh=primenet.com.au@sunsite.auc.dk Mon May 03 09:26:03 1999
+Return-Path: <zsh-workers-return-6194-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29604 invoked from network); 3 May 1999 09:25:58 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 May 1999 09:25:58 -0000
+Received: (qmail 15394 invoked by alias); 3 May 1999 09:25:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6194
+Received: (qmail 15383 invoked from network); 3 May 1999 09:25:37 -0000
+Date: Mon, 3 May 1999 11:25:33 +0200 (MET DST)
+Message-Id: <199905030925.LAA29056@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Oliver Kiddle's message of Tue, 27 Apr 1999 13:56:22 +0100
+Subject: Re: Completion in braces limitation
+
+
+Oliver Kiddle wrote:
+
+> Another feature which would be useful is if completion of variables was
+> extended to
+> properly handle associative arrays. So for example, if I have an
+> associative array named 'test',
+> cd $test[<tab>
+> would complete from the list of keys in $test.
+
+The patch below should do this.
+
+Bye
+ Sven
+
+diff -u oos/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- oos/Zle/zle_tricky.c	Mon May  3 11:21:43 1999
++++ Src/Zle/zle_tricky.c	Mon May  3 11:22:03 1999
+@@ -578,6 +578,10 @@
+ 
+ static int insubscr;
+ 
++/* Parameter pointer for completing keys of an assoc array. */
++
++static Param keypm;
++
+ /* 1 if we are completing in a quoted string (or inside `...`) */
+ 
+ /**/
+@@ -1364,9 +1368,15 @@
+ 	    zsfree(varname);
+ 	    varname = ztrdup(tt);
+ 	    *s = sav;
+-	    if (skipparens(Inbrack, Outbrack, &s) > 0 || s > tt + cs - wb)
+-		s = NULL, inwhat = IN_MATH, insubscr = 1;
+-	    else if (*s == '=' && cs > wb + (s - tt)) {
++	    if (skipparens(Inbrack, Outbrack, &s) > 0 || s > tt + cs - wb) {
++		s = NULL;
++		inwhat = IN_MATH;
++		if ((keypm = (Param) paramtab->getnode(paramtab, varname)) &&
++		    (keypm->flags & PM_HASHED))
++		    insubscr = 2;
++		else
++		    insubscr = 1;
++	    } else if (*s == '=' && cs > wb + (s - tt)) {
+ 		s++;
+ 		wb += s - tt;
+ 		t0 = STRING;
+@@ -1424,11 +1434,15 @@
+ 		    zsfree(varname);
+ 		    varname = ztrdup(nb);
+ 		    *ne = sav;
++		    if ((keypm = (Param) paramtab->getnode(paramtab,
++							   varname)) &&
++			(keypm->flags & PM_HASHED))
++			insubscr = 2;
+ 		}
+ 	    }
+ 	}
+ 	if (inwhat == IN_MATH) {
+-	    if (compfunc) {
++	    if (compfunc || insubscr == 2) {
+ 		int lev;
+ 		char *p;
+ 
+@@ -1472,7 +1486,11 @@
+ 		zsfree(varname);
+ 		varname = ztrdup((char *) line + i + 1);
+ 		line[wb - 1] = sav;
+-		insubscr = 1;
++		if ((keypm = (Param) paramtab->getnode(paramtab, varname)) &&
++		    (keypm->flags & PM_HASHED))
++		    insubscr = 2;
++		else
++		    insubscr = 1;
+ 	    }
+ 	}
+ 	/* This variable will hold the current word in quoted form. */
+@@ -4829,13 +4847,22 @@
+     char *s;
+ 
+     ccont = CC_CCCONT;
++    cc_dummy.suffix = NULL;
+ 
+     if (linwhat == IN_ENV) {
+         /* Default completion for parameter values. */
+         cc = &cc_default;
++	keypm = NULL;
+     } else if (linwhat == IN_MATH) {
+-        /* Parameter names inside mathematical expression. */
+-        cc_dummy.mask = CC_PARAMS;
++	if (insubscr == 2) {
++	    /* Inside subscript of assoc array, complete keys. */
++	    cc_dummy.mask = 0;
++	    cc_dummy.suffix = "]";
++	} else {
++	    /* Other math environment, complete paramete names. */
++	    keypm = NULL;
++	    cc_dummy.mask = CC_PARAMS;
++	}
+ 	cc = &cc_dummy;
+ 	cc_dummy.refc = 10000;
+     } else if (linwhat == IN_COND) {
+@@ -4851,13 +4878,16 @@
+ 	    (CC_FILES | CC_PARAMS);
+ 	cc = &cc_dummy;
+ 	cc_dummy.refc = 10000;
+-    } else if (linredir)
++	keypm = NULL;
++    } else if (linredir) {
+ 	/* In redirections use default completion. */
+ 	cc = &cc_default;
+-    else
++	keypm = NULL;
++    } else {
+ 	/* Otherwise get the matches for the command. */
++	keypm = NULL;
+ 	return makecomplistcmd(os, incmd, flags);
+-
++    }
+     if (cc) {
+ 	/* First, use the -T compctl. */
+ 	if (!(flags & CFN_FIRST)) {
+@@ -5971,7 +6001,12 @@
+     if ((t = cc->mask & (CC_ALREG | CC_ALGLOB)))
+ 	/* Add the two types of aliases. */
+ 	dumphashtable(aliastab, t | (cc->mask & (CC_DISCMDS|CC_EXCMDS)));
+-
++    if (keypm && cc == &cc_dummy) {
++	/* Add the keys of the parameter in keypm. */
++	scanhashtable(keypm->gets.hfn(keypm), 0, 0, PM_UNSET, addhnmatch, 0);
++	keypm = NULL;
++	cc_dummy.suffix = NULL;
++    }
+     if (!errflag && cc->ylist) {
+ 	/* generate the user-defined display list: if anything fails, *
+ 	 * we silently allow the normal completion list to be used.   */
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

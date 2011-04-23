@@ -1,0 +1,113 @@
+From zsh-workers-return-27125-mason-zsh=primenet.com.au@sunsite.dk Fri Jul 10 21:30:30 2009
+Return-Path: <zsh-workers-return-27125-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18503 invoked from network); 10 Jul 2009 21:30:27 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received: from new-brage.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.254.104)
+  by ns1.primenet.com.au with SMTP; 10 Jul 2009 21:30:27 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 10487 invoked from network); 10 Jul 2009 21:30:20 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 10 Jul 2009 21:30:20 -0000
+Received: (qmail 1556 invoked by alias); 10 Jul 2009 21:30:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 27125
+Received: (qmail 1535 invoked from network); 10 Jul 2009 21:30:09 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 10 Jul 2009 21:30:09 -0000
+Received: from mtaout03-winn.ispmail.ntl.com (mtaout03-winn.ispmail.ntl.com [81.103.221.49])
+	by bifrost.dotsrc.org (Postfix) with ESMTP id 8956F80307FB
+	for <zsh-workers@sunsite.dk>; Fri, 10 Jul 2009 23:30:06 +0200 (CEST)
+Received: from aamtaout03-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout03-winn.ispmail.ntl.com
+          (InterMail vM.7.08.04.00 201-2186-134-20080326) with ESMTP
+          id <20090710213006.MUYU5579.mtaout03-winn.ispmail.ntl.com@aamtaout03-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Fri, 10 Jul 2009 22:30:06 +0100
+Received: from pws-pc.ntlworld.com ([81.107.42.185])
+          by aamtaout03-winn.ispmail.ntl.com
+          (InterMail vG.2.02.00.01 201-2161-120-102-20060912) with ESMTP
+          id <20090710213006.TPTG2093.aamtaout03-winn.ispmail.ntl.com@pws-pc.ntlworld.com>
+          for <zsh-workers@sunsite.dk>; Fri, 10 Jul 2009 22:30:06 +0100
+Received: from pws-pc (pws-pc [127.0.0.1])
+	by pws-pc.ntlworld.com (8.14.3/8.14.2) with ESMTP id n6ALU0cg009111
+	for <zsh-workers@sunsite.dk>; Fri, 10 Jul 2009 22:30:00 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: colour buffer allocation
+X-Mailer: MH-E 8.0.3; nmh 1.3; GNU Emacs 22.3.1
+Date: Fri, 10 Jul 2009 22:30:00 +0100
+Message-ID: <9110.1247261400@pws-pc>
+X-Cloudmark-Analysis: v=1.0 c=1 a=NLZqzBF-AAAA:8 a=B5UCeR_EjvQIPj5BUwAA:9 a=bfBs1A_4Q9tb5IuzVsEA:7 a=xKX0DIst6O-vNGJ_34r0yXcKNqoA:4 a=_dQi-Dcv4p4A:10
+X-Virus-Scanned: ClamAV 0.94.2/9554/Fri Jul 10 19:05:16 2009 on bifrost
+X-Virus-Status: Clean
+
+I somehow hit a case where the debug message freeing the buffer for
+colour code composition was triggering (it was a trashzle just as a
+prompt was being redrawn, or something like that).  It looks like
+allocation and free can happen in a nested fashion.  I think it's always
+used immediately, so simply counting the nested allocations will work.
+I think.
+
+Index: Src/prompt.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/prompt.c,v
+retrieving revision 1.58
+diff -u -r1.58 prompt.c
+--- Src/prompt.c	12 May 2009 19:58:08 -0000	1.58
++++ Src/prompt.c	10 Jul 2009 21:27:27 -0000
+@@ -1764,13 +1764,18 @@
+ struct colour_sequences fg_bg_sequences[2];
+ 
+ /*
+- * We need a buffer for colour sequence compostion.  It may
++ * We need a buffer for colour sequence composition.  It may
+  * vary depending on the sequences set.  However, it's inefficient
+  * allocating it separately every time we send a colour sequence,
+  * so do it once per refresh.
+  */
+ static char *colseq_buf;
+ 
++/*
++ * Count how often this has been allocated, for recursive usage.
++ */
++static int colseq_buf_allocs;
++
+ /**/
+ void
+ set_default_colour_sequences(void)
+@@ -1801,9 +1806,13 @@
+ mod_export void
+ allocate_colour_buffer(void)
+ {
+-    char **atrs = getaparam("zle_highlight");
++    char **atrs;
+     int lenfg, lenbg, len;
+ 
++    if (colseq_buf_allocs++)
++	return;
++
++    atrs = getaparam("zle_highlight");
+     if (atrs) {
+ 	for (; *atrs; atrs++) {
+ 	    if (strpfx("fg_start_code:", *atrs)) {
+@@ -1846,6 +1855,9 @@
+ mod_export void
+ free_colour_buffer(void)
+ {
++    if (--colseq_buf_allocs)
++	return;
++
+     DPUTS(!colseq_buf, "Freeing colour sequence buffer without alloc");
+     /* Free buffer for colour code composition */
+     free(colseq_buf);
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

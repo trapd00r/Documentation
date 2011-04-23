@@ -1,0 +1,387 @@
+From zsh-workers-return-10738-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Apr 13 14:11:54 2000
+Return-Path: <zsh-workers-return-10738-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10312 invoked from network); 13 Apr 2000 14:11:48 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 13 Apr 2000 14:11:48 -0000
+Received: (qmail 18388 invoked by alias); 13 Apr 2000 14:11:28 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10738
+Received: (qmail 18372 invoked from network); 13 Apr 2000 14:11:28 -0000
+Date: Thu, 13 Apr 2000 15:10:50 +0100
+From: Peter Stephenson <pws@cambridgesiliconradio.com>
+Subject: PATCH: local exports
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Message-id: <0FSY00H1OKQ2PE@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+It seems to be agreed that not having local parameters exportable is a
+bug.  This is an attempt to fix it.  It works, so far as I've tried, for
+both normal and special parameters (with or without the -h option).  The
+exported value should now be consistent (modulo any other problems with
+exporting variables irrespective of their being local or not) with the
+in-shell value, which seems to me the only sensible way of doing this.
+
+I'm sure this needs more testing.  I removed some special cases that
+prevented exports of locals in various places in the code, but it's
+possible there are some others hanging around.
+
+I made `typeset +g -x' respect the explicit `+g', and I allowed `local' to
+take `-x' without forcing on `-g' --- I take it this is uncontroversial.
+This was necessary to get around the -g-with--x kludge.  Ksh 88 doesn't
+have that and its `typeset -x' behaves more or less like `typeset +g -x'.
+However, apparently ksh 88 leaves the global value in the environment
+together with the local; zsh now deletes it, which seems to correspond to
+the user's intention at the expense of a fairly minor inefficiency.
+
+I hope there's nothing to excite controversy in this patch.
+
+
+On the other matter of handling the combination of localness and
+exportedness: I haven't touched this, since I'd probably get it wrong.
+Having confused myself over this, I've come to these conclusions:
+
+1 - We don't actually need the -g-kludge for typeset -x any more; it
+doesn't correspond to ksh 88 (see above), wasn't present or documented in
+zsh until one of the current development series, and isn't consistent with
+the behaviour of the remaining flags.
+
+2 - `export' in any case behaves like it does in ksh, though in zsh's case
+that means the effect of `typeset -xg', as currently documented.  The zsh
+behaviour was always as now, I believe.  The ksh 88 behaviour makes
+`export' and `typeset -x' behave differently, too, but it's undocumented.
+
+3 - In fact, none of this interaction between exportedness and globalness
+seems to be documented in the ksh 88 manual page.
+
+4 - Therefore it's hard to see the use of an option or different emulation
+settings, but it's possible I've missed some other issue.  We're agreed the
+old behaviour was broken, so we don't want to emulate that.  If an option
+for ksh compatibility is required, the base zsh behaviour should be as
+clean as possible, i.e. no unexpected combinations (even if documented).
+
+4 - Consequently I think we can remove the -g => -xg kludge in either case.
+But I didn't quite follow why it was there.  If it was simply a workaround
+for the -x being ignored otherwise, then maybe we can simply get rid of it
+and put an end to the matter.
+
+
+Index: Doc/Zsh/builtins.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/builtins.yo,v
+retrieving revision 1.2
+diff -u -r1.2 builtins.yo
+--- Doc/Zsh/builtins.yo	2000/04/01 20:43:44	1.2
++++ Doc/Zsh/builtins.yo	2000/04/13 13:26:28
+@@ -595,9 +595,10 @@
+ endsitem()
+ )
+ findex(local)
+-item(tt(local) [ {tt(PLUS())|tt(-)}tt(AEFLRUZahilrtu) [var(n)]] [ var(name)[tt(=)var(value)] ] ...)(
+-Same as tt(typeset), except that the options tt(-g), tt(-x) and
+-tt(-f) are not permitted.
++item(tt(local) [ {tt(PLUS())|tt(-)}tt(AEFLRUZahilrtux) [var(n)]] [ var(name)[tt(=)var(value)] ] ...)(
++Same as tt(typeset), except that the options tt(-g), and
++tt(-f) are not permitted.  In this case the tt(-x) option does not force
++the use of tt(-g), i.e. exported variables will be local to functions.
+ )
+ findex(log)
+ vindex(watch, use of)
+@@ -1003,9 +1004,7 @@
+ function completes.  See
+ ifzman(`Local Parameters' in zmanref(zshparam))\
+ ifnzman(noderef(Local Parameters))\
+-.  Local parameters are not exported unless tt(ALL_EXPORT) is set, in
+-which case the parameter is exported em(only) when var(name) does not
+-already exist.  The same rules apply to special shell parameters, which
++.  The same rules apply to special shell parameters, which
+ retain their special attributes when made local.
+ 
+ For each var(name)tt(=)var(value) assignment, the parameter
+@@ -1161,7 +1160,9 @@
+ )
+ item(tt(-x))(
+ Mark for automatic export to the environment of subsequently
+-executed commands.
++executed commands.  Currently this implies the option tt(-g), unless tt(+g)
++is also explicitly given, in other words the parameter is not made local to
++the enclosing function.  This is for compatibility with other shells.
+ )
+ enditem()
+ )
+Index: Doc/Zsh/params.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/params.yo,v
+retrieving revision 1.2
+diff -u -r1.2 params.yo
+--- Doc/Zsh/params.yo	2000/04/01 20:43:44	1.2
++++ Doc/Zsh/params.yo	2000/04/13 13:26:28
+@@ -215,21 +215,19 @@
+ 
+ Special parameters may also be made local; they retain their special
+ attributes unless either the existing or the newly-created parameter
+-has the tt(-h) (hide) attribute.  This may have unexpected effects.
+-Firstly, there is no default value, so if there is no assigment at the
++has the tt(-h) (hide) attribute.  This may have unexpected effects:
++there is no default value, so if there is no assigment at the
+ point the variable is made local, it will be set to an empty value (or zero
+-in the case of integers).  Secondly, special parameters which are made
+-local will not be exported (as with other parameters), so that the global
+-value of the parameter remains present in the environment if it is already
+-there.  This should be particularly noted in the case of tt(PATH): the
+-shell will use the local version of tt(PATH) for finding programmes, but
+-programmes using the shell's environment will inherit the global version.
++in the case of integers).  
+ The following:
+ 
+ example(typeset PATH=/new/directory:$PATH)
+ 
+-is valid for temporarily allowing the shell to find the programs in
+-tt(/new/directory) inside a function.
++is valid for temporarily allowing the shell or programmes called from it to
++find the programs in tt(/new/directory) inside a function.
++
++Note that the restriction in older versions of zsh that local parameters
++were never exported has been removed.
+ 
+ texinode(Parameters Set By The Shell)(Parameters Used By The Shell)(Local Parameters)(Parameters)
+ sect(Parameters Set By The Shell)
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.6
+diff -u -r1.6 builtin.c
+--- Src/builtin.c	2000/04/13 08:43:39	1.6
++++ Src/builtin.c	2000/04/13 13:26:29
+@@ -79,7 +79,7 @@
+     BUILTIN("jobs", 0, bin_fg, 0, -1, BIN_JOBS, "dlpZrs", NULL),
+     BUILTIN("kill", 0, bin_kill, 0, -1, 0, NULL, NULL),
+     BUILTIN("let", 0, bin_let, 1, -1, 0, NULL, NULL),
+-    BUILTIN("local", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "AEFLRTUZahilrtu", NULL),
++    BUILTIN("local", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "AEFLRTUZahilrtux", NULL),
+     BUILTIN("log", 0, bin_log, 0, 0, 0, NULL, NULL),
+     BUILTIN("logout", 0, bin_break, 0, 1, BIN_LOGOUT, NULL, NULL),
+ 
+@@ -644,14 +644,12 @@
+     setsparam("OLDPWD", ztrdup(oldpwd));
+ 
+     pm = (Param) paramtab->getnode(paramtab, "PWD");
+-    if (!(pm->flags & PM_EXPORTED) &&
+-	(!pm->level || (isset(ALLEXPORT) && !pm->old))) {
++    if (!(pm->flags & PM_EXPORTED)) {
+ 	pm->flags |= PM_EXPORTED;
+ 	pm->env = addenv("PWD", pwd, pm->flags);
+     }
+     pm = (Param) paramtab->getnode(paramtab, "OLDPWD");
+-    if (!(pm->flags & PM_EXPORTED) &&
+-	(!pm->level || (isset(ALLEXPORT) && !pm->old))) {
++    if (!(pm->flags & PM_EXPORTED)) {
+ 	pm->flags |= PM_EXPORTED;
+ 	pm->env = addenv("OLDPWD", oldpwd, pm->flags);
+     }
+@@ -1589,7 +1587,6 @@
+     }
+ 
+     /*
+-     * According to the manual, local parameters don't get exported.
+      * A parameter will be local if
+      * 1. we are re-using an existing local parameter
+      *    or
+@@ -1598,10 +1595,6 @@
+      *     or
+      *   ii. we are creating a new local parameter
+      */
+-    if ((usepm && pm->level) ||
+-	(!usepm && (pm || (locallevel && (on & PM_LOCAL)))))
+-	on &= ~PM_EXPORTED;
+-
+     if (usepm) {
+ 	on &= ~PM_LOCAL;
+ 	if (!on && !roff && !value) {
+@@ -1630,9 +1623,7 @@
+ 	    if (pm->flags & PM_EXPORTED) {
+ 		if (!(pm->flags & PM_UNSET) && !pm->env && !value)
+ 		    pm->env = addenv(pname, getsparam(pname), pm->flags);
+-	    } else if (pm->env &&
+-		       (!pm->level || (isset(ALLEXPORT) && !pm->old &&
+-				       !(pm->flags & PM_HASHELEM)))) {
++	    } else if (pm->env && !(pm->flags & PM_HASHELEM)) {
+ 		delenv(pm->env);
+ 		zsfree(pm->env);
+ 		pm->env = NULL;
+@@ -1708,7 +1699,11 @@
+ 	tpm->old = pm->old;
+ 	tpm->level = pm->level;
+ 	tpm->ct = pm->ct;
+-	tpm->env = pm->env;
++	if (pm->env) {
++	    delenv(pm->env);
++	    zsfree(pm->env);
++	}
++	tpm->env = pm->env = NULL;
+ 
+ 	pm->old = tpm;
+ 	/*
+@@ -1725,7 +1720,6 @@
+ 	    pm->ct = auxlen;
+ 	else
+ 	    pm->ct = 0;
+-	pm->env = NULL;
+     } else {
+ 	/*
+ 	 * Create a new node for a parameter with the flags in `on' minus the
+@@ -1856,7 +1850,7 @@
+ 	return 0;
+     }
+ 
+-    if (!ops['g'] && !ops['x'])
++    if ((!ops['g'] && !ops['x']) || ops['g'] == 2 || *name == 'l')
+ 	on |= PM_LOCAL;
+ 
+     if (on & PM_TIED) {
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.3
+diff -u -r1.3 params.c
+--- Src/params.c	2000/04/04 12:02:04	1.3
++++ Src/params.c	2000/04/13 13:26:29
+@@ -643,13 +643,21 @@
+ 	} else {
+ 	    pm = (Param) zcalloc(sizeof *pm);
+ 	    if ((pm->old = oldpm)) {
+-		/* needed to avoid freeing oldpm */
++		/*
++		 * needed to avoid freeing oldpm, but we do take it
++		 * out of the environment when it's hidden.
++		 */
++		if (oldpm->env) {
++		    delenv(oldpm->env);
++		    zsfree(oldpm->env);
++		    oldpm->env = NULL;
++		}
+ 		paramtab->removenode(paramtab, name);
+ 	    }
+ 	    paramtab->addnode(paramtab, ztrdup(name), pm);
+ 	}
+ 
+-	if (isset(ALLEXPORT) && !oldpm && !(flags & PM_HASHELEM))
++	if (isset(ALLEXPORT) && !(flags & PM_HASHELEM))
+ 	    flags |= PM_EXPORTED;
+     } else {
+ 	pm = (Param) zhalloc(sizeof *pm);
+@@ -1446,11 +1454,30 @@
+ }
+ 
+ /**/
++void
++export_param(Param pm)
++{
++    char buf[(sizeof(zlong) * 8) + 4], *val;
++
++    if (PM_TYPE(pm->flags) == PM_INTEGER)
++	convbase(val = buf, pm->gets.ifn(pm), pm->ct);
++    else if (pm->flags & (PM_EFLOAT|PM_FFLOAT))
++	val = convfloat(pm->gets.ffn(pm), pm->ct,
++			pm->flags, NULL);
++    else
++	val = pm->gets.cfn(pm);
++    if (pm->env)
++	pm->env = replenv(pm->env, val, pm->flags);
++    else {
++	pm->flags |= PM_EXPORTED;
++	pm->env = addenv(pm->nam, val, pm->flags);
++    }
++}
++
++/**/
+ mod_export void
+ setstrvalue(Value v, char *val)
+ {
+-    char buf[(sizeof(zlong) * 8) + 4];
+-
+     if (v->pm->flags & PM_READONLY) {
+ 	zerr("read-only variable: %s", v->pm->nam, 0);
+ 	zsfree(val);
+@@ -1523,22 +1550,10 @@
+ 	break;
+     }
+     if ((!v->pm->env && !(v->pm->flags & PM_EXPORTED) &&
+-	 !(isset(ALLEXPORT) && !v->pm->old && !(v->pm->flags & PM_HASHELEM))) ||
++	 !(isset(ALLEXPORT) && !(v->pm->flags & PM_HASHELEM))) ||
+ 	(v->pm->flags & PM_ARRAY) || v->pm->ename)
+ 	return;
+-    if (PM_TYPE(v->pm->flags) == PM_INTEGER)
+-	convbase(val = buf, v->pm->gets.ifn(v->pm), v->pm->ct);
+-    else if (v->pm->flags & (PM_EFLOAT|PM_FFLOAT))
+-	val = convfloat(v->pm->gets.ffn(v->pm), v->pm->ct,
+-			v->pm->flags, NULL);
+-    else
+-	val = v->pm->gets.cfn(v->pm);
+-    if (v->pm->env)
+-	v->pm->env = replenv(v->pm->env, val, v->pm->flags);
+-    else {
+-	v->pm->flags |= PM_EXPORTED;
+-	v->pm->env = addenv(v->pm->nam, val, v->pm->flags);
+-    }
++    export_param(v->pm);
+ }
+ 
+ /**/
+@@ -1969,6 +1984,15 @@
+ 	if ((PM_TYPE(oldpm->flags) == PM_SCALAR) &&
+ 	    oldpm->sets.cfn == strsetfn)
+ 	    adduserdir(oldpm->nam, oldpm->u.str, 0, 0);
++	if (oldpm->flags & PM_EXPORTED) {
++	    /*
++	     * Re-export the old value which we removed in typeset_single().
++	     * I don't think we need to test for ALL_EXPORT here, since if
++	     * it was used to export the parameter originally the parmeter
++	     * should still have the PM_EXPORTED flag.
++	     */
++	    export_param(oldpm);
++	}
+     }
+ 
+     paramtab->freenode((HashNode) pm); /* free parameter node */
+@@ -2745,7 +2769,7 @@
+      */
+     if (t == path)
+ 	cmdnamtab->emptytable(cmdnamtab);
+-    if ((pm->flags & PM_HASHELEM) || (isset(ALLEXPORT) ? !!pm->old : pm->level))
++    if (pm->flags & PM_HASHELEM)
+ 	return;
+     u = t ? zjoin(t, ':', 1) : "";
+     len_s = strlen(s);
+@@ -3013,7 +3037,11 @@
+ 	    pm->flags = (tpm->flags & ~PM_NORESTORE);
+ 	    pm->level = tpm->level;
+ 	    pm->ct = tpm->ct;
+-	    pm->env = tpm->env;
++	    if (pm->env) {
++		delenv(pm->env);
++		zsfree(pm->env);
++	    }
++	    pm->env = NULL;
+ 
+ 	    if (!(tpm->flags & PM_NORESTORE))
+ 		switch (PM_TYPE(pm->flags)) {
+@@ -3035,6 +3063,9 @@
+ 		    break;
+ 		}
+ 	    zfree(tpm, sizeof(*tpm));
++
++	    if (pm->flags & PM_EXPORTED)
++		export_param(pm);
+ 	} else
+ 	    unsetparam_pm(pm, 0, 0);
+     }
+
+-- 
+Peter Stephenson <pws@cambridgesiliconradio.com>
+Cambridge Silicon Radio, Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+

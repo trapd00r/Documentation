@@ -1,0 +1,560 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Sun Dec 29 22:45:59 1996
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 987 invoked from network); 29 Dec 1996 22:45:54 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 29 Dec 1996 22:45:54 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id RAA15491; Sun, 29 Dec 1996 17:43:28 -0500 (EST)
+Resent-Date: Sun, 29 Dec 1996 17:43:28 -0500 (EST)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199612292233.XAA01223@hzoli.ppp.cs.elte.hu>
+Subject: Brace bugfixes
+To: zsh-workers@math.gatech.edu (Zsh hacking and development)
+Date: Sun, 29 Dec 1996 23:33:20 +0100 (MET)
+X-Mailer: ELM [version 2.4ME+ PL17 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"6D613.0.-n3.GGlno"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2663
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+This patch fixes several brace related bugs:
+
+% zsh -f
+hzoli% echo {{a,b}
+{{a,b}              <--- should be {a {b
+hzoli% echo {1..2a}
+1..2a               <--- should be {1..2a}
+hzoli% echo a{,-.}
+a, a- a.            <--- should be a a-.
+hzoli% echo a}b
+a }b                <--- should be a}b
+
+After this patch the BRACE_CCL option is required for the {a-z} expansion.
+NO_IGNORE_BRACES is required for the { echo } syntax.  With IGNORE_BRACES
+{ echo ; } must be used.  Similarily
+
+fname () { echo foo }
+
+only works with NO_IGNORE_BRACES, but
+
+fname () {
+	echo foo
+}
+
+always works.  Note that NO_IGNORE_BRACES is set by default so this change
+usually affects sh/ksh compatibility mode only.
+
+I'd like to include these changes in the forthcoming zsh-3.0.3 release.
+
+Zoltan
+
+
+*** Src/glob.c	1996/12/29 01:53:45	3.1.1.3
+--- Src/glob.c	1996/12/29 21:03:18
+***************
+*** 802,858 ****
+  int
+  hasbraces(char *str)
+  {
+!     int mb, bc, cmct1, cmct2;
+!     char *lbr = NULL;
+  
+      if (isset(BRACECCL)) {
+  	/* In this case, any properly formed brace expression  *
+  	 * will match and expand to the characters in between. */
+! 	for (mb = bc = 0; *str; ++str)
+  	    if (*str == Inbrace) {
+! 		if (!mb && str[1] == Outbrace)
+  		    *str++ = '{', *str = '}';
+! 		else if (++bc > mb)
+! 		    mb = bc;
+  	    } else if (*str == Outbrace)
+! 		if (--bc < 0)
+! 		    return (0);
+! 	return (mb && bc == 0);
+      }
+      /* Otherwise we need to look for... */
+!     for (mb = bc = cmct1 = cmct2 = 0; *str; str++) {
+! 	if (*str == Inbrace) {
+! 	    if (!bc)
+! 		lbr = str;
+! 	    bc++;
+! 	    if (str[2] == '-' && str[3] && str[4] == Outbrace) { /* {a-z} */
+! 		/* ...character ranges... */
+! 		cmct1++;
+! 		if (bc == 1)
+! 		    cmct2++;
+! 	    }
+! 	} else if (*str == Outbrace) {
+! 	    /* (see if we've finished this set of braces) */
+! 	    bc--;
+! 	    if (!bc) {
+! 		if (!cmct2) {
+! 		    *lbr = '{';
+! 		    *str = '}';
+  		}
+! 		cmct2 = 0;
+  	    }
+! 	} else if ((*str == Comma || (*str == '.' && str[1] == '.')) && bc) {
+! 	    /* ...or comma'd ranges or numeric ranges. */
+! 	    cmct1++;
+! 	    if (bc == 1)
+! 		cmct2++;
+  	}
+- 	if (bc > mb)
+- 	    mb = bc;
+- 	if (bc < 0)
+- 	    return 0;
+      }
+-     return (mb && bc == 0 && cmct1);
+  }
+  
+  /* expand stuff like >>*.c */
+--- 802,889 ----
+  int
+  hasbraces(char *str)
+  {
+!     char *lbr, *mbr, *comma;
+  
+      if (isset(BRACECCL)) {
+  	/* In this case, any properly formed brace expression  *
+  	 * will match and expand to the characters in between. */
+! 	int bc;
+! 
+! 	for (bc = 0; *str; ++str)
+  	    if (*str == Inbrace) {
+! 		if (!bc && str[1] == Outbrace)
+  		    *str++ = '{', *str = '}';
+! 		else
+! 		    bc++;
+  	    } else if (*str == Outbrace)
+! 		if (!bc)
+! 		    *str = '}';
+! 		else if (!--bc)
+! 		    return 1;
+! 	return 0;
+      }
+      /* Otherwise we need to look for... */
+!     lbr = mbr = comma = NULL;
+!     for (;;) {
+! 	switch (*str++) {
+! 	case Inbrace:
+! 	    if (!lbr) {
+! 		lbr = str - 1;
+! 		while (idigit(*str))
+! 		    str++;
+! 		if (*str == '.' && str[1] == '.') {
+! 		    str++;
+! 		    while (idigit(*++str));
+! 		    if (*str == Outbrace &&
+! 			(idigit(lbr[1]) || idigit(str[-1])))
+! 			return 1;
+  		}
+! 	    } else {
+! 		char *s = --str;
+! 
+! 		if (skipparens(Inbrace, Outbrace, &str)) {
+! 		    *lbr = *s = '{';
+! 		    if (comma)
+! 			str = comma;
+! 		    if (mbr && mbr < str)
+! 			str = mbr;
+! 		    lbr = mbr = comma = NULL;
+! 		} else if (!mbr)
+! 		    mbr = s;
+  	    }
+! 	    break;
+! 	case Outbrace:
+! 	    if (!lbr)
+! 		str[-1] = '}';
+! 	    else if (comma)
+! 		return 1;
+! 	    else {
+! 		*lbr = '{';
+! 		str[-1] = '}';
+! 		if (mbr)
+! 		    str = mbr;
+! 		mbr = lbr = NULL;
+! 	    }
+! 	    break;
+! 	case Comma:
+! 	    if (!lbr)
+! 		str[-1] = ',';
+! 	    else if (!comma)
+! 		comma = str - 1;
+! 	    break;
+! 	case '\0':
+! 	    if (lbr)
+! 		*lbr = '{';
+! 	    if (!mbr && !comma)
+! 		return 0;
+! 	    if (comma)
+! 		str = comma;
+! 	    if (mbr && mbr < str)
+! 		str = mbr;
+! 	    lbr = mbr = comma = NULL;
+! 	    break;
+  	}
+      }
+  }
+  
+  /* expand stuff like >>*.c */
+***************
+*** 970,976 ****
+  		++comma;	/* we have {foo,bar} */
+  	    else if (*str2 == '.' && str2[1] == '.')
+  		dotdot++;	/* we have {num1..num2} */
+!     if (!comma && !bc && dotdot) {
+  	/* Expand range like 0..10 numerically: comma or recursive
+  	   brace expansion take precedence. */
+  	char *dots, *p;
+--- 1001,1008 ----
+  		++comma;	/* we have {foo,bar} */
+  	    else if (*str2 == '.' && str2[1] == '.')
+  		dotdot++;	/* we have {num1..num2} */
+!     DPUTS(bc, "BUG: unmatched brace in xpandbraces()");
+!     if (!comma && dotdot) {
+  	/* Expand range like 0..10 numerically: comma or recursive
+  	   brace expansion take precedence. */
+  	char *dots, *p;
+***************
+*** 1014,1034 ****
+  	    return;
+  	}
+      }
+!     if (!comma && !bc && isset(BRACECCL)) {	/* {a-mnop} */
+  	/* Here we expand each character to a separate node,      *
+  	 * but also ranges of characters like a-m.  ccl is a      *
+  	 * set of flags saying whether each character is present; *
+  	 * the final list is in lexical order.                    */
+  	char ccl[256], *p;
+  	unsigned char c1, c2, lastch;
+  
+  	uremnode(list, node);
+  	memset(ccl, 0, sizeof(ccl) / sizeof(ccl[0]));
+  	for (p = str + 1, lastch = 0; p < str2;) {
+  	    if (itok(c1 = *p++))
+  		c1 = ztokens[c1 - STOUC(Pound)];
+  	    if (itok(c2 = *p))
+  		c2 = ztokens[c2 - STOUC(Pound)];
+  	    if (c1 == '-' && lastch && p < str2 && (int)lastch <= (int)c2) {
+  		while ((int)lastch < (int)c2)
+  		    ccl[lastch++] = 1;
+--- 1046,1071 ----
+  	    return;
+  	}
+      }
+!     if (!comma && isset(BRACECCL)) {	/* {a-mnop} */
+  	/* Here we expand each character to a separate node,      *
+  	 * but also ranges of characters like a-m.  ccl is a      *
+  	 * set of flags saying whether each character is present; *
+  	 * the final list is in lexical order.                    */
+  	char ccl[256], *p;
+  	unsigned char c1, c2, lastch;
++ 	unsigned int len, pl;
+  
+  	uremnode(list, node);
+  	memset(ccl, 0, sizeof(ccl) / sizeof(ccl[0]));
+  	for (p = str + 1, lastch = 0; p < str2;) {
+  	    if (itok(c1 = *p++))
+  		c1 = ztokens[c1 - STOUC(Pound)];
++ 	    if ((char) c1 == Meta)
++ 		c1 = 32 ^ *p++;
+  	    if (itok(c2 = *p))
+  		c2 = ztokens[c2 - STOUC(Pound)];
++ 	    if ((char) c2 == Meta)
++ 		c2 = 32 ^ p[1];
+  	    if (c1 == '-' && lastch && p < str2 && (int)lastch <= (int)c2) {
+  		while ((int)lastch < (int)c2)
+  		    ccl[lastch++] = 1;
+***************
+*** 1036,1085 ****
+  	    } else
+  		ccl[lastch = c1] = 1;
+  	}
+! 	strcpy(str + 1, str2 + 1);
+  	for (p = ccl + 255; p-- > ccl;)
+  	    if (*p) {
+! 		*str = p - ccl;
+! 		insertlinknode(list, last, dupstring(str3));
+! 	    }
+! 	*np = nextnode(last);
+! 	return;
+!     }
+!     if (str[2] == '-' && str[3] && str[4] == Outbrace) { /* {a-z} */
+! 	/* Now any other ranges present: note this only happens       *
+!          * for a pattern like {<char>-<char>}, but it happens for ANY *
+!          * character <char>, so {,-z} does this (possibly a bug).     */
+! 	char c1, c2;
+! 
+! 	uremnode(list, node);
+! 	chuck(str);
+! 	c1 = *str;
+! 	chuck(str);
+! 	chuck(str);
+! 	c2 = *str;
+! 	chuck(str);
+! 	if (itok(c1))
+! 	    c1 = ztokens[c1 - Pound];
+! 	if (itok(c2))
+! 	    c2 = ztokens[c2 - Pound];
+! 	if (c1 < c2)
+! 	    for (; c2 >= c1; c2--) {	/* {a-z} */
+! 		*str = c2;
+! 		insertlinknode(list, last, dupstring(str3));
+! 	} else
+! 	    for (; c2 <= c1; c2++) {	/* {z-a} */
+! 		*str = c2;
+! 		insertlinknode(list, last, dupstring(str3));
+  	    }
+  	*np = nextnode(last);
+  	return;
+      }
+!     prev = str - str3;
+!     str2 = getparen(str++);
+!     if (!str2) {
+! 	zerr("how did you get this error?", NULL, 0);
+! 	return;
+!     }
+      uremnode(list, node);
+      node = last;
+      /* Finally, normal comma expansion               *
+--- 1073,1101 ----
+  	    } else
+  		ccl[lastch = c1] = 1;
+  	}
+! 	pl = str - str3;
+! 	len = pl + strlen(++str2) + 2;
+  	for (p = ccl + 255; p-- > ccl;)
+  	    if (*p) {
+! 		c1 = p - ccl;
+! 		if (imeta(c1)) {
+! 		    str = ncalloc(len + 1);
+! 		    str[pl] = Meta;
+! 		    str[pl+1] = c1 ^ 32;
+! 		    strcpy(str + pl + 2, str2);
+! 		} else {
+! 		    str = ncalloc(len);
+! 		    str[pl] = c1;
+! 		    strcpy(str + pl + 1, str2);
+! 		}
+! 		memcpy(str, str3, pl);
+! 		insertlinknode(list, last, str);
+  	    }
+  	*np = nextnode(last);
+  	return;
+      }
+!     prev = str++ - str3;
+!     str2++;
+      uremnode(list, node);
+      node = last;
+      /* Finally, normal comma expansion               *
+***************
+*** 1112,1136 ****
+  	    break;
+      }
+      *np = nextnode(last);
+- }
+- 
+- /* get closing paren, given pointer to opening paren */
+- 
+- /**/
+- char *
+- getparen(char *str)
+- {
+-     int cnt = 1;
+-     char typein = *str++, typeout = typein + 1;
+- 
+-     for (; *str && cnt; str++)
+- 	if (*str == typein)
+- 	    cnt++;
+- 	else if (*str == typeout)
+- 	    cnt--;
+-     if (!str && cnt)
+- 	return NULL;
+-     return str;
+  }
+  
+  /* check to see if a matches b (b is not a filename pattern) */
+--- 1128,1133 ----
+*** Src/lex.c	1996/12/26 22:43:13	3.1.1.1
+--- Src/lex.c	1996/12/29 21:46:48
+***************
+*** 782,791 ****
+  	    if ((isset(IGNOREBRACES) || sub) && !in_brace_param)
+  		break;
+  	    if (!bct)
+! 		if (len)
+! 		    goto brk;
+! 		else
+! 		    break;
+  	    if (in_brace_param)
+  		cmdpop();
+  	    if (bct-- == in_brace_param)
+--- 782,788 ----
+  	    if ((isset(IGNOREBRACES) || sub) && !in_brace_param)
+  		break;
+  	    if (!bct)
+! 		break;
+  	    if (in_brace_param)
+  		cmdpop();
+  	    if (bct-- == in_brace_param)
+***************
+*** 984,995 ****
+      }
+    brk:
+      hungetc(c);
+-     *bptr = '\0';
+      if (in_brace_param) {
+  	while(bct-- >= in_brace_param)
+  	    cmdpop();
+  	zerr("closing brace expected", NULL, 0);
+      }
+      DPUTS(cmdsp != ocmdsp, "BUG: gettok: cmdstack changed.");
+      return peek;
+  }
+--- 981,999 ----
+      }
+    brk:
+      hungetc(c);
+      if (in_brace_param) {
+  	while(bct-- >= in_brace_param)
+  	    cmdpop();
+  	zerr("closing brace expected", NULL, 0);
++     } else if (unset(IGNOREBRACES) && !sub && len > 1 &&
++ 	       peek == STRING && bptr[-1] == '}') {
++ 	/* hack to get {foo} command syntax work */
++ 	bptr--;
++ 	len--;
++ 	lexstop = 0;
++ 	hungetc('}');
+      }
++     *bptr = '\0';
+      DPUTS(cmdsp != ocmdsp, "BUG: gettok: cmdstack changed.");
+      return peek;
+  }
+***************
+*** 1276,1282 ****
+  	}
+  
+  	/* Then check for a reserved word */
+! 	if ((incmdpos || (yytext[0] == '}' && !yytext[1])) &&
+  	    (rw = (Reswd) reswdtab->getnode(reswdtab, yytext))) {
+  	    tok = rw->token;
+  	    if (tok == DINBRACK)
+--- 1280,1287 ----
+  	}
+  
+  	/* Then check for a reserved word */
+! 	if ((incmdpos ||
+! 	     (unset(IGNOREBRACES) && yytext[0] == '}' && !yytext[1])) &&
+  	    (rw = (Reswd) reswdtab->getnode(reswdtab, yytext))) {
+  	    tok = rw->token;
+  	    if (tok == DINBRACK)
+*** Doc/zshmisc.man	1996/12/21 02:35:18	3.1.1.0
+--- Doc/zshmisc.man	1996/12/29 22:02:03
+***************
+*** 208,221 ****
+  where \fIterm\fP is one ore more newline or \fB;\fP.
+  A short form of \fBselect\fP.
+  .SH "RESERVED WORDS"
+! The following words with the exception of \fB}\fP are recognized
+! as reserved words when used as the first word of a command unless
+! quoted or disabled using \fBdisable -r\fP:
+  .RS
+  .PP
+  \fBdo done esac then elif else fi for case
+  if while function repeat time until
+  select coproc nocorrect foreach end ! [[ { }\fP
+  .RE
+  .SH COMMENTS
+  In noninteractive shells, or in interactive shells with the
+--- 208,223 ----
+  where \fIterm\fP is one ore more newline or \fB;\fP.
+  A short form of \fBselect\fP.
+  .SH "RESERVED WORDS"
+! The following words are recognized as reserved words when used as the
+! first word of a command unless quoted or disabled using \fBdisable -r\fP:
+  .RS
+  .PP
+  \fBdo done esac then elif else fi for case
+  if while function repeat time until
+  select coproc nocorrect foreach end ! [[ { }\fP
++ .PP
++ Additionally \fB}\fP is recognized in any position if the
++ \fBIGNORE_BRACES\fP option is not set.
+  .RE
+  .SH COMMENTS
+  In noninteractive shells, or in interactive shells with the
+*** Doc/zshexpn.man	1996/12/21 02:35:18	3.1.1.0
+--- Doc/zshexpn.man	1996/12/29 21:56:39
+***************
+*** 432,443 ****
+  include them literally in a word.
+  .PP
+  An expression of the form
+- \fB{\fIx\fB\-\fIy\fB}\fR,
+- where \fIx\fP and \fIy\fP are single characters,
+- is expanded to every character between
+- \fIx\fP and \fIy\fP, inclusive.
+- .PP
+- An expression of the form
+  \fB{\fIn1\fB..\fIn2\fB}\fR,
+  where \fIn1\fP and \fIn2\fP are integers,
+  is expanded to every number between
+--- 432,437 ----
+*** Doc/zsh.texi	1996/12/25 16:04:45	3.1.1.1
+--- Doc/zsh.texi	1996/12/29 22:07:08
+***************
+*** 744,752 ****
+  @cindex reserved words
+  
+  @noindent
+! The following words with the exception of @code{@}} are recognized as 
+! @dfn{reserved words} when used as the first word of a command unless quoted 
+! or disabled using @code{disable -r}:
+  @findex disable, use of
+  
+  @noindent
+--- 744,751 ----
+  @cindex reserved words
+  
+  @noindent
+! The following words are recognized as @dfn{reserved words} when used as the
+! first word of a command unless quoted or disabled using @code{disable -r}:
+  @findex disable, use of
+  
+  @noindent
+***************
+*** 756,761 ****
+--- 755,764 ----
+  @code{nocorrect} @code{foreach} @code{end} @code{!} @code{[[} @code{@{} 
+  @code{@}}
+  
++ @noindent
++ Additionally @code{@}} is recognized in any position if the
++ @code{IGNORE_BRACES} option is not set.
++ 
+  @node Comments, Aliasing, Reserved Words, Shell Grammar
+  @section Comments
+  @cindex comments
+***************
+*** 1242,1252 ****
+  individual words @samp{fooxxbar}, @samp{fooyybar}, and @samp{foozzbar}.
+  @w{Left-to-right} order is preserved.  This construct may be nested.
+  Commas may be quoted in order to include them literally in a word.
+- 
+- @noindent
+- An expression of the form @code{@{@var{x}-@var{y}@}}, where @var{x} and 
+- @var{y} are single characters, is expanded to every character between 
+- @var{x} and @var{y}, inclusive.
+  
+  @noindent
+  An expression of the form @code{@{@var{n1}..@var{n2}@}}, where @var{n1} and 
+--- 1245,1250 ----
+

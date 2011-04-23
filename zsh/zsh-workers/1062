@@ -1,0 +1,252 @@
+From wayne@tenor.clarinet.com Mon May 13 21:43:57 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id VAA05913 for <mason@werple.mira.net.au>; Mon, 13 May 1996 21:43:45 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA16889; Mon, 13 May 1996 07:29:32 -0400 (EDT)
+Resent-Date: Mon, 13 May 1996 07:29:32 -0400 (EDT)
+Message-Id: <199605131122.EAA04552@tenor.clari.net>
+To: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Cc: zsh-workers@math.gatech.edu
+Subject: Re: Minor change for new isearch code 
+In-reply-to: hzoli's message of Mon, 13 May 1996 03:12:19 +0200.
+	     <199605130112.DAA00742@hzoli.ppp.cs.elte.hu> 
+Date: Mon, 13 May 1996 04:22:27 -0700
+From: Wayne Davison <wayne@tenor.clarinet.com>
+Resent-Message-ID: <"9zUY53.0.m74.Sqnbn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1062
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 5531
+Status: O
+
+Zoltan Hidvegi writes:
+> If I go back in the history, modify a line and start an isearch the
+> modifications will disappear.
+
+This is actually a more widespread problem in zsh than just the isearch
+code.  If I start to edit a history line and go to another history line
+via something like Ctrl-P (previous line in emacs mode) my modifications
+will also disappear.  I would like to see this fixed for all functions.
+
+How about this.  Unapply your last patch to zle_hist.c and apply this one
+instead.  This code creates a function remember_edits() that remembers
+the edits to whatever history line we're on and stashes the real history
+line in a linked list for later retrieval (I used a linked list just
+because it was memory efficient).  When the user presses return a new
+function called forget_edits() restores all the edited history lines to
+their original values.
+
+I put a call to remember_edits() in quite a few functions in zle_hist.c,
+but if you like this code, there are undoubtedly more functions that will
+need to call it.  Also, there may be other functions besides the ones
+that had "accept" in their name that require the forget_edits() call.
+
+..wayne..
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: zle_hist.c
+@@ -32,6 +32,62 @@
+ #define ZLE
+ #include "zsh.h"
+ 
++struct modified {
++    struct modified *next;
++    char *text;
++    int histnum;
++} *hist_mods;
++
++/**/
++void
++remember_edits(void)
++{
++    if (histline == curhist) {
++	zsfree(curhistline);
++	curhistline = metafy(UTOSCP(line), ll, META_DUP);
++    }
++    else {
++	struct modified *node = hist_mods, *prev = NULL;
++	Histent ent = gethistent(histline);
++
++	while (node && node->histnum < histline) {
++	    prev = node;
++	    node = node->next;
++	}
++	if (!node || node->histnum != histline) {
++	    struct modified *newnode = (struct modified *)zalloc(sizeof *node);
++
++	    newnode->next = node;
++	    newnode->histnum = histline;
++	    newnode->text = ent->text;
++	    if (!prev)
++		hist_mods = newnode;
++	    else
++		prev->next = newnode;
++	} else
++	    free(ent->text);
++
++	ent->text = metafy(UTOSCP(line), ll, META_DUP);
++    }
++}
++
++/**/
++void
++forget_edits(void)
++{
++    struct modified *node, *next;
++    Histent ent;
++
++    for (node = hist_mods; node; node = next) {
++	next = node->next;
++	ent = gethistent(node->histnum);
++	free(ent->text);
++	ent->text = node->text;
++	free((char*)node);
++    }
++    hist_mods = NULL;
++}
++
+ /**/
+ void
+ uphistory(void)
+@@ -43,10 +99,7 @@
+ 	downhistory();
+ 	return;
+     }
+-    if (histline == curhist) {
+-	zsfree(curhistline);
+-	curhistline = metafy(UTOSCP(line), ll, META_DUP);
+-    }
++    remember_edits();
+     histline -= mult;
+     if (!(s = qgetevent(histline))) {
+ 	if (unset(NOHISTBEEP))
+@@ -281,6 +334,7 @@
+ {
+     char *s;
+ 
++    forget_edits();
+     if (!(s = qgetevent(histline + 1))) {
+ 	feep();
+ 	return;
+@@ -301,6 +355,7 @@
+ 	uphistory();
+ 	return;
+     }
++    remember_edits();
+     histline += mult;
+     if (!(s = qgetevent(histline))) {
+ 	if (unset(NOHISTBEEP))
+@@ -320,10 +375,7 @@
+     int t0, ohistline = histline;
+     char *s;
+ 
+-    if (histline == curhist) {
+-	zsfree(curhistline);
+-	curhistline = metafy(UTOSCP(line), ll, META_DUP);
+-    }
++    remember_edits();
+     if (lastcmd & ZLE_HISTSEARCH)
+ 	t0 = histpos;
+     else {
+@@ -353,10 +405,7 @@
+     int t0, ohistline = histline;
+     char *s;
+ 
+-    if (histline == curhist) {
+-	zsfree(curhistline);
+-	curhistline = metafy(UTOSCP(line), ll, META_DUP);
+-    }
++    remember_edits();
+     if (lastcmd & ZLE_HISTSEARCH)
+ 	t0 = histpos;
+     else {
+@@ -395,10 +444,7 @@
+ {
+     char *s;
+ 
+-    if (histline == curhist) {
+-	zsfree(curhistline);
+-	curhistline = metafy(UTOSCP(line), ll, META_DUP);
+-    }
++    remember_edits();
+     if (!(s = qgetevent(firsthist()))) {
+ 	if (unset(NOHISTBEEP))
+ 	    feep();
+@@ -632,12 +678,8 @@
+ 
+     strcpy(ibuf, ISEARCH_PROMPT);
+     memcpy(ibuf + NORM_PROMPT_POS, (dir == 1) ? "fwd" : "bck", 3);
+-    if (histline == curhist) {
+-	zsfree(curhistline);
+-	s = curhistline = metafy(UTOSCP(line), ll, META_DUP);
+-    }
+-    else
+-	s = qgetevent(histline);
++    remember_edits();
++    s = qgetevent(histline);
+     bindtab = mainbindtab;
+     pos = metalen(s, cs);
+     for (;;) {
+@@ -834,6 +876,7 @@
+     int t0;
+     char *s;
+ 
++    forget_edits();
+     done = 1;
+     for (t0 = histline - 2;; t0--) {
+ 	if (!(s = qgetevent(t0)))
+@@ -1024,10 +1067,7 @@
+ 	return;
+     }
+     t0 = strlen(visrchstr);
+-    if (histline == curhist) {
+-	zsfree(curhistline);
+-	curhistline = metafy(UTOSCP(line), ll, META_DUP);
+-    }
++    remember_edits();
+     for (;;) {
+ 	histline += visrchsense;
+ 	if (!(s = qgetevent(histline))) {
+@@ -1067,10 +1107,7 @@
+     int ohistline = histline;
+     char *s;
+ 
+-    if (histline == curhist) {
+-	zsfree(curhistline);
+-	curhistline = metafy(UTOSCP(line), ll, META_DUP);
+-    }
++    remember_edits();
+     for (;;) {
+ 	histline--;
+ 	if (!(s = qgetevent(histline))) {
+@@ -1098,10 +1135,7 @@
+     int ohistline = histline;
+     char *s;
+ 
+-    if (histline == curhist) {
+-	zsfree(curhistline);
+-	curhistline = metafy(UTOSCP(line), ll, META_DUP);
+-    }
++    remember_edits();
+     for (;;) {
+ 	histline++;
+ 	if (!(s = qgetevent(histline))) {
+Index: zle_misc.c
+@@ -256,6 +256,7 @@
+ void
+ acceptline(void)
+ {
++    forget_edits();
+     done = 1;
+ }
+ 
+@@ -265,6 +266,7 @@
+ {
+     pushnode(bufstack, ztrdup((char *)line));
+     stackcs = cs;
++    forget_edits();
+     done = 1;
+ }
+ 
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+
+

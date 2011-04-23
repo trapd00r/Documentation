@@ -1,0 +1,269 @@
+From zsh-workers-return-5483-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Feb 23 10:05:37 1999
+Return-Path: <zsh-workers-return-5483-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27787 invoked from network); 23 Feb 1999 10:05:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Feb 1999 10:05:35 -0000
+Received: (qmail 23334 invoked by alias); 23 Feb 1999 10:05:20 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5483
+Received: (qmail 23327 invoked from network); 23 Feb 1999 10:05:19 -0000
+Date: Tue, 23 Feb 1999 11:04:30 +0100 (MET)
+Message-Id: <199902231004.LAA24080@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: opk@thoth.u-net.com's message of Mon, 22 Feb 1999 23:35:08 +0000
+Subject: Re: Problem with completion matching control
+
+
+Oliver Kiddle wrote:
+
+> There seems to be a few problems with the completeinword option though.
+> Could someone offer a better explanation of what completeinword does
+> than the documentation gives. I think that when I first configured zsh,
+> I assumed that it allowed zsh to be more intelligent when completing
+> with the cursor in the middle of the line so I set it.
+
+With completeinword set the code splits the string on the line into a
+prefix (before the cursor) and a suffix (after the cursor). Then it
+generates the completions as usual, but it accepts only those strings
+that have the prefix *and* the suffix from the line. I.e. with the
+string `ab' and the cursor between the to only word beginning with `a' 
+and ending with `b' are accepted.
+
+> With autocd and completeinword set and the compctl MATCH 'm:{a-z}={A-Z}'
+> from the zsh source directory, if I type 
+> ./co<tab>
+> I get completion working but it gets stuck on ./Config/. Is this a bug
+> or what is intended by completeinword.
+
+This was an ugly interaction between completeinword, listambiguous,
+and automenu, actually. With listambiguous one more TAB is needed to
+start menucompletion. But on the second TAB the cursor was moved into
+the word, after the `c' to allow easy editing of the ambiguous
+place. Without listambiguous menucompletion would now have been
+started instead. But with listambiguous the next TAB made the code
+search for a match beginning with `./c' and ending with `onfig' -- and 
+there was only one such possible completion, the directory `Config'.
+In a certain sense this was correct behavior. What made this
+unacceptable was that there were no way to start automenu in such a
+case. The patch below makes the code remember if it moved the cursor
+into the word itself and restore the cursor to its old position before 
+the next completion if that is the case.
+
+> I also tested out your fix for the matching control which prevents *
+> mapping to the anchor so ncftp sunsite.d<tab> works as I had wanted. I
+> found the following which I think is a bug:
+> 
+> zsh -f
+> setopt completeinword
+> compctl -x 'p[1]' -k '(a.b.c a.c.b)' -M 'r:|.=*  r:|=*' -- t
+> t a.<tab><tab><tab>
+> 
+> The above will complete to a.b.c, having never listed the alternatives.
+> It works as I would expect when completeinword is not set.
+> 
+> I also get the following which is certainly worse:
+> 
+> First three commands same as above
+> t a..c<left><left><tab>
+> Gives me: zsh: 4013 segmentation fault
+> With completeinword unsetopted, this works fine.
+
+The first one is fixed by the patch below, too. The second one should
+be fixed by the patch I sent yesterday.
+
+Maybe noone understands me when I'm talking about the internals of the 
+completion code, but still: these were caused by the current state of
+the function join_clines(). The completion code builds lists of cline
+structs to describe what should be put into the command line for each 
+of the matches (actually, only for the complicated matches for which
+match specs were used). After building such a list, join_clines() is
+called to simplify the already existing cline list for the previous
+matches so that it also adequately describes the new match. Most of
+this function still comes from the days when we didn't have the new
+completion code, the (big) patches from yesterday and last week
+slightly improved it, but I still have to go through it once
+more. This will then be my last change to the older completion code
+apart from bug fixes for quite some time.
+(You may now say that you didn't use the new completion stuff in the
+example above -- you triggered a small error with setting flags in the 
+cline struct that described the middle part of the string to insert,
+the part where the prefix and the suffix meet).
+
+Bye
+ Sven
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Mon Feb 22 13:38:45 1999
++++ Src/Zle/comp.h	Tue Feb 23 09:02:31 1999
+@@ -271,9 +271,10 @@
+ #define CLF_MISS   4
+ #define CLF_DIFF   8
+ #define CLF_SUF   16
+-#define CLF_NEW   32
+-#define CLF_VAR   64
+-#define CLF_JOIN 128
++#define CLF_PNEW  32
++#define CLF_SNEW  64
++#define CLF_VAR  128
++#define CLF_JOIN 256
+ 
+ /* Flags for makecomplist*(). Things not to do. */
+ 
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Mon Feb 22 13:38:47 1999
++++ Src/Zle/zle_tricky.c	Tue Feb 23 10:39:28 1999
+@@ -291,12 +291,24 @@
+ 
+ static int lastambig;
+ 
+-/* Non-zero if the string on the line came from a previous completion. *
+- * This is used to detect if the string should be taken as an exact    *
+- * match (see do_ambiguous()).                                         */
++/* This says what of the state the line is in when completion is started *
++ * came from a previous completion. If the FC_LINE bit is set, the       *
++ * string was inserted. If FC_INWORD is set, the last completion moved   *
++ * the cursor into the word although it was at the end of it when the    *
++ * last completion was invoked.                                          *
++ * This is used to detect if the string should be taken as an exact      *
++ * match (see do_ambiguous()) and if the cursor has to be moved to the   *
++ * end of the word before generating the completions.                    */
+ 
+ static int fromcomp;
+ 
++/* This holds the end-position of the last string inserted into the line. */
++
++static int lastend;
++
++#define FC_LINE   1
++#define FC_INWORD 2
++
+ /**/
+ void
+ completecall(void)
+@@ -605,6 +617,12 @@
+ 	return;
+     }
+ 
++    /* We may have to reset the cursor to its position after the   *
++     * string inserted by the last completion. */
++
++    if (fromcomp & FC_INWORD)
++	cs = lastend;
++
+     /* Check if we have to start a menu-completion (via automenu). */
+ 
+     if ((amenu = (isset(AUTOMENU) && lastambig &&
+@@ -2346,7 +2364,7 @@
+ 	*olp = 0;
+     if (nlp)
+ 	*nlp = 0;
+-    if (o->flags & CLF_NEW) {
++    if (o->flags & CLF_PNEW) {
+ 	if (o->flags & (CLF_END | CLF_MID))
+ 	    /* We split the suffix in the middle and at the end into
+ 	     * separate runs. */
+@@ -2363,7 +2381,7 @@
+ 		o->flags |= CLF_MISS;
+ 	}
+     } else if (o->flags & (CLF_END | CLF_MID)) {
+-	o->flags |= CLF_NEW;
++	o->flags |= CLF_PNEW;
+ 	o->prefix = join_ends(end_list(o->wlen, o->word),
+ 			      end_list(n->wlen, n->word), olp, nlp);
+     } else if (o->wlen && n->wlen) {
+@@ -2388,7 +2406,7 @@
+ 	     * matches both strings from the original cline structs
+ 	     * and thus can be put in the command line to represent
+ 	     * them. This cline list is stored in o. */
+-	    o->flags |= CLF_NEW;
++	    o->flags |= CLF_PNEW;
+ 	    o->prefix = bld_new_pfx(o->wlen, o->word, n->wlen, n->word,
+ 				    &mol, &mnl, NULL);
+ 	    newl = 0;
+@@ -2769,7 +2787,7 @@
+ static void
+ bld_sfx(Cline o, Cline n)
+ {
+-    if (o->flags & CLF_NEW) {
++    if (o->flags & CLF_SNEW) {
+ 	int miss;
+ 
+ 	o->suffix = join_new_sfx(o->suffix, n->wlen, n->word, &miss);
+@@ -2785,7 +2803,7 @@
+ 	    new = dupstring(n->word);
+ 	    newl = n->wlen;
+ 	} else if (!strpfx(o->word, n->word)) {
+-	    o->flags |= CLF_NEW;
++	    o->flags |= CLF_SNEW;
+ 	    o->suffix = bld_new_sfx(o->wlen, o->word, n->wlen, n->word,
+ 				    &mol, &mnl, NULL);
+ 	    newl = 0;
+@@ -3234,6 +3252,7 @@
+ 	}
+ 	l = l->next;
+     }
++    lastend = cs;
+     /* Now place the cursor. Preferably in a position where something
+      * is missing, otherwise in a place where the string differs from
+      * any of the matches, or just leave it at the end. */
+@@ -3873,6 +3892,7 @@
+ 	inststrlen(m->suf, 1, (l = strlen(m->suf)));
+ 	r += l;
+     }
++    lastend = cs;
+     cs = ocs;
+     return r;
+ }
+@@ -6999,7 +7019,7 @@
+     /* If we have to insert the first match, call do_single().  This is *
+      * how REC_EXACT takes effect.  We effectively turn the ambiguous   *
+      * completion into an unambiguous one.                              */
+-    if (ainfo && ainfo->exact == 1 && isset(RECEXACT) && !fromcomp &&
++    if (ainfo && ainfo->exact == 1 && isset(RECEXACT) && !(fromcomp & FC_LINE) &&
+ 	(usemenu == 0 || unset(AUTOMENU))) {
+ 	do_single(ainfo->exactm);
+ 	invalidatelist();
+@@ -7072,7 +7092,6 @@
+ 		    merge_cline(lc, ps, lp, NULL, 0, 0);
+ 	    }
+ 	    inst_cline(lc, pl, sl);
+-
+ 	} else {
+ 	    inststrlen(ps, 1, -1);
+ 	    ocs = cs;
+@@ -7093,6 +7112,7 @@
+ 		cs -= brsl;
+ 		inststrlen(brend, 1, -1);
+ 	    }
++	    lastend = cs;
+ 	    cs = ocs;
+ 	}
+ 	/* la is non-zero if listambiguous may be used. Copying and
+@@ -7100,11 +7120,13 @@
+ 	 * solution. Really. */
+ 	la = (ll != oll || strncmp(oline, (char *) line, ll));
+ 
+-	/* If REC_EXACT and AUTO_MENU are set and what we inserted is an *
+-	 * exact match, we want menu completion the next time round      *
+-	 * so we set fromcomp,to ensure that the word on the line is not *
+-	 * taken as an exact match.                                      */
+-	fromcomp = isset(AUTOMENU);
++	/* If REC_EXACT and AUTO_MENU are set and what we inserted is an  *
++	 * exact match, we want menu completion the next time round       *
++	 * so we set fromcomp,to ensure that the word on the line is not  *
++	 * taken as an exact match. Also we remember if we just moved the *
++	 * cursor into the word.                                          */
++	fromcomp = ((isset(AUTOMENU) ? FC_LINE : 0) |
++		    ((atend && cs != lastend) ? FC_INWORD : 0));
+ 
+ 	/*
+ 	 * If the LIST_AMBIGUOUS option (meaning roughly `show a list only *
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

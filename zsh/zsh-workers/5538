@@ -1,0 +1,1110 @@
+From zsh-workers-return-5538-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Feb 26 11:20:49 1999
+Return-Path: <zsh-workers-return-5538-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5029 invoked from network); 26 Feb 1999 11:20:45 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 26 Feb 1999 11:20:45 -0000
+Received: (qmail 22002 invoked by alias); 26 Feb 1999 11:20:23 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5538
+Received: (qmail 21977 invoked from network); 26 Feb 1999 11:20:10 -0000
+Message-Id: <9902261104.AA67161@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.5-pws-9: Approximate pattern matching
+Date: Fri, 26 Feb 1999 12:04:21 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+At the weekend it came to me that the key to making approximate matching
+work was the old rule, which I've just invented, `if in doubt, use
+recursion'.  (Did you see Dilbert a couple of days ago: `I didn't know how
+to design a power supply, so I put a nail in a piece of wood'?)
+
+Here's an initial implementation with the expected syntax: (#a1) to allow
+approximate matching with one error.  It's nothing like as sophisticated as
+agrep with its tables and algorithms, but it does fit neatly into the
+present globbing code.
+
+So
+  (#ia1)readme    matches      readme, readme1, read.me, READ_ME, AREADME
+  (#ia2)readme   also matches  AAREADME, READ_ME1, #README#
+(yes, I've actually tested these very examples).
+
+There are some notable differences from agrep.  First, in addition to
+insertion (pat -> patX), deletion (pat -> pa) and substitution (pat ->
+pax), there is also transposition (pat -> pta, counting just one error).
+This fits in with the types of error built into zsh's spelling correction
+system (and with my standard of typing).
+
+Second, anything which is not a literal string must be matched exactly.
+Thus (#a1)[m]utter must have an m in it (though it's possible to insert
+another character at the empty string before), and (#a1)??? must have at
+least three characters (though maybe four).  This fitted in much more
+easily with the current code (and it's how the (#i) flag works); it would
+have to be fixed up operator by operator otherwise, though that's probably
+on the cards if necessary --- except numeric globs could be hard.  For a
+shell pattern matcher, rather than a regular expression system, I think
+this behaviour is reasonable, but maybe people want to argue with that.
+
+For other subtleties, see the manual entry: in particular, the way to
+prevent areas from approximation is (#a1)dog((#a0)cat)fish, or
+(#a1)dog(#a0)cat(#a1)fish --- note there is only one overall error count in
+both cases, i.e. you are allowed one single error in either dog or fish, no
+dagcatfush.  (Because it's quite enough work as it is, that's why.)
+The exception to this is exclusions with ~, since I thought it was most
+natural that something like (#a1)README~READ_ME meant `give me anything
+that looks a bit like README except for the single pattern READ_ME': this is
+documented.  Amusingly, this means (#a1)pattern~pattern gives you
+everything which almost matched pattern but not quite.  Again, I can change
+this if anyone wants to claim this is wrong.
+
+As with (#i), I made sure file paths are handled properly. so
+(#a1)ab/bcd potentially matches
+  a/bcd    ab/bcd   ab/bcx   ab/cd
+(but not a/bbcd -- the slash can't be transposed so that's two errors).
+This required some jiggery pokery with closures, as documented in the
+scanner() function.
+
+I've more or less convinced myself this system works OK with closures and
+backtracking, and I haven't found a counterexample.  I did have a rather
+neat bug that allowed the pattern that deletes old MH files to delete all
+my other mail files too.  (Unfortunately, a lot of other things have gone
+too.  Oh, well, should keep backups.)  That bug's gone, but You Have Been
+Warned.
+
+It should now be possible to have `approximate completion'; it's easy in
+the case where pattern matching was used to compare the elements in any
+case, just stick (#a1) in front, but less easy if it applies to an
+internally generated list.  (At this point I discovered the bug in
+globcomplete: this now works, stick (#a...) in front and hit tab ---
+suggesting we may need a way of turning on globcomplete inside completion
+widgets.)  I've supplied a function, _correct_filename, which gets bound to
+\C-xc unless you change the top line.  It offers for completion all the
+filenames with the least number of errors from the string on the command
+line --- note it doesn't do completion in this case, just correction, but I
+can almost see Sven's eyes gleaming.  You can set the maximum number of
+errors yourself; I thought 6 was pretty sane but please experiment.  (If
+you get `gobbledygook' offered as a completion for `sensible', for example,
+you've gone too far.)
+
+So
+
+% corrctfilnam<\C-xc>       ->    _correct_filename
+
+which impressed me, at any rate.
+
+Note other consequent pattern matching features:
+
+% foo=abcdefgh
+% print ${foo##(#a1)abcd}
+fgh
+% print ${foo#(#a1)abcd}
+defgh
+
+I don't have plans to introduce separate `costs' for insertion, deletion,
+substitution and transposition in the agrep fashion.  It's actually not
+hard to do, but it doesn't seem to me necessary for our purposes.
+
+I have made some other minor changes in glob.c, including introducing a set
+of macros to deal with the wretched Meta characters.  They are also the
+reason charmatch() is now a function instead of a macro, though it could be
+put back with a little hackery.
+
+--- Doc/Zsh/expn.yo.approx	Fri Feb 26 11:31:24 1999
++++ Doc/Zsh/expn.yo	Fri Feb 26 11:32:13 1999
+@@ -988,12 +988,18 @@
+ Case sensitive:  locally negates the effect of tt(i) or tt(l) from
+ that point on.
+ )
++item(tt(a)var(num))(
++Approximate matching: var(num) errors are allowed in the string matched by
++the pattern.  The rules for this are described in the next subsection.
++)
+ enditem()
+ 
+ For example, the test string tt(fooxx) can be matched by the pattern
+ tt(LPAR()#i)tt(RPAR()FOOXX), but not by tt(LPAR()#l)tt(RPAR()FOOXX),
+ tt(LPAR()#i)tt(RPAR()FOO)tt(LPAR()#I)tt(RPAR()XX) or
+-tt(LPAR()LPAR()#i)tt(RPAR()FOOX)tt(RPAR()X).
++tt(LPAR()LPAR()#i)tt(RPAR()FOOX)tt(RPAR()X).  The string
++tt(LPAR()#ia2)tt(RPAR()readme) specifies case-insensitive matching of
++tt(readme) with up to two errors.
+ 
+ When using the ksh syntax for grouping both tt(KSH_GLOB) and
+ tt(EXTENDED_GLOB) must be set and the left parenthesis should be
+@@ -1003,6 +1009,61 @@
+ examining whole paths case-insensitively every directory must be
+ searched for all files which match, so that a pattern of the form
+ tt(LPAR()#i)tt(RPAR()/foo/bar/...) is potentially slow.
++
++subsect(Approximate Matching)
++When matching approximately, the shell keeps a count of the errors found,
++which cannot exceed the number specified in the
++tt(LPAR()#a)var(num)tt(RPAR()) flags.  Four types of error are recognised:
++
++startitem()
++item(1.)(
++Different characters, as in tt(fooxbar) and tt(fooybar).
++)
++item(2.)(
++Transposition of characters, as in tt(banana) and tt(abnana).
++)
++item(3.)(
++A character missing in the target string, as with the pattern tt(road) and
++target string tt(rod).
++)
++item(4.)(
++An extra character appearing in the target string, as with tt(stove)
++and tt(strove).
++)
++enditem()
++
++Thus, the pattern tt(LPAR()#a3)tt(RPAR()abcd) matches tt(dcba), with the
++errors occurring by using the first rule twice and the second once,
++grouping the string as tt([d][cb][a]) and tt([a][bc][d]).
++
++Non-literal parts of the pattern must match exactly, including characters
++in character ranges: hence tt(LPAR()#a1)tt(RPAR()???)  matches strings of
++length four, by applying rule 4 to an empty part of the pattern, but not
++strings of length three, since all the tt(?) must match.  Other characters
++which must match exactly are initial dots in filenames (unless the
++tt(GLOB_DOTS) option is set), and all slashes in file names, so that
++tt(a/bc) is two errors from tt(ab/c) (the slash cannot be transposed with
++another character).  Similarly, errors are counted separately for
++non-contiguous strings in the pattern, so that tt(LPAR()ab|cd)tt(RPAR()ef)
++is two errors from tt(aebf).
++
++When using exclusion via the tt(~) operator, approximate matching is
++treated entirely separately for the excluded part and must be activated
++separately.  Thus, tt(LPAR()#a1)tt(RPAR()README~READ_ME) matches
++tt(READ.ME) but not tt(READ_ME), as the trailing tt(READ_ME) is matched
++without approximation.  However,
++tt(LPAR()#a1)tt(RPAR()README~LPAR()#a1)tt(RPAR()READ_ME)
++does not match any pattern of the form tt(READ)var(?)tt(ME) as all
++such forms are now excluded.
++
++Apart from exclusions, there is only one overall error count; however, the
++maximum errors allowed may be altered locally, and this can be delimited by
++grouping.  For example,
++tt(LPAR()#a1)tt(RPAR()cat)tt(LPAR()LPAR()#a0)tt(RPAR()dog)tt(RPAR()fox)
++allows one error in total, which may not occur in the tt(dog) section, and
++the pattern
++tt(LPAR()#a1)tt(RPAR()cat)tt(LPAR()#a0)tt(RPAR()dog)tt(LPAR()#a1)tt(RPAR()fox)
++is equivalent.
+ 
+ subsect(Recursive Globbing)
+ A pathname component of the form `tt(LPAR())var(foo)tt(/RPAR()#)'
+--- Functions/Completion/_correct_filename.approx	Thu Feb 25 19:22:59 1999
++++ Functions/Completion/_correct_filename	Fri Feb 26 11:34:13 1999
+@@ -0,0 +1,37 @@
++#defkeycomp complete-word \C-xc
++
++# Function to correct a filename.  Can be used as a completion widget,
++# or as a function in its own right, in which case it will print the
++# corrected filename to standard output.
++#
++# You can adapt max_approx to the maximum number of mistakes
++# which are allowed in total.
++
++emulate -LR zsh
++setopt extendedglob
++
++local file="$PREFIX$SUFFIX" trylist
++integer approx max_approx=6
++
++[[ -z $WIDGET ]] && file=$1 
++
++if [[ -e "$file" ]]; then
++  if [[ -n $WIDGET ]]; then
++    compadd "$file"
++  else
++    print "$file"
++  fi
++  return
++fi
++
++for (( approx = 1; approx <= max_approx; approx++ )); do
++  trylist=( (#a$approx)"$file"(N) )
++  (( $#trylist )) && break
++done
++(( $#trylist )) || return 1
++
++if [[ -n $WIDGET ]]; then
++  compadd -U "${trylist[@]}"
++else
++  print "${trylist[@]}"
++fi
+--- Src/glob.c.approx	Mon Feb 15 18:10:51 1999
++++ Src/glob.c	Fri Feb 26 11:22:35 1999
+@@ -71,6 +71,7 @@
+ int badcshglob;
+  
+ static int mode;		/* != 0 if we are parsing glob patterns */
++static int scanning;		/* != 0 if we are scanning file paths   */
+ static int pathpos;		/* position in pathbuf                  */
+ static int matchsz;		/* size of matchbuf                     */
+ static int matchct;		/* number of matches found              */
+@@ -134,7 +135,7 @@
+ struct comp {
+     Comp left, right, next, exclude;
+     char *str;
+-    int stat;
++    int stat, errsmax;
+ };
+ 
+ /* Type of Comp:  a closure with one or two #'s, the end of a *
+@@ -162,6 +163,18 @@
+ #define GF_PATHADD	1	/* file glob, adding path components */
+ #define GF_TOPLEV	2	/* outside (), so ~ ends main match */
+ 
++/* Next character after one which may be a Meta (x is any char *) */
++#define METANEXT(x)	(*(x) == Meta ? (x)+2 : (x)+1)
++/*
++ * Increment pointer which may be on a Meta (x is a pointer variable),
++ * returning the incremented value (i.e. like pre-increment).
++ */
++#define METAINC(x)	((x) += (*(x) == Meta) ? 2 : 1)
++/*
++ * Return unmetafied char from string (x is any char *)
++ */
++#define UNMETA(x)	(*(x) == Meta ? (x)[1] ^ 32 : *(x))
++
+ static char *pptr;		/* current place in string being matched */
+ static Comp tail;
+ static int first;		/* are leading dots special? */
+@@ -352,6 +365,25 @@
+     return 0;
+ }
+ 
++/* Flags to apply to current level of grouping */
++
++static int addflags;
++
++/*
++ * Approximate matching.
++ *
++ * errsmax is used while parsing to store the current number
++ * of errors allowed.  While executing it is usually set to -1,
++ * but can be set to something else to fix a different maximum
++ * no. of errors which acts as a limit on the local value:  see
++ * scanner() for why this is necessary.
++ *
++ * errsfound is used while executing a pattern to record the
++ * number of errors found so far.
++ */
++
++static int errsmax, errsfound;
++
+ /* Do the globbing:  scanner is called recursively *
+  * with successive bits of the path until we've    *
+  * tried all of it.                                */
+@@ -363,6 +395,7 @@
+     Comp c;
+     int closure;
+     int pbcwdsav = pathbufcwd;
++    int errssofar = errsfound;
+     struct dirsav ds;
+ 
+     ds.ino = ds.dev = 0;
+@@ -381,7 +414,7 @@
+     c = q->comp;
+     /* Now the actual matching for the current path section. */
+     if (!(c->next || c->left) && !haswilds(c->str)
+-	&& (!(c->stat & (C_LCMATCHUC|C_IGNCASE))
++	&& (!((c->stat & (C_LCMATCHUC|C_IGNCASE)) || c->errsmax)
+ 	    || !strcmp(".", c->str) || !strcmp("..", c->str))) {
+ 	/*
+ 	 * We always need to match . and .. explicitly, even if we're
+@@ -433,6 +466,7 @@
+ 		((glob_pre && !strpfx(glob_pre, fn))
+ 		 || (glob_suf && !strsfx(glob_suf, fn))))
+ 		continue;
++	    errsfound = errssofar;
+ 	    if (domatch(fn, c, gf_noglobdots)) {
+ 		/* if this name matchs the pattern... */
+ 		if (pbcwdsav == pathbufcwd &&
+@@ -453,7 +487,34 @@
+ 		if (dirs) {
+ 		    int l;
+ 
+-		    /* if not the last component in the path */
++		    /*
++		     * If not the last component in the path:
++		     *
++		     * If we made an approximation in the new path segment,
++		     * and the pattern includes closures other than a
++		     * trailing * (we only test if it is not a string),
++		     * then it is possible we made too many errors.  For
++		     * example, (ab)#(cb)# will match the directory abcb
++		     * with one error if allowed to, even though it can
++		     * match with none.  This will stop later parts of the
++		     * path matching, so we need to check by reducing the
++		     * maximum number of errors and seeing if the directory
++		     * still matches.  Luckily, this is not a terribly
++		     * common case, since complex patterns typically occur
++		     * in the last part of the path which is not affected
++		     * by this problem.
++		     */
++		    if (errsfound > errssofar && (c->next || c->left)) {
++			errsmax = errsfound - 1;
++			while (errsmax >= errssofar) {
++			    errsfound = errssofar;
++			    if (!domatch(fn, c, gf_noglobdots))
++				break;
++			    errsmax = errsfound - 1;
++			}
++			errsfound = errsmax + 1;
++			errsmax = -1;
++		    }
+ 		    if (closure) {
+ 			/* if matching multiple directories */
+ 			struct stat buf;
+@@ -470,9 +531,14 @@
+ 			    continue;
+ 		    }
+ 		    l = strlen(fn) + 1;
+-		    subdirs = hrealloc(subdirs, subdirlen, subdirlen + l);
++		    subdirs = hrealloc(subdirs, subdirlen, subdirlen + l
++				       + sizeof(int));
+ 		    strcpy(subdirs + subdirlen, fn);
+ 		    subdirlen += l;
++		    /* store the count of errors made so far, too */
++		    memcpy(subdirs + subdirlen, (char *)&errsfound,
++			   sizeof(int));
++		    subdirlen += sizeof(int);
+ 		} else
+ 		    /* if the last filename component, just add it */
+ 		    insert(fn, 1);
+@@ -482,8 +548,11 @@
+ 	if (subdirs) {
+ 	    int oppos = pathpos;
+ 
+-	    for (fn = subdirs; fn < subdirs+subdirlen; fn += strlen(fn) + 1) {
++	    for (fn = subdirs; fn < subdirs+subdirlen; ) {
+ 		addpath(fn);
++		fn += strlen(fn) + 1;
++		memcpy((char *)&errsfound, fn, sizeof(int));
++		fn += sizeof(int);
+ 		scanner((q->closure) ? q : q->next);  /* scan next level */
+ 		pathbuf[pathpos = oppos] = '\0';
+ 	    }
+@@ -502,16 +571,13 @@
+ 
+ /* Parse a series of path components pointed to by pptr */
+ 
+-/* Flags to apply to current level of grourping */
+-
+-static int addflags;
+-
+ /**/
+ static Comp
+ compalloc(void)
+ {
+     Comp c = (Comp) alloc(sizeof *c);
+     c->stat |= addflags;
++    c->errsmax = errsmax;
+     return c;
+ }
+ 
+@@ -519,10 +585,19 @@
+ static int
+ getglobflags()
+ {
++    char *nptr;
+     /* (#X): assumes we are still positioned on the initial '(' */
+     pptr++;
+     while (*++pptr && *pptr != Outpar) {
+ 	switch (*pptr) {
++	case 'a':
++	    /* Approximate matching, max no. of errors follows */
++	    errsmax = zstrtol(++pptr, &nptr, 10);
++	    if (pptr == nptr)
++		return 1;
++	    pptr = nptr-1;
++	    break;
++
+ 	case 'l':
+ 	    /* Lowercase in pattern matches lower or upper in target */
+ 	    addflags |= C_LCMATCHUC;
+@@ -635,6 +710,7 @@
+ 	    if (eptr == cstr) {
+ 		/* if no string yet, carry on and get one. */
+ 		c->stat = addflags;
++		c->errsmax = errsmax;
+ 		cstr = pptr;
+ 		continue;
+ 	    }
+@@ -817,6 +893,7 @@
+ {
+     Comp c1, c2, c3, excl = NULL, stail = tail;
+     int oaddflags = addflags;
++    int oerrsmax = errsmax;
+     char *sptr;
+ 
+     /*
+@@ -845,12 +922,14 @@
+ 	return NULL;
+     if (isset(EXTENDEDGLOB) && *pptr == Tilde) {
+ 	/* Matching remainder of pattern excludes the pattern from matching */
+-	int oldmode = mode;
++	int oldmode = mode, olderrsmax = errsmax;
+ 
+ 	mode = 1;
++	errsmax = 0;
+ 	pptr++;
+ 	excl = parsecomp(gflag);
+ 	mode = oldmode;
++	errsmax = olderrsmax;
+ 	if (!excl)
+ 	    return NULL;
+     }
+@@ -878,8 +957,10 @@
+ 	    c2->stat |= C_PATHADD;
+ 	c1 = c2;
+     }
+-    if (!(gflag & GF_TOPLEV))
++    if (!(gflag & GF_TOPLEV)) {
+ 	addflags = oaddflags;
++	errsmax = oerrsmax;
++    }
+     return c1;
+ }
+ 
+@@ -965,6 +1046,7 @@
+ {
+     mode = 0;			/* path components present */
+     addflags = 0;
++    errsmax = 0;
+     pptr = str;
+     tail = NULL;
+     /*
+@@ -1102,7 +1184,7 @@
+ gmatchcmp(Gmatch a, Gmatch b)
+ {
+     int i, *s;
+-    long r;
++    long r = 0L;
+ 
+     for (i = gf_nsorts, s = gf_sortlist; i; i--, s++) {
+ 	switch (*s & ~GS_DESC) {
+@@ -1594,10 +1676,14 @@
+     matchptr = matchbuf = (Gmatch)zalloc((matchsz = 16) *
+ 					 sizeof(struct gmatch));
+     matchct = 0;
++    errsfound = 0;
++    errsmax = -1;
+ 
+     /* The actual processing takes place here: matches go into  *
+      * matchbuf.  This is the only top-level call to scanner(). */
++    scanning = 1;
+     scanner(q);
++    scanning = 0;
+ 
+     /* Deal with failures to match depending on options */
+     if (matchct)
+@@ -2427,6 +2513,14 @@
+     int ret;
+     pptr = str;
+     first = fist;
++    /*
++     * If scanning paths, keep the error count over the whole
++     * filename
++     */
++    if (!scanning) {
++	errsfound = 0;
++	errsmax = -1;
++    }
+     if (*pptr == Nularg)
+ 	pptr++;
+     PERMALLOC {
+@@ -2444,15 +2538,17 @@
+ excluded(Comp c, char *eptr)
+ {
+     char *saves = pptr;
+-    int savei = first, savel = longest, ret;
++    int savei = first, savel = longest, savee = errsfound, ret;
+ 
+     first = 0;
+     /*
+      * Even if we've been told always to match the longest string,
+      * i.e. not anchored to the end, we want to match the full string
+      * we've already matched when we're trying to exclude it.
++     * Likewise, approximate matching here is treated separately.
+      */
+     longest = 0;
++    errsfound = 0;
+     if (PATHADDP(c) && pathpos) {
+ 	VARARR(char, buf, pathpos + strlen(eptr) + 1);
+ 
+@@ -2470,13 +2566,18 @@
+     pptr = saves;
+     first = savei;
+     longest = savel;
++    errsfound = savee;
+ 
+     return ret;
+ }
+ 
++/*
++ * Structure for storing instances of a pattern in a closured.
++ */
+ struct gclose {
+-    char *start;
+-    char *end;
++    char *start;		/* Start of this instance */
++    char *end;			/* End of this instance */
++    int errsfound;		/* Errors found up to start of instance */
+ };
+ typedef struct gclose *Gclose;
+ 
+@@ -2488,34 +2589,48 @@
+  * also not bother going any further, since the first time we got to
+  * that position (when it was marked), we must already have failed on
+  * and backtracked over any further closure matches beyond that point.
++ * If we are using approximation, the number in the string is incremented
++ * by the current error count; if we come back to that point with a
++ * lower error count, it is worth trying from that point again, but
++ * we must now mark that point in trystring with the new error.
+  */
+ 
+ /**/
+ static void
+-addclosures(Comp c, LinkList closlist, int *pdone, char *trystring)
++addclosures(Comp c, LinkList closlist, int *pdone, unsigned char *trystring)
+ {
+     Gclose gcnode;
+     char *opptr = pptr;
++    unsigned char *tpos;
+ 
+     while (*pptr) {
+ 	if (STARP(c)) {
+-	    if (trystring[(pptr+1)-opptr])
+-		break;
++	    if (*(tpos = trystring + ((pptr+1) - opptr))) {
++		if ((unsigned)(errsfound+1) >= *tpos)
++		    break;
++		*tpos = (unsigned)(errsfound+1);
++	    }
+ 	    gcnode = (Gclose)zalloc(sizeof(struct gclose));
+ 	    gcnode->start = pptr;
+-	    gcnode->end = ++pptr;
++	    gcnode->end = METAINC(pptr);
++	    gcnode->errsfound = errsfound;
+ 	} else {
+ 	    char *saves = pptr;
++	    int savee = errsfound;
+ 	    if (OPTIONALP(c) && *pdone >= 1)
+ 		return;
+ 	    if (!matchonce(c) || saves == pptr ||
+-		trystring[pptr-opptr]) {
++		(*(tpos = trystring + (pptr-opptr)) &&
++		 (unsigned)(errsfound+1) >= *tpos)) {
+ 		pptr = saves;
+ 		break;
+ 	    }
++	    if (*tpos)
++		*tpos = (unsigned)(errsfound+1);
+ 	    gcnode = (Gclose)zalloc(sizeof(struct gclose));
+ 	    gcnode->start = saves;
+ 	    gcnode->end = pptr;
++	    gcnode->errsfound = savee;
+ 	}
+ 	pushnode(closlist, gcnode);
+ 	(*pdone)++;
+@@ -2523,13 +2638,29 @@
+ }
+ 
+ /*
+- * Match characters with case-insensitivity.
+- * Note CHARMATCH(x,y) != CHARMATCH(y,x)
++ * Match characters with case-insensitivity.  Note charmatch(x,y) !=
++ * charmatch(y,x): the first argument comes from the target string, the
++ * second from the pattern.  This used to be a macro, and in principle
++ * could be turned back into one.
+  */
+-#define CHARMATCH(x, y) \
+-(x == y || (((c->stat & C_IGNCASE) ? (tulower(x) == tulower(y)) : \
+-	     (c->stat & C_LCMATCHUC) ? (islower(y) && tuupper(y) == x) : 0)))
+ 
++/**/
++static int
++charmatch(Comp c, char *x, char *y)
++{
++    /*
++     * This takes care of matching two characters which may be a
++     * two byte sequence, Meta followed by something else.
++     * Here we bypass tulower() and tuupper() for speed.
++     */
++    int xi = (STOUC(UNMETA(x)) & 0xff), yi = (STOUC(UNMETA(y)) & 0xff);
++    return xi == yi ||
++	(((c->stat & C_IGNCASE) ?
++	  ((isupper(xi) ? tolower(xi) : xi) ==
++	   (isupper(yi) ? tolower(yi) : yi)) :
++	  (c->stat & C_LCMATCHUC) ?
++	  (islower(yi) && toupper(yi) == xi) : 0));
++}
+ 
+ /* see if current string in pptr matches c */
+ 
+@@ -2539,14 +2670,16 @@
+ {
+     if (CLOSUREP(c)) {
+ 	int done, retflag = 0;
+-	char *saves, *trystring, *opptr;
++	char *saves, *opptr;
++	unsigned char *trystring, *tpos;
++	int savee;
+ 	LinkList closlist;
+ 	Gclose gcnode;
+ 
+ 	if (first && *pptr == '.')
+ 	    return 0;
+ 
+-	if (!inclosure && !c->left) {
++	if (!inclosure && !c->left && !c->errsmax) {
+ 	    /* We are not inside another closure, and the current
+ 	     * pattern is a simple string.  We handle this very common
+ 	     * case specially: otherwise, matches like *foo* are
+@@ -2561,26 +2694,30 @@
+ 		!itok(looka)) {
+ 		/* Another simple optimisation for a very common case:
+ 		 * we are processing a * and there is
+-		 * an ordinary character match next.  We look ahead for
+-		 * that character, taking care of Meta bytes.
++		 * an ordinary character match (which may not be a Metafied
++		 * character, just to make it easier) next.  We look ahead
++		 * for that character, taking care of Meta bytes.
+ 		 */
+ 		while (*pptr) {
+ 		    for (; *pptr; pptr++) {
+ 			if (*pptr == Meta)
+ 			    pptr++;
+-			else if (CHARMATCH(STOUC(*pptr), STOUC(looka)))
++			else if (charmatch(c, pptr, &looka))
+ 			    break;
+ 		    }
+ 		    if (!*(saves = pptr))
+ 			break;
++		    savee = errsfound;
+ 		    if (doesmatch(c->next))
+ 			return 1;
+ 		    pptr = saves+1;
++		    errsfound = savee;
+ 		}
+ 	    } else {
+ 		/* Standard track-forward code */
+ 		for (done = 0; ; done++) {
+ 		    saves = pptr;
++		    savee = errsfound;
+ 		    if ((done || ONEHASHP(c) || OPTIONALP(c)) &&
+ 			((!c->next && (!LASTP(c) || !*pptr || longest)) ||
+ 			 (c->next && doesmatch(c->next))))
+@@ -2588,6 +2725,7 @@
+ 		    if (done && OPTIONALP(c))
+ 			return 0;
+ 		    pptr = saves;
++		    errsfound = savee;
+ 		    first = 0;
+ 		    if (STARP(c)) {
+ 			if (!*pptr)
+@@ -2602,7 +2740,7 @@
+ 	/* The full, gory backtracking code is now necessary. */
+ 	inclosure++;
+ 	closlist = newlinklist();
+-	trystring = zcalloc(strlen(pptr)+1);
++	trystring = (unsigned char *)zcalloc(strlen(pptr)+1);
+ 	opptr = pptr;
+ 
+ 	/* Start by making a list where each match is as long
+@@ -2621,7 +2759,7 @@
+ 		retflag = 1;
+ 		break;
+ 	    }
+-	    trystring[saves-opptr] = 1;
++	    trystring[saves-opptr] = (unsigned)(errsfound + 1);
+ 	    /*
+ 	     * If we failed, the first thing to try is whether we can
+ 	     * shorten the match using the last pattern in the closure.
+@@ -2633,14 +2771,18 @@
+ 		char savec = *gcnode->end;
+ 		*gcnode->end = '\0';
+ 		pptr = gcnode->start;
++		errsfound = gcnode->errsfound;
+ 		if (matchonce(c) && pptr != gcnode->start
+-		    && !trystring[pptr-opptr]) {
++		    && (!*(tpos = trystring + (pptr-opptr)) ||
++			*tpos > (unsigned)(errsfound+1))) {
++		    if (*tpos)
++			*tpos = (unsigned)(errsfound+1);
+ 		    *gcnode->end = savec;
+ 		    gcnode->end = pptr;
+ 		    /* Try again to construct a list based on
+ 		     * this new position
+ 		     */
+-		    addclosures(c, closlist, &done, trystring+(pptr-opptr));
++		    addclosures(c, closlist, &done, tpos);
+ 		    continue;
+ 		}
+ 		*gcnode->end = savec;
+@@ -2650,6 +2792,7 @@
+ 	     */
+ 	    if ((gcnode = (Gclose)getlinknode(closlist))) {
+ 		pptr = gcnode->start;
++		errsfound = gcnode->errsfound;
+ 		zfree(gcnode, sizeof(struct gclose));
+ 		done--;
+ 	    } else
+@@ -2723,8 +2866,7 @@
+ #define PAT(X) (pat[X] == Meta ? pat[(X)+1] ^ 32 : untok(pat[X]))
+ #define PPAT(X) (pat[(X)-1] == Meta ? pat[X] ^ 32 : untok(pat[X]))
+ 
+-    for (pat++; *pat != Outbrack && *pat;
+-	 *pat == Meta ? pat += 2 : pat++) {
++    for (pat++; *pat != Outbrack && *pat; METAINC(pat)) {
+ 	if (*pat == Inbrack) {
+ 	    /* Inbrack can only occur inside a range if we found [:...:]. */
+ 	    pat += 2;
+@@ -2748,6 +2890,22 @@
+     *patptr = pat;
+ }
+ 
++/*
++ * matchonce() is the core of the pattern matching, handling individual
++ * strings and instances of a pattern in a closure.
++ *
++ * Note on approximate matching:  The rule is supposed to be
++ *   (1) Take the longest possible match without approximation.
++ *   (2) At any failure, make the single approximation that results
++ *       in the longest match for the remaining part (which may
++ *       include further approximations).
++ *   (3) If we match the same distance, take the one with fewer
++ *       approximations.
++ * If this is wrong, I haven't yet discovered a counterexample.  Email
++ * lines are now open.
++ *                   pws 1999/02/23
++ */
++
+ /**/
+ static int
+ matchonce(Comp c)
+@@ -2758,7 +2916,7 @@
+ 	if (!pat || !*pat) {
+ 	    /* No current pattern (c->str). */
+ 	    char *saves;
+-	    int savei;
++	    int savee, savei;
+ 
+ 	    if (errflag)
+ 		return 0;
+@@ -2766,6 +2924,7 @@
+ 	     * check for exclusion of pattern or alternatives. */
+ 	    saves = pptr;
+ 	    savei = first;
++	    savee = errsfound;
+ 	    /* Loop over alternatives with exclusions: (foo~bar|...). *
+ 	     * Exclusions apply to the pattern in c->left.            */
+ 	    if (c->left || c->right) {
+@@ -2812,6 +2971,7 @@
+ 			 */
+ 			exclend--;
+ 			pptr = saves;
++			errsfound = savee;
+ 		    }
+ 		    inclosure--;
+ 		    if (ret)
+@@ -2822,19 +2982,43 @@
+ 		if (c->right && (!ret || inclosure)) {
+ 		    /* If in a closure, we always want the longest match. */
+ 		    char *newpptr = pptr;
++		    int newerrsfound = errsfound;
+ 		    pptr = saves;
+ 		    first = savei;
++		    errsfound = savee;
+ 		    ret2 = doesmatch(c->right);
+-		    if (ret && (!ret2 || pptr < newpptr))
++		    if (ret && (!ret2 || pptr < newpptr)) {
+ 			pptr = newpptr;
++			errsfound = newerrsfound;
++		    }
++		}
++		if (!ret && !ret2) {
++		    pptr = saves;
++		    first = savei;
++		    errsfound = savee;
++		    break;
+ 		}
+-		if (!ret && !ret2)
+-		    return 0;
+ 	    }
+ 	    if (CLOSUREP(c))
+ 		return 1;
+-	    if (!c->next)	/* no more patterns left */
+-		return (!LASTP(c) || !*pptr || longest);
++	    if (!c->next) {
++		/*
++		 * No more patterns left, but we may still be in the middle
++		 * of a match, in which case alles in Ordnung...
++		 */ 
++		if (!LASTP(c))
++		    return 1;
++		/*
++		 * ...else we're at the last pattern, so this is our last
++		 * ditch attempt at an approximate match: try to omit the
++		 * last few characters.
++		 */
++		for (; *pptr && errsfound < c->errsmax &&
++			 (errsmax == -1 || errsfound < errsmax);
++		     METAINC(pptr))
++		    errsfound++;
++		return !*pptr || longest;
++	    }
+ 	    /* optimisation when next pattern is not a closure */
+ 	    if (!CLOSUREP(c->next)) {
+ 		c = c->next;
+@@ -2843,7 +3027,10 @@
+ 	    }
+ 	    return doesmatch(c->next);
+ 	}
+-	/* Don't match leading dot if first is set */
++	/*
++	 * Don't match leading dot if first is set
++	 * (don't even try for an approximate match)
++	 */
+ 	if (first && *pptr == '.' && *pat != '.')
+ 	    return 0;
+ 	if (*pat == Star) {	/* final * is not expanded to ?#; returns success */
+@@ -2852,39 +3039,47 @@
+ 	    return 1;
+ 	}
+ 	first = 0;		/* finished checking start of pattern */
+-	if (*pat == Quest && *pptr) {
++	if (*pat == Quest) {
+ 	    /* match exactly one character */
+-	    if (*pptr == Meta)
+-		pptr++;
+-	    pptr++;
++	    if (!*pptr)
++		break;
++	    METAINC(pptr);
+ 	    pat++;
+ 	    continue;
+ 	}
+ 	if (*pat == Inbrack) {
+ 	    /* Match groups of characters */
+ 	    char ch;
++	    char *saves, *savep;
+ 
+ 	    if (!*pptr)
+ 		break;
+-	    ch = *pptr == Meta ? pptr[1] ^ 32 : *pptr;
++	    saves = pptr;
++	    savep = pat;
++	    ch = UNMETA(pptr);
+ 	    if (pat[1] == Hat || pat[1] == '^' || pat[1] == '!') {
+ 		/* group is negated */
+ 		*++pat = Hat;
+ 		rangematch(&pat, ch, Hat);
+ 		DPUTS(!*pat, "BUG: something is very wrong in doesmatch()");
+-		if (*pat != Outbrack)
++		if (*pat != Outbrack) {
++		    pptr = saves;
++		    pat = savep;
+ 		    break;
++		}
+ 		pat++;
+-		*pptr == Meta ? pptr += 2 : pptr++;
++		METAINC(pptr);
+ 		continue;
+ 	    } else {
+ 		/* pattern is not negated (affirmed? asserted?) */
+ 		rangematch(&pat, ch, Inbrack);
+ 		DPUTS(!pat || !*pat, "BUG: something is very wrong in doesmatch()");
+-		if (*pat == Outbrack)
++		if (*pat == Outbrack) {
++		    pptr = saves;
++		    pat = savep;
+ 		    break;
+-		for (*pptr == Meta ? pptr += 2 : pptr++;
+-		     *pat != Outbrack; pat++);
++		}
++		for (METAINC(pptr); *pat != Outbrack; pat++);
+ 		pat++;
+ 		continue;
+ 	    }
+@@ -2892,7 +3087,7 @@
+ 	if (*pat == Inang) {
+ 	    /* Numeric globbing. */
+ 	    unsigned long t1, t2, t3;
+-	    char *ptr;
++	    char *ptr, *saves = pptr, *savep = pat;
+ 
+ 	    if (!idigit(*pptr))
+ 		break;
+@@ -2933,19 +3128,146 @@
+ 		  pptr--;
+ 		  t1 /= 10;
+ 		}
+-		if (t1 < t2 || (!not3 && t1 > t3))
++		if (t1 < t2 || (!not3 && t1 > t3)) {
++		    pptr = saves;
++		    pat = savep;
+ 		    break;
++		}
+ 	    }
+ 	    continue;
+ 	}
+-	if (CHARMATCH(STOUC(*pptr), STOUC(*pat))) {
+-	    /* just plain old characters */
+-	    pptr++;
+-	    pat++;
++	/* itok(Meta) is zero */
++	DPUTS(itok(*pat), "BUG: matching tokenized character");
++	if (charmatch(c, pptr, pat)) {
++	    /* just plain old characters (or maybe unplain new characters) */
++	    METAINC(pptr);
++	    METAINC(pat);
+ 	    continue;
+ 	}
++	if (errsfound < c->errsmax &&
++	    (errsmax == -1 || errsfound < errsmax)) {
++	    /*
++	     * We tried to match literal characters and failed.  Now it's
++	     * time to match approximately.  Note this doesn't handle the
++	     * case where we *didn't* try to match literal characters,
++	     * including the case where we were already at the end of the
++	     * pattern, because then we never get here.  In that case the
++	     * pattern has to be matched exactly, but we could maybe
++	     * advance up the target string before trying it, so we have to
++	     * handle that case elsewhere.
++	     */
++	    char *saves = pptr, *savep = c->str;
++	    char *maxpptr = pptr, *patnext = METANEXT(pat);
++	    int savee, maxerrs = -1;
++
++	    /* First try to advance up the pattern. */
++	    c->str = patnext;
++	    savee = ++errsfound;
++	    if (matchonce(c)) {
++		maxpptr = pptr;
++		maxerrs = errsfound;
++	    }
++	    errsfound = savee;
++
++	    if (*saves) {
++		/*
++		 * If we have characters on both strings, we have more
++		 * choice.
++		 *
++		 * Try to edge up the target string.
++		 */
++		char *strnext = METANEXT(saves);
++		pptr = strnext;
++		c->str = pat;
++		if (matchonce(c) &&
++		    (maxerrs == -1 || pptr > maxpptr ||
++		     (pptr == maxpptr && errsfound <= maxerrs))) {
++		    maxpptr = pptr;
++		    maxerrs = errsfound;
++		}
++		errsfound = savee;
++
++		/*
++		 * Try edging up both of them at once.
++		 * Note this takes precedence in the case of equal
++		 * length as we get further up the pattern.
++		 */
++		c->str = patnext;
++		pptr = strnext;
++		if (matchonce(c) &&
++		    (maxerrs == -1 || pptr > maxpptr ||
++		     (pptr == maxpptr && errsfound <= maxerrs))) {
++		    maxpptr = pptr;
++		    maxerrs = errsfound;
++		}
++		errsfound = savee;
++
++		/*
++		 * See if we can transpose: that counts as just one error.
++		 *
++		 * Note, however, `abanana' and `banana': transposing
++		 * is wrong here, as it gets us two errors,
++		 * [ab][a]nana vs [ba][]nana, instead of the correct
++		 * [a]banana vs []banana, so we still need to try
++		 * the other possibilities.
++		 */
++		if (strnext && patnext && !itok(*patnext) &&
++		    charmatch(c, strnext, pat) &&
++		    charmatch(c, saves, patnext)) {
++		    c->str = patnext;
++		    METAINC(c->str);
++
++		    pptr = strnext;
++		    METAINC(pptr);
++
++		    if (matchonce(c) &&
++			(maxerrs == -1 || pptr > maxpptr ||
++			 (pptr == maxpptr && errsfound <= maxerrs))) {
++			maxpptr = pptr;
++			maxerrs = errsfound;
++		    }
++		}
++	    }
++	    /*
++	     * We don't usually restore state on failure, but we need
++	     * to fix up the Comp structure which we altered to
++	     * look at the tail of the pattern.
++	     */
++	    c->str = savep;
++	    /*
++	     * If that failed, game over:  we don't want to break
++	     * and try the other approximate test, because we just did
++	     * that.
++	     */
++	    if (maxerrs == -1)
++		return 0;
++	    pptr = maxpptr;
++	    errsfound = maxerrs;
++	    return 1;
++	}
+ 	break;
+     }
++    if (*pptr && errsfound < c->errsmax &&
++	(errsmax == -1 || errsfound < errsmax)) {
++	/*
++	 * The pattern failed, but we can try edging up the target string
++	 * and rematching with an error.  Note we do this from wherever we
++	 * got to in the pattern string c->str, not the start. hence the
++	 * need to modify c->str.
++	 *
++	 * At this point, we don't have a literal character in the pattern
++	 * (handled above), so we don't try any funny business on the
++	 * pattern itself.
++	 */
++	int ret;
++	char *savep = c->str;
++	errsfound++;
++	METAINC(pptr);
++	c->str = pat;
++	ret = matchonce(c);
++	c->str = savep;
++	return ret;
++    }
+     return 0;
+ }
+ 
+@@ -2958,6 +3280,7 @@
+     remnulargs(str);
+     mode = 1;			/* no path components */
+     addflags = 0;
++    errsmax = 0;
+     pptr = str;
+     tail = NULL;
+     return parsecompsw(GF_TOPLEV);
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

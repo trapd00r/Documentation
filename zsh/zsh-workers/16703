@@ -1,0 +1,115 @@
+From zsh-workers-return-16703-mason-zsh=primenet.com.au@sunsite.dk Fri Feb 22 22:00:41 2002
+Return-Path: <zsh-workers-return-16703-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11124 invoked from network); 22 Feb 2002 22:00:40 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 22 Feb 2002 22:00:40 -0000
+Received: (qmail 16117 invoked by alias); 22 Feb 2002 22:00:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16703
+Received: (qmail 16106 invoked from network); 22 Feb 2002 22:00:32 -0000
+Date: Fri, 22 Feb 2002 14:00:03 -0800 (PST)
+From: Wayne Davison <wayned@users.sourceforge.net>
+X-X-Sender:  <wayne@phong.blorf.net>
+To: Peter Stephenson <pws@csr.com>
+Cc: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: Bug in history changes 
+In-Reply-To: <721.1014376777@csr.com>
+Message-ID: <Pine.LNX.4.33L2.0202221242090.4810-100000@phong.blorf.net>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+On Fri, 22 Feb 2002, Peter Stephenson wrote:
+> It seems to be the code with HISTEXPIREDUPSFIRST in
+> putoldhistentryontop() setting the next pointer to something that's
+> about to be free
+
+Right.  The forward scan has to end at just the right point for this bug
+to get triggered, so I had been having a hard time getting it to crash
+with my history settings.  Once I duplicated the bug, I came up with the
+following patch:
+
+Index: Src/hist.c
+--- Src/hist.c	20 Feb 2002 19:25:14 -0000	1.42
++++ Src/hist.c	22 Feb 2002 20:40:29 -0000	1.43
+@@ -924,14 +924,15 @@
+ 	if (!keep_going)
+ 	    max_unique_ct = getiparam("SAVEHIST");
+ 	do {
+-	    if (max_unique_ct-- <= 0) {
++	    if (max_unique_ct-- <= 0 || he == hist_ring) {
+ 		max_unique_ct = 0;
+ 		he = hist_ring->down;
++		next = hist_ring;
+ 		break;
+ 	    }
+ 	    he = next;
+ 	    next = he->down;
+-	} while (he != hist_ring->down && !(he->flags & HIST_DUP));
++	} while (!(he->flags & HIST_DUP));
+     }
+     if (he != hist_ring->down) {
+ 	he->up->down = he->down;
+
+> +11:15% unsetopt histexpiredupsfirst
+> +11:15% HISTSIZE=1
+> +11:15% h
+> fc: no such event: 832
+
+The code is trying to list the (non-existent) event prior to the "h"
+command and failing.  This less-than-optimal result is caused by the
+code trying to deal with the differences between specified and default
+values in too simplistic a manner (i.e. if the user had actually typed
+"h 832 832" that would have been the right thing to output).
+
+The following patch makes the default-list values always encompass some
+history and it leaves explicitly-specified values alone (since fclist()
+can handle out-of-range values, and it can output better error messages
+if the range encompasses nothing).
+
+Index: Src/builtin.c
+--- Src/builtin.c	20 Feb 2002 12:51:53 -0000	1.69
++++ Src/builtin.c	22 Feb 2002 21:42:36 -0000
+@@ -1308,18 +1308,23 @@
+ 	return 1;
+     }
+     /* default values of first and last, and range checking */
++    if (last == -1) {
++	if (ops['l'] && first < curhist) {
++	    last = addhistnum(curline.histnum,-1,0);
++	    if (last < firsthist())
++		last = firsthist();
++	}
++	else
++	    last = first;
++    }
+     if (first == -1) {
+ 	first = ops['l']? addhistnum(curline.histnum,-16,0)
+-	    : addhistnum(curline.histnum,-1,0);
++			: addhistnum(curline.histnum,-1,0);
++	if (first < 1)
++	    first = 1;
++	if (last < first)
++	    last = first;
+     }
+-    if (last == -1)
+-	last = ops['l']? addhistnum(curline.histnum,-1,0) : first;
+-    if (first < firsthist())
+-	first = firsthist() - (last < firsthist());
+-    if (last > curhist)
+-	last = curhist;
+-    else if (last < first)
+-	last = first;
+     if (ops['l']) {
+ 	/* list the required part of the history */
+ 	retval = fclist(stdout, !ops['n'], ops['r'], ops['D'],
+
+One side-effect of this patch is that you can get reverse output just by
+specifying a last number that is less than the first number (or by using
+the -r option).
+
+..wayne..
+

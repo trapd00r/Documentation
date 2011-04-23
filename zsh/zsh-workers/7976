@@ -1,0 +1,806 @@
+From zsh-workers-return-7976-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Sep 21 08:20:34 1999
+Return-Path: <zsh-workers-return-7976-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20185 invoked from network); 21 Sep 1999 08:20:32 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Sep 1999 08:20:32 -0000
+Received: (qmail 5580 invoked by alias); 21 Sep 1999 08:20:22 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7976
+Received: (qmail 5562 invoked from network); 21 Sep 1999 08:20:21 -0000
+Date: Tue, 21 Sep 1999 10:20:19 +0200 (MET DST)
+Message-Id: <199909210820.KAA13972@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: math functions
+
+
+(No doubt there is a better name than `math functions'...)
+
+This allows functions to be called in arithmetic expressions (*not*
+shell functions). With the obvious syntax: `(( func(args) ))'.
+
+This is only the basic stuff. No functions are defined in the core,
+only the example module has two, showing the two different types of
+functions (I fear Bart will not like the second type):
+
+- the first type gets a normal argument list, where the arguments are
+  arith expressions; the example is `sum(a,b,c,...)' which accepts any 
+  number of arguments (greater than one) and returns the sum
+- the C-function for the second type gets the whole string between the 
+  parentheses as a string and can do with it whatever it wants; the
+  example is `length(str)' which returns the length of the string
+
+Since I'll be away two weeks from Friday on, I don't plan to write the 
+math module we were talking about. Someone else?
+
+
+Bye
+ Sven
+
+diff -u os/builtin.c Src/builtin.c
+--- os/builtin.c	Mon Sep 20 19:00:19 1999
++++ Src/builtin.c	Mon Sep 20 21:16:20 1999
+@@ -125,7 +125,7 @@
+     BUILTIN("which", 0, bin_whence, 0, -1, 0, "ampsw", "c"),
+ 
+ #ifdef DYNAMIC
+-    BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "ILabcdipue", NULL),
++    BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "ILabcfdipue", NULL),
+ #else
+     BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "e", NULL),
+ #endif
+--- oos/math.c	Tue Sep 21 09:22:42 1999
++++ Src/math.c	Tue Sep 21 09:25:30 1999
+@@ -141,7 +141,8 @@
+ #define POWER 49
+ #define CID 50
+ #define POWEREQ 51
+-#define TOKCOUNT 52
++#define FUNC 52
++#define TOKCOUNT 53
+ 
+ /* precedences */
+ 
+@@ -157,7 +158,7 @@
+     15,  15, 15, 15,  15,
+     15,  15, 15, 16, 200,
+      2,   2,  0,  0,   7,
+-     0,  15
++     0,  15, 0
+ };
+ 
+ #define TOPPREC 16
+@@ -175,7 +176,7 @@
+ /* 35 */  RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO,
+ /* 40 */  BOOL|OP_E2IO, BOOL|OP_E2IO, RL|OP_A2IO, RL|OP_A2, RL|OP_OP,
+ /* 45 */  RL, RL, LR|OP_OPF, LR|OP_OPF, RL|OP_A2,
+-/* 50 */  LR|OP_OPF, RL|OP_E2
++/* 50 */  LR|OP_OPF, RL|OP_E2, LR|OP_OPF
+ };
+ 
+ #define LVCOUNT 32
+@@ -392,6 +393,7 @@
+ 		cct = 1;
+ 	    }
+ 	    if (iident(*ptr)) {
++		int func = 0;
+ 		char *p, q;
+ 
+ 		p = ptr;
+@@ -400,12 +402,14 @@
+ 		    return EOI;
+ 		}
+ 		while (iident(*++ptr));
+-		if (*ptr == '[') {
++		if (*ptr == '[' || (!cct && *ptr == '(')) {
++		    char op = *ptr, cp = ((*ptr == '[') ? ']' : ')');
+ 		    int l;
++		    func = (op == '(');
+ 		    for (ptr++, l = 1; *ptr && l; ptr++) {
+-			if (*ptr == '[')
++			if (*ptr == op)
+ 			    l++;
+-			if (*ptr == ']')
++			if (*ptr == cp)
+ 			    l--;
+ 			if (*ptr == '\\' && ptr[1])
+ 			    ptr++;
+@@ -415,7 +419,7 @@
+ 		*ptr = '\0';
+ 		lvals[yylval = lvc++] = ztrdup(p);
+ 		*ptr = q;
+-		return cct ? CID : ID;
++		return (func ? FUNC : (cct ? CID : ID));
+ 	    }
+ 	    else if (cct) {
+ 		yyval.u.l = poundgetfn(NULL);
+@@ -484,6 +488,64 @@
+ 
+ 
+ /**/
++static mnumber
++callmathfunc(char *o)
++{
++    MathFunc f;
++    char *a, *n;
++    static mnumber dummy;
++
++    n = a = dupstring(o);
++
++    while (*a != '(')
++	a++;
++    *a++ = '\0';
++    a[strlen(a) - 1] = '\0';
++
++    if ((f = getmathfunc(n, 1))) {
++	if (f->flags & MFF_STR)
++	    return f->sfunc(n, a, f->funcid);
++	else {
++	    int argc = 0;
++	    mnumber *argv, *q;
++	    LinkList l = newlinklist();
++	    LinkNode node;
++	    char *p;
++
++	    if (*a) {
++		for (p = a; *a; a++) {
++		    if (*a == '\\' && a[1])
++			a++;
++		    else if (*a == ',') {
++			*a = '\0';
++			addlinknode(l, p);
++			argc++;
++			p = a + 1;
++		    }
++		}
++		addlinknode(l, p);
++		argc++;
++	    }
++	    if (argc >= f->minargs && (f->maxargs < 0 || argc <= f->maxargs)) {
++		if (argc) {
++		    q = argv = (mnumber *) zhalloc(argc * sizeof(mnumber));
++		    for (node = firstnode(l); node; incnode(node))
++			*q++ = matheval((char *) getdata(node));
++		}
++		return f->nfunc(n, argc, argv, f->funcid);
++	    } else
++		zerr("wrong number of argument: %s", o, 0);
++	}
++    } else
++	zerr("unknown function: %s", n, 0);
++
++    dummy.type = MN_INTEGER;
++    dummy.u.l = 0;
++
++    return dummy;
++}
++
++/**/
+ static int
+ notzero(mnumber a)
+ {
+@@ -956,6 +1018,9 @@
+ 	    break;
+ 	case CID:
+ 	    push(getcvar(yylval), yylval);
++	    break;
++	case FUNC:
++	    push(callmathfunc(lvals[yylval]), yylval);
+ 	    break;
+ 	case M_INPAR:
+ 	    mathparse(TOPPREC);
+diff -u os/mkbltnmlst.sh Src/mkbltnmlst.sh
+--- os/mkbltnmlst.sh	Mon Sep 20 21:41:32 1999
++++ Src/mkbltnmlst.sh	Mon Sep 20 21:42:20 1999
+@@ -25,6 +25,7 @@
+ 	*)  echo "/* non-linked-in known module \`$x_mod' */"
+ 	    eval "loc=\$loc_$x_mod"
+ 	    unset moddeps autobins autoinfixconds autoprefixconds autoparams
++	    unset automathfuncs
+ 	    . $srcdir/../$loc/${x_mod}.mdd
+ 	    for bin in $autobins; do
+ 		echo "    add_autobin(\"$bin\", \"$x_mod\");"
+@@ -37,6 +38,9 @@
+ 	    done
+ 	    for param in $autoparams; do
+ 		echo "    add_autoparam(\"$param\", \"$x_mod\");"
++	    done
++	    for mfunc in $automathfuncs; do
++		echo "    add_automath(\"$mfunc\", \"$x_mod\");"
+ 	    done
+ 	    for dep in $moddeps; do
+ 		case $bin_mods in
+diff -u os/mkmakemod.sh Src/mkmakemod.sh
+--- os/mkmakemod.sh	Mon Sep 20 21:38:23 1999
++++ Src/mkmakemod.sh	Mon Sep 20 21:42:39 1999
+@@ -25,6 +25,7 @@
+ #                   autoloading (without the leading `-')
+ #   autoprefixconds like autoinfixconds, but for prefix condition codes
+ #   autoparams      parameters defined by the module, for autoloading
++#   automathfuncs   math functions defined by the module, for autoloading
+ #   objects         .o files making up this module (*must* be defined)
+ #   proto           .pro files for this module (default generated from $objects)
+ #   headers         extra headers for this module (default none)
+@@ -171,7 +172,7 @@
+     for module in $here_modules; do
+ 
+ 	unset moddeps nozshdep alwayslink hasexport
+-	unset autobins autoinfixconds autoprefixconds autoparams
++	unset autobins autoinfixconds autoprefixconds autoparams automathfuncs
+ 	unset objects proto headers hdrdeps otherincs
+ 	. $top_srcdir/$the_subdir/${module}.mdd
+ 	test -n "${moddeps+set}" || moddeps=
+diff -u os/module.c Src/module.c
+--- os/module.c	Mon Sep 20 19:00:20 1999
++++ Src/module.c	Mon Sep 20 21:26:48 1999
+@@ -696,8 +696,9 @@
+ int
+ bin_zmodload(char *nam, char **args, char *ops, int func)
+ {
+-    if ((ops['b'] || ops['c'] || ops['p']) && !(ops['a'] || ops['u'])) {
+-	zwarnnam(nam, "-b, -c, and -p must be combined with -a or -u",
++    if ((ops['b'] || ops['c'] || ops['p'] || ops['f']) &&
++	!(ops['a'] || ops['u'])) {
++	zwarnnam(nam, "-b, -c, -f, and -p must be combined with -a or -u",
+ 		 NULL, 0);
+ 	return 1;
+     }
+@@ -718,10 +719,12 @@
+ 	return bin_zmodload_exist(nam, args, ops);
+     else if (ops['d'])
+ 	return bin_zmodload_dep(nam, args, ops);
+-    else if ((ops['a'] || ops['b']) && !(ops['c'] || ops['p']))
++    else if ((ops['a'] || ops['b']) && !(ops['c'] || ops['p'] || ops['f']))
+ 	return bin_zmodload_auto(nam, args, ops);
+     else if (ops['c'] && !(ops['b'] || ops['p']))
+ 	return bin_zmodload_cond(nam, args, ops);
++    else if (ops['f'] && !(ops['b'] || ops['p']))
++	return bin_zmodload_math(nam, args, ops);
+     else if (ops['p'] && !(ops['b'] || ops['c']))
+ 	return bin_zmodload_param(nam, args, ops);
+     else if (!(ops['a'] || ops['b'] || ops['c'] || ops['p']))
+@@ -935,9 +938,10 @@
+ 			putchar('I');
+ 		    printf(" %s %s\n", p->module, p->name);
+ 		} else {
+-		    fputs("post ", stdout);
+ 		    if (p->flags & CONDF_INFIX)
+ 			fputs("infix ", stdout);
++		    else
++			fputs("post ", stdout);
+ 		    printf("%s (%s)\n",p->name, p->module);
+ 		}
+ 	    }
+@@ -958,7 +962,68 @@
+ 		zwarnnam(nam, "%s: `/' is illegal in a condition", cnam, 0);
+ 		ret = 1;
+ 	    } else if (add_autocond(cnam, ops['I'], modnam) && !ops['i']) {
+-		zwarnnam(nam, "failed to add condition %s", cnam, 0);
++		zwarnnam(nam, "failed to add condition `%s'", cnam, 0);
++		ret = 1;
++	    }
++	} while(*args);
++	return ret;
++    }
++}
++
++/**/
++static int
++bin_zmodload_math(char *nam, char **args, char *ops)
++{
++    int ret = 0;
++
++    if (ops['u']) {
++	/* remove autoloaded conditions */
++	for (; *args; args++) {
++	    MathFunc f = getmathfunc(*args, 0);
++
++	    if (!f) {
++		if (!ops['i']) {
++		    zwarnnam(nam, "%s: no such math function", *args, 0);
++		    ret = 1;
++		}
++	    } else if (f->flags & CONDF_ADDED) {
++		zwarnnam(nam, "%s: math function is already defined", *args, 0);
++		ret = 1;
++	    } else
++		deletemathfunc(f);
++	}
++	return ret;
++    } else if (!*args) {
++	/* list autoloaded math functions */
++	MathFunc p;
++
++	for (p = mathfuncs; p; p = p->next) {
++	    if (p->module) {
++		if (ops['L']) {
++		    fputs("zmodload -af", stdout);
++		    printf(" %s %s\n", p->module, p->name);
++		} else
++		    printf("%s (%s)\n",p->name, p->module);
++	    }
++	}
++	return 0;
++    } else {
++	/* add autoloaded conditions */
++	char *modnam;
++
++	modnam = *args++;
++	if(isset(RESTRICTED) && strchr(modnam, '/')) {
++	    zwarnnam(nam, "%s: restricted", modnam, 0);
++	    return 1;
++	}
++	do {
++	    char *fnam = *args ? *args++ : modnam;
++	    if (strchr(fnam, '/')) {
++		zwarnnam(nam, "%s: `/' is illegal in a math function",
++			 fnam, 0);
++		ret = 1;
++	    } else if (add_automathfunc(fnam, modnam) && !ops['i']) {
++		zwarnnam(nam, "failed to add math function `%s'", fnam, 0);
+ 		ret = 1;
+ 	    }
+ 	} while(*args);
+@@ -1272,8 +1337,10 @@
+     int hads = 0, hadf = 0;
+ 
+     while (size--) {
+-	if (c->flags & CONDF_ADDED)
++	if (c->flags & CONDF_ADDED) {
++	    c++;
+ 	    continue;
++	}
+ 	if (addconddef(c)) {
+ 	    zwarnnam(nam, "name clash when adding condition `%s'", c->name, 0);
+ 	    hadf = 1;
+@@ -1534,7 +1601,7 @@
+ int
+ add_autocond(char *nam, int inf, char *module)
+ {
+-    Conddef c = zalloc(sizeof(*c));
++    Conddef c = (Conddef) zalloc(sizeof(*c));
+ 
+     c->name = ztrdup(nam);
+     c->flags = (inf  ? CONDF_INFIX : 0);
+@@ -1587,8 +1654,10 @@
+     int hads = 0, hadf = 0;
+ 
+     while (size--) {
+-	if (!(c->flags & CONDF_ADDED))
++	if (!(c->flags & CONDF_ADDED)) {
++	    c++;
+ 	    continue;
++	}
+ 	if (deleteconddef(c)) {
+ 	    zwarnnam(nam, "condition `%s' already deleted", c->name, 0);
+ 	    hadf = 1;
+@@ -1618,3 +1687,152 @@
+ 
+ /**/
+ #endif
++
++/* List of math functions. */
++
++/**/
++MathFunc mathfuncs;
++
++/**/
++MathFunc
++getmathfunc(char *name, int autol)
++{
++    MathFunc p, q = NULL;
++
++    for (p = mathfuncs; p; q = p, p = p->next)
++	if (!strcmp(name, p->name)) {
++#ifdef DYNAMIC
++	    if (autol && p->module) {
++		char *n = dupstring(p->module);
++
++		if (q)
++		    q->next = p->next;
++		else
++		    mathfuncs = p->next;
++
++		zsfree(p->module);
++		zfree(p, sizeof(*p));
++
++		load_module(n);
++
++		return getmathfunc(name, 0);
++	    }
++#endif
++	    return p;
++	}
++
++    return NULL;
++}
++
++/**/
++int
++addmathfunc(MathFunc f)
++{
++    MathFunc p;
++
++    if (f->flags & MFF_ADDED)
++	return 1;
++
++    for (p = mathfuncs; p; p = p->next)
++	if (!strcmp(f->name, p->name))
++	    return 1;
++
++    f->flags |= MFF_ADDED;
++    f->next = mathfuncs;
++    mathfuncs = f;
++
++    return 0;
++}
++
++/**/
++int
++addmathfuncs(char const *nam, MathFunc f, int size)
++{
++    int hads = 0, hadf = 0;
++
++    while (size--) {
++	if (f->flags & MFF_ADDED) {
++	    f++;
++	    continue;
++	}
++	if (addmathfunc(f)) {
++	    zwarnnam(nam, "name clash when adding math function `%s'",
++		     f->name, 0);
++	    hadf = 1;
++	} else
++	    hads = 2;
++	f++;
++    }
++    return hadf ? hads : 1;
++}
++
++#ifdef DYNAMIC
++
++/**/
++int
++add_automathfunc(char *nam, char *module)
++{
++    MathFunc f = (MathFunc) zalloc(sizeof(*f));
++
++    f->name = ztrdup(nam);
++    f->module = ztrdup(module);
++
++    if (addmathfunc(f)) {
++	zsfree(f->name);
++	zsfree(f->module);
++	zfree(f, sizeof(*f));
++
++	return 1;
++    }
++    return 0;
++}
++
++/**/
++int
++deletemathfunc(MathFunc f)
++{
++    MathFunc p, q;
++
++    for (p = mathfuncs, q = NULL; p && p != f; q = p, p = p->next);
++
++    if (p) {
++	if (q)
++	    q->next = f->next;
++	else
++	    mathfuncs = f->next;
++
++	if (f->module) {
++	    zsfree(f->name);
++	    zsfree(f->module);
++	    zfree(f, sizeof(*f));
++	} else
++	    f->flags &= ~MFF_ADDED;
++
++	return 0;
++    }
++    return -1;
++}
++
++/**/
++int
++deletemathfuncs(char const *nam, MathFunc f, int size)
++{
++    int hads = 0, hadf = 0;
++
++    while (size--) {
++	if (!(f->flags & MFF_ADDED)) {
++	    f++;
++	    continue;
++	}
++	if (deletemathfunc(f)) {
++	    zwarnnam(nam, "math function `%s' already deleted",
++		     f->name, 0);
++	    hadf = 1;
++	} else
++	    hads = 2;
++	f++;
++    }
++    return hadf ? hads : 1;
++}
++
++#endif /* DYNAMIC */
+diff -u os/zsh.h Src/zsh.h
+--- os/zsh.h	Mon Sep 20 19:00:21 1999
++++ Src/zsh.h	Mon Sep 20 20:38:50 1999
+@@ -79,6 +79,30 @@
+ 
+ typedef int LV;
+ 
++typedef struct mathfunc *MathFunc;
++typedef mnumber (*NumMathFunc)(char *, int, mnumber *, int);
++typedef mnumber (*StrMathFunc)(char *, char *, int);
++
++struct mathfunc {
++    MathFunc next;
++    char *name;
++    int flags;
++    NumMathFunc nfunc;
++    StrMathFunc sfunc;
++    char *module;
++    int minargs;
++    int maxargs;
++    int funcid;
++};
++
++#define MFF_STR      1
++#define MFF_ADDED    2
++
++#define NUMMATHFUNC(name, func, min, max, id) \
++    { NULL, name, 0, func, NULL, NULL, min, max, id }
++#define STRMATHFUNC(name, func, id) \
++    { NULL, name, MFF_STR, NULL, func, NULL, 0, 0, id }
++
+ /* Character tokens are sometimes casted to (unsigned char)'s.         * 
+  * Unfortunately, some compilers don't correctly cast signed to        * 
+  * unsigned promotions; i.e. (int)(unsigned char)((char) -1) evaluates * 
+diff -u os/Modules/example.c Src/Modules/example.c
+--- os/Modules/example.c	Mon Sep 20 20:52:28 1999
++++ Src/Modules/example.c	Mon Sep 20 21:10:37 1999
+@@ -101,6 +101,47 @@
+ }
+ 
+ /**/
++static mnumber
++math_sum(char *name, int argc, mnumber *argv, int id)
++{
++    mnumber ret;
++    int f = 0;
++
++    ret.u.l = 0;
++    while (argc--) {
++	if (argv->type == MN_INTEGER) {
++	    if (f)
++		ret.u.d += (double) argv->u.l;
++	    else
++		ret.u.l += argv->u.l;
++	} else {
++	    if (f)
++		ret.u.d += argv->u.d;
++	    else {
++		ret.u.d = ((double) ret.u.l) + ((double) argv->u.d);
++		f = 1;
++	    }
++	}
++	argv++;
++    }
++    ret.type = (f ? MN_FLOAT : MN_INTEGER);
++
++    return ret;
++}
++
++/**/
++static mnumber
++math_length(char *name, char *arg, int id)
++{
++    mnumber ret;
++
++    ret.type = MN_INTEGER;
++    ret.u.l = strlen(arg);
++
++    return ret;
++}
++
++/**/
+ static int
+ ex_wrapper(List list, FuncWrap w, char *name)
+ {
+@@ -136,6 +177,11 @@
+     ARRPARAMDEF("exarr", &arrparam),
+ };
+ 
++static struct mathfunc mftab[] = {
++    NUMMATHFUNC("sum", math_sum, 1, -1, 0),
++    STRMATHFUNC("length", math_length, 0),
++};
++
+ static struct funcwrap wrapper[] = {
+     WRAPDEF(ex_wrapper),
+ };
+@@ -162,6 +208,7 @@
+     return !(addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab)) |
+ 	     addconddefs(m->nam, cotab, sizeof(cotab)/sizeof(*cotab)) |
+ 	     addparamdefs(m->nam, patab, sizeof(patab)/sizeof(*patab)) |
++	     addmathfuncs(m->nam, mftab, sizeof(mftab)/sizeof(*mftab)) |
+ 	     !addwrapper(m, wrapper));
+ }
+ 
+@@ -174,6 +221,7 @@
+     deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
+     deleteconddefs(m->nam, cotab, sizeof(cotab)/sizeof(*cotab));
+     deleteparamdefs(m->nam, patab, sizeof(patab)/sizeof(*patab));
++    deletemathfuncs(m->nam, mftab, sizeof(mftab)/sizeof(*mftab));
+     deletewrapper(m, wrapper);
+     return 0;
+ }
+diff -u os/Modules/example.mdd Src/Modules/example.mdd
+--- os/Modules/example.mdd	Mon Sep 20 21:41:59 1999
++++ Src/Modules/example.mdd	Mon Sep 20 21:42:47 1999
+@@ -3,5 +3,6 @@
+ autoinfixconds="ex"
+ autoprefixconds="len"
+ autoparams="exint exstr exarr"
++automathfuncs="sum length"
+ 
+ objects="example.o"
+diff -u od/Zsh/arith.yo Doc/Zsh/arith.yo
+--- od/Zsh/arith.yo	Mon Sep 20 19:00:33 1999
++++ Doc/Zsh/arith.yo	Mon Sep 20 21:37:28 1999
+@@ -78,6 +78,14 @@
+ operator is evaluated.  Note the precedence of the bitwise AND, OR,
+ and XOR operators.
+ 
++cindex(math functions)
++cindex(functions, math)
++Mathematical functions can be called with the syntax
++`var(func)tt(LPAR())var(args)tt(RPAR())', where the function decides
++if the var(args) is used as a string or a comma-separated list of
++arithmetic expressions. The shell currently defines no mathematical
++functions, but modules may define some.
++
+ An expression of the form `tt(#\)var(x)' where var(x) is any character
+ sequence such as `tt(a)', `tt(^A)', or `tt(\M-\C-x)' gives the ascii
+ value of this character and an expression of the form `tt(#)var(foo)'
+diff -u od/Zsh/builtins.yo Doc/Zsh/builtins.yo
+--- od/Zsh/builtins.yo	Mon Sep 20 19:00:33 1999
++++ Doc/Zsh/builtins.yo	Mon Sep 20 21:32:52 1999
+@@ -1259,8 +1259,8 @@
+ cindex(loading modules)
+ xitem(tt(zmodload) [ tt(-dL) ] [ ... ])
+ xitem(tt(zmodload -e) [ ... ])
+-xitem(tt(zmodload) [ tt(-a) [ tt(-bcp) [ tt(-I) ] ] ] [ tt(-iL) ] ...)
+-item(tt(zmodload) tt(-u) [ tt(-abcdp) [ tt(-I) ] ] [ tt(-iL) ] ...)(
++xitem(tt(zmodload) [ tt(-a) [ tt(-bcpf) [ tt(-I) ] ] ] [ tt(-iL) ] ...)
++item(tt(zmodload) tt(-u) [ tt(-abcdpf) [ tt(-I) ] ] [ tt(-iL) ] ...)(
+ tt(zmodload) performs operations relating to zsh's loadable modules.
+ This feature is not available on all operating systems,
+ or on all installations on a particular operating system.
+@@ -1348,6 +1348,12 @@
+ item(tt(zmodload) tt(-up) [ tt(-i) ] var(parameter) ...)(
+ The tt(-p) option is like the tt(-b) and tt(-c) options, but makes
+ tt(zmodload) work on autoloaded parameters instead.
++)
++xitem(tt(zmodload) tt(-af) [ tt(-L) ])
++xitem(tt(zmodload) tt(-af) [ tt(-i) ] var(name) [ var(function) ... ])
++item(tt(zmodload) tt(-uf) [ tt(-i) ] var(function) ...)(
++The tt(-p) option is like the tt(-b), tt(-p), and tt(-c) options, but
++makes tt(zmodload) work on autoloaded math functions instead. 
+ )
+ xitem(tt(zmodload) tt(-a) [ tt(-L) ])
+ xitem(tt(zmodload) tt(-a) [ tt(-i) ] var(name) [ var(builtin) ... ])
+--- Etc/zsh-development-guide.old	Mon Sep 20 21:44:34 1999
++++ Etc/zsh-development-guide	Mon Sep 20 22:01:09 1999
+@@ -129,6 +129,7 @@
+                     autoloading (without the leading `-')
+   - autoprefixconds like autoinfixconds, but for prefix condition codes
+   - autoparams      parameters defined by the module, for autoloading
++  - automathfuncs   math functions defined by the module, for autoloading
+   - objects         .o files making up this module (*must* be defined)
+   - proto           .pro files for this module (default generated from $objects)
+   - headers         extra headers for this module (default none)
+@@ -397,6 +398,90 @@
+     deleteparamdefs(m->nam, patab, sizeof(patab)/sizeof(*patab));
+     ...
+   }
++
++Modules can also define math functions. Again, they are described
++using a table:
++
++  static struct mathfunc mftab[] = {
++    NUMMATHFUNC("sum", math_sum, 1, -1, 0),
++    STRMATHFUNC("length", math_length, 0),
++  };
++
++The `NUMMATHFUNC()' macro defines a math function that gets an array
++of mnumbers (the zsh type for representing values in arithmetic
++expressions) taken from the string in parentheses at the function
++call. Its arguments are the name of the function, the C-function
++implementing it, the minimum and maximum number of arguments (as
++usual, the later may be `-1' to specify that the function accepts any
++number of arguments), and finally an integer that is given unchanged
++to the C-function (to be able to implement multiple math functions in
++one C-function).
++
++The `STRMATHFUNC()' macro defines a math function that gets the string 
++in parentheses at the call as one string argument (without the
++parentheses). The arguments are the name of the function, the
++C-function, and an integer used like the last argument of
++`NUMMATHFUNC()'.
++
++The C-functions implementing the math functions look like this:
++
++  /**/
++  static mnumber
++  math_sum(char *name, int argc, mnumber *argv, int id)
++  {
++    ...
++  }
++
++  /**/
++  static mnumber
++  math_length(char *name, char *arg, int id)
++  {
++    ...
++  }
++
++Functions defined with `NUMMATHFUNC' get the name of the function, the 
++number of numeric arguments, an array with these arguments, and the
++last argument from the macro-call. Functions defined with
++`STRMATHFUNC' get the name of the function, the string between the
++parentheses at the call, and the last argument from the macro-call.
++
++Both types of functions return an mnumber which is a descriminated
++union looking like:
++
++  typedef struct {
++    union {
++      zlong l;
++      double d;
++    } u;
++    int type;
++  } mnumber;
++
++The `type' field should be set to `MN_INTEGER' or `MN_FLOAT' and
++depending on its value either `u.l' or `u.d' contains the value.
++
++To register and de-register math functions, the functions
++`addmathfuncs()' and `deletemathfuncs()' are used:
++
++  /**/
++  int
++  boot_example(Module m)
++  {
++    int ret;
++
++    ret = addmathfuncs(m->nam, mftab, sizeof(mftab)/sizeof(*mftab));
++    ...
++  }
++
++  /**/
++  int
++  cleanup_example(Module m)
++  {
++    deletemathfuncs(m->nam, mftab, sizeof(mftab)/sizeof(*mftab));
++    ...
++  }
++
++The arguments and return values are as for the functions used to
++register and de-register parameters, conditions, etc.
+ 
+ Modules can also define function hooks. Other modules can then add
+ functions to these hooks to make the first module call these functions
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,210 @@
+From zsh-workers-request@math.gatech.edu Tue Nov 17 08:22:13 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10935 invoked from network); 17 Nov 1998 08:22:11 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 17 Nov 1998 08:22:11 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id DAA10043;
+	Tue, 17 Nov 1998 03:19:34 -0500 (EST)
+Resent-Date: Tue, 17 Nov 1998 03:19:34 -0500 (EST)
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <981117001508.ZM4342@candle.brasslantern.com>
+Date: Tue, 17 Nov 1998 00:15:08 -0800
+In-Reply-To: <981116044345.ZM32703@candle.brasslantern.com>
+Comments: In reply to "Bart Schaefer" <schaefer@brasslantern.com>
+        "Re: Associative arrays and memory" (Nov 16,  4:43am)
+References: <199811160954.KAA10377@beta.informatik.hu-berlin.de> 
+	<981116044345.ZM32703@candle.brasslantern.com> 
+	<9811161716.AA45746@ibmth.df.unipi.it>
+In-Reply-To: <9811161716.AA45746@ibmth.df.unipi.it>
+Comments: In reply to Peter Stephenson <pws@ibmth.df.unipi.it>
+        "PATCH: 3.1.5: assoc array memory mucking around tedium" (Nov 16,  6:16pm)
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: zsh-workers@math.gatech.edu
+Subject: Re: assoc array memory mucking, and semantics of patterned keys
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"ho_5_1.0.sS2.M6JKs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4656
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+On Nov 16,  6:16pm, Peter Stephenson wrote:
+} Subject: PATCH: 3.1.5: assoc array memory mucking around tedium
+}
+} The following very dull patch is my current best guess to keep memory
+} management of AA's in order.  At this stage it's probably best for
+} other people (= Bart, presumably) to play with it, even if there's the
+} odd buglet remaining.
+
+Looks good.  I'm particularly pleased that you arranged for whole-array
+assignments to work, even if it does need ${(kv)assoc} on the rhs.
+
+Speaking of that:
+
+On Nov 16,  4:43am, Bart Schaefer wrote:
+} Subject: Re: Associative arrays and memory
+}
+} 	% bar=($foo)
+} 	% echo $bar[$foo[(i)w*]]
+} 	hello
+
+That should read
+
+	% bar=($foo)
+	% echo $bar[$foo[(i)w*]]
+	world
+
+Or
+
+	% bar=(${(k)foo})
+	% echo $bar[$foo[(i)w*]]
+	hello
+
+} That would fail if $foo[(i)w*] substituted "hello" instead of "1".
+} (Actually, there appears to be a bug in this code; the correct index is
+} not always substituted.  Patch hopefully to follow.)
+
+The scoop on that bug:  There's no problem when returning the index of a
+value, except as Sven noted that it returns a number rather than a key.
+The bug is with
+
+	% echo ${(k)foo[(i)h*]}
+
+which you'd expect to return the key index of "hello", which should be the
+same as the value index of "world".  Unfortunately, [(i)h*] is interpreted
+by getvalue() before paramsubst() has adjusted for the (k) flag, so even
+when asking for keys what is returned is the index of the value.
+
+So, in this example:
+
+} 	% echo ${(k)foo[@]}
+} 	hello
+} 	% echo ${(k)foo[(i)h*]}
+} 	1
+
+The current implementation returns 2 (past the end of the array), not 1,
+and in this example:
+
+} 	% echo ${(kv)foo[*]}
+} 	hello world
+} 	% echo ${(kv)foo[(i)w*]}
+} 	2
+
+it returns 1 rather than 2 because it hasn't counted the keys yet when
+the index is computed.
+
+There are a number of different ways to fix this, but I'd like to get
+agreement on what the semantics should be to help choose the best one.
+None of the following suggestions resolves the meaning of (k) used with
+ordinary array slices, nor a syntax for using a key pattern to "slice" AAs.
+
+The semantics of ordinary arrays are such that $array[(x)pat] for x
+in [rRiI] always matches pat against the values.  So one reasonable
+semantics is to decree that the same holds for AAs.  That gives the
+following interpretations:
+
+                        Associative Array        Ordinary Array
+                        -----------------        --------------
+  $param[key]           Value in param at key    Value in param at key
+                        or empty if none         or empty if none
+
+  ${(k)param[key]}      If key has a value,      If key has a value,
+                        then key, else empty     then key, else empty
+
+  $param[(r)pat]        Value in param that      Value in param that
+  $param[(R)pat]        matches pattern pat      matches pattern pat
+
+  $param[(i)pat]        Index in $param[@] of    Index in $param[@] of
+  $param[(I)pat]        value that matches pat   value that matches pat
+                        (_not_ key in $param)
+
+  ${(k)param[(r)pat]}   Key of a value that      None (or, alternately,
+  ${(k)param[(R)pat]}   that matches pat (not    same as $param[(i)pat]
+                        a key that matches)      and $param[(I)pat])
+
+  ${(k)param[(i)pat]}   As ${(k}param[(r)pat]}   As ${(k)param[(r)pat]}
+  ${(k)param[(I)pat]}   and ${(k}param[(R)pat]}  and ${(k)param[(R)pat]}
+
+  ${(kv)param[(r)pat]}  Key and value pair of    None (or, alternately,
+  ${(kv)param[(R)pat]}  value that matches pat   same as $param[(r)pat]
+                                                 and $param[(R)pat])
+
+  ${(kv)param[(i)pat]}  Key and value pair of    None (or, alternately,
+  ${(kv)param[(I)pat]}  value that matches pat   same as $param[(i)pat]
+                                                 and $param[(I)pat])
+
+This is nicely symmetrical, and adds a useful meaning for the (k) flag
+when given a non-pattern key with either array type.  The potential
+confusion is that (r) and (i) become equivalent when (k) is present, even
+if (v) is also present, but that's pretty minimal.
+
+Another possibility is similar to the above, except $param[(i)pat] on
+an AA would return a key, not just an index, and thus be equivalent to
+${(k)param[(r)pat]}.  I think this is less flexible, but some might find
+it more intuitive.
+
+The third possibility is that (k) would specify that keys were to be
+searched rather than values.  The last four rows of the table then read:
+
+  ${(k)param[(r)pat]}   If there is a key that   None (or, alternately,
+  ${(k)param[(R)pat]}   matches pat, then the    same as $param[(r)pat]
+                        value at that key, else  and $param[(R)pat])
+			empty
+
+  ${(k)param[(i)pat]}   If there is a key that   Same as $param[(i)pat]
+  ${(k)param[(I)pat]}   matches pat, then that   and $param[(I)pat]
+                        key, else empty
+
+  ${(kv)param[(r)pat]}  Key and value pair of    Same as $param[(r)pat]
+  ${(kv)param[(R)pat]}  key that matches pat     and $param[(R)pat]
+
+  ${(kv)param[(i)pat]}  Key and value pair of    Same as $param[(i)pat]
+  ${(kv)param[(I)pat]}  key that matches pat     and $param[(I)pat]
+
+Again, this could be combined with having $param[(i)pat] return a key
+rather than an index.  Note that there's no way to return a key/value pair
+for values that match the pattern.
+
+The final possibility is to change the meanings of (r) and (i) when an
+AA is involved, so that (r) means search the values and (i) means search
+the keys.  That changes these rows (4th, 6th, and 8th) in the original
+table:
+
+  $param[(i)pat]        A key that matches pat   Index of a value that
+  $param[(I)pat]        or empty if none         matches pat, or empty
+
+  ${(k)param[(i)pat]}   As $param[(i)pat]        As $param[(i)pat]
+  ${(k)param[(I)pat]}   and $param[(I)pat]       and $param[(I)pat]
+
+  ${(kv)param[(i)pat]}  Key and value pair of    Any of several; ignore
+  ${(kv)param[(I)pat]}  key that matches pat     either (k) or (v) to
+                                                 generate alternatives
+
+And adds this row:
+
+  ${(v)param[(i)pat]}   Value at a key that      As $param[(r)pat]
+  ${(v)param[(I)pat]}   matches pat              and $param[(R)pat]
+
+That last one makes this quite interesting, as it supplies an efficient
+way to accomplish something that can't be expressed at all in the first
+semantics I proposed, and that in the third semantics would be written as
+$param[${(k)param[(i)pat]}].  However, I worry that the difference in the
+meaning of (i) on associative arrays would be confusing.  Also, that last
+is the only case where (v) is required to get a value (because (i) ends up
+implying (k) otherwise).
+
+On a pragmatic note, the first and last possible semantics are the easiest
+to implement.  The middle three semantics require passing more data either
+into or back from of getvalue() than is currently being passed.  I also
+like the consistency of the first, but the expressiveness of the last.
+
+Anybody else have an opinion?
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

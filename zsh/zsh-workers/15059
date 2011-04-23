@@ -1,0 +1,193 @@
+From zsh-workers-return-15059-mason-zsh=primenet.com.au@sunsite.dk Sun Jun 24 18:29:58 2001
+Return-Path: <zsh-workers-return-15059-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28306 invoked from network); 24 Jun 2001 18:29:56 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 24 Jun 2001 18:29:56 -0000
+Received: (qmail 9365 invoked by alias); 24 Jun 2001 18:29:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15059
+Received: (qmail 9350 invoked from network); 24 Jun 2001 18:29:09 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010624182845.ZM9789@candle.brasslantern.com>
+Date: Sun, 24 Jun 2001 18:28:45 +0000
+In-Reply-To: <3B35D04E.F6F4E3A1@u.genie.co.uk>
+Comments: In reply to Oliver Kiddle <opk@u.genie.co.uk>
+        "named references" (Jun 24, 12:34pm)
+References: <3B35D04E.F6F4E3A1@u.genie.co.uk>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Oliver Kiddle <opk@u.genie.co.uk>, zsh-workers@sunsite.dk
+Subject: Re: named references
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Jun 24, 12:34pm, Oliver Kiddle wrote:
+} 
+} I've attached the text file where I've been jotting down any issues I've
+} thought of. There are a number of unusual issues (like the one with for
+} loops) so it is quite possible I've missed something.
+} 
+} I've also attached a patch of what I've done so far
+
+Having had a quick look at your patch, two things come to mind.
+
+First, I wish it wasn't necessary to waste an entire `struct param' on a
+nameref.  It's got a bunch of extra fields that a nameref can't possibly
+need.  I'd say you should create a new type of hash node, except that the
+implementation of `local' depends so much on the guts of `struct param'.
+
+Second, I think you're dealing with dereferencing in too many separate
+places.  It's almost always the case that dereference is wanted -- the
+only exception seems to be `unset -n'.  This suggests that dereference
+should be a hashtable-level operation rather than parameter-name-level.
+
+So I'd suggest adding to the union:
+
+    /* the value of this parameter */
+    union {
+	void *data;		/* used by special parameter functions    */
+	char **arr;		/* value if declared array   (PM_ARRAY)   */
+	char *str;		/* value if declared string  (PM_SCALAR)  */
+	zlong val;		/* value if declared integer (PM_INTEGER) */
+	double dval;		/* value if declared float
+				                    (PM_EFLOAT|PM_FFLOAT) */
+        HashTable hash;		/* value if declared assoc   (PM_HASHED)  */
+	HashNode ref;		/* value if declared nameref (PM_NAMEREF) */
+    } u;
+
+Then specialize getparamnode() and related functions to deref through the
+u.ref field, and leave most of the rest of the parameter code alone.  Use
+another SCANPM_* flag, which can be passed through fetchvalue(), to tell
+when NOT to do this extra dereference.
+
+The potential complication of the above is with `unset' of the node that
+is pointed-to.  It'll have to be more careful about freeing the memory;
+It'll have to set the PM_UNSET flag instead, and re-use the node if it
+becomes set again.  The other option is to continue using u.str as your
+patch does, and make a recursive call to getnode() or whatever, but that
+complicates other operations (like your overloading of `ct' to plus an
+extra loop to determine what `level' to look up in the referenced param).
+
+} I have not implemented ksh93's ${!ref}
+} which expands to whatever ref is a reference to. This syntax is a csh
+} style history reference in zsh, so I feared that any attempt by me to
+} implement it would break something else.
+
+I don't think that's an issue.  Just implement it in the most direct
+way, without paying any attention to history, and it'll "just work" in
+ksh emulation mode when nobanghist is in effect.  Then also provide a
+corresponding expansion flag for regular zsh use.
+
+} with a parameter expansion flag (possibly two to allow a single
+} dereference in addition to ksh's full dereference?)?
+
+I don't think that's necessary, but it raises the question of what really
+happens when a reference-to-a-reference is made.  That is:
+
+	typeset v1 v2
+	typeset -n r1=v1
+	typeset -n r2=r1
+	typeset -n r1=v2
+
+At this point, is r2 still a reference to v1, or has it become a reference
+to v2?  That is, is r1 dereferenced at the time of assignment to r2, or
+not until time of dereference of r2?  This ...
+
+} cycles and self-references blocked
+}   $ typeset -n ref=val
+}   $ typeset -n val=ref
+}   ksh: typeset: val: invalid self reference
+
+... tends to indicate that a dereference is performed at the time of the
+assignment, if only to discover the loop.
+
+I'm also a bit confused by this:
+
+} also, the element of an array, assoc can not be a reference, just as it
+} can't be a float etc:
+}   $ typeset -n ref[1]=val
+}   ksh: typeset: ref: reference variable cannot be an array
+
+Because later you say:
+
+} in ksh, typeset -n ref[one]=val is allowed with [one] ignored
+
+Which is it?
+
+} references can't be exported
+} local applies to the reference not the variable
+
+What exactly does "local applies to the reference" mean?  I presume it
+means it hides the name of the nameref, turning it into a local name
+that may not even be a nameref any more.
+
+} in ksh though:
+}   $ typeset -n -r ref=val
+}   ksh: typeset: ref: is read only
+} might be good if this would define ref as a readonly reference
+
+I don't understand what the ksh error message means has happened.  I do
+understand what you mean by a read-only reference:  It would mean that
+an assignment `val=newval' would succeed, but `ref=newval' would not.
+  
+} typeset +n ref converts ref to a scalar
+
+A scalar having what value?  The name of the previously referenced param?
+
+} if ksh is given an nameref as the index to a for loop it assigns the
+} values as for the reference, not the value. It could be very useful
+} but isn't what what you'd first expect. Is there a good alternative to
+} avoid this:
+}   $ typeset -n ref=dummy
+}   $ for ref in var1 var2 ...
+
+So what you mean is that, in ksh, the two lines above are the same as
+
+    for name in var1 var2; do typeset -n ref=$name; ...
+
+Hence at the end of the loop `typeset ref' will say `nameref ref=var2'?
+(Or does `typeset ref' not work that way?  See below.)
+
+} reference records the local level [...]
+} because of the above, it needs to handle the situation where
+} unset ref is done in the function above and also where ref is
+} then also reassigned a value.
+
+Using an actual u.ref pointer to the referenced node would deal with all
+of this in a very straightforward manner, I think.
+ 
+} ksh is not clever enough to allow typeset -n ref=ref in a function though
+
+What is the actual complaint?
+ 
+} Extra issues in zsh:
+} 
+} local should be implied for typeset -n without +l.
+
+You mean without -g ?  +l is `not lowercase'.  I suppose ksh has used -l
+for `local'?  (See previous mail I've sent about whether ksh emulation
+mode should change the meanings of some options to typeset.)
+
+} what should ${(t)ref} return - the same as what it refers to with -nameref-
+} inserted?
+
+It should correspond to `typeset -n ref=val; typeset ref'.
+ 
+} should we use namerefs for prompt, rprompt, PROMPT-PROMPT4?
+
+Possibly.  Definitely we should for ZLS_COLO(|U)RS, colo(|u)rs, etc.
+
+} how messy will references to specials be?
+
+I think they won't be messy with my suggested implementation, but I admit
+I haven't tried to work out all the details.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

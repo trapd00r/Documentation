@@ -1,0 +1,288 @@
+From zsh-workers-return-11440-mason-zsh=primenet.com.au@sunsite.auc.dk Wed May 17 12:07:36 2000
+Return-Path: <zsh-workers-return-11440-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1620 invoked from network); 17 May 2000 12:07:34 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 May 2000 12:07:34 -0000
+Received: (qmail 5949 invoked by alias); 17 May 2000 12:07:18 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11440
+Received: (qmail 5942 invoked from network); 17 May 2000 12:07:17 -0000
+Date: Wed, 17 May 2000 14:06:08 +0200 (MET DST)
+Message-Id: <200005171206.OAA00472@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Fri, 12 May 2000 09:14:29 +0000
+Subject: Re: Conditional styles and free-association thereon
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> On a slightly different note ... every time "eval"ing something else
+> gets mentioned, I worry again that the completion system has created a
+> security hole you culd drop all of Microsoft through.  The number of
+> things that autoload and execute when you press TAB has exceeded all my
+> expectations from when I first began discussing a function-based system.
+> I'm on the verge of suggesting that the zsh/complete module should refuse
+> to load if EUID == 0.
+> 
+> At the least, shouldn't compinit check the directories (and files?) in
+> $fpath for unsafe write permissions?
+
+My suggestion would be the patch below which I won't commit until
+someone says it's OK.
+
+
+It makes compinit ask if the completion system should really be used
+if 1) EUID == 0 or 2) there are world-writable directories in the
+fpath or world-writable files used by the completion system. The
+option -Q can be used to keep it from asking (and performing the
+tests). This means that normally the tests will even be done for
+normal users, maybe we should change that and add the -q option to
+allow mere mortals to get the tests?
+
+The patch also adds the -C option which keeps compinit from looking
+for new function files if there is a dump file. A small optimisation
+for people who don't write their own functions. Dunno if this is worth 
+it, though.
+
+That first hunk makes the dump file nicer again.
+
+Bye
+ Sven
+
+diff -u -r ../oz/Completion/Core/compdump ./Completion/Core/compdump
+--- ../oz/Completion/Core/compdump	Tue May 16 22:07:25 2000
++++ ./Completion/Core/compdump	Tue May 16 22:50:16 2000
+@@ -93,9 +93,9 @@
+ while (( $#_d_als )); do
+   if (( ! $+_compautos[$_d_als[1]] )); then
+     print -n " $_d_als[1]"
+-    if (( _i-- && $#_d_als > 1 )); then
++    if (( ! _i-- && $#_d_als > 1 )); then
+       _i=5
+-      print -n '\nautoload -U'
++      print -n ' \\\n           '
+     fi
+   fi
+   shift _d_als
+diff -u -r ../oz/Completion/Core/compinit ./Completion/Core/compinit
+--- ../oz/Completion/Core/compinit	Tue May 16 22:07:25 2000
++++ ./Completion/Core/compinit	Tue May 16 22:46:21 2000
+@@ -61,26 +61,43 @@
+ setopt extendedglob
+ 
+ typeset _i_dumpfile _i_files _i_line _i_done _i_dir _i_autodump=1
+-typeset _i_tag _i_file _i_addfiles
++typeset _i_tag _i_file _i_addfiles _i_query=yes _i_check=yes
+ 
+-while [[ $# -gt 0 && $1 = -[dDf] ]]; do
+-  if [[ "$1" = -d ]]; then
++while [[ $# -gt 0 && $1 = -[dDfQC] ]]; do
++  case "$1" in
++  -d)
+     _i_autodump=1
+     shift
+-    if [[ $# -gt 0 && "$1" != -[df] ]]; then
++    if [[ $# -gt 0 && "$1" != -[dfQC] ]]; then
+       _i_dumpfile="$1"
+       shift
+     fi
+-  elif [[ "$1" = -D ]]; then
++    ;;
++  -D)
+     _i_autodump=0
+     shift
+-  elif [[ "$1" = -f ]]; then
++    ;;
++  -f)
+     # Not used any more; use _compdir
+     shift
+     shift
+-  fi
++    ;;
++  -Q)
++    _i_query=
++    shift
++    ;;
++  -C)
++    _i_check=
++    shift
++    ;;
++  esac
+ done
+ 
++[[ -n "$_i_query" ]] &&
++  { (( EGID )) ||
++    read -q '?The completion system may be insecure, really use it [yn]? ' ||
++    return 1 }
++
+ # The associative array containing the definitions for the commands.
+ # Definitions for patterns will be stored in the associations `_patcomps'
+ # and `_postpatcomps'. `_compautos' contains the names and options
+@@ -322,7 +339,7 @@
+ 
+ Note that the values for the styles may be partly incorrect. Please
+ read the manual to find out how to configure the completion system
+-with styles.
++with styles or use the \`compinstall' function.
+ 
+ Have fun
+ 
+@@ -424,48 +441,68 @@
+ # Now we automatically make the definition files autoloaded.
+ 
+ typeset -U _i_files
+-_i_files=( ${^~fpath:/.}/^([^_]*|*~|*.zwc)(N:t) )
+-if [[ $#_i_files -lt 20 || $_compdir = */Core || -d $_compdir/Core ]]; then
+-  # Too few files:  we need some more directories,
+-  # or we need to check that all directories (not just Core) are present.
+-  if [[ -n $_compdir ]]; then
+-    _i_addfiles=()
+-    if [[ $_compdir = */Core ]]; then
+-      # Add all the Completion subdirectories
+-      _i_addfiles=(${_compdir:h}/*(/))
+-    elif [[ -d $_compdir/Core ]]; then
+-      # Likewise
+-      _i_addfiles=(${_compdir}/*(/))
++
++if [[ -n "$_i_check" ]]; then
++  _i_files=( ${^~fpath:/.}/^([^_]*|*~|*.zwc)(N:t) )
++  if [[ $#_i_files -lt 20 || $_compdir = */Core || -d $_compdir/Core ]]; then
++    # Too few files:  we need some more directories,
++    # or we need to check that all directories (not just Core) are present.
++    if [[ -n $_compdir ]]; then
++      _i_addfiles=()
++      if [[ $_compdir = */Core ]]; then
++        # Add all the Completion subdirectories
++        _i_addfiles=(${_compdir:h}/*(/))
++      elif [[ -d $_compdir/Core ]]; then
++        # Likewise
++        _i_addfiles=(${_compdir}/*(/))
++      fi
++      for _i_line in {1..$#i_addfiles}; do
++        _i_file=${_i_addfiles[$_i_line]}
++        [[ -d $_i_file && -z ${fpath[(r)$_i_file]} ]] ||
++          _i_addfiles[$_i_line]=
++      done
++      fpath=($fpath $_i_addfiles)
++      _i_files=( ${^~fpath:/.}/^([^_]*|*~|*.zwc)(N:t) )
+     fi
+-    for _i_line in {1..$#i_addfiles}; do
+-      _i_file=${_i_addfiles[$_i_line]}
+-      [[ -d $_i_file && -z ${fpath[(r)$_i_file]} ]] ||
+-        _i_addfiles[$_i_line]=
+-    done
+-    fpath=($fpath $_i_addfiles)
+-    _i_files=( ${^~fpath:/.}/^([^_]*|*~|*.zwc)(N:t) )
+   fi
+-fi
++  if [[ -n "$_i_query" ]]; then
++    typeset _i_wdirs _i_wfiles _i_q
+ 
++    _i_wdirs=( $^fpath(Nf:o+w:) )
++    _i_wfiles=( ${^~fpath:/.}/^([^_]*|*~|*.zwc)(Nf:o+w:) )
++    case "${#_i_wdirs}:${#_i_wfiles}" in
++    0:0) _i_q= ;;
++    0:*) _i_q=files ;;
++    *:0) _i_q=directories ;;
++    *:*) _i_q='directories and files' ;;
++    esac
+ 
+-# Rebind the standard widgets
+-for _i_line in complete-word delete-char-or-list expand-or-complete \
+-  expand-or-complete-prefix list-choices menu-complete \
+-  menu-expand-or-complete reverse-menu-complete; do
+-  zle -C $_i_line .$_i_line _main_complete
+-done
+-zle -la menu-select && zle -C menu-select .menu-select _main_complete
++    if [[ -n "$_i_q" ]] &&
++       ! read -q "?There are world-writable $_i_q, continue [yn]? "; then
++      unfunction compinit compdef compconf
++      unset _comp_dumpfile compprefuncs comppostfuncs \
++            _comps _patcomps _postpatcomps _compautos _lastcomp
+ 
+-_i_done=''
++      return 1
++    fi
++  fi
++fi
+ 
+ # Make sure compdump is available, even if we aren't going to use it.
+ autoload -U compdump compinstall
+ 
+ # If we have a dump file, load it.
+ 
++_i_done=''
++
+ if [[ -f "$_comp_dumpfile" ]]; then
+-  read -rA _i_line < "$_comp_dumpfile"
+-  if [[ _i_autodump -eq 1 && $_i_line[2] -eq $#_i_files ]]; then
++  if [[ -n "$_i_check" ]]; then
++    read -rA _i_line < "$_comp_dumpfile"
++    if [[ _i_autodump -eq 1 && $_i_line[2] -eq $#_i_files ]]; then
++      builtin . "$_comp_dumpfile"
++      _i_done=yes
++    fi
++  else
+     builtin . "$_comp_dumpfile"
+     _i_done=yes
+   fi
+@@ -500,5 +537,15 @@
+   fi
+ fi
+ 
++# Rebind the standard widgets
++for _i_line in complete-word delete-char-or-list expand-or-complete \
++  expand-or-complete-prefix list-choices menu-complete \
++  menu-expand-or-complete reverse-menu-complete; do
++  zle -C $_i_line .$_i_line _main_complete
++done
++zle -la menu-select && zle -C menu-select .menu-select _main_complete
++
+ unfunction compinit
+ autoload -U compinit
++
++return 0
+diff -u -r ../oz/Doc/Zsh/compsys.yo ./Doc/Zsh/compsys.yo
+--- ../oz/Doc/Zsh/compsys.yo	Tue May 16 22:07:17 2000
++++ ./Doc/Zsh/compsys.yo	Tue May 16 23:00:01 2000
+@@ -92,7 +92,10 @@
+ and produce a new dump file.  However, if the name of a function or the
+ arguments in the first line of a tt(#compdef) function (as described below)
+ change, it is easiest to delete the dump file by hand so that
+-tt(compinit) will re-create it the next time it is run.
++tt(compinit) will re-create it the next time it is run. The check
++performed to see if there are new functions can be omitted by giving
++the option tt(-C). In this case the dump file will only be created if
++there isn't one already.
+ 
+ The dumping is actually done by another function, tt(compdump), but you
+ will only need to run this yourself if you change the configuration
+@@ -102,6 +105,17 @@
+ If the parameter tt(_compdir) is set, tt(compinit) uses it as a directory
+ where completion functions can be found; this is only necessary if they are
+ not already in the function search path.
++
++For security reasons tt(compinit) also performs some tests and will
++ask if the completion system should really be used when these tests
++fail. When the shell is run with super-user rights, it will
++immediately ask because the completion system can potentially call a
++lot of functions defined in various places which might be a security
++hole if tt($fpath) isn't set up carefully. The second test is performed 
++for all users: it checks if there are any world-writable directories
++in tt($fpath) or if one of the files used by the completion system is
++world-writable. By giving the option tt(-Q) tt(compinit) can be forced
++to not execute the tests.
+ 
+ subsect(Autoloaded files)
+ cindex(completion system, autoloaded functions)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

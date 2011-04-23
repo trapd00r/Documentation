@@ -1,0 +1,441 @@
+From zsh-workers-return-17384-mason-zsh=primenet.com.au@sunsite.dk Sun Jun 30 20:51:05 2002
+Return-Path: <zsh-workers-return-17384-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11225 invoked from network); 30 Jun 2002 20:51:04 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 30 Jun 2002 20:51:04 -0000
+Received: (qmail 22704 invoked by alias); 30 Jun 2002 20:50:59 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17384
+Received: (qmail 22693 invoked from network); 30 Jun 2002 20:50:58 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: zle recursive editing.
+Date: Sun, 30 Jun 2002 21:53:04 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20020630205309.25E531C0C9@pwstephenson.fsnet.co.uk>
+
+This simple patch (only the trivial function recursiveedit is new, the
+rest is just rearrangement, mostly to move the core functions from
+zlemain to a new function zlecore) has a lot of mileage.  The widget
+`recursive-edit' gives control to zle, then returns it to the widget in
+question at the point the line would usually be accepted or aborted,
+with status 0 or status 1 respectively.  This makes it easy to restore
+status, and also to propagate the accept/break to the top level if you
+want to.
+
+The internal recursiveedit only handles the variables `errflag' and
+`done' and redisplaying on entry.  There may be some other things I have
+missed, though testing during the week suggests this covers the essentials.
+
+Apart from the example in the manual entry, here are a few others I have
+been playing with.  I hope there are lots more.
+
+
+edit-file: a zed lookalike, except the file to be edited is a word on
+the current command line.  When you have finished, the command line is
+restored.
+
+  # This function allows you to edit a small file mentioned on the command
+  # line inside the shell.  Invoking the function when the cursor is on or
+  # after a word containing the name of the file temporarily replaces the
+  # contents of the line editor's buffer with the contents of the file, if
+  # any.  Typing ^j (or ZZ in vicmd mode) saves the file, send-break (^G in
+  # Emacs mode) aborts.  At this point the original command line is restored.
+
+  emulate -L zsh
+  setopt extendedglob
+
+  local lbuffer=$LBUFFER rbuffer=$RBUFFER mark=$MARK
+  local lwords words cleanup
+  integer stat
+
+  lwords=(${(z)LBUFFER})
+  words=(${(z)BUFFER})
+
+  local file=${(Q)words[${#lwords}]} msg
+
+  if [[ ! -f $file ]]; then
+    if [[ ! -d $file && -w ${file:h} ]]; then
+      msg=Creating
+      BUFFER=
+    else
+      zle -M "Can't create $file."
+      return 1
+    fi
+  elif [[ ! -w $file ]]; then
+    zle -M "File $file not writeable."
+    return 1
+  else
+    msg=Editing
+    BUFFER="$(<$file)"
+  fi
+
+  CURSOR=1
+
+  # copied from zed
+  cleanup="$(bindkey -L "^M"; bindkey -L -M emacs "^X^W"; bindkey -aL "ZZ")"
+  bindkey '^m' self-insert-unmeta
+  bindkey -M emacs "^X^W" accept-line
+  bindkey -a "ZZ" accept-line
+
+  zle -M "*** $msg ${file:t}, hit ^j to save, ^g to abort ***"
+
+  if zle recursive-edit; then
+    print $BUFFER >$file
+  else
+    zle -M "Aborted."
+  fi
+
+  LBUFFER=$lbuffer RBUFFER=$rbuffer MARK=$mark
+
+  eval $cleanup
+
+
+recursive-predict: another way of using the predict-on stuff provided
+with the distribution.  Exercise for the user:  restore the original
+command line if the mode is aborted instead of exited normally.
+
+  # Provides an alternative and possibly more convenient interface
+  # to the predict-on function, q.v.  You should not need to make special
+  # arrangements for loading or binding the functions in that file.
+  #
+  # Predict mode is exited at any point the line would usually be accepted
+  # or abandoned.  At that point, normal editing is restored.  Hence you
+  # will require two `return's to accept a line from inside predict mode.
+
+  autoload -U predict-on
+
+  predict-on
+
+  zle -M '[Recursive predict]'
+
+  zle recursive-edit
+
+  predict-off
+
+  zle -M '[Recursive prediction off]'
+
+
+list-select:  an example of a widget which allows you to select
+something to be inserted from a list just by scrolling up and down it.
+This particular example isn't useful.  Exercise for the reader:
+retrieve the list from a function related to the name of the widget.
+
+  local savel=$LBUFFER saver=$RBUFFER sel
+  integer stat
+
+  # Obviously, the following list should be something useful.
+  # Generating this via a style might be appropriate.
+  list=(hocus pocus magic crocus)
+
+  local pretext="$LBUFFER$RBUFFER
+  * Select one of the following *
+  "
+
+  LBUFFER="$pretext${list[1]}"
+  RBUFFER="
+  ${(F)list[2,-1]}"
+
+  zle recursive-edit
+  # No good if this returned non-zero
+  stat=$?
+
+  # No good if the cursor isn't in the list
+  [[ $CURSOR -lt ${#pretext} ]] && stat=1
+
+  sel="${LBUFFER##*$'\n'}${RBUFFER%%$'\n'*}"
+
+  LBUFFER=$savel
+  RBUFFER=$saver
+
+  (( !$stat )) && LBUFFER+=$sel
+
+  return $stat
+
+
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.22
+diff -u -r1.22 zle.yo
+--- Doc/Zsh/zle.yo	24 Jun 2002 09:52:01 -0000	1.22
++++ Doc/Zsh/zle.yo	30 Jun 2002 20:23:27 -0000
+@@ -1620,6 +1620,48 @@
+ construct into the editor buffer.
+ The latter is equivalent to tt(push-input) followed by tt(get-line).
+ )
++tindex(recursive-edit)
++item(tt(recursive-edit))(
++Only useful from a user-defined widget.  At this point in the function,
++the editor regains control until one of the standard widgets which would
++normally cause zle to exit (typically an tt(accept-line) caused by
++hitting the return key) is executed.  Instead, control returns to the
++user-defined widget.  The status returned is non-zero if the return was
++caused by an error, but the function still continues executing and hence
++may tidy up.  This makes it safe for the user-defined widget to alter
++the command line or key bindings temporarily.
++
++
++The following widget, tt(caps-lock), serves as an example.
++example(self-insert-ucase() {
++  LBUFFER+=${(U)KEYS[-1]}
++}
++
++integer stat
++
++zle -N self-insert self-insert-ucase
++zle -A caps-lock save-caps-lock
++zle -A accept-line caps-lock
++
++zle recursive-edit
++stat=$?
++
++zle -A .self-insert self-insert
++zle -A save-caps-lock caps-lock
++zle -D save-caps-lock
++
++(( stat )) && zle send-break
++
++return $stat
++)
++This causes typed letters to be inserted capitalised until either
++tt(accept-line) (i.e. typically the return key) is typed or the
++tt(caps-lock) widget is invoked again; the later is handled by saving
++the old definition of tt(caps-lock) as tt(save-caps-lock) and then
++rebinding it to invoke tt(accept-line).  Note that an error from the
++recursive edit is detected as a non-zero return status and propagated by
++using the tt(send-break) widget.
++)
+ tindex(redisplay)
+ item(tt(redisplay) (unbound) (^R) (^R))(
+ Redisplays the edit buffer.
+Index: Src/Zle/iwidgets.list
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/iwidgets.list,v
+retrieving revision 1.3
+diff -u -r1.3 iwidgets.list
+--- Src/Zle/iwidgets.list	12 Apr 2000 08:24:16 -0000	1.3
++++ Src/Zle/iwidgets.list	30 Jun 2002 20:23:27 -0000
+@@ -85,6 +85,7 @@
+ "quoted-insert", quotedinsert, ZLE_MENUCMP | ZLE_KEEPSUFFIX
+ "quote-line", quoteline, 0
+ "quote-region", quoteregion, 0
++"recursive-edit", recursiveedit, ZLE_MENUCMP | ZLE_KEEPSUFFIX | ZLE_LASTCOL
+ "redisplay", redisplay, ZLE_MENUCMP | ZLE_KEEPSUFFIX | ZLE_LASTCOL
+ "redo", redo, ZLE_KEEPSUFFIX
+ "reverse-menu-complete", reversemenucomplete, ZLE_MENUCMP | ZLE_KEEPSUFFIX | ZLE_ISCOMP
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.24
+diff -u -r1.24 zle_main.c
+--- Src/Zle/zle_main.c	6 Jun 2002 09:04:47 -0000	1.24
++++ Src/Zle/zle_main.c	30 Jun 2002 20:23:36 -0000
+@@ -89,10 +89,11 @@
+ static int eofsent;
+ static long keytimeout;
+ 
+-#ifdef HAVE_SELECT
++#if defined(HAVE_SELECT) || defined(HAVE_POLL)
+ /* Terminal baud rate */
+ 
+ static int baud;
++static long costmult;
+ #endif
+ 
+ /* flags associated with last command */
+@@ -631,6 +632,74 @@
+     return ret;
+ }
+ 
++/**/
++void
++zlecore(void)
++{
++#if !defined(HAVE_POLL) && defined(HAVE_SELECT)
++    struct timeval tv;
++    fd_set foofd;
++
++    FD_ZERO(&foofd);
++#endif
++
++    zrefresh();
++
++    while (!done && !errflag) {
++
++	statusline = NULL;
++	vilinerange = 0;
++	reselectkeymap();
++	selectlocalmap(NULL);
++	bindk = getkeycmd();
++	if (!ll && isfirstln && unset(IGNOREEOF) && c == eofchar) {
++	    eofsent = 1;
++	    break;
++	}
++	if (bindk) {
++	    if (execzlefunc(bindk, zlenoargs))
++		handlefeep(zlenoargs);
++	    handleprefixes();
++	    /* for vi mode, make sure the cursor isn't somewhere illegal */
++	    if (invicmdmode() && cs > findbol() &&
++		(cs == ll || line[cs] == '\n'))
++		cs--;
++	    if (undoing)
++		handleundo();
++	} else {
++	    errflag = 1;
++	    break;
++	}
++#ifdef HAVE_POLL
++	if (baud && !(lastcmd & ZLE_MENUCMP)) {
++	    struct pollfd pfd;
++	    int to = cost * costmult / 1000; /* milliseconds */
++
++	    if (to > 500)
++		to = 500;
++	    pfd.fd = SHTTY;
++	    pfd.events = POLLIN;
++	    if (!kungetct && poll(&pfd, 1, to) <= 0)
++		zrefresh();
++	} else
++#else
++# ifdef HAVE_SELECT
++	if (baud && !(lastcmd & ZLE_MENUCMP)) {
++	    FD_SET(SHTTY, &foofd);
++	    tv.tv_sec = 0;
++	    if ((tv.tv_usec = cost * costmult) > 500000)
++		tv.tv_usec = 500000;
++	    if (!kungetct && select(SHTTY+1, (SELECT_ARG_2_T) & foofd,
++				    NULL, NULL, &tv) <= 0)
++		zrefresh();
++	} else
++# endif
++#endif
++	    if (!kungetct)
++		zrefresh();
++    }
++}
++
+ /* Read a line.  It is returned metafied. */
+ 
+ /**/
+@@ -641,14 +710,7 @@
+     int old_errno = errno;
+     int tmout = getiparam("TMOUT");
+ 
+-#if defined(HAVE_SELECT) || defined(HAVE_POLL)
+-    long costmult;
+-# ifdef HAVE_POLL
+-# else
+-    struct timeval tv;
+-    fd_set foofd;
+-# endif
+-
++#if defined(HAVE_POLL) || defined(HAVE_SELECT)
+     baud = getiparam("BAUD");
+     costmult = (baud) ? 3840000L / baud : 0;
+ #endif
+@@ -693,11 +755,6 @@
+ 
+     zlereadflags = flags;
+     histline = curhist;
+-#ifndef HAVE_POLL
+-# ifdef HAVE_SELECT
+-    FD_ZERO(&foofd);
+-# endif
+-#endif
+     undoing = 1;
+     line = (unsigned char *)zalloc((linesz = 256) + 2);
+     virangeflag = lastcmd = done = cs = ll = mark = 0;
+@@ -732,60 +789,9 @@
+     lastcol = -1;
+     initmodifier(&zmod);
+     prefixflag = 0;
+-    zrefresh();
+-    while (!done && !errflag) {
+ 
+-	statusline = NULL;
+-	vilinerange = 0;
+-	reselectkeymap();
+-	selectlocalmap(NULL);
+-	bindk = getkeycmd();
+-	if (!ll && isfirstln && unset(IGNOREEOF) && c == eofchar) {
+-	    eofsent = 1;
+-	    break;
+-	}
+-	if (bindk) {
+-	    if (execzlefunc(bindk, zlenoargs))
+-		handlefeep(zlenoargs);
+-	    handleprefixes();
+-	    /* for vi mode, make sure the cursor isn't somewhere illegal */
+-	    if (invicmdmode() && cs > findbol() &&
+-		(cs == ll || line[cs] == '\n'))
+-		cs--;
+-	    if (undoing)
+-		handleundo();
+-	} else {
+-	    errflag = 1;
+-	    break;
+-	}
+-#ifdef HAVE_POLL
+-	if (baud && !(lastcmd & ZLE_MENUCMP)) {
+-	    struct pollfd pfd;
+-	    int to = cost * costmult / 1000; /* milliseconds */
++    zlecore();
+ 
+-	    if (to > 500)
+-		to = 500;
+-	    pfd.fd = SHTTY;
+-	    pfd.events = POLLIN;
+-	    if (!kungetct && poll(&pfd, 1, to) <= 0)
+-		zrefresh();
+-	} else
+-#else
+-# ifdef HAVE_SELECT
+-	if (baud && !(lastcmd & ZLE_MENUCMP)) {
+-	    FD_SET(SHTTY, &foofd);
+-	    tv.tv_sec = 0;
+-	    if ((tv.tv_usec = cost * costmult) > 500000)
+-		tv.tv_usec = 500000;
+-	    if (!kungetct && select(SHTTY+1, (SELECT_ARG_2_T) & foofd,
+-				    NULL, NULL, &tv) <= 0)
+-		zrefresh();
+-	} else
+-# endif
+-#endif
+-	    if (!kungetct)
+-		zrefresh();
+-    }
+     statusline = NULL;
+     invalidatelist();
+     trashzle();
+@@ -1231,6 +1237,20 @@
+     showmsg(ff.msg);
+     zsfree(ff.msg);
+     return 0;
++}
++
++/**/
++int
++recursiveedit(char **args)
++{
++    int locerror;
++
++    zlecore();
++
++    locerror = errflag;
++    errflag = done = 0;
++
++    return locerror;
+ }
+ 
+ /**/
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

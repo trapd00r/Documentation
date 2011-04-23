@@ -1,0 +1,339 @@
+From zsh-workers-request@math.gatech.edu  Thu Nov 16 02:34:58 1995
+Received: from math.gatech.edu (euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with SMTP id CAA10274 for <mason@werple.mira.net.au>; Thu, 16 Nov 1995 02:34:45 +1100 (EST)
+Received: by math.gatech.edu (5.x/SMI-SVR4)
+	id AA20940; Wed, 15 Nov 1995 10:03:53 -0500
+Resent-Date: Wed, 15 Nov 1995 15:58:38 +0100
+Old-Return-Path: <pws@ifh.de>
+Message-Id: <9511151458.AA00324@sgi.ifh.de>
+To: zsh-workers@math.gatech.edu
+Subject: Alias fix
+In-Reply-To: "coleman@math.gatech.edu"'s message of "Wed, 15 Nov 1995 00:32:52 MET."
+             <199511150532.AAA23979@redwood.skiles.gatech.edu> 
+Date: Wed, 15 Nov 1995 15:58:38 +0100
+From: Peter William Stephenson <pws@ifh.de>
+Resent-Message-Id: <"DuG4v.0.675.O5Wgm"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/611
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+> I was getting ready to release this as beta12, but last minute
+> testing showed that there is a massive memory leak when you do
+> filename completion.  I hadn't had a chance to look at it yet,
+> but I thought I would through it out for everyone to take a
+> look at
+
+The problem was this: with the new history code, spaces in the input
+line are significant.  For that reason, I had removed an extra space
+that was being added by alias expansion at the end of each alias text.
+Unfortunately, this meant that aliases were being removed from the
+stack too early, so if the alias referred to the command itself at the
+end of the expanded text (sticking noglob or nocorrect in front of
+something was the most common) it didn't know it was already expanding
+an alias and tried to do it again repeatedly.
+
+The problem wasn't trivial to solve while still keeping track of
+spaces.  The solution I've adopted (which has the major advantage over
+all the other things I thought about that it works) is to allow the
+aliases to be popped, but keep them in case the character before which
+the pop command was hiding is put back in the input queue, and at that
+point to restore the aliases.  As the code is fairly scrupulous about
+having the right lexical state for the job in hand, this fixes the
+problem.  A slight sophistication was that this has to happen even if
+lexstop is set (i.e. we have swallowed past the last token) to allow
+it to work when reading from strings.
+
+I'm not mad keen on this solution due to the extra code (see the last
+hunk), but I don't see a better way.  The positive side means that the
+use of the INP_SPACE hack to add an extra (bogus) space to the input
+for lexical purposes is now restricted to three calls in zle_tricky.c,
+each time with a specially allocated string, so I shall probably be
+able to remove it, which should shorten the input code and remove
+another potential source of errors.  I'll leave that for another
+patch.
+
+By the way, we don't need to do this with history expansion, since
+there's no recursive expansion problem; also `alstat' should take care
+of itself as we don't need to look at it until expanding the next
+word, so I haven't saved and restored that.  I've also taken the
+opportunity to alter the input stack code too; it looked like I made a
+mess of making it expand.
+
+I've just discovered another bug, not yet fixed:  aliases ending in
+spaces leave the spaces in the history line.  I'll have a go at that
+next.
+
+*** Src/hist.c.inpal	Tue Nov 14 13:20:05 1995
+--- Src/hist.c	Wed Nov 15 14:29:01 1995
+***************
+*** 451,474 ****
+  void
+  hungetc(int c)
+  {
+!     if (lexstop)
+! 	return;
+!     if (expanding) {
+! 	cs--;
+! 	ll--;
+!     }
+  #if 0
+!     /* debugging only */
+!     if (hptr == chline)
+! 	zerr("hungetc attempted at buffer start", NULL, 0);
+!     else {
+  #endif
+- 	hptr--;
+- 	if (*hptr == (char)bangchar && unset(NOBANGHIST))
+  	    hptr--;
+  #if 0
+!     }
+  #endif
+      inungetc(c);
+  }
+  
+--- 451,474 ----
+  void
+  hungetc(int c)
+  {
+!     if (!lexstop) {
+! 	if (expanding) {
+! 	    cs--;
+! 	    ll--;
+! 	}
+  #if 0
+! 	/* debugging only */
+! 	if (hptr == chline)
+! 	    zerr("hungetc attempted at buffer start", NULL, 0);
+! 	else {
+  #endif
+  	    hptr--;
++ 	    if (*hptr == (char)bangchar && unset(NOBANGHIST))
++ 		hptr--;
+  #if 0
+! 	}
+  #endif
++     }
+      inungetc(c);
+  }
+  
+*** Src/input.c.inpal	Tue Nov  7 09:48:35 1995
+--- Src/input.c	Wed Nov 15 15:48:29 1995
+***************
+*** 95,100 ****
+--- 95,122 ----
+  
+  static int instacksz = INSTACK_INITIAL;
+  
++ /*
++  * Stack to deal with popped aliases.
++  * The problem is that we reach the end of the alias text and pop
++  * the alias at the point where we read the next character
++  * afterwards, which is probably whitespace, *then* go back and
++  * look to see if the expanded text needs re-expanding.  This
++  * means we need to keep track of the aliases we've popped and
++  * maybe add them back in if we unget the whitespace character.
++  *
++  * What happens is that ingetc(), when it pops an alias, sticks it on the
++  * stack, and inungetc() looks at that to see if it has to restore the
++  * alias(es); if so, the commands to pop an alias go back in the input
++  * queue. If ingetc() is called again, it sets the stack to zero.
++  * 
++  * We also need to be careful about `lexstop' when reading from a string.
++  * 
++  * Historical note:  the code used to add a bogus space to the end of
++  * aliases, after which the alias would be popped.  With the new
++  * history code, which keeps track of spaces correctly, this won't work.
++  */
++ static Alias *inalstack, *inalstacktop;
++ static int inalstacksz = INSTACK_INITIAL;
+  
+  /* Get the next character from the input.
+   * Will call inputline() to get a new line where necessary.
+***************
+*** 104,109 ****
+--- 126,132 ----
+  int
+  ingetc(void)
+  {
++     inalstacktop = inalstack;
+      for (;;) {
+  	if (inbufleft) {
+  	    inbufleft--;
+***************
+*** 116,124 ****
+  	 */
+  	if (inbufflags & INP_SPACE)  {
+  	    /*
+! 	     * INP_SPACE is flag from alias mechanism that space
+! 	     * should follow expanded alias.  It is also used
+! 	     * as a hack by zle_tricky.c.
+  	     */
+  	    inbufct--;		/* counts as a character in rest of shell */
+  	    inbufflags &= ~INP_SPACE; /* ready to back up if necessary... */
+--- 139,145 ----
+  	 */
+  	if (inbufflags & INP_SPACE)  {
+  	    /*
+! 	     * INP_SPACE is used as a hack by zle_tricky.c.
+  	     */
+  	    inbufct--;		/* counts as a character in rest of shell */
+  	    inbufflags &= ~INP_SPACE; /* ready to back up if necessary... */
+***************
+*** 144,149 ****
+--- 165,171 ----
+  		    alstat = ALSTAT_MORE;
+  		else
+  		    alstat = ALSTAT_JUNK;
++ 		inalpush(ix);
+  	    }
+  	}
+  
+***************
+*** 318,355 ****
+  void
+  inungetc(int c)
+  {
+!     if (lexstop)
+! 	return;
+!     if ((inbufflags & (INP_SPACE|INP_OLDSPACE)) == INP_OLDSPACE) {
+! 	/* Use the space hack.  This is necessary because sometimes we need
+! 	 * to back up the bogus space at the end of the line.
+! 	 * We don't need to check c since the combination of flags only occurs
+! 	 * if the last character got was a bogus space.
+! 	 */
+! 	inbufct++;		/* don't increment inbufleft, not in inbuf */
+! 	inbufflags |= INP_SPACE;
+! 	inbufflags &= ~INP_OLDSPACE; /* not necessary but cleaner */
+! 	return;
+!     }
+!     if (inbufptr != inbuf) {
+  #if 0
+! 	/* Just for debugging: enable only if foul play suspected. */
+! 	if (inbufptr[-1] != c)
+! 	    fprintf(stderr, "Warning: backing up wrong character.\n");
+  #endif
+! 	/* Just decrement the pointer:  if it's not the same
+! 	 * character being pushed back, we're in trouble anyway.
+! 	 */
+! 	inbufptr--;
+! 	inbufct++;
+! 	inbufleft++;
+!     }
+  #if 0
+!     else {
+! 	/* Just for debugging */
+! 	fprintf(stderr, "Attempt to inungetc() at start of input.\n");
+!     }
+  #endif
+  }
+  
+  /* stuff a whole file into the input queue and print it */
+--- 340,377 ----
+  void
+  inungetc(int c)
+  {
+!     if (!lexstop) {
+! 	if ((inbufflags & (INP_SPACE|INP_OLDSPACE)) == INP_OLDSPACE) {
+! 	    /* Use the space hack.  This is necessary because sometimes we
+! 	     * need to back up the bogus space at the end of the line.
+! 	     * We don't need to check c since the combination of flags only
+! 	     * occurs if the last character got was a bogus space.
+! 	     */
+! 	    inbufct++;		/* don't increment inbufleft, not in inbuf */
+! 	    inbufflags |= INP_SPACE;
+! 	    inbufflags &= ~INP_OLDSPACE; /* not necessary but cleaner */
+! 	} else if (inbufptr != inbuf) {
+  #if 0
+! 	    /* Just for debugging: enable only if foul play suspected. */
+! 	    if (inbufptr[-1] != c)
+! 		fprintf(stderr, "Warning: backing up wrong character.\n");
+  #endif
+! 	    /* Just decrement the pointer:  if it's not the same
+! 	     * character being pushed back, we're in trouble anyway.
+! 	     */
+! 	    inbufptr--;
+! 	    inbufct++;
+! 	    inbufleft++;
+! 	}
+  #if 0
+!         else {
+! 	    /* Just for debugging */
+! 	    fprintf(stderr, "Attempt to inungetc() at start of input.\n");
+! 	}
+  #endif
++     }
++     if (inalstacktop > inalstack)
++ 	inalrestore();
+  }
+  
+  /* stuff a whole file into the input queue and print it */
+***************
+*** 408,418 ****
+  	/* Initial stack allocation */
+  	instack = (struct instacks *)zalloc(instacksz*sizeof(struct instacks));
+  	instacktop = instack;
+!     } else if (instacktop > instack + instacksz) {
+  	/* Expand the stack */
+- 	instacksz += INSTACK_EXPAND;
+  	instack = (struct instacks *)
+! 	    realloc(instack, instacksz*sizeof(struct instacks));
+      }
+      instacktop->buf = inbuf;
+      instacktop->bufptr = inbufptr;
+--- 430,442 ----
+  	/* Initial stack allocation */
+  	instack = (struct instacks *)zalloc(instacksz*sizeof(struct instacks));
+  	instacktop = instack;
+!     } else if (instacktop == instack + instacksz) {
+  	/* Expand the stack */
+  	instack = (struct instacks *)
+! 	    realloc(instack,
+! 		    (instacksz + INSTACK_EXPAND)*sizeof(struct instacks));
+! 	instacktop = instack + instacksz;
+! 	instacksz += INSTACK_EXPAND;
+      }
+      instacktop->buf = inbuf;
+      instacktop->bufptr = inbufptr;
+***************
+*** 458,461 ****
+--- 482,513 ----
+  
+  	inpoptop();
+      } while (remcont);
++ }
++ 
++ /**/
++ void
++ inalpush(Alias al)
++ {
++     if (!inalstack) {
++ 	 inalstack = (Alias *)zalloc(inalstacksz*sizeof(Alias));
++ 	 inalstacktop = inalstack;
++     } else if (inalstacktop - inalstack == inalstacksz) {
++ 	inalstack = (Alias *)
++ 	    realloc(inalstack, (inalstacksz + INSTACK_EXPAND)*sizeof(Alias));
++ 	inalstacktop = inalstack + inalstacksz;
++ 	inalstacksz += INSTACK_EXPAND;
++     }
++     *inalstacktop++ = al;
++ }
++ 
++ /**/
++ void
++ inalrestore(void)
++ {
++     while (inalstacktop > inalstack) {
++ 	Alias al = *--inalstacktop;
++ 	alstack[alstackind++] = al;
++ 	al->inuse = 1;
++ 	inpush("", INP_ALIAS);
++     }
+  }
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

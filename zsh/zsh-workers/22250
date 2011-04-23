@@ -1,0 +1,154 @@
+From zsh-workers-return-22250-mason-zsh=primenet.com.au@sunsite.dk Mon Feb 13 08:17:22 2006
+Return-Path: <zsh-workers-return-22250-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21965 invoked from network); 13 Feb 2006 08:17:20 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.0 (2005-09-13) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 13 Feb 2006 08:17:20 -0000
+Received: (qmail 83197 invoked from network); 13 Feb 2006 08:17:14 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 13 Feb 2006 08:17:14 -0000
+Received: (qmail 13420 invoked by alias); 13 Feb 2006 08:17:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22250
+Received: (qmail 13411 invoked from network); 13 Feb 2006 08:17:10 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 13 Feb 2006 08:17:10 -0000
+Received: (qmail 82990 invoked from network); 13 Feb 2006 08:17:10 -0000
+Received: from dsl3-63-249-88-2.cruzio.com (HELO dot.blorf.net) (63.249.88.2)
+  by a.mx.sunsite.dk with SMTP; 13 Feb 2006 08:17:09 -0000
+Received: by dot.blorf.net (Postfix, from userid 1000)
+	id 383659DDC; Mon, 13 Feb 2006 00:17:08 -0800 (PST)
+Date: Mon, 13 Feb 2006 00:17:08 -0800
+From: Wayne Davison <wayned@users.sourceforge.net>
+To: zsh-workers@sunsite.dk
+Subject: difference between ${...=...} and ${...+...} with (j:_:)
+Message-ID: <20060213081708.GA31780@dot.blorf.net>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="VS++wcV0S1rZb1Fb"
+Content-Disposition: inline
+User-Agent: Mutt/1.5.11
+
+
+--VS++wcV0S1rZb1Fb
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+While looking at the multsub() code, I noticed something that may be
+inconsistent:
+
+    % foo=(1 2 3)
+    % unset ick; echo ${(j:_:)ick=$foo}
+    1 2 3
+    % echo ${(j:_:)ick+$foo}
+    1_2_3
+
+Now, the first case makes sense to me because the joined value of $foo
+gets assigned to $ick, and the 'j' flag applies to that variable (doing
+nothing).  The latter looks like a mistake, since $foo should get joined
+with the normal IFS char (since it is not the object of the 'j' flag).
+I would assume that the user should apply the 'j' flag directly to the
+array variable to get joining (both of which works right):
+
+    % foo=(1 2 3)
+    % unset ick; echo ${ick=${(j:_:)foo}}
+    1_2_3
+    % echo ${ick+${(j:_:)foo}}
+    1_2_3
+
+Is this an inconsistency?  Or a misunderstanding on my part?
+
+I'm also keen to change is the unused arg sent to multsub().  Currently
+the comment prior to the function says that it honors the sep arg when
+joining arrays, but it doesn't really.  Since it appears we don't need
+it, should we remove it?  I chose to re-active it, and just make all the
+current callers pass a NULL.
+
+Another thing I saw was some useless code in multsub() that checks if
+"l" is non-zero where it can't possibly be anything but 0.  I thought at
+first that the "if ((l = countlinknodes(&foo)))" check should be changed
+into "if ((l = countlinknodes(&foo)) > 1)", but it appears that some
+callers like to receive a 1-element array (fortunately, one of the test
+cases depends on this).  So, I'd suggest that we change that line to be
+"if ((l = countlinknodes(&foo)) > (a ? 0 : 1))", since this just avoids
+creating a one-element array if we're going to join it into a scalar
+(because the caller didn't give us a way to return an array).
+
+Attached is a patch that optimizes multsub(), makes its "sep" arg work
+again (though no callers currently use it), fixes the inconsistency
+mentioned at the start of this message, and gets rid of a superfluous
+"isarr = 0" assignment (due to both of the following multsub() calls
+now passing in &isarr).
+
+This seems safe enough to check in (assuming that item #1 needs to be
+changed).
+
+..wayne..
+
+--VS++wcV0S1rZb1Fb
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="multsub.patch"
+
+--- Src/subst.c	6 Feb 2006 11:57:06 -0000	1.44
++++ Src/subst.c	13 Feb 2006 07:35:53 -0000
+@@ -310,7 +310,7 @@ static int mult_isarr;
+ 
+ /**/
+ static int
+-multsub(char **s, char ***a, int *isarr, UNUSED(char *sep))
++multsub(char **s, char ***a, int *isarr, char *sep)
+ {
+     int l, omi = mult_isarr;
+     char **r, **p;
+@@ -325,7 +325,7 @@ multsub(char **s, char ***a, int *isarr,
+ 	mult_isarr = omi;
+ 	return 0;
+     }
+-    if ((l = countlinknodes(&foo))) {
++    if ((l = countlinknodes(&foo)) > (a ? 0 : 1)) {
+ 	p = r = hcalloc((l + 1) * sizeof(char*));
+ 	while (nonempty(&foo))
+ 	    *p++ = (char *)ugetnode(&foo);
+@@ -345,7 +345,7 @@ multsub(char **s, char ***a, int *isarr,
+ 	    mult_isarr = omi;
+ 	    return 0;
+ 	}
+-	*s = sepjoin(r, NULL, 1);
++	*s = sepjoin(r, sep, 1);
+ 	mult_isarr = omi;
+ 	if (isarr)
+ 	    *isarr = 0;
+@@ -2012,6 +2012,7 @@ paramsubst(LinkList l, LinkNode n, char 
+ 		 */
+ 		multsub(&val, (aspar ? NULL : &aval), &isarr, NULL);
+ 		copied = 1;
++		sep = NULL;
+ 	    }
+ 	    break;
+ 	case ':':
+@@ -2029,7 +2030,6 @@ paramsubst(LinkList l, LinkNode n, char 
+ 
+ 		*idend = '\0';
+ 		val = dupstring(s);
+-		isarr = 0;
+ 		/*
+ 		 * TODO: this is one of those places where I don't
+ 		 * think we want to do the joining until later on.
+@@ -2037,7 +2037,7 @@ paramsubst(LinkList l, LinkNode n, char 
+ 		 * point and unset them.
+ 		 */
+ 		if (spsep || spbreak || !arrasg)
+-		    multsub(&val, NULL, NULL, sep);
++		    multsub(&val, NULL, &isarr, NULL);
+ 		else
+ 		    multsub(&val, &aval, &isarr, NULL);
+ 		if (arrasg) {
+
+--VS++wcV0S1rZb1Fb--
+

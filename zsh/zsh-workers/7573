@@ -1,0 +1,152 @@
+From zsh-workers-return-7573-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Aug 31 11:28:43 1999
+Return-Path: <zsh-workers-return-7573-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25199 invoked from network); 31 Aug 1999 11:28:41 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 Aug 1999 11:28:41 -0000
+Received: (qmail 23346 invoked by alias); 31 Aug 1999 11:28:30 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7573
+Received: (qmail 23338 invoked from network); 31 Aug 1999 11:28:30 -0000
+Date: Tue, 31 Aug 1999 13:25:15 +0200 (MET DST)
+Message-Id: <199908311125.NAA29655@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 30 Aug 1999 14:43:44 +0000
+Subject: Re: prob: fg not sending CONT to 'make' children
+
+
+Bart Schaefer wrote:
+
+> On Aug 30, 10:21am, Sven Wischnowsky wrote:
+> } Subject: Re: prob: fg not sending CONT to 'make' children
+> }
+> } Bart Schaefer wrote:
+> } 
+> } > I think this must be a case where process group management was updated
+> } > elsewhere but the change was not reflected in killjb().  The following
+> } > patch resumes the make properly in this particular example, but I'm not
+> } > sure it isn't an over-use of killpg() -- Sven, can you comment?
+> } 
+> } I think we could add some extra safety by first trying killpg() and
+> } then using kill() if that fails.
+> 
+> As long as we're on the subject ...
+> 
+> Why does killjb() return failure only if the last attempted kill failed?
+> Is the second-to-last job in the pn->next chain special for some reason?
+> Or should it be returning failure when any of the kills failed?
+
+Yes, I have been wondering about this, too for some time now (I don't
+remember writing it that way in the first place, but I may be wrong,
+and if I did, I don't remember why I wrote it like that).
+
+The patch below makes the return value be -1 if at least one of the
+kill()s failed.
+
+
+NOTE: while playing with this I found a bug when I did `ls|sleep 800'
+where the `ls' finished before the `sleep' process was set up -- the
+`sleep' put itself in its own little process group and one couldn't fg 
+the whole thing. I tried several ways to fix this now and the hunks in 
+`exec.c' and `utils.c' are the only ones which made this work and
+didn't break things like `ls|foo' where `foo' is a function.
+We'll have to see if anything else fails (although at least the hunk
+in `utils.c' seems to make sense anyway and the one in `exec.c' is
+hopefully the cleanest way to handle dead group leaders).
+
+
+Bye
+ Sven
+
+diff -u os/signals.c Src/signals.c
+--- os/signals.c	Tue Aug 31 09:11:02 1999
++++ Src/signals.c	Tue Aug 31 11:55:04 1999
+@@ -592,22 +592,44 @@
+             if (sig == SIGCONT) {
+                 for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+                     if (killpg(pn->pid, sig) == -1)
+-			kill(pn->pid, sig);
++			if (kill(pn->pid, sig) == -1 && errno != ESRCH)
++#ifdef BROKEN_KILL_ESRCH
++			    if(errno != EINVAL || sig != 0)
++#endif /* BROKEN_KILL_ESRCH */
++				err = -1;
+  
+                 for (pn = jn->procs; pn->next; pn = pn->next)
+-                    err = kill(pn->pid, sig);
++                    if (kill(pn->pid, sig) == -1 && errno != ESRCH)
++#ifdef BROKEN_KILL_ESRCH
++			if(errno != EINVAL || sig != 0)
++#endif /* BROKEN_KILL_ESRCH */
++			    err = -1;
+ 
+ 		if (!jobtab[jn->other].procs && pn)
+-		    err = kill(pn->pid, sig);
++		    if (kill(pn->pid, sig) == -1 && errno != ESRCH)
++#ifdef BROKEN_KILL_ESRCH
++			if(errno != EINVAL || sig != 0)
++#endif /* BROKEN_KILL_ESRCH */
++			    err = -1;
+ 
+                 return err;
+             }
+- 
+-            killpg(jobtab[jn->other].gleader, sig);
+-            return killpg(jn->gleader, sig);
++            if (killpg(jobtab[jn->other].gleader, sig) == -1 && errno != ESRCH)
++#ifdef BROKEN_KILL_ESRCH
++		if(errno != EINVAL || sig != 0)
++#endif /* BROKEN_KILL_ESRCH */
++		    err = -1;
++		
++	    if (killpg(jn->gleader, sig) == -1 && errno != ESRCH)
++#ifdef BROKEN_KILL_ESRCH
++		if(errno != EINVAL || sig != 0)
++#endif /* BROKEN_KILL_ESRCH */
++		    err = -1;
++
++	    return err;
+         }
+         else
+-            return (killpg(jn->gleader, sig));
++	    return killpg(jn->gleader, sig);
+     }
+     for (pn = jn->procs; pn; pn = pn->next)
+         if ((err = kill(pn->pid, sig)) == -1 && errno != ESRCH)
+diff -u os/exec.c Src/exec.c
+--- os/exec.c	Tue Aug 31 09:10:58 1999
++++ Src/exec.c	Tue Aug 31 13:22:15 1999
+@@ -1760,6 +1760,13 @@
+ #ifdef PATH_DEV_FD
+ 	    closem(2);
+ #endif
++
++	    /* If there is already a group leader but that has died, we make
++	     * this one the leader. */
++	    if (pline_level == 1 && jobtab[thisjob].procs &&
++		kill(jobtab[thisjob].gleader, 0) == -1)
++		jobtab[thisjob].gleader = pid;
++
+ 	    if (how & Z_ASYNC) {
+ 		lastpid = (zlong) pid;
+ 	    } else if (!jobtab[thisjob].stty_in_env &&
+diff -u os/utils.c Src/utils.c
+--- os/utils.c	Tue Aug 31 09:11:03 1999
++++ Src/utils.c	Tue Aug 31 13:16:56 1999
+@@ -2438,7 +2438,7 @@
+ # endif
+ #endif
+ 	{
+-	    if (pgrp != mypgrp && kill(pgrp, 0) == -1)
++	    if (pgrp != mypgrp && kill(-pgrp, 0) == -1)
+ 		attachtty(mypgrp);
+ 	    else {
+ 		if (errno != ENOTTY)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

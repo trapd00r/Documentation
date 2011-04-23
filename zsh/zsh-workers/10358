@@ -1,0 +1,184 @@
+From zsh-workers-return-10358-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Mar 31 11:36:41 2000
+Return-Path: <zsh-workers-return-10358-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19470 invoked from network); 31 Mar 2000 11:36:40 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 Mar 2000 11:36:40 -0000
+Received: (qmail 13691 invoked by alias); 31 Mar 2000 11:36:31 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10358
+Received: (qmail 13682 invoked from network); 31 Mar 2000 11:36:31 -0000
+Date: Fri, 31 Mar 2000 13:36:29 +0200 (MET DST)
+Message-Id: <200003311136.NAA17413@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: $pipestatus
+
+
+I had been thinking about trying this when I first starting hacking
+the execution code... and now even bash has $PIPESTATUS.
+
+The $pipestatus special array gives the return values of all commands
+in the last pipeline.
+
+Good?
+
+I was a bit lazy, er... no, I wanted to keep it fast, so this uses a
+static array to keep the return values. A ridiculously large one,
+though (currently it has 256 entries; that's nonsense, of course,
+should we make it smaller? 64 entries? 32? 16?).
+
+Bye
+ Sven
+
+diff -ru ../z.old/Doc/Zsh/params.yo Doc/Zsh/params.yo
+--- ../z.old/Doc/Zsh/params.yo	Fri Mar 31 10:14:39 2000
++++ Doc/Zsh/params.yo	Fri Mar 31 13:22:21 2000
+@@ -287,6 +287,11 @@
+ item(tt(status) <S> <Z>)(
+ Same as tt(?).
+ )
++vindex(pipestatus)
++item(tt(pipestatus) <S> <Z>)(
++An array containing the exit values returned by all commands in the
++last pipeline.
++)
+ vindex(_)
+ item(tt(_) <S>)(
+ The last argument of the previous command.
+diff -ru ../z.old/Src/jobs.c Src/jobs.c
+--- ../z.old/Src/jobs.c	Fri Mar 31 10:14:23 2000
++++ Src/jobs.c	Fri Mar 31 13:17:24 2000
+@@ -73,6 +73,9 @@
+ 
+ static struct timeval dtimeval, now;
+ 
++/**/
++int numpipestats, pipestats[MAX_PIPESTATS];
++
+ /* Diff two timevals for elapsed-time computations */
+ 
+ /**/
+@@ -346,6 +349,18 @@
+ 	return;
+     jn->stat |= (somestopped) ? STAT_CHANGED | STAT_STOPPED :
+ 	STAT_CHANGED | STAT_DONE;
++    if (job == thisjob && (jn->stat & STAT_DONE)) {
++	int i;
++	Process p;
++
++	for (p = jn->procs, i = 0; p && i < MAX_PIPESTATS; p = p->next, i++)
++	    pipestats[i] = ((WIFSIGNALED(p->status)) ?
++			    0200 | WTERMSIG(p->status) :
++			    WEXITSTATUS(p->status));
++	if ((jn->stat & STAT_CURSH) && i < MAX_PIPESTATS)
++	    pipestats[i++] = lastval;
++	numpipestats = i;
++    }
+     if (!inforeground &&
+ 	(jn->stat & (STAT_SUBJOB | STAT_DONE)) == (STAT_SUBJOB | STAT_DONE)) {
+ 	int su;
+@@ -901,8 +916,11 @@
+ 		    break;
+ 	    child_block();
+ 	}
+-    } else
++    } else {
+ 	deletejob(jn);
++	pipestats[0] = lastval;
++	numpipestats = 1;
++    }
+     child_unblock();
+ }
+ 
+@@ -916,8 +934,11 @@
+ 
+     if (jn->procs)
+ 	waitjob(thisjob, 0);
+-    else
++    else {
+ 	deletejob(jn);
++	pipestats[0] = lastval;
++	numpipestats = 1;
++    }
+     thisjob = -1;
+ }
+ 
+diff -ru ../z.old/Src/params.c Src/params.c
+--- ../z.old/Src/params.c	Fri Mar 31 10:14:24 2000
++++ Src/params.c	Fri Mar 31 13:23:03 2000
+@@ -220,6 +220,7 @@
+ IPDEF9("*", &pparams, NULL),
+ IPDEF9("@", &pparams, NULL),
+ {NULL, NULL},
++#define IPDEF10(A,B,C) {NULL,A,PM_ARRAY|PM_SPECIAL,BR(NULL),SFN(C),GFN(B),stdunsetfn,10,NULL,NULL,NULL,0}
+ 
+ /* The following parameters are not avaible in sh/ksh compatibility *
+  * mode. All of these has sh compatible equivalents.                */
+@@ -244,6 +245,8 @@
+ IPDEF9F("module_path", &module_path, "MODULE_PATH", PM_RESTRICTED),
+ IPDEF9F("path", &path, "PATH", PM_RESTRICTED),
+ 
++IPDEF10("pipestatus", pipestatgetfn, pipestatsetfn),
++
+ {NULL, NULL}
+ };
+ #undef BR
+@@ -2672,6 +2675,38 @@
+ 	termflags |= TERM_UNKNOWN;
+     else 
+ 	init_term();
++}
++
++/* Function to get value for special parameter `pipestatus' */
++
++/**/
++static char **
++pipestatgetfn(Param pm)
++{
++    char **x = (char **) zhalloc((numpipestats + 1) * sizeof(char *));
++    char buf[20], **p;
++    int *q, i;
++
++    for (p = x, q = pipestats, i = numpipestats; i--; p++, q++) {
++	sprintf(buf, "%d", *q);
++	*p = dupstring(buf);
++    }
++    *p = NULL;
++
++    return x;
++}
++
++/* Function to get value for special parameter `pipestatus' */
++
++/**/
++static void
++pipestatsetfn(Param pm, char **x)
++{
++    int i;
++
++    for (i = 0; *x && i < MAX_PIPESTATS; i++, x++)
++	pipestats[i] = atoi(*x);
++    numpipestats = i;
+ }
+ 
+ /* We could probably replace the replenv with the actual code to *
+diff -ru ../z.old/Src/zsh.h Src/zsh.h
+--- ../z.old/Src/zsh.h	Fri Mar 31 10:14:26 2000
++++ Src/zsh.h	Fri Mar 31 12:19:52 2000
+@@ -752,6 +752,8 @@
+     ino_t ino;
+ };
+ 
++#define MAX_PIPESTATS 256
++
+ /*******************************/
+ /* Definitions for Hash Tables */
+ /*******************************/
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

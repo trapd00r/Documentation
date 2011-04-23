@@ -1,0 +1,347 @@
+From zsh-workers-return-6717-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jun 18 14:12:39 1999
+Return-Path: <zsh-workers-return-6717-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8890 invoked from network); 18 Jun 1999 14:12:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Jun 1999 14:12:35 -0000
+Received: (qmail 6986 invoked by alias); 18 Jun 1999 14:12:13 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6717
+Received: (qmail 6900 invoked from network); 18 Jun 1999 14:12:09 -0000
+Message-Id: <9906181343.AA23899@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: pws-22: Local traps
+Date: Fri, 18 Jun 1999 15:43:30 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+This is another remaining gap in the shell: automatically restoring traps
+after a function exits.  The simplest way of doing this was to keep a
+linked list of traps to be restored on exit from a function; by keeping the
+locallevel in it, too, a single list is enough.  This way of doing it means
+that it's the value of LOCAL_TRAPS at the point at which the trap is set in
+a function that matters, but it didn't seem worth saving the complete set
+of trap statuses, since usually people on set a couple of them.
+
+This is set for ksh emulation, of course, but it would be a good thing to
+set by default, if it weren't for the fact that someone, somewhere is bound
+to have functions which deliberately set traps for the parent shell.
+
+This code also replaces the special handling of SIGEXIT inside doshfunc()
+with use of the new code, although it still has to be executed specially.
+
+I've tried some quite complex things, but it would be interesting to play
+around with this with --enable-zsh-mem to check that nothing strange is
+happening.  There are all sorts of things to go wrong.
+
+--- Doc/Zsh/options.yo.lt	Thu Jun 17 14:17:21 1999
++++ Doc/Zsh/options.yo	Fri Jun 18 14:31:07 1999
+@@ -578,6 +578,22 @@
+ with a formulation like `tt(emulate -L zsh)'; the tt(-L) activates
+ tt(LOCAL_OPTIONS).
+ )
++pindex(LOCAL_TRAPS)
++item(tt(LOCAL_TRAPS))(
++If this option is set when a signal trap is set inside a function, then the
++previous status of the trap for that signal will be restored when the
++function exits.  Note that this option must be set em(prior) to altering the
++trap behaviour in a function; unlike tt(LOCAL_OPTIONS), the value on exit
++from the function is irrelevant.  However, it does not need to be set
++before any global trap for that to be correctly restored by a function.
++For example,
++
++example(unsetopt localtraps
++trap - INT
++fn() { setopt localtraps; trap '' INT; sleep 3; })
++
++will restore normally handling of tt(SIGINT) after the function exits.
++)
+ pindex(LOGIN)
+ item(tt(LOGIN) (tt(-l), ksh: tt(-l)))(
+ This is a login shell.
+--- Src/exec.c.lt	Fri Jun 18 11:55:39 1999
++++ Src/exec.c	Fri Jun 18 15:15:36 1999
+@@ -2868,8 +2868,7 @@
+  * was executed.                                            */
+ {
+     char **tab, **x, *oargv0 = NULL;
+-    int xexittr, newexittr, oldzoptind, oldlastval;
+-    void *xexitfn, *newexitfn;
++    int oldzoptind, oldlastval;
+     char saveopts[OPT_SIZE];
+     int obreaks = breaks;
+ 
+@@ -2878,13 +2877,9 @@
+ 	if (trapreturn < 0)
+ 	    trapreturn--;
+ 	oldlastval = lastval;
+-	xexittr = sigtrapped[SIGEXIT];
+-	if (xexittr & ZSIG_FUNC)
+-	    xexitfn = shfunctab->removenode(shfunctab, "TRAPEXIT");
+-	else
+-	    xexitfn = sigfuncs[SIGEXIT];
+-	sigtrapped[SIGEXIT] = 0;
+-	sigfuncs[SIGEXIT] = NULL;
++
++	starttrapscope();
++
+ 	tab = pparams;
+ 	oldzoptind = zoptind;
+ 	zoptind = 1;
+@@ -2942,27 +2937,7 @@
+ 	    opts[LOCALOPTIONS] = saveopts[LOCALOPTIONS];
+ 	}
+ 
+-	/*
+-	 * The trap '...' EXIT runs in the environment of the caller,
+-	 * so remember it here but run it after resetting the
+-	 * traps for the parent.
+-	 */
+-	newexittr = sigtrapped[SIGEXIT];
+-	newexitfn = sigfuncs[SIGEXIT];
+-	if (newexittr & ZSIG_FUNC)
+-	    shfunctab->removenode(shfunctab, "TRAPEXIT");
+-
+-	sigtrapped[SIGEXIT] = xexittr;
+-	if (xexittr & ZSIG_FUNC) {
+-	    shfunctab->addnode(shfunctab, ztrdup("TRAPEXIT"), xexitfn);
+-	    sigfuncs[SIGEXIT] = ((Shfunc) xexitfn)->funcdef;
+-	} else
+-	    sigfuncs[SIGEXIT] = (List) xexitfn;
+-
+-	if (newexitfn) {
+-	    dotrapargs(SIGEXIT, &newexittr, newexitfn);
+-	    freestruct(newexitfn);
+-	}
++	endtrapscope();
+ 
+ 	if (trapreturn < -1)
+ 	    trapreturn++;
+--- Src/options.c.lt	Thu Jun 17 14:17:51 1999
++++ Src/options.c	Fri Jun 18 10:38:57 1999
+@@ -143,6 +143,7 @@
+ {NULL, "listbeep",	      OPT_ALL,			 LISTBEEP},
+ {NULL, "listtypes",	      OPT_ALL,			 LISTTYPES},
+ {NULL, "localoptions",	      OPT_EMULATE|OPT_KSH,	 LOCALOPTIONS},
++{NULL, "localtraps",	      OPT_EMULATE|OPT_KSH,	 LOCALTRAPS},
+ {NULL, "login",		      OPT_SPECIAL,		 LOGINSHELL},
+ {NULL, "longlistjobs",	      0,			 LONGLISTJOBS},
+ {NULL, "magicequalsubst",     0,			 MAGICEQUALSUBST},
+--- Src/signals.c.lt	Wed Jun 16 16:34:56 1999
++++ Src/signals.c	Fri Jun 18 15:38:35 1999
+@@ -602,6 +602,57 @@
+     return err;
+ }
+ 
++/*
++ * List for saving traps.  We don't usually have that many traps
++ * at once, so just use a linked list.
++ */
++struct savetrap {
++    int sig, flags, local;
++    void *list;
++};
++
++static LinkList savetraps;
++
++/* Flag to unsettrap not to free the structs, which we're keeping */
++
++/**/
++int notrapfree;
++
++/*
++ * Save the current trap and unset it.
++ */
++
++static void
++dosavetrap(int sig, int level)
++{
++    struct savetrap *st;
++    st = (struct savetrap *)zalloc(sizeof(*st));
++    st->sig = sig;
++    st->local = level;
++    notrapfree++;
++    if ((st->flags = sigtrapped[sig]) & ZSIG_FUNC) {
++	/*
++	 * Get the old function: this assumes we haven't added
++	 * the new one yet.
++	 */
++	char func[20];
++	sprintf(func, "TRAP%s", sigs[sig]);
++	st->list = shfunctab->removenode(shfunctab, func);
++    } else {
++	st->list = sigfuncs[sig];
++	unsettrap(sig);
++    }
++    notrapfree--;
++    PERMALLOC {
++	if (!savetraps)
++	    savetraps = newlinklist();
++	/*
++	 * Put this at the front of the list
++	 */
++	insertlinknode(savetraps, (LinkNode)savetraps, st);
++    } LASTALLOC;
++}
++
+ /**/
+ int
+ settrap(int sig, List l)
+@@ -612,7 +663,15 @@
+         zerr("can't trap SIG%s in interactive shells", sigs[sig], 0);
+         return 1;
+     }
+-    if (sigfuncs[sig])
++    /*
++     * Note that we save the trap here even if there isn't an existing
++     * one, to aid in removing this one.  However, if there's
++     * already one at the current locallevel we just overwrite it.
++     */
++    if (isset(LOCALTRAPS) &&
++	(!sigtrapped[sig] || locallevel > (sigtrapped[sig] >> ZSIG_SHIFT))) {
++	dosavetrap(sig, locallevel);
++    } else if (sigfuncs[sig])
+ 	unsettrap(sig);
+     sigfuncs[sig] = l;
+     if (!l) {
+@@ -632,6 +691,12 @@
+             sig != SIGCHLD)
+             install_handler(sig);
+     }
++    /*
++     * Note that introducing the locallevel does not affect whether
++     * sigtrapped[sig] is zero or not, i.e. a test without a mask
++     * works just the same.
++     */
++    sigtrapped[sig] |= (locallevel << ZSIG_SHIFT);
+     return 0;
+ }
+ 
+@@ -659,6 +724,8 @@
+ #endif
+              sig != SIGCHLD)
+         signal_default(sig);
++    if (notrapfree)
++	return;
+     if (trapped & ZSIG_FUNC) {
+ 	char func[20];
+ 	HashNode hn;
+@@ -669,6 +736,83 @@
+     } else if (sigfuncs[sig]) {
+ 	freestruct(sigfuncs[sig]);
+ 	sigfuncs[sig] = NULL;
++    }
++}
++
++/**/
++void
++starttrapscope(void)
++{
++    /*
++     * SIGEXIT needs to be restored at the current locallevel,
++     * so give it the next higher one.
++     */
++    if (sigtrapped[SIGEXIT])
++	dosavetrap(SIGEXIT, locallevel+1);
++}
++
++/*
++ * Reset traps after the end of a function: must be called after
++ * endparamscope() so that the locallevel has been decremented.
++ */
++
++/**/
++void
++endtrapscope(void)
++{
++    LinkNode ln;
++    struct savetrap *st;
++    int exittr;
++    void *exitfn = NULL;
++
++    /*
++     * Remember the exit trap, but don't run it until
++     * after all the other traps have been put back.
++     */
++    if ((exittr = sigtrapped[SIGEXIT])) {
++	notrapfree++;
++	if (exittr & ZSIG_FUNC) {
++	    exitfn = shfunctab->removenode(shfunctab, "TRAPEXIT");
++	} else {
++	    exitfn = sigfuncs[SIGEXIT];
++	    unsettrap(SIGEXIT);
++	}
++	notrapfree--;
++    }
++
++    if (savetraps) {
++	while ((ln = firstnode(savetraps)) &&
++	       (st = (struct savetrap *) ln->dat) &&
++	       st->local > locallevel) {
++	    int sig = st->sig;
++
++	    remnode(savetraps, ln);
++
++	    if (sigtrapped[sig])
++		unsettrap(sig);
++	    if (st->flags) {
++		List list = (st->flags & ZSIG_FUNC) ?
++		    ((Shfunc) st->list)->funcdef : (List) st->list;
++		/* prevent settrap from saving this */
++		int oldlt = opts[LOCALTRAPS];
++		opts[LOCALTRAPS] = 0;
++		settrap(sig, list);
++		opts[LOCALTRAPS] = oldlt;
++		if ((sigtrapped[sig] = st->flags) & ZSIG_FUNC)
++		    shfunctab->addnode(shfunctab, ((Shfunc)st->list)->nam,
++				       (Shfunc) st->list);
++	    }
++	    zfree(st, sizeof(*st));
++	}
++    }
++
++    if (exittr) {
++	dotrapargs(SIGEXIT, &exittr, (exittr & ZSIG_FUNC) ?
++		   ((Shfunc)exitfn)->funcdef : (List) exitfn);
++	if (exittr & ZSIG_FUNC)
++	    shfunctab->freenode((HashNode)exitfn);
++	else
++	    freestruct(exitfn);
+     }
+ }
+ 
+--- Src/zsh.h.lt	Thu Jun 17 16:09:25 1999
++++ Src/zsh.h	Fri Jun 18 10:38:29 1999
+@@ -1202,6 +1202,7 @@
+     LISTBEEP,
+     LISTTYPES,
+     LOCALOPTIONS,
++    LOCALTRAPS,
+     LOGINSHELL,
+     LONGLISTJOBS,
+     MAGICEQUALSUBST,
+@@ -1493,9 +1494,13 @@
+ 
+ /* These used in the sigtrapped[] array */
+ 
+-#define ZSIG_TRAPPED	(1<<0)
+-#define ZSIG_IGNORED	(1<<1)
+-#define ZSIG_FUNC	(1<<2)
++#define ZSIG_TRAPPED	(1<<0)	/* Signal is trapped */
++#define ZSIG_IGNORED	(1<<1)	/* Signal is ignored */
++#define ZSIG_FUNC	(1<<2)	/* Trap is a function, not an eval list */
++/* Mask to get the above flags */
++#define ZSIG_MASK	(ZSIG_TRAPPED|ZSIG_IGNORED|ZSIG_FUNC)
++/* No. of bits to shift local level when storing in sigtrapped */
++#define ZSIG_SHIFT	3
+ 
+ /**********************************/
+ /* Flags to third argument of zle */
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

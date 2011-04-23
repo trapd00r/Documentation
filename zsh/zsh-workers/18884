@@ -1,0 +1,260 @@
+From zsh-workers-return-18884-mason-zsh=primenet.com.au@sunsite.dk Tue Jul 22 13:33:06 2003
+Return-Path: <zsh-workers-return-18884-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8891 invoked from network); 22 Jul 2003 13:33:05 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 22 Jul 2003 13:33:05 -0000
+Received: (qmail 28888 invoked by alias); 22 Jul 2003 13:32:58 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 18884
+Received: (qmail 28873 invoked from network); 22 Jul 2003 13:32:58 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 22 Jul 2003 13:32:58 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.183.235] by sunsite.dk (MessageWall 1.0.8) with SMTP; 22 Jul 2003 13:32:57 -0000
+Received: from EXCHANGE02.csr.com (unverified) by MAILSWEEPER01.cambridgesiliconradio.com
+ (Content Technologies SMTPRS 4.3.10) with ESMTP id <T6396d5808dc0a88d012d4@MAILSWEEPER01.cambridgesiliconradio.com> for <zsh-workers@sunsite.dk>;
+ Tue, 22 Jul 2003 14:32:16 +0100
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.5329);
+	 Tue, 22 Jul 2003 14:33:33 +0100
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: access to names of errors
+Date: Tue, 22 Jul 2003 14:32:53 +0100
+Message-ID: <22303.1058880773@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 22 Jul 2003 13:33:33.0430 (UTC) FILETIME=[D8AF1160:01C35055]
+
+This patches the parameter module to add $sys_errnos, which turns $ERRNO
+into the name of the error --- not the error text you would get with
+strerror(), the standard name.  This is more useful for programming,
+since if you know you can test for
+
+[[ $sys_errnos[$ERRNO] = EINTR ]]
+
+and so on.  It's also more difficult, but I simply copied the code for
+signal names.
+
+I'd appreciate comments on
+- where this should appear; I'm planning on an interface to the system
+  read function and it could go there instead.  This might be
+  better since the parameter module usually provides shell rather
+  than system information and the new array bloats it somewhat.
+  The new module could be a generic zsystem module.
+- what it should be called; the current name at least paves the way
+  for a move into a different namespace such as $sys.errnos, should
+  anybody ever have the time to rewrite the parameter code completely
+- what else we should provide; strerror() would be fairly easy, but
+  an array would probably have to be generated specially during
+  configuration, because the internal system array seems to be
+  non-standard.  We can check for _sys_errlist and _sys_nerr first,
+  perhaps.
+
+There's no documenation until that gets decided.
+
+Index: zshconfig.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/zshconfig.ac,v
+retrieving revision 1.37
+diff -u -r1.37 zshconfig.ac
+--- zshconfig.ac	25 Apr 2003 11:18:51 -0000	1.37
++++ zshconfig.ac	22 Jul 2003 13:08:04 -0000
+@@ -1117,6 +1117,39 @@
+ SIGNAL_H=$zsh_cv_path_signal_h
+ AC_SUBST(SIGNAL_H)dnl
+ 
++dnl Where are error names located?  Needed as input for errnos.awk
++AC_CACHE_CHECK(where error names are located, zsh_cv_path_errno_h,
++[dnl Look at the output from the preprocessor.
++dnl We should get lines of the form `# 1 "/usr/include/errno.h"'
++dnl The following assumes the real definitions are in a file which
++dnl contains the name `err'; we could relax this if necessary,
++dnl but then you can get a rather long list of files to test.
++dnl The backslash substitution is to persuade cygwin to cough up
++dnl slashes rather than doubled backslashes in the path.
++echo "#include <errno.h>" > nametmp.c
++errfile_list="`$CPP nametmp.c |
++sed -n 's/^#[ 	].*\"\(.*\)\"/\1/p' |
++sed 's/\\\\\\\\/\//g' |
++$AWK '{ if (\$1 ~ \"err\") files[[\$1]] = \$1 }
++  END { for (var in files) print var }'`"
++rm -f nametmp.c
++for ERRNO_H in $errfile_list /dev/null
++do
++  dnl Try to make sure it doesn't get confused by files that don't
++  dnl have real error definitions in.  Count definitions to make sure.
++  nerrs=`test -f $ERRNO_H && \
++  grep '#[ 	]*define[ 	][ 	]*E[0-9A-Z]*[ 	]*[0-9][0-9]*' $ERRNO_H | \
++  wc -l | sed 's/[ 	]//g'`
++  test "x$nerrs" != x && test "$nerrs" -ge 7 && break
++done
++if test $ERRNO_H = "/dev/null"; then
++  AC_MSG_ERROR(ERROR MACROS NOT FOUND:  please report to developers)
++fi
++zsh_cv_path_errno_h=$ERRNO_H
++])
++ERRNO_H=$zsh_cv_path_errno_h
++AC_SUBST(ERRNO_H)dnl
++
+ dnl -----------------------------------------------------
+ dnl Look for the file containing the RLIMIT_* definitions
+ dnl -----------------------------------------------------
+Index: Src/Modules/errnames1.awk
+===================================================================
+RCS file: Src/Modules/errnames1.awk
+diff -N Src/Modules/errnames1.awk
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Src/Modules/errnames1.awk	22 Jul 2003 13:08:06 -0000
+@@ -0,0 +1,18 @@
++# Edited version of Src/signames1.awk.
++#
++# This is an awk script which finds out what the possibilities for
++# the error names are, and dumps them out so that cpp can turn them
++# into numbers.  Since we don't need to decide here what the
++# real signals are, we can afford to be generous about definitions,
++# in case the definitions are in terms of other definitions.
++# However, we need to avoid definitions with parentheses, which will
++# mess up the syntax.
++BEGIN { printf "#include <errno.h>\n\n" }
++
++/^[\t ]*#[\t ]*define[\t ]*E[A-Z0-9]*[\t ][\t ]*[^(\t ]/ { 
++    eindex = index($0, "E")
++    etail = substr($0, eindex, 80)
++    split(etail, tmp)
++    enam = substr(tmp[1], 2, 20)
++    printf("XXNAMES XXE%s E%s\n", enam, enam)
++}
+Index: Src/Modules/errnames2.awk
+===================================================================
+RCS file: Src/Modules/errnames2.awk
+diff -N Src/Modules/errnames2.awk
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Src/Modules/errnames2.awk	22 Jul 2003 13:08:06 -0000
+@@ -0,0 +1,42 @@
++# Edited version of Src/signames2.awk.
++#
++# {g,n}awk script to generate errnames.c
++# This version relies on the previous output of the preprocessor
++# on sigtmp.c, sigtmp.out, which is in turn generated by errnames1.awk.
++#
++# NB: On SunOS 4.1.3 - user-functions don't work properly, also \" problems
++# Without 0 + hacks some nawks compare numbers as strings
++#
++/^XXNAMES XXE[A-Z0-9]*[\t ][\t ]*[1-9][0-9]*/ {
++    eindex = index($0, "E")
++    etail = substr($0, 11, 80)
++    split(etail, tmp)
++    enam = tmp[1]
++    enum = tmp[2]
++    if (errname[enum] == "") {
++	errname[enum] = enam
++	if (0 + max < 0 + enum && enum < 1024)
++	    max = enum
++    }
++}
++
++END {
++    ps = "%s"
++    printf "/** errnames.c                                 **/\n"
++    printf "/** architecture-customized errnames.c for zsh **/\n"
++    printf "\n"
++    printf "#define ERRCOUNT\t%d\n", max
++    printf "\n"
++    printf "#include %cparameter.mdh%c\n", 34, 34
++    printf "\n"
++    printf "/**/\n"
++    printf "char *sys_errnames[ERRCOUNT+1] = {\n"
++
++    for (i = 1; i <= 0 + max; i++)
++	if (errname[i] == "")
++	    printf("\t%c%d%c,\n", 34, i, 34)
++	else
++	    printf("\t%c%s%c,\n", 34, errname[i], 34)
++    print "\tNULL"
++    print "};"
++}
+Index: Src/Modules/parameter.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/parameter.c,v
+retrieving revision 1.23
+diff -u -r1.23 parameter.c
+--- Src/Modules/parameter.c	7 Mar 2003 12:31:12 -0000	1.23
++++ Src/Modules/parameter.c	22 Jul 2003 13:08:07 -0000
+@@ -1852,6 +1854,16 @@
+     scanaliases(ht, func, flags, 1, DISABLED);
+ }
+ 
++/* Functions for the sys_errnosgetfn special parameter. */
++
++/**/
++static char **
++sys_errnosgetfn(Param pm)
++{
++    /* arrdup etc. should really take const pointers as arguments */
++    return arrdup((char **)sys_errnames);
++}
++
+ /* Table for defined parameters. */
+ 
+ struct pardef {
+@@ -1936,6 +1948,9 @@
+     { "dis_galiases", 0,
+       getpmdisgalias, scanpmdisgaliases, setpmdisgaliases,
+       NULL, NULL, stdunsetfn, NULL },
++    { "sys_errnos", PM_ARRAY|PM_SPECIAL|PM_READONLY,
++      NULL, NULL, NULL,
++      arrsetfn, sys_errnosgetfn, stdunsetfn, NULL },
+     { NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL }
+ };
+ 
+Index: Src/Modules/parameter.mdd
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/parameter.mdd,v
+retrieving revision 1.2
+diff -u -r1.2 parameter.mdd
+--- Src/Modules/parameter.mdd	26 Nov 2000 20:01:03 -0000	1.2
++++ Src/Modules/parameter.mdd	22 Jul 2003 13:08:07 -0000
+@@ -4,4 +4,21 @@
+ 
+ autoparams="parameters commands functions dis_functions funcstack builtins dis_builtins reswords dis_reswords options modules dirstack history historywords jobtexts jobdirs jobstates nameddirs userdirs aliases dis_aliases galiases dis_galiases"
+ 
+-objects="parameter.o"
++objects="parameter.o errnames.o"
++
++headers="errcount.h"
++
++:<<\Make
++errnames.c: errnames1.awk errnames2.awk $(dir_top)/config.h @ERRNO_H@
++	   if [ x@ERRNO_H@ = x ]; then \
++		touch errtmp.out; \
++	   else \
++		$(AWK) -f $(sdir)/errnames1.awk @ERRNO_H@ >errtmp.c; \
++		$(CPP) errtmp.c >errtmp.out; \
++	   fi
++	   $(AWK) -f $(sdir)/errnames2.awk errtmp.out > $@
++	   rm -f errtmp.c errtmp.out
++
++errcount.h: errnames.c
++	grep 'define.*ERRCOUNT' errnames.c > $@
++Make
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

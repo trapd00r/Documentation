@@ -1,0 +1,156 @@
+From zsh-workers-return-28005-mason-zsh=primenet.com.au@zsh.org Mon Jun 07 16:44:27 2010
+Return-Path: <zsh-workers-return-28005-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9130 invoked by alias); 7 Jun 2010 16:44:27 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28005
+Received: (qmail 9117 invoked from network); 7 Jun 2010 16:44:14 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Mon, 7 Jun 2010 17:43:58 +0100
+From: Peter Stephenson <Peter.Stephenson@csr.com>
+To: zsh-workers@zsh.org
+Subject: Re: Bug in zsh builtin pwd when option CHASE_LINKS is set
+Message-ID: <20100607174358.551f2350@csr.com>
+In-Reply-To: <20100607131339.GA21964@prunille.vinc17.org>
+References: <20040924074842.GJ2973@ay.vinc17.org>
+	<20100607131339.GA21964@prunille.vinc17.org>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.5 (GTK+ 2.18.9; i686-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 07 Jun 2010 16:44:00.0717 (UTC) FILETIME=[A18CAFD0:01CB0660]
+X-Scanned-By: MailControl A_09_40_00 (www.mailcontrol.com) on 10.68.0.153
+
+On Mon, 7 Jun 2010 15:13:39 +0200
+Vincent Lefevre <vincent@vinc17.net> wrote:
+> On 2004-09-24 09:48:42 +0200, Vincent Lefevre wrote:
+> > lepuid:~> zsh -f
+> > lepuid% setopt CHASE_LINKS
+> > lepuid% pwd
+> > /users/spaces/lefevre
+> > lepuid% cd .snapshot
+> > lepuid% pwd
+> > .
+
+This is happening on our Netapp too, not surprisingly.
+
+The .snapshot isn't in the parent's directory list, so we're stuck.  We'll
+just have to use a best guess. "." isn't a particularly good one.
+
+I had to insert some comments into the function to understand it.
+
+What are the tests for *buf doing?  That doesn't mean anything
+unless we happen to have exactly PATH_MAX characters in the directory
+name.  If we don't, *buf has never been set (not even to '\0').  Shouldn't
+it be testing buf[pos]?  I've assumed so.
+
+
+Index: Src/compat.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/compat.c,v
+retrieving revision 1.19
+diff -p -u -r1.19 compat.c
+--- Src/compat.c	22 Feb 2010 10:12:22 -0000	1.19
++++ Src/compat.c	7 Jun 2010 16:42:33 -0000
+@@ -275,11 +275,7 @@ zgetdir(struct dirsav *d)
+     buf[pos] = '\0';
+     strcpy(nbuf, "../");
+     if (stat(".", &sbuf) < 0) {
+-	if (d)
+-	    return NULL;
+-	buf[0] = '.';
+-	buf[1] = '\0';
+-	return buf;
++	return NULL;
+     }
+ 
+     /* Record the initial inode and device */
+@@ -354,6 +350,11 @@ zgetdir(struct dirsav *d)
+ 	closedir(dir);
+ 	if (!de)
+ 	    break;		/* Not found */
++	/*
++	 * We get the "/" free just by copying from nbuf+2 instead
++	 * of nbuf+3, which is where we copied the path component.
++	 * This means buf[pos] is always a "/".
++	 */
+ 	len = strlen(nbuf + 2);
+ 	pos -= len;
+ 	while (pos <= 1) {
+@@ -371,15 +372,22 @@ zgetdir(struct dirsav *d)
+ 	if (chdir(".."))
+ 	    break;
+     }
++
++    /*
++     * Fix up the directory, if necessary.
++     * We're changing back down the hierarchy, ignore the
++     * "/" at buf[pos].
++     */
+     if (d) {
+ #ifndef HAVE_FCHDIR
+-	if (*buf)
++	if (buf[pos])
+ 	    zchdir(buf + pos + 1);
+ 	noholdintr();
+ #endif
+ 	return NULL;
+     }
+-    if (*buf)
++
++    if (buf[pos])
+ 	zchdir(buf + pos + 1);
+     noholdintr();
+ 
+@@ -397,16 +405,27 @@ zgetdir(struct dirsav *d)
+     }
+ #endif
+ 
+-    buf[0] = '.';
+-    buf[1] = '\0';
+-    return buf;
++    /*
++     * Something bad happened.
++     * This has been seen when inside a special directory,
++     * such as the Netapp .snapshot directory, that doesn't
++     * appear as a directory entry in the parent directory.
++     * We'll just need our best guess.
++     *
++     * We only get here from zgetcwd(); let that fall back to pwd.
++     */
++
++    return NULL;
+ }
+ 
+ /**/
+ char *
+ zgetcwd(void)
+ {
+-    return zgetdir(NULL);
++    char *ret = xzgetdir(NULL);
++    if (!ret)
++	ret = pwd;
++    return ret;
+ }
+ 
+ /* chdir with arbitrary long pathname.  Returns 0 on success, -1 on normal *
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

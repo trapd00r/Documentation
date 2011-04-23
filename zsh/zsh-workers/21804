@@ -1,0 +1,146 @@
+From zsh-workers-return-21804-mason-zsh=primenet.com.au@sunsite.dk Sun Oct 02 19:55:34 2005
+Return-Path: <zsh-workers-return-21804-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17734 invoked from network); 2 Oct 2005 19:55:32 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 2 Oct 2005 19:55:32 -0000
+Received: (qmail 38521 invoked from network); 2 Oct 2005 19:55:26 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 2 Oct 2005 19:55:26 -0000
+Received: (qmail 12746 invoked by alias); 2 Oct 2005 19:55:24 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 21804
+Received: (qmail 12737 invoked from network); 2 Oct 2005 19:55:23 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 2 Oct 2005 19:55:23 -0000
+Received: (qmail 38198 invoked from network); 2 Oct 2005 19:55:23 -0000
+Received: from vms046pub.verizon.net (206.46.252.46)
+  by a.mx.sunsite.dk with SMTP; 2 Oct 2005 19:55:22 -0000
+Received: from candle.brasslantern.com ([71.116.81.225])
+ by vms046.mailsrvcs.net
+ (Sun Java System Messaging Server 6.2 HotFix 0.04 (built Dec 24 2004))
+ with ESMTPA id <0INR001FD0O8KAPA@vms046.mailsrvcs.net> for
+ zsh-workers@sunsite.dk; Sun, 02 Oct 2005 14:55:21 -0500 (CDT)
+Received: from candle.brasslantern.com (IDENT:schaefer@localhost [127.0.0.1])
+	by candle.brasslantern.com (8.12.11/8.12.11) with ESMTP id j92JtJvv002165	for
+ <zsh-workers@sunsite.dk>; Sun, 02 Oct 2005 12:55:19 -0700
+Received: (from schaefer@localhost)	by candle.brasslantern.com
+ (8.12.11/8.12.11/Submit) id j92JtJT2002164	for zsh-workers@sunsite.dk; Sun,
+ 02 Oct 2005 12:55:19 -0700
+Date: Sun, 02 Oct 2005 19:55:18 +0000
+From: Bart Schaefer <schaefer@brasslantern.com>
+Subject: Re: Exception handling and "trap" vs. TRAPNAL()
+In-reply-to: <20051002190940.437F9866F@pwstephenson.fsnet.co.uk>
+To: zsh-workers@sunsite.dk
+Message-id: <1051002195518.ZM2163@candle.brasslantern.com>
+MIME-version: 1.0
+X-Mailer: Z-Mail (5.0.0 30July97)
+Content-type: text/plain; charset=us-ascii
+References: <20050929200741.GA1156@DervishD>
+	<20050930124130.45eb0463.pws@csr.com>	<20051001153756.GA12183@DervishD>
+	<1051001183818.ZM27904@candle.brasslantern.com>
+	<20051001202856.GA134@DervishD>
+	<1051002044052.ZM28373@candle.brasslantern.com>
+	<20051002190940.437F9866F@pwstephenson.fsnet.co.uk>
+Comments: In reply to Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+ "Re: Exception handling and "trap" vs. TRAPNAL()" (Oct  2,  8:09pm)
+X-Spam-Checker-Version: SpamAssassin 3.0.4 (2005-06-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham 
+	version=3.0.4
+
+On Oct 2,  8:09pm, Peter Stephenson wrote:
+}
+} I'm not sure there's any code change I would feel comfortable with.
+} [...] I don't see anything that's [...] obviously inconsistent
+} provided the manual is written correctly... except for the
+} odd case of the error in the TRAP function, which I'm currently too
+} confused even to think about straight.
+
+It's really pretty simple.  The whole problem is the "else if (errflag)"
+branch in dotrapargs().  It's a no-op for inline traps because of later
+tests of (isfunc).
+
+If we want to suppress errors/interrupts from trap functions, so they
+behave the same as inline traps, we simply delete that branch:
+
+-------------------------------------------------------------------
+Index: Src/signals.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/signals.c,v
+retrieving revision 1.13
+diff -c -r1.13 signals.c
+--- Src/signals.c	28 May 2005 04:32:49 -0000	1.13
++++ Src/signals.c	2 Oct 2005 19:31:00 -0000
+@@ -1097,8 +1097,7 @@
+ 	 * execrestore.
+ 	 */
+ 	trapret = trapreturn + 1;
+-    } else if (errflag)
+-	trapret = 1;
++    }
+     execrestore();
+     lexrestore();
+ 
+-------------------------------------------------------------------
+
+Note that an effect of suppressing errors in this way is that it
+becomes difficult to send a keyboard interrupt to the shell, because
+interrupts that arrive during execution of a trap will be ignored.
+
+If we want to propagate errors that occur inside traps, and thereby
+make it possible for inline traps to "throw exceptions" in "always"
+blocks, we do this instead (more discussion below patch):
+
+-------------------------------------------------------------------
+Index: Src/signals.c
+===================================================================
+diff -c -r1.13 signals.c
+--- Src/signals.c	28 May 2005 04:32:49 -0000	1.13
++++ Src/signals.c	2 Oct 2005 19:22:57 -0000
+@@ -1003,6 +1003,7 @@
+     int trapret = 0;
+     int obreaks = breaks;
+     int isfunc;
++    int traperr;
+ 
+     /* if signal is being ignored or the trap function		      *
+      * is NULL, then return					      *
+@@ -1097,8 +1098,8 @@
+ 	 * execrestore.
+ 	 */
+ 	trapret = trapreturn + 1;
+-    } else if (errflag)
+-	trapret = 1;
++    }
++    traperr = errflag;
+     execrestore();
+     lexrestore();
+ 
+@@ -1110,6 +1111,7 @@
+ 	    lastval = trapret-1;
+ 	}
+     } else {
++	errflag |= traperr;
+ 	breaks += obreaks;
+ 	if (breaks > loops)
+ 	    breaks = loops;
+-------------------------------------------------------------------
+
+The |= there is to retain any true value of errflag from the context
+restored by lexrestore().  That may be impossible in the first place,
+but I'm not certain.
+
+Note that the "if" for the "else" in that third hunk is:
+
+    if (trapret > 0) {
+
+With the change in the second hunk, (trapret > 0) is true if and only
+if an explicit "return" statement was executed within the trap (either
+inline or function).  When (traperr) is true an error/interrupt must
+have occurred in the trap, and it therefore did not call "return",
+and therefore (trapret > 0) must be false.
+

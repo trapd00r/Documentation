@@ -1,0 +1,285 @@
+From zsh-workers-return-5566-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Mar 01 12:27:46 1999
+Return-Path: <zsh-workers-return-5566-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19775 invoked from network); 1 Mar 1999 12:27:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 1 Mar 1999 12:27:35 -0000
+Received: (qmail 21188 invoked by alias); 1 Mar 1999 12:26:39 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5566
+Received: (qmail 21180 invoked from network); 1 Mar 1999 12:26:38 -0000
+Date: Mon, 1 Mar 1999 13:25:28 +0100 (MET)
+Message-Id: <199903011225.NAA04666@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH suggestion and completion testing
+
+
+The more I play with new completion functions the more I'm of the
+opinion that maybe we should do the tests only with shell code. And
+now that I found the scalar-reverse subscripting again, this doesn't
+look too complicated any more (if we add a small new feature, see below):
+
+Only the slightly more complicated ones:
+
+  -string <num> <str>
+
+    local index=$PREFIX[(in:<num>:)<str>]
+
+    if (( index )); then
+      IPREFIX="$IPREFIX$PREFIX[1,index]"
+      PREFIX="$PREFIX[index+1,-1]"
+
+    And, yes, this also works for negative <num>s (and for the most
+    common case with <num> == -1 this can be simplified, of course).
+
+  -class <num> <class>
+
+   Almost the same as `-string', but with `PREFIX[(in:<num>:)[<class>]]'.
+
+  -after <str>
+
+    local index=${words[1,CURRENT][(I)<str>]}
+
+    if (( index )); then
+      words=("${(@)words[index+1,-1]}")
+
+For `-between' this gets a bit more complicated (and the double
+subscript may be irritating for some users). But we could make things
+easier if we add a new subscript flag that gives the index for `r',
+`R', `i', and `I' at which to start. This is easy to implement (see
+the patch below) and might be useful anyway.
+
+[Peter: I'd really like to have this (independent from the discussion
+about the testing stuff), can we add it?.]
+
+With this:
+
+  -after <str>
+
+    local index=$words[(Ib:CURRENT:)<str>]
+
+    if (( index )); then
+      words=("${(@)words[index+1,-1]}")
+
+    And `-mafter' is the same, obviously.
+
+  -between <s1> <s2>
+
+    local i1 i2
+
+    i1=$words[(Ib:CURRENT:)<s1>]
+    i2=$words[(ib:i1:)<s2>]
+
+    if (( i1 && i1 < CURRENT && i2 > CURRENT )); then
+      words=("${(@)words[i1+1,i2-1]}")
+
+    Again, `-mbetween' would be the same.
+
+We could even put the assignments into the (( ... )), speeding up
+things some more.
+
+So. With this, would the tests be simple enough for our users? If we
+document them in the manual?
+
+With `compstate[restore]' we could even supply a function `comptest'...
+
+Bye
+ Sven
+
+diff -u od/Zsh/params.yo Doc/Zsh/params.yo
+--- od/Zsh/params.yo	Sun Feb 28 21:31:51 1999
++++ Doc/Zsh/params.yo	Sun Feb 28 21:39:42 1999
+@@ -155,6 +155,11 @@
+ the var(n)th or var(n)th last match (if var(expr) evaluates to
+ var(n)).  This flag is ignored when the array is associative.
+ )
++item(tt(b:)var(expr)tt(:))(
++if combined with `tt(r)', `tt(R)', `tt(i)' or `tt(I)', makes them begin
++at the var(n)th or var(n)th last element, word, or character (if var(expr)
++evaluates to var(n)).  This flag is ignored when the array is associative.
++)
+ enditem()
+ texinode(Positional Parameters)(Local Parameters)(Array Parameters)(Parameters)
+ sect(Positional Parameters)
+--- os/params.c	Sun Feb 28 20:45:05 1999
++++ Src/params.c	Sun Feb 28 22:12:40 1999
+@@ -680,6 +680,7 @@
+ getarg(char **str, int *inv, Value v, int a2, long *w)
+ {
+     int num = 1, word = 0, rev = 0, ind = 0, down = 0, l, i, ishash;
++    int beg = 0, hasbeg = 0;
+     char *s = *str, *sep = NULL, *t, sav, *d, **ta, **p, *tt;
+     long r = 0;
+     Comp c;
+@@ -731,6 +732,18 @@
+ 		*t = sav;
+ 		s = t;
+ 		break;
++	    case 'b':
++		hasbeg = 1;
++		t = get_strarg(++s);
++		if (!*t)
++		    goto flagerr;
++		sav = *t;
++		*t = '\0';
++		if ((beg = mathevalarg(s + 1, &d)) > 0)
++		    beg--;
++		*t = sav;
++		s = t;
++		break;
+ 	    case 'p':
+ 		escapes = 1;
+ 		break;
+@@ -869,6 +883,8 @@
+ 	tokenize(s);
+ 
+ 	if ((c = parsereg(s))) {
++	    int len;
++
+ 	    if (v->isarr) {
+ 		if (ishash) {
+ 		    scancomp = c;
+@@ -887,28 +903,43 @@
+ 		    ta = getarrvalue(v);
+ 		if (!ta || !*ta)
+ 		    return 0;
+-		if (down)
+-		    for (r = -1, p = ta + arrlen(ta) - 1; p >= ta; r--, p--) {
+-			if (domatch(*p, c, 0) && !--num)
+-			    return r;
+-		} else
+-		    for (r = 1, p = ta; *p; r++, p++)
+-			if (domatch(*p, c, 0) && !--num)
+-			    return r;
++		len = arrlen(ta);
++		if (beg < 0)
++		    beg += len;
++		if (beg >= 0 && beg < len) {
++		    if (down) {
++			if (!hasbeg)
++			    beg = len - 1;
++			for (r = 1 + beg, p = ta + beg; p >= ta; r--, p--) {
++			    if (domatch(*p, c, 0) && !--num)
++				return r;
++			}
++		    } else
++			for (r = 1 + beg, p = ta + beg; *p; r++, p++)
++			    if (domatch(*p, c, 0) && !--num)
++				return r;
++		}
+ 	    } else if (word) {
+ 		ta = sepsplit(d = s = getstrvalue(v), sep, 1);
+-		if (down) {
+-		    for (p = ta + (r = arrlen(ta)) - 1; p >= ta; p--, r--)
+-			if (domatch(*p, c, 0) && !--num)
+-			    break;
+-		    if (p < ta)
+-			return 0;
+-		} else {
+-		    for (r = 1, p = ta; *p; r++, p++)
+-			if (domatch(*p, c, 0) && !--num)
+-			    break;
+-		    if (!*p)
+-			return 0;
++		len = arrlen(ta);
++		if (beg < 0)
++		    beg += len;
++		if (beg >= 0 && beg < len) {
++		    if (down) {
++			if (!hasbeg)
++			    beg = len - 1;
++			for (r = 1 + beg, p = ta + beg; p >= ta; p--, r--)
++			    if (domatch(*p, c, 0) && !--num)
++				break;
++			if (p < ta)
++			    return 0;
++		    } else {
++			for (r = 1 + beg, p = ta + beg; *p; r++, p++)
++			    if (domatch(*p, c, 0) && !--num)
++				break;
++			if (!*p)
++			    return 0;
++		    }
+ 		}
+ 		if (a2)
+ 		    r++;
+@@ -924,35 +955,46 @@
+ 		d = getstrvalue(v);
+ 		if (!d || !*d)
+ 		    return 0;
+-		if (a2) {
+-		    if (down)
+-			for (r = -2, t = d + strlen(d) - 1; t >= d; r--, t--) {
+-			    sav = *t;
+-			    *t = '\0';
+-			    if (domatch(d, c, 0) && !--num) {
++		len = strlen(d);
++		if (beg < 0)
++		    beg += len;
++		if (beg >= 0 && beg < len) {
++		    if (a2) {
++			if (down) {
++			    if (!hasbeg)
++				beg = len - 1;
++			    for (r = beg, t = d + beg; t >= d; r--, t--) {
++				sav = *t;
++				*t = '\0';
++				if (domatch(d, c, 0) && !--num) {
++				    *t = sav;
++				    return r;
++				}
+ 				*t = sav;
+-				return r;
+ 			    }
+-			    *t = sav;
+-		    } else
+-			for (r = 0, t = d; *t; r++, t++) {
+-			    sav = *t;
+-			    *t = '\0';
+-			    if (domatch(d, c, 0) && !--num) {
++			} else
++			    for (r = beg, t = d + beg; *t; r++, t++) {
++				sav = *t;
++				*t = '\0';
++				if (domatch(d, c, 0) && !--num) {
++				    *t = sav;
++				    return r;
++				}
+ 				*t = sav;
+-				return r;
+ 			    }
+-			    *t = sav;
+-			}
+-		} else {
+-		    if (down)
+-			for (r = -1, t = d + strlen(d) - 1; t >= d; r--, t--) {
+-			    if (domatch(t, c, 0) && !--num)
+-				return r;
+-		    } else
+-			for (r = 1, t = d; *t; r++, t++)
+-			    if (domatch(t, c, 0) && !--num)
+-				return r;
++		    } else {
++			if (down) {
++			    if (!hasbeg)
++				beg = len - 1;
++			    for (r = beg + 1, t = d + beg; t >= d; r--, t--) {
++				if (domatch(t, c, 0) && !--num)
++				    return r;
++			    }
++			} else
++			    for (r = beg + 1, t = d + beg; *t; r++, t++)
++				if (domatch(t, c, 0) && !--num)
++				    return r;
++		    }
+ 		}
+ 		return 0;
+ 	    }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

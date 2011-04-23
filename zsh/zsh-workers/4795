@@ -1,0 +1,151 @@
+From zsh-workers-request@math.gatech.edu Tue Dec 15 06:58:40 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 398 invoked from network); 15 Dec 1998 06:58:38 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 15 Dec 1998 06:58:38 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id BAA00894;
+	Tue, 15 Dec 1998 01:57:40 -0500 (EST)
+Resent-Date: Tue, 15 Dec 1998 01:57:40 -0500 (EST)
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <981214225636.ZM4182@candle.brasslantern.com>
+Date: Mon, 14 Dec 1998 22:56:35 -0800
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: zsh-workers@math.gatech.edu
+Subject: PATCH: 3.1.5-pws-3: Associative arrays and ${...:=...}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"VI8lB2.0.vD.aXWTs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4795
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+This patch permits associative arrays to be created or assigned-to using
+the := and ::= parameter substitution syntax.  This is more convenient than
+having to use `typeset -A name` before any other references to an AA.  The
+syntax is simply to double the `A' substitution flag, like so:
+
+zsh% echo ${(AA)=assoc::=key1 value1 key2 value2}
+value2 value1
+
+Note that, as usual for AAs, only the values are substituted, and they may
+not be substituted in the same order that they were assigned.
+
+The reason for the = between (AA) and assoc is to turn on shwordsplit.  If
+this is not done, "key1 value1 key2 value2" is taken as a single string,
+and the assignment fails.  You can also cause splitting in other ways; e.g.
+this copies the entire command hash table into the parameter `commands':
+
+zsh% : ${(AAs:=:)commands::=${(j:=:)$(hash -f;hash)}}
+
+(I suspect something like that could be extremely useful when programming
+completions.)
+
+There are two quirks that should be mentioned.  The first is that you
+can't presently assign to a subscripted AA element this way; e.g. this
+works for arrays (always did, my patch has nothing to do with it):
+
+zsh% : ${(A)array[2]::=two}
+
+But this fails for AAs:
+
+zsh% : ${(AA)assoc[two]::=2}
+zsh: attempt to set slice of associative array
+
+I now believe I know how to fix this, but I hadn't figured it out yet
+when I fixed up sethparam() a few patches ago.
+
+The second quirk is that ${(A)name::=...} (note, only one `A') doesn't
+convert associations into ordinary arrays.  If $name exists and is an
+AA, it's assigned to as an AA, just as happens with regular name=(...)
+assignment syntax.
+
+zsh% echo ${(A)bar:=x}
+x
+zsh% echo ${(AA)=foo::=one 1 two 2}
+2 1
+zsh% echo ${(A)foo:=x}
+zsh: bad set of key/value pairs for associative array
+
+This patch also makes use of the SCANPM flags in paramsubst(), now that
+they're available outside of params.c.
+
+Index: Src/subst.c
+===================================================================
+--- subst.c	1998/12/13 23:40:57	1.6
++++ subst.c	1998/12/14 09:17:38
+@@ -720,8 +720,8 @@
+     int eval = 0;
+     int nojoin = 0;
+     char inbrace = 0;		/* != 0 means ${...}, otherwise $... */
+-    char hkeys = 0;		/* 1 means get keys from associative array */
+-    char hvals = 0;		/* > hkeys get values of associative array */
++    char hkeys = 0;
++    char hvals = 0;
+ 
+     *s++ = '\0';
+     if (!ialnum(*s) && *s != '#' && *s != Pound && *s != '-' &&
+@@ -739,7 +739,7 @@
+ 	inbrace = 1;
+ 	s++;
+ 	if (*s == '!' && s[1] != Outbrace && emulation == EMULATE_KSH) {
+-	    hkeys = 1;
++	    hkeys = SCANPM_WANTKEYS;
+ 	    s++;
+ 	} else if (*s == '(' || *s == Inpar) {
+ 	    char *t, sav;
+@@ -762,7 +762,7 @@
+ 		case Outpar:
+ 		    break;
+ 		case 'A':
+-		    arrasg = 1;
++		    ++arrasg;
+ 		    break;
+ 		case '@':
+ 		    nojoin = 1;
+@@ -897,10 +897,10 @@
+ 		    break;
+ 
+ 		case 'k':
+-		    hkeys = 1;
++		    hkeys = SCANPM_WANTKEYS;
+ 		    break;
+ 		case 'v':
+-		    hvals = 2;
++		    hvals = SCANPM_WANTVALS;
+ 		    break;
+ 
+ 		default:
+@@ -979,9 +979,8 @@
+ 	*s = sav;
+ 	v = (Value) NULL;
+     } else {
+-	/* 2 == SCANPM_WANTKEYS, 1 == SCANPM_WANTVALS, see params.c */
+ 	if (!(v = fetchvalue(&s, (unset(KSHARRAYS) || inbrace) ? 1 : -1,
+-			     (hkeys ? 2 : 0) + ((hvals > hkeys) ? 1 : 0))))
++			     hkeys|hvals)))
+ 	    vunset = 1;
+     }
+     while (v || ((inbrace || (unset(KSHARRAYS) && vunset)) && isbrack(*s))) {
+@@ -1260,7 +1259,12 @@
+ 			*p++ = ztrdup(*t++);
+ 		    }
+ 		    *p++ = NULL;
+-		    setaparam(idbeg, a);
++		    if (arrasg > 1) {
++			Param pm = sethparam(idbeg, a);
++			if (pm)
++			    aval = paramvalarr(pm->gets.hfn(pm), hkeys|hvals);
++		    } else
++			setaparam(idbeg, a);
+ 		} else {
+ 		    untokenize(val);
+ 		    setsparam(idbeg, ztrdup(val));
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

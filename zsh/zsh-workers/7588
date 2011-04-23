@@ -1,0 +1,104 @@
+From zsh-workers-return-7588-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Sep 01 08:08:55 1999
+Return-Path: <zsh-workers-return-7588-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22511 invoked from network); 1 Sep 1999 08:08:52 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 1 Sep 1999 08:08:52 -0000
+Received: (qmail 20738 invoked by alias); 1 Sep 1999 08:08:40 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7588
+Received: (qmail 20731 invoked from network); 1 Sep 1999 08:08:39 -0000
+Date: Wed, 1 Sep 1999 10:08:37 +0200 (MET DST)
+Message-Id: <199909010808.KAA31927@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Tue, 31 Aug 1999 16:40:22 +0000
+Subject: Re: prob: fg not sending CONT to 'make' children
+
+
+Bart Schaefer wrote:
+
+> On Aug 31,  1:25pm, Sven Wischnowsky wrote:
+> } Subject: Re: prob: fg not sending CONT to 'make' children
+> }
+> } The patch below makes the return value be -1 if at least one of the
+> } kill()s failed.
+> 
+> Really?  It doesn't look to me as though it changes that behavior at all.
+> And all those #ifdefs make it really hard to read, and testing sig != 0 is
+> redundant because the whole thing is inside "if (sig == SIGCONT) ...".
+
+(Sorry about the #ifdefs, I just copied them froom the end of the
+function. I certainly should have noticed the `sig!=0' and probably
+that they were not needed anyway, given the definiton in system.h.)
+
+But: behavior not changed? Before it was:
+
+                for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+                    if (killpg(pn->pid, sig) == -1)
+			kill(pn->pid, sig);
+ 
+                for (pn = jn->procs; pn->next; pn = pn->next)
+                    err = kill(pn->pid, sig);
+
+		if (!jobtab[jn->other].procs && pn)
+		    err = kill(pn->pid, sig);
+
+                return err;
+
+I changed it to (without the #ifdefs):
+
+                for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+                    if (killpg(pn->pid, sig) == -1)
+			if (kill(pn->pid, sig) == -1 && errno != ESRCH)
+			    err = -1;
+ 
+                for (pn = jn->procs; pn->next; pn = pn->next)
+                    if (kill(pn->pid, sig) == -1 && errno != ESRCH)
+			err = -1;
+
+		if (!jobtab[jn->other].procs && pn)
+		    if (kill(pn->pid, sig) == -1 && errno != ESRCH)
+			err = -1;
+
+                return err;
+
+So, err is only set to -1 if (and always if) a kill fails with an
+intersting error and if another kill() later succeeds it will not be
+reset to zero -- that's certainly different from before, isn't it?
+(And how does your change to `|= -1' change the behavior?)
+
+> } NOTE: while playing with this I found a bug when I did `ls|sleep 800'
+> } where the `ls' finished before the `sleep' process was set up -- the
+> } `sleep' put itself in its own little process group and one couldn't fg 
+> } the whole thing. I tried several ways to fix this now and the hunks in 
+> } `exec.c' and `utils.c' are the only ones which made this work
+> 
+> That's very odd.  I didn't think the PID passed to killpg() should change
+> if you still want to signal the whole group, even if the group leader had
+> exited.  I wonder what happens if there are more than two processes in
+> the group when the leader exits?  Do all the leader's children become
+> their own little leaders?
+
+(Damn. After thinking again: there is a problem with `a | b | c' if `b' 
+is started when `a' still lives and `c' is started when `a' is dead.
+I'll have to look at it again. Sigh.)
+
+The problem is in `entersubsh()' where we use `kill(..)' to test if a
+forked process has to put itself in its own process group. I tried
+to change this to `killpg(..)' and it fixed the problem with `a | b'
+where `b' is a command. But it also made that fail if `b' is a shell
+construct (or function). There is some code elsewhere which makes this 
+work with the `kill(..)' for pipes ending in shell constructs -- I
+have to find that place again to make it work with normal pipes, too.
+
+Bye
+ Sven
+
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,146 @@
+From zsh-workers-return-19389-mason-zsh=primenet.com.au@sunsite.dk Thu Jan 22 17:28:31 2004
+Return-Path: <zsh-workers-return-19389-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15082 invoked from network); 22 Jan 2004 17:28:29 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 22 Jan 2004 17:28:29 -0000
+Received: (qmail 5444 invoked by alias); 22 Jan 2004 17:28:13 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19389
+Received: (qmail 5369 invoked from network); 22 Jan 2004 17:28:12 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 22 Jan 2004 17:28:12 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.58.19] by sunsite.dk (MessageWall 1.0.8) with SMTP; 22 Jan 2004 17:28:12 -0000
+Received: from MAILSWEEPER01.csr.com (mailhost1.csr.com [62.189.183.235])
+	by lhuumrelay3.lnd.ops.eu.uu.net (8.11.0/8.11.0) with ESMTP id i0MHSBv05974
+	for <zsh-workers@sunsite.dk>; Thu, 22 Jan 2004 17:28:12 GMT
+Received: from EXCHANGE02.csr.com (unverified [192.168.137.45]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T674b087d85c0a88d012dc@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Thu, 22 Jan 2004 17:27:59 +0000
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.5329);
+	 Thu, 22 Jan 2004 17:30:22 +0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: strftime -s
+Date: Thu, 22 Jan 2004 17:28:10 +0000
+Message-ID: <21397.1074792490@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 22 Jan 2004 17:30:22.0382 (UTC) FILETIME=[69E314E0:01C3E10D]
+
+This adds the option `-s scalar' to strftime to do an assignment instead
+of a print.  Otherwise there's no gain over using date when assigning to
+a parameter.
+
+It also fixes a bug that the EPOCHSECONDS wasn't unset when the module
+was unloaded, which could have nasty effects.  There ought to be
+something in the development guide about this.  (Ideally, there ought to
+be an easier way of removing module parameters --- it's a bit hairy at
+the moment.)
+
+Index: Src/Modules/datetime.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/datetime.c,v
+retrieving revision 1.6
+diff -u -r1.6 datetime.c
+--- Src/Modules/datetime.c	8 Oct 2003 13:37:13 -0000	1.6
++++ Src/Modules/datetime.c	22 Jan 2004 17:24:28 -0000
+@@ -35,10 +35,18 @@
+ bin_strftime(char *nam, char **argv, Options ops, int func)
+ {
+     int bufsize, x;
+-    char *endptr = NULL, *buffer;
++    char *endptr = NULL, *scalar = NULL, *buffer;
+     time_t secs;
+     struct tm *t;
+ 
++    if (OPT_ISSET(ops,'s')) {
++	scalar = OPT_ARG(ops, 's');
++	if (!isident(scalar)) {
++	    zwarnnam(nam, "not an identifier: %s", scalar, 0);
++	    return 1;
++	}
++    }
++
+     secs = (time_t)strtoul(argv[1], &endptr, 10);
+     if (secs == ULONG_MAX) {
+ 	zwarnnam(nam, "%s: %e", argv[1], errno);
+@@ -58,7 +66,11 @@
+ 	buffer = zrealloc(buffer, bufsize *= 2);
+     }
+ 
+-    printf("%s\n", buffer);
++    if (scalar) {
++	setsparam(scalar, ztrdup(buffer));
++    } else {
++	printf("%s\n", buffer);
++    }
+     zfree(buffer, bufsize);
+ 
+     return 0;
+@@ -71,7 +83,7 @@
+ }
+ 
+ static struct builtin bintab[] = {
+-    BUILTIN("strftime",    0, bin_strftime,    2,   2, 0, NULL, NULL),
++    BUILTIN("strftime",    0, bin_strftime,    2,   2, 0, "s:", NULL),
+ };
+ 
+ static struct paramdef patab[] = {
+@@ -99,7 +111,14 @@
+ int
+ cleanup_(Module m)
+ {
++    Param pm;
++
+     deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++    pm = (Param) paramtab->getnode(paramtab, "EPOCHSECONDS");
++    if (pm && (pm->flags & PM_SPECIAL)) {
++	pm->flags &= ~PM_READONLY;
++	unsetparam_pm(pm, 0, 1);
++    }
+     return 0;
+ }
+ 
+Index: Doc/Zsh/mod_datetime.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/mod_datetime.yo,v
+retrieving revision 1.1
+diff -u -r1.1 mod_datetime.yo
+--- Doc/Zsh/mod_datetime.yo	25 Oct 2003 17:38:19 -0000	1.1
++++ Doc/Zsh/mod_datetime.yo	22 Jan 2004 17:24:29 -0000
+@@ -6,9 +6,12 @@
+ startitem()
+ findex(strftime)
+ cindex(date string, printing)
+-item(tt(strftime) var(format) var(epochtime) )(
++item(tt(strftime) [ tt(-s) var(scalar) ] var(format) var(epochtime) )(
+ Output the date denoted by var(epochtime) in the var(format)
+ specified.
++
++If tt(-s) var(scalar) is given, assign the date to var(scalar) instead
++of printing it.
+ )
+ enditem()
+ 
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

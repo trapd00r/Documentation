@@ -1,0 +1,815 @@
+From zsh-workers-return-7944-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Sep 20 13:38:49 1999
+Return-Path: <zsh-workers-return-7944-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7498 invoked from network); 20 Sep 1999 11:25:53 -0000
+Received: from mail2.primenet.com.au (HELO primenet.com.au) (?+IEMJnXVIjbjJ/T+zYfv+bdAU5qAnG8f?@203.24.36.6)
+  by ns1.primenet.com.au with SMTP; 20 Sep 1999 11:25:53 -0000
+Received: (qmail 2149 invoked from network); 20 Sep 1999 09:39:09 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by mail2.primenet.com.au with SMTP; 20 Sep 1999 09:39:09 -0000
+Received: (qmail 27716 invoked by alias); 20 Sep 1999 09:37:44 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7944
+Received: (qmail 27709 invoked from network); 20 Sep 1999 09:37:43 -0000
+Date: Mon, 20 Sep 1999 11:37:38 +0200 (MET DST)
+Message-Id: <199909200937.LAA06340@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Fri, 17 Sep 1999 09:48:27 +0000
+Subject: Re: Completion heuristics (was Re: bug in _rpm?)
+
+
+Bart Schaefer wrote:
+
+> One approach would be to figure out some heuristic for determining that
+> the ambiguous string "looks enough like" an element of the set of possible
+> matches, and not insert it at all if it looks "too different."
+
+Ok. Here is my first attempt at trying to avoid inserting unambiguous 
+stuff that is only irritating.
+
+Some explanation:
+
+When inserting such an unambiguous string we use nested loops. The
+outer one walks along all cline structs for the word-parts (resulting
+from `*'-patterns). The inner one(s) then insert the stuff before or
+after the anchors of the `*'-patterns.
+
+I think our problem really only has to do with the first type of cline 
+structs, i.e. for the word-parts its a all-or-nothing question. So we
+only have to decide whether to insert such a top-level cline and its
+prefix or suffix at all.
+
+The string is inserted in the function `cline_str' (the name comes
+from the fact that this function can also just return the unambiguous
+string, without insering it into the line). I've now made this call
+the new function cut_cline() (just before cline_str() in the code)
+which looks at the whole cline list and, well, cuts this list at the
+point where it thinks is the last interesting bit.
+
+This decision is currently done as follows: all parts for which there
+is something in the original string from the line are kept. E.g. with
+possible matches `a.foo.c.1' and `a.bar.c.2' doing `a<TAB>' gives
+`a.', but doing `a..<TAB> gives `a..c.' with the cursor on the second
+dot.
+
+Then, if only one part has missing characters, the whole unambiguous
+string is inserted. If multiple parts have missing characters, anything
+up to the first of them plus all parts directly after it without
+missing characters are inserted. This means that there is still only
+one part inside the string with missing characters (and probably one
+at the end). However, more parts may be inserted because the code does 
+two more checks (and now it gets a bit fuzzy):
+
+For both tests it looks at structs from the point it found before
+(first part with missing characters plus all parts without missing
+characters directly after it) to the end. The first test tries to make 
+sure that interestingly long unambiguous parts are inserted if that
+doesn't make the whole string look too messy. It builds a value (`sum' 
+in the code) that expresses how `good' the string would look up to the 
+struct it currently handles. I compares the length of the unambiguous
+part-string with the minimum and maximum lengths for this part (as
+they appear in all matches added). For parts without missing
+characters and for parts for which the unambiguous string has a
+minimum length (two characters) and this length is at least as big as
+the `(min + max) / 2', the `sum' value is increased (weighted by the
+number of missing characters for the maximum length). For parts fo
+which the unambiguous string is shorter than the minimum length, `sum' 
+is decreased (and doubly so if the unambiguous string is shorter than
+two characters because these are the particularly ugly looking empty
+parts before one-letter anchors). Ok, while walking along the list it
+remembers the point where `sum' had the greatest value and it was
+greater than zero. If there was such a point it keeps the parts up to
+it. If no part with `sum' greater than zero was found, it does the
+second (and last test):
+
+It sums up the lengths of all parts (after the one described above)
+and if that sum is greater than 2/3 of the length of the shortest
+match, the whole unambiguous string is inserted.
+
+
+So, I think the first simple tests are good. The weighting thins looks 
+good to me, too, although we probably want to fiddle with the
+weighting itself. The last test is probably to simple. Maybe it should 
+avoid overly simple unambiguous parts at the end. Maybe the test could 
+be improved (the code now also calculates the length of the longest
+match -- we could use this, too).
+
+Anyway, with all this, we need some experience, so if you happen to
+get something inserted which you didn't expect or don't like, please
+let us know. And tell us the context, i.e. the original string, the
+possible matches and the string that was inserted. And maybe your
+thoughts about how this could be improved.
+
+
+When you look at cut_cline() you'll see a harmless looking test at the 
+top (`if (!hasmatched)...'), this is for handling the case where all
+matches were added with `-U'. In that case we don't have any
+information in the cline structs about the `original' string (of
+course). This means that the very first test would always fail. So I
+handled this specially: in this case the full unambiguous string is
+inserted, even if it looks bad. My thought was that it may be better
+to inserted that than to insert some truncated string and thereby
+insert something where bits that originally were on the line are
+missing (this has happened sometimes and is *very* irritating). Any
+comments about this?
+
+This also required some changes in the completion functions because
+e.g. our friends `_path_files' and `_multi_parts' did exactly that --
+do the matching with `compadd -D' or something like that and finally
+add the matches with `-U'.
+
+
+And finally, the patch contains some fixes in the matching code which
+surfaced when I changed the completion functions. I could have sent
+this separately, but since the code in cut_cline() really makes the
+unambiguous string inserted look better I didn't bother to do that.
+
+Bye
+ Sven
+
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Sun Sep 19 12:21:02 1999
++++ Src/Zle/zle_tricky.c	Sun Sep 19 00:39:06 1999
+@@ -159,6 +159,10 @@
+ 
+ static int ispattern, haspattern;
+ 
++/* Non-zero if at least one match was added without -U. */
++
++static int hasmatched;
++
+ /* Two patterns used when doing glob-completion.  The first one is built *
+  * from the whole word we are completing and the second one from that    *
+  * part of the word that was identified as a possible filename.          */
+@@ -230,6 +234,10 @@
+ 
+ static int mflags;
+ 
++/* Length of longest/shortest match. */
++
++static int maxmlen, minmlen;
++
+ /* This holds the explanation strings we have to print in this group and *
+  * a pointer to the current cexpl structure. */
+ 
+@@ -287,6 +295,7 @@
+     int olen;
+     int slen;
+     Cline prefix, suffix;
++    int min, max;
+ };
+ 
+ #define CLF_MISS  1
+@@ -2003,6 +2012,39 @@
+     return r;
+ }
+ 
++/* Calculate the length of a cline and its sub-lists. */
++
++static int
++cline_sublen(Cline l)
++{
++    int len = ((l->flags & CLF_LINE) ? l->llen : l->wlen);
++
++    if (l->olen && !((l->flags & CLF_SUF) ? l->suffix : l->prefix))
++	len += l->olen;
++    else {
++	Cline p;
++
++	for (p = l->prefix; p; p = p->next)
++	    len += ((p->flags & CLF_LINE) ? p->llen : p->wlen);
++	for (p = l->suffix; p; p = p->next)
++	    len += ((p->flags & CLF_LINE) ? p->llen : p->wlen);
++    }
++    return len;
++}
++
++/* Set the lengths in the cline lists. */
++
++static void
++cline_setlens(Cline l, int both)
++{
++    while (l) {
++	l->max = cline_sublen(l);
++	if (both)
++	    l->min = l->max;
++	l = l->next;
++    }
++}
++
+ /* This reverts the order of the elements of the given cline list and
+  * returns a pointer to the new head. */
+ 
+@@ -2217,8 +2259,8 @@
+     if (!strncmp(l, w, wl))
+ 	l = NULL;
+ 
+-    /* Split the new part into parts and turn the last one into a `suffix'
+-     * if we have a left anchor. */
++    /* Split the new part into parts and turn the last one into a
++     * `suffix' if we have a left anchor. */
+ 
+     p = bld_parts(s, sl, osl, &lp);
+ 
+@@ -2234,8 +2276,21 @@
+ 	p = revert_cline(lp = p);
+     /* Now add the sub-clines we already had. */
+     if (matchsubs) {
+-	matchlastsub->next = p->prefix;
+-	p->prefix = matchsubs;
++	if (sfx) {
++	    Cline q;
++
++	    if ((q = lp->prefix)) {
++		while (q->next)
++		    q = q->next;
++		q->next = matchsubs;
++	    } else
++		lp->prefix = matchsubs;
++
++	    matchlastsub->next = NULL;
++	} else {
++	    matchlastsub->next = p->prefix;
++	    p->prefix = matchsubs;
++	}
+ 	matchsubs = matchlastsub = NULL;
+     }
+     /* Store the arguments in the last part-cline. */
+@@ -2290,7 +2345,7 @@
+ match_str(char *l, char *w, int *bp, int *rwlp, int sfx, int test)
+ {
+     int ll = strlen(l), lw = strlen(w), oll = ll, olw = lw;
+-    int il = 0, iw = 0, t, ind, add, bc = (bp ? *bp : 0);
++    int il = 0, iw = 0, t, ind, add, bc = (bp ? *bp : 0), he = 0;
+     VARARR(unsigned char, ea, ll + 1);
+     char *ow;
+     Cmlist ms;
+@@ -2382,8 +2437,11 @@
+ 		    for (t = 0, tp = w, ct = 0, ict = lw - alen + 1;
+ 			 ict;
+ 			 tp += add, ct++, ict--) {
+-			if (both ||
+-			    (pattern_match(ap, tp - moff, NULL, NULL) &&
++			if ((both &&
++			     (!ap || !test ||
++			      !pattern_match(ap, tp + aoff, NULL, NULL))) ||
++			    (!both &&
++			     pattern_match(ap, tp - moff, NULL, NULL) &&
+ 			     match_parts(l + aoff , tp - moff, alen))) {
+ 			    if (sfx) {
+ 				savw = tp[-zoff];
+@@ -2409,7 +2467,7 @@
+ 
+ 		    /* Yes, add the strings and clines if this is a 
+ 		     * top-level call. */
+-		    if (!test) {
++		    if (!test && (!he || (llen + alen))) {
+ 			char *op, *lp, *map, *wap, *wmp;
+ 			int ol;
+ 
+@@ -2475,10 +2533,15 @@
+ 		    }
+ 		    ow = w;
+ 
+-		    if (!llen && !alen)
++		    if (!llen && !alen) {
+ 			lm = mp;
+-		    else
+-			lm = NULL;
++			if (he)
++			    mp = NULL;
++			else
++			    he = 1;
++		    } else {
++			lm = NULL; he = 0;
++		    }
+ 		    break;
+ 		} else if (ll >= mp->llen && lw >= mp->wlen) {
+ 		    /* Non-`*'-pattern. */
+@@ -2567,6 +2630,7 @@
+ 		    }
+ 		    ow = w;
+ 		    lm = NULL;
++		    he = 0;
+ 		    break;
+ 		}
+ 	    }
+@@ -2586,6 +2650,7 @@
+ 		bp = NULL;
+ 	    }
+ 	    lm = NULL;
++	    he = 0;
+ 	} else {
+ 	    /* No matcher and different characters: l does not match w. */
+ 	    if (test)
+@@ -3398,6 +3463,7 @@
+ {
+     if (!e->suffix && a->prefix) {
+ 	Cline op = e->prefix, n = NULL, *p = &n, t, ca;
++	int min = 0, max = 0;
+ 
+ 	for (; b != e; b = b->next) {
+ 	    if ((*p = t = b->prefix)) {
+@@ -3407,6 +3473,8 @@
+ 	    }
+ 	    b->suffix = b->prefix = NULL;
+ 	    b->flags &= ~CLF_SUF;
++	    min += b->min;
++	    max += b->max;
+ 	    *p = b;
+ 	    p = &(b->next);
+ 	}
+@@ -3419,13 +3487,22 @@
+ 
+ 	    if (anew) {
+ 		join_psfx(e, a, NULL, NULL, 0);
+-		if (e->prefix)
++		if (e->prefix) {
++		    e->min += min;
++		    e->max += max;
+ 		    break;
++		}
+ 	    } else {
+ 		join_psfx(e, a, NULL, NULL, 0);
+-		if (a->prefix)
++		if (a->prefix) {
++		    a->min += min;
++		    a->max += max;
+ 		    break;
++		}
+ 	    }
++	    min -= n->min;
++	    max -= n->max;
++
+ 	    n = n->next;
+ 	}
+     }
+@@ -3437,6 +3514,8 @@
+ static Cline
+ join_clines(Cline o, Cline n)
+ {
++    cline_setlens(n, 1);
++
+     /* First time called, just return the new list. On further invocations
+      * we will get it as the first argument. */
+     if (!o)
+@@ -3562,7 +3641,17 @@
+ 		    }
+ 		}
+ 	    }
+-	    /* Ok, they are equal, now join the sub-lists. */
++	    /* Ok, they are equal, now copy the information about the
++             * original string if needed, calculate minimum and maximum
++	     * lengths, and join the sub-lists. */
++	    if (!o->orig && !o->olen) {
++		o->orig = n->orig;
++		o->olen = n->olen;
++	    }
++	    if (n->min < o->min)
++		o->min = n->min;
++	    if (n->max > o->max)
++		o->max = n->max;
+ 	    if (o->flags & CLF_MID)
+ 		join_mid(o, n);
+ 	    else
+@@ -3599,6 +3688,7 @@
+     Cmatch cm;
+     Aminfo ai = (alt ? fainfo : ainfo);
+     int palen, salen, qipl, ipl, pl, ppl, qisl, isl, psl;
++    int sl, lpl, lsl, ml;
+ 
+     palen = salen = qipl = ipl = pl = ppl = qisl = isl = psl = 0;
+ 
+@@ -3791,6 +3881,16 @@
+     if (!ai->firstm)
+ 	ai->firstm = cm;
+ 
++    sl = strlen(str);
++    lpl = (cm->ppre ? strlen(cm->ppre) : 0);
++    lsl = (cm->psuf ? strlen(cm->psuf) : 0);
++    ml = sl + lpl + lsl;
++
++    if (ml < minmlen)
++	minmlen = ml;
++    if (ml > maxmlen)
++	maxmlen = ml;
++
+     /* Do we have an exact match? More than one? */
+     if (exact) {
+ 	if (!ai->exact) {
+@@ -3799,13 +3899,10 @@
+ 		/* If a completion widget is active, we make the exact
+ 		 * string available in `compstate'. */
+ 
+-		int sl = strlen(str);
+-		int lpl = (cm->ppre ? strlen(cm->ppre) : 0);
+-		int lsl = (cm->psuf ? strlen(cm->psuf) : 0);
+ 		char *e;
+ 
+ 		zsfree(compexactstr);
+-		compexactstr = e = (char *) zalloc(lpl + sl + lsl + 1);
++		compexactstr = e = (char *) zalloc(ml + 1);
+ 		if (cm->ppre) {
+ 		    strcpy(e, cm->ppre);
+ 		    e += lpl;
+@@ -3886,7 +3983,9 @@
+      * was invoked. */
+     SWITCHHEAPS(compheap) {
+ 	HEAPALLOC {
+-	    doadd = (!dat->apar && !dat->opar && !dat->dpar);
++	    if ((doadd = (!dat->apar && !dat->opar && !dat->dpar)) &&
++		(dat->aflags & CAF_MATCH))
++		hasmatched = 1;
+ 	    if (dat->apar)
+ 		aparl = newlinklist();
+ 	    if (dat->opar)
+@@ -4587,6 +4686,9 @@
+ 				"yes" : "");
+ 	movetoend = ((cs == we || isset(ALWAYSTOEND)) ? 2 : 1);
+ 	showinglist = 0;
++	hasmatched = 0;
++	minmlen = 1000000;
++	maxmlen = -1;
+ 
+ 	/* Make sure we have the completion list and compctl. */
+ 	if (makecomplist(s, incmd, lst)) {
+@@ -6211,6 +6313,9 @@
+     untokenize(lpre);
+     untokenize(lsuf);
+ 
++    if (!(cc->mask & CC_DELETE))
++	hasmatched = 1;
++
+     /* Handle completion of files specially (of course). */
+ 
+     if ((cc->mask & (CC_FILES | CC_DIRS | CC_COMMPATH)) || cc->glob) {
+@@ -7413,6 +7518,86 @@
+     return len;
+ }
+ 
++/* This cuts the cline list before the stuff that isn't worth
++ * inserting in the line. */
++
++static Cline
++cut_cline(Cline l)
++{
++    Cline p, e = NULL, maxp = NULL;
++    int sum = 0, max = 0, tmp, ls = 0;
++
++    /* If no match was added with matching, we don't really know
++     * which parts of the unambiguous string are worth keeping,
++     * so for now we keep everything (in the hope that this
++     * produces a string containing at least everything that was 
++     * originally on the line). */
++
++    if (!hasmatched) {
++	cline_setlens(l, 0);
++	return l;
++    }
++    e = l = cp_cline(l);
++
++    /* First, search the last struct for which we have something on
++     * the line. Anything before that is kept. */
++
++    for (p = l; p; p = p->next)
++	if (p->orig || p->olen)
++	    e = p->next;
++
++    /* Then keep all structs without missing characters. */
++
++    while (e && !(e->flags & CLF_MISS))
++	e = e->next;
++
++    if (e) {
++	/* Then we see if there is another struct with missing
++	 * characters. If not, we keep the whole list. */
++
++	for (p = e->next; p && !(p->flags & CLF_MISS); p = p->next);
++
++	if (p) {
++	    for (p = e; p; p = p->next) {
++		if (!(p->flags & CLF_MISS))
++		    sum += p->max;
++		else {
++		    tmp = cline_sublen(p);
++		    if (tmp > 2 && tmp > ((p->max + p->min) >> 1))
++			sum += tmp - (p->max - tmp);
++		    else if (tmp < p->min)
++			sum -= (((p->max + p->min) >> 1) - tmp) << (tmp < 2);
++		}
++		if (sum > max) {
++		    max = sum;
++		    maxp = p;
++		}
++	    }
++	    if (max)
++		e = maxp;
++	    else {
++		int len = 0;
++
++		cline_setlens(l, 0);
++		ls = 1;
++
++		for (p = e; p; p = p->next)
++		    len += p->max;
++
++		if (len > ((minmlen << 1) / 3))
++		    return l;
++	    }
++	    e->line = e->word = NULL;
++	    e->llen = e->wlen = e->olen = 0;
++	    e->next = NULL;
++	}
++    }
++    if (!ls)
++	cline_setlens(l, 0);
++
++    return l;
++}
++
+ /* This builds the unambiguous string. If ins is non-zero, it is
+  * immediatly inserted in the line. Otherwise csp is used to return
+  * the relative cursor position in the string returned. */
+@@ -7421,11 +7606,13 @@
+ cline_str(Cline l, int ins, int *csp)
+ {
+     Cline s;
+-    int ocs = cs, ncs, pcs, pm, sm, d, b, i, j, li = 0;
++    int ocs = cs, ncs, pcs, pm, pmax, sm, smax, d, b, i, j, li = 0;
+     int pl, sl, hasp, hass, ppos, spos, plen, slen;
+ 
++    l = cut_cline(l);
++
+     ppos = spos = plen = slen = hasp = hass = 0;
+-    pm = sm = d = b = pl = sl = -1;
++    pm = pmax = sm = smax = d = b = pl = sl = -1;
+ 
+     /* Get the information about the brace beginning and end we have
+      * to re-insert. */
+@@ -7487,8 +7674,10 @@
+ 	}
+ 	/* Remember the position if this is the first prefix with
+ 	 * missing characters. */
+-	if ((l->flags & CLF_MISS) && !(l->flags & CLF_SUF))
+-	    pm = cs;
++	if ((l->flags & CLF_MISS) && !(l->flags & CLF_SUF) &&
++	    (pmax < (l->min - l->max))) {
++	    pm = cs; pmax = l->min - l->max;
++	}
+ 	pcs = cs;
+ 	/* Insert the anchor. */
+ 	if (l->flags & CLF_LINE)
+@@ -7508,8 +7697,9 @@
+ 	if (l->flags & CLF_MISS) {
+ 	    if (l->flags & CLF_MID)
+ 		b = cs;
+-	    else if (l->flags & CLF_SUF)
+-		sm = cs;
++	    else if ((l->flags & CLF_SUF) && smax < (l->min - l->max)) {
++		sm = cs; smax = l->min - l->max;
++	    }
+ 	}
+ 	/* And now insert the suffix or the original string. */
+ 	if (l->olen && (l->flags & CLF_SUF) && !l->suffix) {
+diff -u -r oldcompletion/Core/_multi_parts Completion/Core/_multi_parts
+--- oldcompletion/Core/_multi_parts	Sun Sep 19 12:19:13 1999
++++ Completion/Core/_multi_parts	Fri Sep 17 22:07:50 1999
+@@ -100,14 +100,16 @@
+         matches=( "${(@M)matches:#${tmp1[1]}*}" )
+ 	tmp2=( "${(@M)matches:#${tmp1[1]}${sep}*}" )
+ 
++        PREFIX="$pref$PREFIX"
++
+ 	if (( $#tmp2 )); then
+-	  compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	          -p "$pref" -qS "$sep" - "$tmp1[1]"
++	  compadd "$group[@]" "$expl[@]" -p "$pref" -qS "$sep" \
++                  -M "r:|${sep}=* r:|=*" - "$tmp1[1]"
+         else
+-	  compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	          -p "$pref" - "$tmp1[1]"
++	  compadd "$group[@]" "$expl[@]" -p "$pref" \
++                  -M "r:|${sep}=* r:|=*" - "$tmp1[1]"
+         fi
+-	return 1
++	return 0
+       fi
+     elif (( $#tmp1 )); then
+ 
+@@ -118,6 +120,8 @@
+       SUFFIX="$suf"
+       compadd -O matches -M "r:|${sep}=* r:|=*" - "$matches[@]"
+ 
++      PREFIX="$pref"
++
+       if [[ -n "$menu" ]]; then
+         # With menucompletion we just add matches for the matching
+         # components with the prefix we collected and the rest from the
+@@ -125,11 +129,13 @@
+ 
+         tmp2="$pre$suf"
+         if [[ "$tmp2" = *${sep}* ]]; then
+-          compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	          -p "$pref" -s "${sep}${tmp2#*${sep}}" - "$tmp1[@]"
++          SUFFIX="${sep}${tmp2#*${sep}}$SUFFIX"
++          compadd "$group[@]" "$expl[@]" \
++                  -p "$pref" -s "${sep}${tmp2#*${sep}}" \
++                  -M "r:|${sep}=* r:|=*" - "$tmp1[@]"
+         else
+-          compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	          -p "$pref" - "$tmp1[@]"
++          compadd "$group[@]" "$expl[@]" -p "$pref"\
++                  -M "r:|${sep}=* r:|=*" - "$tmp1[@]"
+         fi
+       else
+         # With normal completion we add all matches one-by-one with
+@@ -138,11 +144,14 @@
+ 
+         for i in "${(@M)matches:#(${(j:|:)~tmp1})*}"; do
+ 	  if [[ "$i" = *${sep}* ]]; then
+-            compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	            -S '' -p "$pref" -s "${i#*${sep}}" - "${i%%${sep}*}${sep}"
++	    SUFFIX="${i#*${sep}}$suf"
++            compadd "$group[@]" "$expl[@]" -S '' \
++	            -p "$pref" -s "${i#*${sep}}" \
++                    -M "r:|${sep}=* r:|=*" - "${i%%${sep}*}${sep}"
+           else
+-            compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	            -S '' -p "$pref" - "$i"
++	    SUFFIX="$suf"
++            compadd "$group[@]" "$expl[@]" -S '' -p "$pref" \
++                    -M "r:|${sep}=* r:|=*" - "$i"
+           fi
+         done
+       fi
+@@ -154,12 +163,15 @@
+ 
+       [[ "$orig" = "$pref$pre$suf" ]] && return 1
+ 
++      PREFIX="$pref$pre"
++      SUFFIX="$suf"
++
+       if [[ -n "$suf" ]]; then
+-        compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	        -s "$suf" - "$pref$pre"
++        compadd "$group[@]" "$expl[@]" -s "$suf" \
++                -M "r:|${sep}=* r:|=*" - "$pref$pre"
+       else
+-        compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	        -S '' - "$pref$pre$suf"
++        compadd "$group[@]" "$expl[@]" -S '' \
++                -M "r:|${sep}=* r:|=*" - "$pref$pre$suf"
+       fi
+       return 0
+     fi
+@@ -184,9 +196,11 @@
+     # unambiguous prefix and that differs from the original string,
+     # we insert it.
+ 
++    PREFIX="$pref"
++    SUFFIX=""
++
+     [[ -n "$pref" && "$orig" != "$pref" ]] &&
+-        compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	        -S '' - "$pref"
++        compadd "$group[@]" "$expl[@]" -S '' -M "r:|${sep}=* r:|=*" - "$pref"
+ 
+     return
+   fi
+diff -u -r oldcompletion/Core/_path_files Completion/Core/_path_files
+--- oldcompletion/Core/_path_files	Sun Sep 19 12:19:13 1999
++++ Completion/Core/_path_files	Fri Sep 17 21:54:39 1999
+@@ -24,7 +24,7 @@
+ #    menucompletion.
+ 
+ local linepath realpath donepath prepath testpath exppath
+-local tmp1 tmp2 tmp3 tmp4 i orig pre suf tpre tsuf
++local tmp1 tmp2 tmp3 tmp4 i orig pre suf tpre tsuf opre osuf
+ local pats haspats=no ignore group expl addpfx addsfx remsfx
+ local nm=$compstate[nmatches] menu
+ 
+@@ -118,6 +118,8 @@
+ 
+ pre="$PREFIX"
+ suf="$SUFFIX"
++opre="$PREFIX"
++osuf="$SUFFIX"
+ orig="${PREFIX}${SUFFIX}"
+ 
+ [[ $compstate[insert] = (*menu|[0-9]*) || -n "$_comp_correct" ||
+@@ -291,6 +293,8 @@
+ 
+       if [[ "$haspats" = no && -z "$tpre$tsuf" &&
+ 	"$pre" = */ && -z "$suf" ]]; then
++	PREFIX="$opre"
++	SUFFIX="$osuf"
+         compadd -nQS '' - "$linepath$donepath$orig"
+         tmp4=-
+       fi
+@@ -349,35 +353,40 @@
+       # collected as the suffixes to make the completion code expand
+       # it as far as possible.
+ 
++      PREFIX="$linepath${testpath:q}$PREFIX"
++
+       if [[ -n $menu ]]; then
+         [[ -n "$compconfig[path_cursor]" ]] && compstate[to_end]=''
+         if [[ "$tmp3" = */* ]]; then
++	  SUFFIX="${SUFFIX}/${tmp3#*/}"
+ 	  compadd -Qf -p "$linepath${testpath:q}" -s "/${tmp3#*/}" \
+ 	          -W "$prepath$realpath$testpath" "$ignore[@]" \
+ 		  "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" -M 'r:|/=* r:|=*' \
+-		  "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++		  "$group[@]" "$expl[@]" \
+ 		  - "${(@)${(@)tmp1%%/*}:q}"
+ 	else
+ 	  compadd -Qf -p "$linepath${testpath:q}" \
+ 	          -W "$prepath$realpath$testpath" "$ignore[@]" \
+ 		   "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
+-		   "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++		   "$group[@]" "$expl[@]" \
+ 		   - "${(@)tmp1:q}"
+ 	fi
+       else
+         if [[ "$tmp3" = */* ]]; then
++          tmp4="$SUFFIX"
+           for i in "$tmp1[@]"; do
++	    SUFFIX="${tmp4}/${${i#*/}:q}"
+ 	    compadd -Qf -p "$linepath${testpath:q}" -s "/${${i#*/}:q}" \
+ 		    -W "$prepath$realpath$testpath" "$ignore[@]" \
+ 		    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" -M 'r:|/=* r:|=*' \
+-		    "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++		    "$group[@]" "$expl[@]" \
+ 		    - "${${i%%/*}:q}"
+ 	  done
+         else
+ 	  compadd -Qf -p "$linepath${testpath:q}" \
+ 		  -W "$prepath$realpath$testpath" "$ignore[@]" \
+ 		  "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" -M 'r:|/=* r:|=*' \
+-		  "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++		  "$group[@]" "$expl[@]" \
+ 		  - "${(@)tmp1:q}"
+         fi
+       fi
+@@ -403,10 +412,11 @@
+   done
+ 
+   if [[ -z "$tmp4" ]]; then
++    PREFIX="$linepath${testpath:q}$PREFIX"
+     compadd -Qf -p "$linepath${testpath:q}" \
+ 	    -W "$prepath$realpath$testpath" "$ignore[@]" \
+ 	    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" -M 'r:|/=* r:|=*' \
+-	    "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++	    "$group[@]" "$expl[@]" \
+ 	    - "${(@)tmp1:q}"
+   fi
+ done
+@@ -419,7 +429,9 @@
+ 
+ if [[ -n "$compconfig[path_expand]" &&
+       $#exppaths -gt 0 && nm -eq compstate[nmatches] ]]; then
+-  compadd -Q -S '' "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++  PREFIX="$linepath"
++  SUFFIX=""
++  compadd -Q -S '' "$group[@]" "$expl[@]" \
+           -M 'r:|/=* r:|=*' -p "$linepath" - "$exppaths[@]"
+ fi
+ 
+diff -u -r oldcompletion/Core/_sep_parts Completion/Core/_sep_parts
+--- oldcompletion/Core/_sep_parts	Sun Sep 19 12:19:13 1999
++++ Completion/Core/_sep_parts	Sun Sep 19 11:57:59 1999
+@@ -18,7 +18,7 @@
+ # `-X explanation' options.
+ 
+ local str arr sep test testarr tmparr prefix suffixes matchers autosuffix
+-local matchflags opt group expl nm=$compstate[nmatches]
++local matchflags opt group expl nm=$compstate[nmatches] opre osuf
+ 
+ # Get the options.
+ 
+@@ -34,6 +34,8 @@
+ 
+ # Get the string from the line.
+ 
++opre="$PREFIX"
++osuf="$SUFFIX"
+ str="$PREFIX$SUFFIX"
+ SUFFIX=""
+ prefix=""
+@@ -144,6 +146,8 @@
+ 
+ # Add the matches for each of the suffixes.
+ 
++PREFIX="$pre"
++SUFFIX="$suf"
+ for i in "$suffixes[@]"; do
+   compadd -U "$group[@]" "$expl[@]" "$matchers[@]" "$autosuffix[@]" \
+           -i "$IPREFIX" -I "$ISUFFIX" -p "$prefix" -s "$i" - "$testarr[@]"
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

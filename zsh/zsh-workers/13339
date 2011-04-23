@@ -1,0 +1,491 @@
+From zsh-workers-return-13339-mason-zsh=primenet.com.au@sunsite.dk Thu Jan 11 09:57:09 2001
+Return-Path: <zsh-workers-return-13339-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13066 invoked from network); 11 Jan 2001 09:57:07 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 Jan 2001 09:57:07 -0000
+Received: (qmail 11931 invoked by alias); 11 Jan 2001 09:57:01 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13339
+Received: (qmail 11918 invoked from network); 11 Jan 2001 09:57:00 -0000
+Date: Thu, 11 Jan 2001 10:56:58 +0100 (MET)
+Message-Id: <200101110956.KAA23806@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Felix Rosencrantz's message of Sat, 30 Dec 2000 14:58:58 -0800
+	(PST)
+Subject: Re: Bug w/matching control + feature request
+
+
+Felix Rosencrantz wrote:
+
+> Hmm...  Since the matching specs and cursor positioning came up again,
+> it got me thinking about a feature request I've wanted.   There are times
+> when matching places the cursor at the undesired spot for finishing the
+> completion of the word I'm completing.  The matching code has an idea of
+> where several other reasonable cursor positions are (see the code
+> at  zsh/Src/Zle/compresult.c:415, which picks from several possible
+> cursor locations as hot spots, there are probably a few more.) 
+> 
+> It seems like there would need to be a global array that is accessible to the
+> completion functions, that would hold valid hot spots in the current word.
+> It would then be possible to write a widget that would cycle the cursor
+> between these spots.
+
+Here is the patch. It adds two new $compstate-keys:
+`unambiguous_positions' and `insert_positions'. Both give the
+interesting positions as colon separated lists. The former reports
+them relative to $compstate[unambiguous] and the latter relative to
+the command line (i.e. usable as $CURSOR values). The distinction is
+important, because $compstate[unambiguous] doesn't contain the braces, 
+if any, so the positions may be completely different in the two lists.
+
+The patch also add the widget function `cycle-completion-positions'
+which can be invoked repeatedly to cycle between the interesting spots.
+
+
+Hm, the patch looks bigger than it is. And because it is only an
+add-on and shouldn't be able to break anything, I'll commit it right
+away.
+
+
+Bye
+ Sven
+
+Index: Doc/Zsh/compwid.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compwid.yo,v
+retrieving revision 1.27
+diff -u -r1.27 compwid.yo
+--- Doc/Zsh/compwid.yo	2000/10/11 12:19:25	1.27
++++ Doc/Zsh/compwid.yo	2001/01/11 09:53:12
+@@ -240,6 +240,14 @@
+ Finally, it may also be set to tt(all), which makes all matches
+ generated be inserted into the line.
+ )
++vindex(insert_positions, compstate)
++item(tt(insert_positions))(
++When the completion system inserts an unambiguous string into the
++line, there may be multiple places where characters are missing or
++where the character inserted differs from at least one match.  The
++value of this key contains a colon separated list of all these
++positions, as indexes into the command line.
++)
+ vindex(last_prompt, compstate)
+ item(tt(last_prompt))(
+ If this is set to an non-empty string for every match added, the
+@@ -396,6 +404,13 @@
+ common prefix in the tt(unambiguous) key were inserted, relative to
+ the value of that key. The cursor would be placed before the character
+ whose index is given by this key.
++)
++vindex(unambiguous_positions, compstate)
++item(tt(unambiguous_positions))(
++This contains all positions where characters in the unambiguous string
++are missing or where the character inserted differs from at least one
++of the matches.  The positions are given as indexes into the string
++given by the value of the tt(uanmbiguous) key.
+ )
+ vindex(vared, compstate)
+ item(tt(vared))(
+Index: Doc/Zsh/contrib.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/contrib.yo,v
+retrieving revision 1.7
+diff -u -r1.7 contrib.yo
+--- Doc/Zsh/contrib.yo	2000/09/20 06:33:30	1.7
++++ Doc/Zsh/contrib.yo	2001/01/11 09:53:12
+@@ -316,6 +316,20 @@
+ with a key sequence.  Suggested bindings are described below.
+ 
+ startitem()
++tindex(cycle-completion-positions)
++item(tt(cycle-completion-positions))(
++After inserting an unambiguous string into the command line, the new
++function based completion system may know about multiple places in
++this string where characters are missing or differ from at least one
++of the possible matches.  It will then place the cursor on the
++position it considers to be the most interesting one, i.e. the one
++where one can disambiguate between as many matches as possible with as 
++little typing as possible.
++
++This widget allows to easily move the cursor to the other interesting
++spots.  It can be invoked repeatedly to cycle between all positions
++reported by the completion system.
++)
+ tindex(edit-command-line)
+ item(tt(edit-command-line))(
+ Edit the command line using your visual editor, as in tt(ksh).
+Index: Functions/Zle/cycle-completion-positions
+===================================================================
+RCS file: cycle-completion-positions
+diff -N cycle-completion-positions
+--- /dev/null	Mon Dec 11 17:26:27 2000
++++ cycle-completion-positions	Thu Jan 11 01:53:12 2001
+@@ -0,0 +1,16 @@
++# This may be called after a completion that inserted the unambiguous
++# (i.e. non-menu- and non-single-match-) string into the command line.
++# If there are multiple positions in the string with missing or differing
++# characters, repeatedly calling this widget cycles between all these
++# positions.
++
++emulate -L zsh
++setopt extendedglob
++
++local p="$_lastcomp[insert_positions]"
++
++if [[ $p = ((#s)|*:)${CURSOR}:* ]]; then
++  CURSOR=${${p#(|*:)${CURSOR}:}%%:*}
++elif [[ -n $p ]]; then
++  CURSOR=${p%%:*}
++fi
+Index: Src/Zle/comp.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/comp.h,v
+retrieving revision 1.9
+diff -u -r1.9 comp.h
+--- Src/Zle/comp.h	2000/10/11 12:19:25	1.9
++++ Src/Zle/comp.h	2001/01/11 09:53:13
+@@ -345,27 +345,31 @@
+ #define CP_UNAMBIG     (1 << CPN_UNAMBIG)
+ #define CPN_UNAMBIGC   14
+ #define CP_UNAMBIGC    (1 << CPN_UNAMBIGC)
+-#define CPN_LISTMAX    15
++#define CPN_UNAMBIGP   15
++#define CP_UNAMBIGP    (1 << CPN_UNAMBIGP)
++#define CPN_INSERTP    16
++#define CP_INSERTP     (1 << CPN_INSERTP)
++#define CPN_LISTMAX    17
+ #define CP_LISTMAX     (1 << CPN_LISTMAX)
+-#define CPN_LASTPROMPT 16
++#define CPN_LASTPROMPT 18
+ #define CP_LASTPROMPT  (1 << CPN_LASTPROMPT)
+-#define CPN_TOEND      17
++#define CPN_TOEND      19
+ #define CP_TOEND       (1 << CPN_TOEND)
+-#define CPN_OLDLIST    18
++#define CPN_OLDLIST    20
+ #define CP_OLDLIST     (1 << CPN_OLDLIST)
+-#define CPN_OLDINS     19
++#define CPN_OLDINS     21
+ #define CP_OLDINS      (1 << CPN_OLDINS)
+-#define CPN_VARED      20
++#define CPN_VARED      22
+ #define CP_VARED       (1 << CPN_VARED)
+-#define CPN_LISTLINES  21
++#define CPN_LISTLINES  23
+ #define CP_LISTLINES   (1 << CPN_LISTLINES)
+-#define CPN_QUOTES     22
++#define CPN_QUOTES     24
+ #define CP_QUOTES      (1 << CPN_QUOTES)
+-#define CPN_IGNORED    23
++#define CPN_IGNORED    25
+ #define CP_IGNORED     (1 << CPN_IGNORED)
+ 
+-#define CP_KEYPARAMS   24
+-#define CP_ALLKEYS     ((unsigned int) 0xffffff)
++#define CP_KEYPARAMS   26
++#define CP_ALLKEYS     ((unsigned int) 0x3ffffff)
+ 
+ /* Hooks. */
+ 
+Index: Src/Zle/complete.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complete.c,v
+retrieving revision 1.14
+diff -u -r1.14 complete.c
+--- Src/Zle/complete.c	2000/10/11 12:19:25	1.14
++++ Src/Zle/complete.c	2001/01/11 09:53:13
+@@ -956,6 +956,10 @@
+     { "unambiguous", PM_SCALAR | PM_READONLY, NULL, NULL, VAL(get_unambig) },
+     { "unambiguous_cursor", PM_INTEGER | PM_READONLY, NULL, NULL,
+       VAL(get_unambig_curs) },
++    { "unambiguous_positions", PM_SCALAR | PM_READONLY, NULL, NULL,
++      VAL(get_unambig_pos) },
++    { "insert_positions", PM_SCALAR | PM_READONLY, NULL, NULL,
++      VAL(get_insert_pos) },
+     { "list_max", PM_INTEGER, VAL(complistmax), NULL, NULL },
+     { "last_prompt", PM_SCALAR, VAL(complastprompt), NULL, NULL },
+     { "to_end", PM_SCALAR, VAL(comptoend), NULL, NULL },
+@@ -1103,7 +1107,7 @@
+ static char *
+ get_unambig(Param pm)
+ {
+-    return unambig_data(NULL);
++    return unambig_data(NULL, NULL, NULL);
+ }
+ 
+ /**/
+@@ -1112,9 +1116,31 @@
+ {
+     int c;
+ 
+-    unambig_data(&c);
++    unambig_data(&c, NULL, NULL);
+ 
+     return c;
++}
++
++/**/
++static char *
++get_unambig_pos(Param pm)
++{
++    char *p;
++
++    unambig_data(NULL, &p, NULL);
++
++    return p;
++}
++
++/**/
++static char *
++get_insert_pos(Param pm)
++{
++    char *p;
++
++    unambig_data(NULL, NULL, &p);
++
++    return p;
+ }
+ 
+ /**/
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.29
+diff -u -r1.29 compresult.c
+--- Src/Zle/compresult.c	2001/01/10 09:24:46	1.29
++++ Src/Zle/compresult.c	2001/01/11 09:53:14
+@@ -154,18 +154,20 @@
+     return l;
+ }
+ 
+-/* This builds the unambiguous string. If ins is non-zero, it is
+- * immediatly inserted in the line. Otherwise csp is used to return
+- * the relative cursor position in the string returned. */
++/* This builds the unambiguous string. If ins is one, it is immediately
++ * inserted into the line. Otherwise csp is used to return the relative
++ * cursor position in the string returned and posl contains all 
++ * positions with missing or ambiguous characters. If ins is two, csp
++ * and posl contain real command line positions (including braces). */
+ 
+ /**/
+ static char *
+-cline_str(Cline l, int ins, int *csp)
++cline_str(Cline l, int ins, int *csp, LinkList posl)
+ {
+     Cline s;
+     int ocs = cs, ncs, pcs, scs;
+     int pm, pmax, pmm, pma, sm, smax, smm, sma, d, dm, mid;
+-    int i, j, li = 0, cbr;
++    int i, j, li = 0, cbr, padd = (ins ? wb - ocs : -ocs);
+     Brinfo brp, brs;
+ 
+     l = cut_cline(l);
+@@ -222,6 +224,8 @@
+ 
+ 		if ((s->flags & CLF_DIFF) && (!dm || (s->flags & CLF_MATCHED))) {
+ 		    d = cs; dm = s->flags & CLF_MATCHED;
++		    if (posl)
++			addlinknode(posl, (void *) ((long) (cs + padd)));
+ 		}
+ 		li += s->llen;
+ 	    }
+@@ -242,12 +246,15 @@
+ 	}
+ 	/* Remember the position if this is the first prefix with
+ 	 * missing characters. */
+-	if ((l->flags & CLF_MISS) && !(l->flags & CLF_SUF) &&
+-	    (((pmax < (l->max - l->min) || (pma && l->max != l->min)) &&
+-	      (!pmm || (l->flags & CLF_MATCHED))) ||
+-	     ((l->flags & CLF_MATCHED) && !pmm))) {
+-	    pm = cs; pmax = l->max - l->min; pmm = l->flags & CLF_MATCHED;
+-	    pma = ((l->prefix || l->suffix) && l->min == cline_sublen(l));
++	if ((l->flags & CLF_MISS) && !(l->flags & CLF_SUF)) {
++	    if (posl && l->min != l->max)
++		addlinknode(posl, (void *) ((long) (cs + padd)));
++	    if (((pmax < (l->max - l->min) || (pma && l->max != l->min)) &&
++		 (!pmm || (l->flags & CLF_MATCHED))) ||
++		((l->flags & CLF_MATCHED) && !pmm)) {
++		pm = cs; pmax = l->max - l->min; pmm = l->flags & CLF_MATCHED;
++		pma = ((l->prefix || l->suffix) && l->min == cline_sublen(l));
++	    }
+ 	}
+ 	if (ins) {
+ 	    int ocs, bl;
+@@ -291,12 +298,15 @@
+ 	if (l->flags & CLF_MISS) {
+ 	    if (l->flags & CLF_MID)
+ 		mid = cs;
+-	    else if ((l->flags & CLF_SUF) && 
+-		     (((smax < (l->min - l->max) || (sma && l->max != l->min)) &&
+-		       (!smm || (l->flags & CLF_MATCHED))) ||
+-		      ((l->flags & CLF_MATCHED) && !smm))) {
+-		sm = cs; smax = l->min - l->max; smm = l->flags & CLF_MATCHED;
+-		sma = ((l->prefix || l->suffix) && l->min == cline_sublen(l));
++	    else if (l->flags & CLF_SUF) {
++		if (posl && l->min != l->max)
++		    addlinknode(posl, (void *) ((long) (cs + padd)));
++		if (((smax < (l->min - l->max) || (sma && l->max != l->min)) &&
++		     (!smm || (l->flags & CLF_MATCHED))) ||
++		    ((l->flags & CLF_MATCHED) && !smm)) {
++		    sm = cs; smax = l->min - l->max; smm = l->flags & CLF_MATCHED;
++		    sma = ((l->prefix || l->suffix) && l->min == cline_sublen(l));
++		}
+ 	    }
+ 	}
+ 	if (ins) {
+@@ -389,10 +399,14 @@
+ 	    cs += i;
+ 	    if (j >= 0 && (!dm || (js->flags & CLF_MATCHED))) {
+ 		d = cs - j; dm = js->flags & CLF_MATCHED;
++		if (posl)
++		    addlinknode(posl, (void *) ((long) (cs - j + padd)));
+ 	    }
+ 	}
+ 	l = l->next;
+     }
++    if (posl)
++	addlinknode(posl, (void *) ((long) (cs + padd)));
+     if (ins) {
+ 	int ocs = cs;
+ 
+@@ -411,6 +425,17 @@
+ 	    sm += cs - ocs;
+ 	if (d >= ocs)
+ 	    d += cs - ocs;
++
++	if (posl) {
++	    LinkNode node;
++	    long p;
++
++	    for (node = firstnode(posl); node; incnode(node)) {
++		p = (long) getdata(node);
++		if (p >= ocs)
++		    setdata(node, (void *) (p + cs - ocs));
++	    }
++	}
+     }
+     /* This calculates the new cursor position. If we had a mid cline
+      * with missing characters, we take this, otherwise if we have a
+@@ -420,7 +445,7 @@
+ 	   (cbr >= 0 ? cbr :
+ 	    (pm >= 0 ? pm : (sm >= 0 ? sm : (d >= 0 ? d : cs)))));
+ 
+-    if (!ins) {
++    if (ins != 1) {
+ 	/* We always inserted the string in the line. If that was not
+ 	 * requested, we copy it and remove from the line. */
+ 	char *r = zalloc((i = cs - ocs) + 1);
+@@ -430,7 +455,8 @@
+ 	cs = ocs;
+ 	foredel(i);
+ 
+-	*csp = ncs - ocs;
++	if (csp)
++	    *csp = ncs - ocs;
+ 
+ 	return r;
+     }
+@@ -440,31 +466,81 @@
+     return NULL;
+ }
+ 
++/* Small utility function turning a list of positions into a colon
++ * separated string. */
++
++static char *
++build_pos_string(LinkList list)
++{
++    LinkNode node;
++    int l;
++    char buf[40], *s;
++
++    for (node = firstnode(list), l = 0; node; incnode(node)) {
++	sprintf(buf, "%ld", (long) getdata(node));
++	setdata(node, dupstring(buf));
++	l += 1 + strlen(buf);
++    }
++    s = (char *) zalloc(l * sizeof(char));
++    *s = 0;
++    for (node = firstnode(list); node;) {
++	strcat(s, (char *) getdata(node));
++	incnode(node);
++	if (node)
++	    strcat(s, ":");
++    }
++    return s;
++}
++
+ /* This is a utility function using the function above to allow access
+  * to the unambiguous string and cursor position via compstate. */
+ 
+ /**/
+ char *
+-unambig_data(int *cp)
++unambig_data(int *cp, char **pp, char **ip)
+ {
+-    static char *scache = NULL;
++    static char *scache = NULL, *pcache = NULL, *icache = NULL;
+     static int ccache;
+ 
+     if (mnum && ainfo) {
+ 	if (mnum != unambig_mnum) {
++	    LinkList list = newlinklist();
++
+ 	    zsfree(scache);
+ 	    scache = cline_str((ainfo->count ? ainfo->line : fainfo->line),
+-			       0, &ccache);
++			       0, &ccache, list);
++	    zsfree(pcache);
++	    if (empty(list))
++		pcache = ztrdup("");
++	    else
++		pcache = build_pos_string(list);
++
++	    zsfree(icache);
++
++	    list = newlinklist();
++	    zsfree(cline_str((ainfo->count ? ainfo->line : fainfo->line),
++			     2, NULL, list));
++	    if (empty(list))
++		icache = ztrdup("");
++	    else
++		icache = build_pos_string(list);
+ 	}
+     } else if (mnum != unambig_mnum || !ainfo || !scache) {
+ 	zsfree(scache);
+ 	scache = ztrdup("");
++	zsfree(pcache);
++	pcache = ztrdup("");
++	zsfree(icache);
++	icache = ztrdup("");
+ 	ccache = 0;
+     }
+     unambig_mnum = mnum;
+     if (cp)
+ 	*cp = ccache + 1;
+-
++    if (pp)
++	*pp = pcache;
++    if (ip)
++	*ip = icache;
+     return scache;
+ }
+ 
+@@ -665,7 +741,7 @@
+ 	foredel(we - wb);
+ 
+ 	/* Now get the unambiguous string and insert it into the line. */
+-	cline_str(ainfo->line, 1, NULL);
++	cline_str(ainfo->line, 1, NULL, NULL);
+ 
+ 	/* Sometimes the different match specs used may result in a cline
+ 	 * that gives an empty string. If that happened, we re-insert the
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,300 @@
+From zsh-workers-return-17859-mason-zsh=primenet.com.au@sunsite.dk Sat Oct 26 02:30:02 2002
+Return-Path: <zsh-workers-return-17859-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25500 invoked from network); 26 Oct 2002 02:30:01 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 26 Oct 2002 02:30:01 -0000
+Received: (qmail 11101 invoked by alias); 26 Oct 2002 02:29:52 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17859
+Received: (qmail 11087 invoked from network); 26 Oct 2002 02:29:51 -0000
+To: zsh-workers@sunsite.dk
+Subject: Bug+patch: zsh fails to set itself as process group leader when running interactively
+From: Philippe Troin <phil@fifi.org>
+Date: 25 Oct 2002 19:29:46 -0700
+Message-ID: <87fzuuaq5h.fsf@ceramic.fifi.org>
+Lines: 203
+User-Agent: Gnus/5.09 (Gnus v5.9.0) Emacs/21.2
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=-=-="
+Sender: Philippe Troin <phil@fifi.org>
+
+--=-=-=
+
+Found in 4.0.6 (and earlier).
+
+If zsh is spawned interactively from another program, it fails to
+establish itself as a process group leader, leading to deliveries of
+terminal-related signals to both zsh and its parent. Generally the
+parent dies, leaving two shells reading from the same terminal.
+
+Sample program: spawn.c
+
+   #include <unistd.h>
+   #include <stdio.h>
+   #include <sys/wait.h>
+   #include <sys/types.h>
+
+   int main(int argc, char *argv[])
+   {
+     int status;
+     pid_t child = fork();
+     if (child<0)
+       perror("fork");
+     if (child == 0)
+       {
+         if (execvp(argv[1], &argv[1])<0)
+           perror("execvp");
+         exit(1);
+       }
+     waitpid(child, &status, 0);
+     printf("child exited with status %x\n", status);
+     exit(0);
+   }
+
+Compile with: cc -o spawn spawn.c
+
+How to reproduce:
+
+        % ./spawn zsh             <- parent shell
+        subshell%                 <- subshell
+
+At this point we have this:
+
+   PPID   PID   PGID
+      1   100    100  zsh         <- parent shell
+    100   101    101  \_ spawn
+    101   102    101     \_ zsh   <- subshell
+
+If you press CTRL-C in the subshell, SIGINT gets delivered to the
+process group 101. Since zsh traps SIGINT, the result is that spawn
+dies and you're left with two shells trying to read from one
+terminal... Ugly.
+
+The solution is to make sure we're a process group leader when running
+interactively. This patch fixes the problem.
+
+diff -rc zsh-4.0.6.orig/Src/init.c zsh-4.0.6/Src/init.c
+*** zsh-4.0.6.orig/Src/init.c	Fri Aug  9 06:30:22 2002
+--- zsh-4.0.6/Src/init.c	Fri Oct 25 19:28:31 2002
+***************
+*** 459,477 ****
+  	opts[USEZLE] = 0;
+  
+  #ifdef JOB_CONTROL
+!     /* If interactive, make the shell the foreground process */
+      if (opts[MONITOR] && interact && (SHTTY != -1)) {
+  	if ((mypgrp = GETPGRP()) > 0) {
+  	    while ((ttpgrp = gettygrp()) != -1 && ttpgrp != mypgrp) {
+- 		sleep(1);	/* give parent time to change pgrp */
+  		mypgrp = GETPGRP();
+! 		if (mypgrp == mypid)
+! 		    attachtty(mypgrp);
+  		if (mypgrp == gettygrp())
+  		    break;
+! 		killpg(mypgrp, SIGTTIN);
+  		mypgrp = GETPGRP();
+  	    }
+  	} else
+  	    opts[MONITOR] = 0;
+      } else
+--- 459,498 ----
+  	opts[USEZLE] = 0;
+  
+  #ifdef JOB_CONTROL
+!     /* If interactive, make sure the shell is in the foreground and is the
+!      * process group leader.
+!      */
+!     mypid = (zlong)getpid();
+      if (opts[MONITOR] && interact && (SHTTY != -1)) {
+  	if ((mypgrp = GETPGRP()) > 0) {
++ 	    sigset_t blockset, oldset;
++ 	    sigemptyset(&blockset);
++ 	    sigaddset(&blockset, SIGTTIN);
++ 	    sigaddset(&blockset, SIGTTOU);
++ 	    sigaddset(&blockset, SIGTSTP);
++ 	    oldset = signal_block(blockset);
+  	    while ((ttpgrp = gettygrp()) != -1 && ttpgrp != mypgrp) {
+  		mypgrp = GETPGRP();
+! 		if (mypgrp == mypid) {
+! 		    signal_setmask(oldset);
+! 		    attachtty(mypgrp); /* Might generate SIGT* */
+! 		    signal_block(blockset);
+! 		}
+  		if (mypgrp == gettygrp())
+  		    break;
+! 		signal_setmask(oldset);
+! 		read(0, NULL, 0); /* Might generate SIGT* */
+! 		signal_block(blockset);
+  		mypgrp = GETPGRP();
+  	    }
++ 	    if (mypgrp != mypid) {
++ 	        if (setpgrp(0, 0) == 0) {
++ 		    mypgrp = mypid;
++ 		    attachtty(mypgrp);
++                 } else
++ 		    opts[MONITOR] = 0;
++ 	    }
++ 	    signal_setmask(oldset);
+  	} else
+  	    opts[MONITOR] = 0;
+      } else
+
+(I've also attached the patch for those email readers that mangle
+whitespace).
+
+Patch notes:
+
+  1. At shell start-up, mypid is set to 0. There was some code before
+     my patch that used mypid. Mypid is set in setuptvals(), but
+     init_io() is called before. I set it unconditionnaly before using
+     it.
+
+  2. The trick here is to do the process group id change without any
+     races... There are four cases to consider, depending whether or not
+
+      - we start in the foreground (is PGID == TPGID ?)
+
+      - we our own process group leader (is PID == PGID)
+
+  3. I've started by changing the code that handle the case when zsh
+     starts in the background which was somewhat incorrect:
+
+      - it was racy: for example, the process could have been put in
+        the foreground by an other process in between those lines:
+
+  		if (mypgrp == gettygrp())
+  		    break;
+             /** RACE **/
+  		killpg(mypgrp, SIGTTIN);
+
+        causing one spurious auto-backgrounding.
+
+      - I really did not like this sleep(1) thing.
+
+  4. Before checking if the zsh's process group is in the foregroung,
+     I block all terminal-related signals (SIGTTIN, SIGTTOU and
+     SIGTSTP).
+
+  5. The loop is entered only if we're in the background.
+
+  6. Assuming we're entering the loop:
+
+      6a. We first check if we're the process group leader. If yes,
+          then we can request to be put in the foreground: this is
+          done by unblocking SIGTTIN, SIGTTOU and SIGTSTP first and
+          then calling tcsetpgrp(). This will generate SIGTTOU, which
+          will put us to sleep. (Note: if some other process has put
+          us in the foreground, then tcsetpgrp() will be a noop and no
+          signal will be generated). The first thing we do is to
+          reblock all terminal signals.
+
+          Subnote: I don't know why this is necessary or why this is
+                   better than just doing what's in 6c.
+
+      6b. We then check if we're the foreground process. If yes, then
+          we exit the loop (with terminal-related signals blocked).
+
+      6c. If we're not a process group leader and we're still not the
+          foreground process, the only thing to do is to go back to
+          sleep. We do this by reading 0 bytes, which will generate
+          SIGTTIN if we're still in the background or loop back if
+          we're in the foreground. The terminal related signals are
+          unblocked before reading and reblocked immediately after.
+
+  7. Once we're outside the while() loop (or if we never entered it),
+     we are guaranteed that we're the foreground process group. I
+     believe there are no races here since the terminal-related
+     signals have been blocked since before we checked PGID == TPGID,
+     and the above shell will only change the terminal foreground
+     process group after the current foreground process group has
+     stopped (and we block SIGT*).
+
+  8. The last step is to make sure that PID == PGID. If not, we simply
+     call setpgrp() and attachtty(). Note that we still have to have
+     the terminal-related signals blocked at this stage, or we might
+     get a SIGTTOU or SIGTTIN when calling attachtty().
+
+  9. Finally, we unblock the terminal-related signals.
+
+Terminal I/O is pretty tricky, so I hope I did not screw up anything :-)
+
+Comments?
+Phil. 
+
+
+--=-=-=
+Content-Type: text/x-patch
+Content-Disposition: attachment; filename=zsh-4.0.6-setpgid.patch
+
+diff -rc zsh-4.0.6.orig/Src/init.c zsh-4.0.6/Src/init.c
+*** zsh-4.0.6.orig/Src/init.c	Fri Aug  9 06:30:22 2002
+--- zsh-4.0.6/Src/init.c	Fri Oct 25 19:28:31 2002
+***************
+*** 459,477 ****
+  	opts[USEZLE] = 0;
+  
+  #ifdef JOB_CONTROL
+!     /* If interactive, make the shell the foreground process */
+      if (opts[MONITOR] && interact && (SHTTY != -1)) {
+  	if ((mypgrp = GETPGRP()) > 0) {
+  	    while ((ttpgrp = gettygrp()) != -1 && ttpgrp != mypgrp) {
+- 		sleep(1);	/* give parent time to change pgrp */
+  		mypgrp = GETPGRP();
+! 		if (mypgrp == mypid)
+! 		    attachtty(mypgrp);
+  		if (mypgrp == gettygrp())
+  		    break;
+! 		killpg(mypgrp, SIGTTIN);
+  		mypgrp = GETPGRP();
+  	    }
+  	} else
+  	    opts[MONITOR] = 0;
+      } else
+--- 459,498 ----
+  	opts[USEZLE] = 0;
+  
+  #ifdef JOB_CONTROL
+!     /* If interactive, make sure the shell is in the foreground and is the
+!      * process group leader.
+!      */
+!     mypid = (zlong)getpid();
+      if (opts[MONITOR] && interact && (SHTTY != -1)) {
+  	if ((mypgrp = GETPGRP()) > 0) {
++ 	    sigset_t blockset, oldset;
++ 	    sigemptyset(&blockset);
++ 	    sigaddset(&blockset, SIGTTIN);
++ 	    sigaddset(&blockset, SIGTTOU);
++ 	    sigaddset(&blockset, SIGTSTP);
++ 	    oldset = signal_block(blockset);
+  	    while ((ttpgrp = gettygrp()) != -1 && ttpgrp != mypgrp) {
+  		mypgrp = GETPGRP();
+! 		if (mypgrp == mypid) {
+! 		    signal_setmask(oldset);
+! 		    attachtty(mypgrp); /* Might generate SIGT* */
+! 		    signal_block(blockset);
+! 		}
+  		if (mypgrp == gettygrp())
+  		    break;
+! 		signal_setmask(oldset);
+! 		read(0, NULL, 0); /* Might generate SIGT* */
+! 		signal_block(blockset);
+  		mypgrp = GETPGRP();
+  	    }
++ 	    if (mypgrp != mypid) {
++ 	        if (setpgrp(0, 0) == 0) {
++ 		    mypgrp = mypid;
++ 		    attachtty(mypgrp);
++                 } else
++ 		    opts[MONITOR] = 0;
++ 	    }
++ 	    signal_setmask(oldset);
+  	} else
+  	    opts[MONITOR] = 0;
+      } else
+
+--=-=-=--
+

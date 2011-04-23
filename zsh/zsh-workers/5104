@@ -1,0 +1,172 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Date: Fri, 29 Jan 1999 11:08:16 +0100 (MET)
+Message-Id: <199901291008.LAA14075@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: zle parameters in completion widgets
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5104
+
+
+The patch below does two things:
+
+  - making the zle-parameters (BUFFER, ...) available in completion
+    widgets; for now they are readonly inside completion widgets
+  - adding two new zle parameters: `WIDGET' and `LASTWIDGET' hold the
+    names of the widget that is currently being executed and the name
+    of the widget that was executed before; both of them are always
+    readonly
+
+I'm not sure if you like that second addition, but I think it may be
+handy in some cases. Still, I can remove it again, if you want (or
+send a patch with only the first change).
+
+Now, to get completion only on the second tab, just add
+
+  [[ "$WIDGET" != "$LASTWIDGET" ]] && return
+
+add the top of you completion widget (main-complete in the example
+file).
+
+Bye
+ Sven
+
+P.S.: Yes, I saw that my last example code for the double-tab stuff
+      couldn't work.
+
+diff -u os/Zle/zle_main.c Src/Zle/zle_main.c
+--- os/Zle/zle_main.c	Fri Jan 29 10:05:03 1999
++++ Src/Zle/zle_main.c	Fri Jan 29 10:56:32 1999
+@@ -45,10 +45,10 @@
+ /**/
+ int c;
+ 
+-/* the binding for this key */
++/* the bindings for the previous and for this key */
+ 
+ /**/
+-Thingy bindk;
++Thingy lbindk, bindk;
+ 
+ /* insert mode/overwrite mode flag */
+ 
+@@ -554,6 +554,7 @@
+ void
+ execzlefunc(Thingy func)
+ {
++    int r = 0;
+     Widget w;
+ 
+     if(func->flags & DISABLED) {
+@@ -594,6 +595,7 @@
+ 	    w->u.fn();
+ 	if (!(wflags & ZLE_NOTCOMMAND))
+ 	    lastcmd = wflags;
++	r = 1;
+     } else {
+ 	List l = getshfunc(w->u.fnnam);
+ 
+@@ -610,14 +612,20 @@
+ 	    int osc = sfcontext;
+ 
+ 	    startparamscope();
+-	    makezleparams();
++	    makezleparams(0);
+ 	    sfcontext = SFC_WIDGET;
+ 	    doshfunc(w->u.fnnam, l, NULL, 0, 1);
+ 	    sfcontext = osc;
+ 	    endparamscope();
+ 	    lastcmd = 0;
++	    r = 1;
+ 	}
+     }
++    if (r) {
++	unrefthingy(lbindk);
++	refthingy(func);
++	lbindk = func;
++    }
+ }
+ 
+ /* initialise command modifiers */
+@@ -881,6 +889,7 @@
+ 
+     /* initialise the thingies */
+     init_thingies();
++    lbindk = NULL;
+ 
+     /* miscellaneous initialisations */
+     stackhist = stackcs = -1;
+@@ -920,6 +929,8 @@
+ finish_zle(Module m)
+ {
+     int i;
++
++    unrefthingy(lbindk);
+ 
+     cleanup_keymaps();
+     deletehashtable(thingytab);
+diff -u os/Zle/zle_params.c Src/Zle/zle_params.c
+--- os/Zle/zle_params.c	Fri Jan 29 10:05:04 1999
++++ Src/Zle/zle_params.c	Fri Jan 29 10:57:05 1999
+@@ -61,17 +61,22 @@
+ 	zleunsetfn, NULL },
+     { "RBUFFER", PM_SCALAR,  FN(set_rbuffer), FN(get_rbuffer),
+ 	zleunsetfn, NULL },
++    { "WIDGET", PM_SCALAR | PM_READONLY, NULL, FN(get_widget),
++        zleunsetfn, NULL },
++    { "LASTWIDGET", PM_SCALAR | PM_READONLY, NULL, FN(get_lwidget),
++        zleunsetfn, NULL },
+     { NULL, 0, NULL, NULL, NULL, NULL }
+ };
+ 
+ /**/
+ void
+-makezleparams(void)
++makezleparams(int ro)
+ {
+     struct zleparam *zp;
+ 
+     for(zp = zleparams; zp->name; zp++) {
+-	Param pm = createparam(zp->name, zp->type | PM_SPECIAL);
++	Param pm = createparam(zp->name, (zp->type | PM_SPECIAL |
++					  (ro ? PM_READONLY : 0)));
+ 	if (!pm)
+ 	    pm = (Param) paramtab->getnode(paramtab, zp->name);
+ 	DPUTS(!pm, "param not set in makezleparams");
+@@ -196,4 +201,18 @@
+ get_rbuffer(Param pm)
+ {
+     return metafy((char *)line + cs, ll - cs, META_HEAPDUP);
++}
++
++/**/
++static char *
++get_widget(Param pm)
++{
++    return bindk->nam;
++}
++
++/**/
++static char *
++get_lwidget(Param pm)
++{
++    return (lbindk ? lbindk->nam : "");
+ }
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Fri Jan 29 10:05:05 1999
++++ Src/Zle/zle_tricky.c	Fri Jan 29 10:16:54 1999
+@@ -3276,6 +3276,7 @@
+ 	incompfunc = 1;
+ 	startparamscope();
+ 	makecompparamsptr();
++	makezleparams(1);
+ 	sfcontext = SFC_CWIDGET;
+ 	NEWHEAPS(compheap) {
+ 	    doshfunc(fn, list, args, 0, 1);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

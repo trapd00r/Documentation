@@ -1,0 +1,200 @@
+From zsh-workers-return-24460-mason-zsh=primenet.com.au@sunsite.dk Thu Jan 24 18:40:52 2008
+Return-Path: <zsh-workers-return-24460-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 990 invoked from network); 24 Jan 2008 18:40:49 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.4 (2008-01-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.4
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 24 Jan 2008 18:40:49 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 11615 invoked from network); 24 Jan 2008 18:40:45 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 24 Jan 2008 18:40:45 -0000
+Received: (qmail 8215 invoked by alias); 24 Jan 2008 18:40:42 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 24460
+Received: (qmail 8196 invoked from network); 24 Jan 2008 18:40:41 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 24 Jan 2008 18:40:41 -0000
+Received: from virusfilter.dotsrc.org (bifrost [127.0.0.1])
+	by spamfilter.dotsrc.org (Postfix) with ESMTP id D8E8E8058F58
+	for <zsh-workers@sunsite.dk>; Thu, 24 Jan 2008 19:40:36 +0100 (CET)
+Received: from cluster-g.mailcontrol.com (cluster-g.mailcontrol.com [85.115.41.190])
+	by bifrost.dotsrc.org (Postfix) with ESMTP
+	for <zsh-workers@sunsite.dk>; Thu, 24 Jan 2008 19:40:36 +0100 (CET)
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly17g.srv.mailcontrol.com (MailControl) with ESMTP id m0OIeRXr001252
+	for <zsh-workers@sunsite.dk>; Thu, 24 Jan 2008 18:40:31 GMT
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.1830);
+	 Thu, 24 Jan 2008 18:40:05 +0000
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.14.1/8.13.4) with ESMTP id m0OIe5vt012581
+	for <zsh-workers@sunsite.dk>; Thu, 24 Jan 2008 18:40:05 GMT
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.14.1/8.14.1/Submit) with ESMTP id m0OIe5LX012578
+	for <zsh-workers@sunsite.dk>; Thu, 24 Jan 2008 18:40:05 GMT
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: zpty polling
+X-Mailer: MH-E 8.0.3; nmh 1.2-20070115cvs; GNU Emacs 22.1.1
+Date: Thu, 24 Jan 2008 18:40:05 +0000
+Message-ID: <12577.1201200005@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 24 Jan 2008 18:40:05.0701 (UTC) FILETIME=[89AF2750:01C85EB8]
+X-Scanned-By: MailControl A-08-00-01 (www.mailcontrol.com) on 10.71.0.127
+X-Virus-Scanned: ClamAV using ClamSMTP
+
+"zpty -rt" is supposed to return if there's nothing to do, but it's half
+implemented: it tests before the *first* read, but it can block if it's
+read a character, needs another one, and fails to read it.  This happens
+in particular if there was no newline, since unless it's matching a
+pattern it will wait for one.  (I'm assuming throughout at that reads
+are in blocking mode (the default), otherwise this behaviour is
+irrelevant.)
+
+I would guess nobody wants the current "poll but get stuck anyway"
+behaviour, so this makes it always poll before reading.  I've borrowed
+the code from inside poll_read() to make it a bit more efficient;
+actually, it ought to be good enough just to do the non-blocking read
+bit without the select or FIONREAD before.  I didn't dare do this when
+the current system seems to be working.
+
+-t will now interact differently with a pattern argument: it will no
+longer block if there was something available but not what you wanted,
+and then no more was available.  This is already the behaviour when the
+command exits.  I don't think the previous behaviour was satisfactory
+since there's a race: if no input at all was there, it would return 1
+immediately, otherwise it would consume that input and block waiting for
+the pattern.
+
+I discovered this when thinking about writing a zsh front-end to
+smbclient, which is a bit clumsy.  Unfortunately a suitably recent
+version of smbclient seems to be the only way to get at DFS filesystems
+at the moment; mounting a CIFS share where the files are actually
+provided by DFS doesn't yet work.  If anyone happens to know of a better
+way of doing this I'm all ears, otherwise if I come up with something
+I'll post it.  (Possibly I should be using non-blocking mode for this.)
+
+Index: Doc/Zsh/mod_zpty.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/mod_zpty.yo,v
+retrieving revision 1.6
+diff -u -r1.6 mod_zpty.yo
+--- Doc/Zsh/mod_zpty.yo	1 Apr 2005 12:04:22 -0000	1.6
++++ Doc/Zsh/mod_zpty.yo	24 Jan 2008 18:31:49 -0000
+@@ -64,7 +64,10 @@
+ 
+ If the tt(-r) option is combined with the tt(-t) option, tt(zpty) tests
+ whether output is available before trying to read.  If no output is
+-available, tt(zpty) immediately returns the status tt(1).
++available, tt(zpty) immediately returns the status tt(1).  When used
++with a var(pattern), the behaviour on a failed poll is similar to
++when the command has exited:  the return value is zero if at least
++one character could still be read even if the pattern failed to match.
+ )
+ item(tt(zpty) tt(-t) var(name))(
+ The tt(-t) option without the tt(-r) option can be used to test
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.175
+diff -u -r1.175 utils.c
+--- Src/utils.c	17 Dec 2007 18:34:25 -0000	1.175
++++ Src/utils.c	24 Jan 2008 18:31:53 -0000
+@@ -1886,7 +1886,7 @@
+ }
+ 
+ /**/
+-int
++mod_export int
+ setblock_fd(int turnonblocking, int fd, long *modep)
+ {
+ #ifdef O_NDELAY
+Index: Src/Modules/zpty.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/zpty.c,v
+retrieving revision 1.36
+diff -u -r1.36 zpty.c
+--- Src/Modules/zpty.c	6 Jul 2007 21:52:40 -0000	1.36
++++ Src/Modules/zpty.c	24 Jan 2008 18:31:53 -0000
+@@ -468,7 +468,7 @@
+ }
+ 
+ static int
+-ptyread(char *nam, Ptycmd cmd, char **args)
++ptyread(char *nam, Ptycmd cmd, char **args, int noblock)
+ {
+     int blen, used, seen = 0, ret = 0;
+     char *buf;
+@@ -509,6 +509,45 @@
+ 	cmd->read = -1;
+     }
+     do {
++	if (noblock && cmd->read == -1) {
++	    int pollret;
++	    /*
++	     * Check there is data available.  Borrowed from
++	     * poll_read() in utils.c and simplified.
++	     */
++#ifdef HAVE_SELECT
++	    fd_set foofd;
++	    struct timeval expire_tv;
++	    expire_tv.tv_sec = 0;
++	    expire_tv.tv_usec = 0;
++	    FD_ZERO(&foofd);
++	    FD_SET(cmd->fd, &foofd);
++	    pollret = select(cmd->fd+1,
++			 (SELECT_ARG_2_T) &foofd, NULL, NULL, &expire_tv);
++#else
++#ifdef FIONREAD
++	    if (ioctl(cmd->fd, FIONREAD, (char *) &val) == 0)
++		pollret = (val > 0);
++#endif
++#endif
++
++	    if (pollret < 0) {
++		/*
++		 * See read_poll() for this.
++		 * Last despairing effort to poll: attempt to
++		 * set nonblocking I/O and actually read the
++		 * character.  cmd->read stores the character read.
++		 */
++		long mode;
++
++		if (setblock_fd(0, cmd->fd, &mode))
++		    pollret = read(cmd->fd, &cmd->read, 1);
++		if (mode != -1)
++		    fcntl(cmd->fd, F_SETFL, mode);
++	    }
++	    if (pollret == 0)
++		break;
++	}
+ 	if (!ret) {
+ 	    checkptycmd(cmd);
+ 	    if (cmd->fin)
+@@ -648,12 +687,9 @@
+ 	}
+ 	if (p->fin)
+ 	    return 2;
+-	if (OPT_ISSET(ops,'t') && p->read == -1 &&
+-	    !read_poll(p->fd, &p->read, 0, 0))
+-	    return 1;
+ 
+ 	return (OPT_ISSET(ops,'r') ?
+-		ptyread(nam, p, args + 1) :
++		ptyread(nam, p, args + 1, OPT_ISSET(ops,'t')) :
+ 		ptywrite(p, args + 1, OPT_ISSET(ops,'n')));
+     } else if (OPT_ISSET(ops,'d')) {
+ 	Ptycmd p;
+
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+

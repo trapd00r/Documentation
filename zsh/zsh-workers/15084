@@ -1,0 +1,254 @@
+From zsh-workers-return-15084-mason-zsh=primenet.com.au@sunsite.dk Mon Jun 25 22:54:56 2001
+Return-Path: <zsh-workers-return-15084-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29080 invoked from network); 25 Jun 2001 22:54:54 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Jun 2001 22:54:54 -0000
+Received: (qmail 9387 invoked by alias); 25 Jun 2001 22:54:08 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15084
+Received: (qmail 9364 invoked from network); 25 Jun 2001 22:54:06 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: Re: backward-kill-word behavior 
+In-reply-to: ""Bart Schaefer""'s message of "Mon, 25 Jun 2001 15:43:01 PDT."
+             <010625154301.ZM24246@candle.brasslantern.com> 
+Date: Tue, 26 Jun 2001 00:56:31 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20010625235636.EA90814286@pwstephenson.fsnet.co.uk>
+
+"Bart Schaefer" wrote:
+> On Jun 25, 10:36pm, Peter Stephenson wrote:
+> > 
+> > We can supply functions that do this.  The deletion is a trivial one-line
+> > parameter substitution.  However, pushing the deleted part onto the kill
+> > ring appears to be rather harder.  You can manipulate point and mark, but
+> > that messes up the user's state.  Is it really impossible to do this as the
+> > internals do, or have I missed something?
+> 
+> Is there something wrong with:
+> 
+>     function bash-backward-kill-word {
+> 	local WORDCHARS=''
+> 	zle .backward-kill-word
+>     }
+
+No, apart from it not being very flexible.  If bash compatibility is all
+you want, that should be fine.
+
+Here's my proposal for allowing text to be put into the kill buffer (and
+hence onto the kill ring).  I put together some functions to use these with
+patterns instead of character list for words, which I may rewrite a bit
+more, although the default effect is identical to the above.
+
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.13
+diff -u -r1.13 zle.yo
+--- Doc/Zsh/zle.yo	2001/04/19 19:43:45	1.13
++++ Doc/Zsh/zle.yo	2001/06/25 22:46:44
+@@ -295,6 +295,7 @@
+ xitem(tt(zle) tt(-C) var(widget) var(completion-widget) var(function))
+ xitem(tt(zle) tt(-R) [ tt(-c) ] [ var(display-string) ] [ var(string) ... ])
+ xitem(tt(zle) tt(-M) var(string))
++xitem(tt(zle) tt(-P) [ tt(-bk) ] var(string))
+ xitem(tt(zle) tt(-U) var(string))
+ xitem(tt(zle) tt(-I))
+ xitem(tt(zle) var(widget) tt([ -n) var(num) tt(]) tt([ -N ]) var(args) ...)
+@@ -374,6 +375,16 @@
+ the status line but will instead be printed normally below the
+ prompt.  This means that the var(string) will still be displayed after
+ the widget returns (until it is overwritten by subsequent commands).
++)
++item(tt(-P) [ tt(-bk) ] var(string))(
++This puts var(string) into zsh's kill buffer for use with a subsequent
++tt(yank), causing the kill-ring to be rotated.   By default, var(string)
++will simply overwrite the text in the buffer; if the tt(-k) option is
++given, it behaves instead like a kill command in that subsequent kills or
++calls to tt(zle -P) cause var(string) to be appended to the existing text
++in the kill buffer.  If the flag tt(-b) is given, the the var(string) is
++instead inserted before any existing text in the kill buffer; this is used
++when emulating kills in the backward direction.
+ )
+ item(tt(-U) var(string))(
+ This pushes the characters in the var(string) onto the input stack of
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.18
+diff -u -r1.18 zle_main.c
+--- Src/Zle/zle_main.c	2001/05/17 15:56:13	1.18
++++ Src/Zle/zle_main.c	2001/06/25 22:47:01
+@@ -93,6 +93,11 @@
+ /**/
+ mod_export int lastcmd;
+ 
++/* flags to be or'd into lastcmd for present command */
++
++/**/
++mod_export int thiscmd;
++
+ /**/
+ mod_export Widget compwidget;
+ 
+@@ -526,7 +531,7 @@
+ #endif
+     undoing = 1;
+     line = (unsigned char *)zalloc((linesz = 256) + 2);
+-    virangeflag = lastcmd = done = cs = ll = mark = 0;
++    virangeflag = lastcmd = thiscmd = done = cs = ll = mark = 0;
+     vichgflag = 0;
+     viinsbegin = 0;
+     statusline = NULL;
+@@ -701,7 +706,8 @@
+ 	    lastval = olv;
+ 	    sfcontext = osc;
+ 	    endparamscope();
+-	    lastcmd = 0;
++	    lastcmd = thiscmd;
++	    thiscmd = 0;
+ 	    r = 1;
+ 	    redup(osi, 0);
+ 	}
+@@ -1096,7 +1102,7 @@
+ static struct builtin bintab[] = {
+     BUILTIN("bindkey", 0, bin_bindkey, 0, -1, 0, "evaMldDANmrsLRp", NULL),
+     BUILTIN("vared",   0, bin_vared,   1,  7, 0, NULL,             NULL),
+-    BUILTIN("zle",     0, bin_zle,     0, -1, 0, "lDANCLmMgGcRaUI", NULL),
++    BUILTIN("zle",     0, bin_zle,     0, -1, 0, "AabCcDGgIkLlMmNPRU", NULL),
+ };
+ 
+ /* The order of the entries in this table has to match the *HOOK
+Index: Src/Zle/zle_thingy.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_thingy.c,v
+retrieving revision 1.3
+diff -u -r1.3 zle_thingy.c
+--- Src/Zle/zle_thingy.c	2000/11/11 19:50:29	1.3
++++ Src/Zle/zle_thingy.c	2001/06/25 22:47:03
+@@ -340,6 +340,7 @@
+ 	{ 'M', bin_zle_mesg, 1, 1 },
+ 	{ 'U', bin_zle_unget, 1, 1 },
+ 	{ 'I', bin_zle_invalidate, 0, 0 },
++	{ 'P', bin_zle_push, 1, 1 },
+ 	{ 0,   bin_zle_call, 0, -1 },
+     };
+     struct opn const *op, *opp;
+@@ -664,6 +665,20 @@
+ 	return 0;
+     } else
+ 	return 1;
++}
++
++/**/
++static int
++bin_zle_push(char *name, char **args, char *ops, char func)
++{
++    if (!zleactive) {
++	zwarnnam(name, "can only be called from widget function", NULL, 0);
++	return 1;
++    }
++    push_kring(*args, ops['b']);
++    if (ops['k'] || ops['b'])
++	thiscmd |= ZLE_KILL;
++    return 0;
+ }
+ 
+ /*******************/
+Index: Src/Zle/zle_utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_utils.c,v
+retrieving revision 1.6
+diff -u -r1.6 zle_utils.c
+--- Src/Zle/zle_utils.c	2001/03/26 08:58:34	1.6
++++ Src/Zle/zle_utils.c	2001/06/25 22:47:03
+@@ -125,6 +125,40 @@
+ }
+ 
+ /**/
++static void
++paste(char *str, int ct, int dir)
++{
++    if (!cutbuf.buf) {
++	cutbuf.buf = ztrdup("");
++	cutbuf.len = cutbuf.flags = 0;
++    } else if (!(lastcmd & ZLE_KILL)) {
++	kringnum = (kringnum + 1) % KRINGCT;
++	if (kring[kringnum].buf)
++	    free(kring[kringnum].buf);
++	kring[kringnum] = cutbuf;
++	cutbuf.buf = ztrdup("");
++	cutbuf.len = cutbuf.flags = 0;
++    }
++    if (dir) {
++	char *s = (char *)zalloc(cutbuf.len + ct);
++
++	memcpy(s, str, ct);
++	memcpy(s + ct, cutbuf.buf, cutbuf.len);
++	free(cutbuf.buf);
++	cutbuf.buf = s;
++	cutbuf.len += ct;
++    } else {
++	cutbuf.buf = realloc(cutbuf.buf, cutbuf.len + ct);
++	memcpy(cutbuf.buf + cutbuf.len, str, ct);
++	cutbuf.len += ct;
++    }
++    if(vilinerange)
++	cutbuf.flags |= CUTBUFFER_LINE;
++    else
++	cutbuf.flags &= ~CUTBUFFER_LINE;
++}
++
++/**/
+ void
+ cut(int i, int ct, int dir)
+ {
+@@ -163,34 +197,17 @@
+ 	vibuf[26].len = ct;
+ 	vibuf[26].flags = vilinerange ? CUTBUFFER_LINE : 0;
+     }
+-    if (!cutbuf.buf) {
+-	cutbuf.buf = ztrdup("");
+-	cutbuf.len = cutbuf.flags = 0;
+-    } else if (!(lastcmd & ZLE_KILL)) {
+-	kringnum = (kringnum + 1) % KRINGCT;
+-	if (kring[kringnum].buf)
+-	    free(kring[kringnum].buf);
+-	kring[kringnum] = cutbuf;
+-	cutbuf.buf = ztrdup("");
+-	cutbuf.len = cutbuf.flags = 0;
+-    }
+-    if (dir) {
+-	char *s = (char *)zalloc(cutbuf.len + ct);
++    paste((char *)line + i, ct, dir);
++}
+ 
+-	memcpy(s, (char *) line + i, ct);
+-	memcpy(s + ct, cutbuf.buf, cutbuf.len);
+-	free(cutbuf.buf);
+-	cutbuf.buf = s;
+-	cutbuf.len += ct;
+-    } else {
+-	cutbuf.buf = realloc(cutbuf.buf, cutbuf.len + ct);
+-	memcpy(cutbuf.buf + cutbuf.len, (char *) line + i, ct);
+-	cutbuf.len += ct;
+-    }
+-    if(vilinerange)
+-	cutbuf.flags |= CUTBUFFER_LINE;
+-    else
+-	cutbuf.flags &= ~CUTBUFFER_LINE;
++/**/
++mod_export void
++push_kring(char *str, int dir)
++{
++    int len;
++
++    unmetafy(str, &len);
++    paste(str, len, dir);
+ }
+ 
+ /**/
+

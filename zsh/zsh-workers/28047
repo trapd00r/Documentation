@@ -1,0 +1,296 @@
+From zsh-workers-return-28047-mason-zsh=primenet.com.au@zsh.org Thu Jun 17 16:08:01 2010
+Return-Path: <zsh-workers-return-28047-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24157 invoked by alias); 17 Jun 2010 16:08:01 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28047
+Received: (qmail 23974 invoked from network); 17 Jun 2010 16:07:46 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Thu, 17 Jun 2010 17:07:30 +0100
+From: Peter Stephenson <Peter.Stephenson@csr.com>
+To: zsh-workers@zsh.org
+Subject: Re: zsh doesn't load HISTFILE from readonly directory
+Message-ID: <20100617170730.63c0bcde@csr.com>
+In-Reply-To: <20100614151626.185ba382@csr.com>
+References: <slrni19mjh.hil.joerg@alea.gnuu.de>
+	<20100614150521.068ec280@csr.com>
+	<20100614151626.185ba382@csr.com>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.18.9; i686-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+X-OriginalArrivalTime: 17 Jun 2010 16:07:30.0762 (UTC) FILETIME=[305D92A0:01CB0E37]
+X-Scanned-By: MailControl A_09_40_00 (www.mailcontrol.com) on 10.68.0.131
+
+On Mon, 14 Jun 2010 15:16:26 +0100
+Peter Stephenson <Peter.Stephenson@csr.com> wrote:
+> On Mon, 14 Jun 2010 15:05:21 +0100
+> Peter Stephenson <Peter.Stephenson@csr.com> wrote:
+> > On Sun, 13 Jun 2010 13:17:37 +0000 (UTC)
+> > J=C3=B6rg Sommer <joerg@alea.gnuu.de> wrote:
+> > > if the directory, containing the history file, is not writeable,
+> > > zsh doesn't load the data and I've not history.
+> >=20
+> > Yes, it's returning after not being able to lock the file.  This is
+> > unhealthy because (1) there's no error, which might be arguable for
+> > normal interactive history but is certainly wrong for an explicit
+> > "fc -R" (2) there's no reason why it shouldn't just read the
+> > history.
+> >=20
+> > Not immediately sure how wide the scope of the fix should be.  Get
+> > locking to check if the file is not writeable for some reason (which
+> > is a different test from checking if it can be locked)?
+>=20
+> That's no good.  In a case like this (where the problem is directory
+> permissions) we might well still be able to write to the file.
+> However, as zsh wouldn't be able to lock it, it would refuse to write
+> to it. (There's a subtlety that fcntl() file locking might still work
+> but if you have inconsistent file locking options you're already
+> stuffed.)
+>=20
+> > Or should
+> > we simply issue a warning when and continue any time we can't lock
+> > the file?
+>=20
+> So, as long as we narrow this to make a check for why we couldn't
+> create the lock (EACCES in this case) maybe this is the right way to
+> go after all?
+>=20
+> We still need to decide when we should print an error.  I would be
+> tempted to do it every time.
+
+This prints an error when fc fails, but not when interactive history
+fails.  It probably wants careful looking over:  note the change of meaning
+in return values from file locking.
+
+Index: Src/hist.c
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.98
+diff -p -u -r1.98 hist.c
+--- Src/hist.c	22 Mar 2010 23:20:11 -0000	1.98
++++ Src/hist.c	17 Jun 2010 16:05:23 -0000
+@@ -1194,7 +1194,7 @@ hend(Eprog prog)
+     callhookfunc("zshaddhistory", hookargs, 1, &hookret);
+     /* For history sharing, lock history file once for both read and write=
+ */
+     hf =3D getsparam("HISTFILE");
+-    if (isset(SHAREHISTORY) && lockhistfile(hf, 0)) {
++    if (isset(SHAREHISTORY) && !lockhistfile(hf, 0)) {
+ 	readhistfile(hf, 0, HFILE_USE_OPTIONS | HFILE_FAST);
+ 	curline.histnum =3D curhist+1;
+     }
+@@ -2231,20 +2231,25 @@ readhistfile(char *fn, int err, int read
+     short *wordlist;
+     struct stat sb;
+     int nwordpos, nwordlist, bufsiz;
+-    int searching, newflags, l;
++    int searching, newflags, l, ret;
+=20
+     if (!fn && !(fn =3D getsparam("HISTFILE")))
+ 	return;
+     if (readflags & HFILE_FAST) {
+ 	if (stat(unmeta(fn), &sb) < 0
+ 	 || (lasthist.fsiz =3D=3D sb.st_size && lasthist.mtim =3D=3D sb.st_mtime)
+-	 || !lockhistfile(fn, 0))
++	 || lockhistfile(fn, 0))
+ 	    return;
+ 	lasthist.fsiz =3D sb.st_size;
+ 	lasthist.mtim =3D sb.st_mtime;
++    } else if ((ret =3D lockhistfile(fn, 1))) {
++	if (ret =3D=3D 2) {
++	    zwarn("locking failed for %s: %e: reading anyway", fn, errno);
++	} else {
++	    zerr("locking failed for %s: %e", fn, errno);
++	    return;
++	}
+     }
+-    else if (!lockhistfile(fn, 1))
+-	return;
+     if ((in =3D fopen(unmeta(fn), "r"))) {
+ 	nwordlist =3D 64;
+ 	wordlist =3D (short *)zalloc(nwordlist*sizeof(short));
+@@ -2377,6 +2382,11 @@ readhistfile(char *fn, int err, int read
+ #ifdef HAVE_FCNTL_H
+ static int flock_fd =3D -1;
+=20
++/*
++ * Lock file using fcntl().  Return 0 on success, 1 on failure of
++ * locking mechanism, 2 on permanent failure (e.g. permission).
++ */
++
+ static int
+ flockhistfile(char *fn, int keep_trying)
+ {
+@@ -2384,7 +2394,7 @@ flockhistfile(char *fn, int keep_trying)
+     int ctr =3D keep_trying ? 9 : 0;
+=20
+     if ((flock_fd =3D open(unmeta(fn), O_RDWR | O_NOCTTY)) < 0)
+-	return errno =3D=3D ENOENT; /* "successfully" locked missing file */
++	return errno =3D=3D ENOENT ? 0 : 2; /* "successfully" locked missing file=
+ */
+=20
+     lck.l_type =3D F_WRLCK;
+     lck.l_whence =3D SEEK_SET;
+@@ -2395,12 +2405,12 @@ flockhistfile(char *fn, int keep_trying)
+ 	if (--ctr < 0) {
+ 	    close(flock_fd);
+ 	    flock_fd =3D -1;
+-	    return 0;
++	    return 1;
+ 	}
+ 	sleep(1);
+     }
+=20
+-    return 1;
++    return 0;
+ }
+ #endif
+=20
+@@ -2424,14 +2434,16 @@ savehistfile(char *fn, int err, int writ
+ 	    lasthist.next_write_ev =3D he->histnum + 1;
+ 	    he =3D down_histent(he);
+ 	}
+-	if (!he || !lockhistfile(fn, 0))
++	if (!he || lockhistfile(fn, 0))
+ 	    return;
+ 	if (histfile_linect > savehistsiz + savehistsiz / 5)
+ 	    writeflags &=3D ~HFILE_FAST;
+     }
+     else {
+-	if (!lockhistfile(fn, 1))
++	if (lockhistfile(fn, 1)) {
++	    zerr("locking failed for %s: %e", fn, errno);
+ 	    return;
++	}
+ 	he =3D hist_ring->down;
+     }
+     if (writeflags & HFILE_USE_OPTIONS) {
+@@ -2597,18 +2609,27 @@ savehistfile(char *fn, int err, int writ
+=20
+ static int lockhistct;
+=20
++/*
++ * Lock history file.  Return 0 on success, 1 on failure to lock this
++ * time, 2 on permanent failure (e.g. permission).
++ */
++
+ /**/
+ int
+ lockhistfile(char *fn, int keep_trying)
+ {
+     int ct =3D lockhistct;
++    int ret =3D 0;
+=20
+     if (!fn && !(fn =3D getsparam("HISTFILE")))
+-	return 0;
++	return 1;
+=20
+ #ifdef HAVE_FCNTL_H
+-    if (isset(HISTFCNTLLOCK) && flock_fd < 0 && !flockhistfile(fn, keep_tr=
+ying))
+-	return 0;
++    if (isset(HISTFCNTLLOCK) && flock_fd < 0) {
++	ret =3D flockhistfile(fn, keep_trying);
++	if (ret)
++	    return ret;
++    }
+ #endif
+=20
+     if (!lockhistct++) {
+@@ -2632,8 +2653,13 @@ lockhistfile(char *fn, int keep_trying)
+ 	lnk =3D bicat(pidbuf, getsparam("HOST"));
+ 	/* We'll abuse fd as our success flag. */
+ 	while ((fd =3D symlink(lnk, lockfile)) < 0) {
+-	    if (errno !=3D EEXIST || !keep_trying)
++	    if (errno !=3D EEXIST) {
++		ret =3D 2;
++		break;
++	    } else if (!keep_trying) {
++		ret =3D 1;
+ 		break;
++	    }
+ 	    if (lstat(lockfile, &sb) < 0) {
+ 		if (errno =3D=3D ENOENT)
+ 		    continue;
+@@ -2656,15 +2682,16 @@ lockhistfile(char *fn, int keep_trying)
+ 	    } else
+ 		close(fd);
+ 	    while (link(tmpfile, lockfile) < 0) {
+-		if (errno !=3D EEXIST)
+-		    zerr("failed to create hard link as lock file %s: %e",
+-			 lockfile, errno);
+-		else if (!keep_trying)
+-		    ;
+-		else if (lstat(lockfile, &sb) < 0) {
++		if (errno !=3D EEXIST) {
++		    ret =3D 2;
++		    break;
++		} else if (!keep_trying) {
++		    ret =3D 1;
++		    break;
++		} else if (lstat(lockfile, &sb) < 0) {
+ 		    if (errno =3D=3D ENOENT)
+ 			continue;
+-		    zerr("failed to stat lock file %s: %e", lockfile, errno);
++		    ret =3D 2;
+ 		} else {
+ 		    if (time(NULL) - sb.st_mtime < 10)
+ 			sleep(1);
+@@ -2681,11 +2708,17 @@ lockhistfile(char *fn, int keep_trying)
+ # endif /* not HAVE_SYMLINK */
+ #else /* not HAVE_LINK */
+ 	while ((fd =3D open(lockfile, O_WRONLY|O_CREAT|O_EXCL, 0644)) < 0) {
+-	    if (errno !=3D EEXIST || !keep_trying)
++	    if (errno !=3D EEXIST) {
++		ret =3D 2;
+ 		break;
++	    } else if (!keep_trying) {
++		ret =3D 1;
++		break;
++	    }
+ 	    if (lstat(lockfile, &sb) < 0) {
+ 		if (errno =3D=3D ENOENT)
+ 		    continue;
++		ret =3D 2;
+ 		break;
+ 	    }
+ 	    if (time(NULL) - sb.st_mtime < 10)
+@@ -2714,9 +2747,10 @@ lockhistfile(char *fn, int keep_trying)
+ 	    flock_fd =3D -1;
+ 	}
+ #endif
+-	return 0;
++	DPUTS(ret =3D=3D 0, "BUG: return value non-zero on locking error");
++	return ret;
+     }
+-    return 1;
++    return 0;
+ }
+=20
+ /* Unlock the history file if this corresponds to the last nested lock
+
+--=20
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, =
+UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and=
+ Wales, registered number 4187346, registered office Churchill House, Cambr=
+idge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

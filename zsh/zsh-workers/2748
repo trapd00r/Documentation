@@ -1,0 +1,474 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Wed Jan 08 14:27:45 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 14859 invoked from network); 8 Jan 1997 14:27:38 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 8 Jan 1997 14:27:38 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id JAA22310; Wed, 8 Jan 1997 09:20:07 -0500 (EST)
+Resent-Date: Wed, 8 Jan 1997 09:20:07 -0500 (EST)
+Message-Id: <199701081419.PAA05991@hydra.ifh.de>
+To: Steve Reid <steve@edmweb.com>,
+        zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: precmd() and history 
+In-reply-to: "Steve Reid"'s message of "Tue, 07 Jan 1997 18:15:10 MET."
+             <Pine.BSF.3.95.970107175233.293F-100000@bitbucket.edmweb.com> 
+Date: Wed, 08 Jan 1997 15:19:26 +0100
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"U6c-21.0.US5.Mqwqo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2748
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Steve Reid wrote:
+> I'm having a problem with Zsh 3.0.2 under FreeBSD 2.1.0. It doesn't seem
+> to honor the hist_ignore_dups or hist_ignore_space options. Also, just
+> pressing enter will add a blank line to the history.
+> 
+> This only happened when I added the precmd() shell function.
+>
+> precmd() {
+> 	fc -AI ~$USER/.history;
+> 	fc -R ~$USER/.history;
+> }                                         
+
+(the above pruned down to bare essentials, the extra fc's are central
+to the bug.)
+
+This has finally made me do the last part of the history code tidy up
+which I should have done with the other two bits.  The problems are
+fixed partly as a side effect, partly as an effect of an additional
+change to remhist().  
+
+I haven't copied this to zsh-users since it turns out there is no
+user-fixable part of the problem.  Apart from bugfixes, there
+shouldn't be any user-visible changes either.  In fact, the only
+change visible outside hist.c should be that histremmed is now the
+rather more useful histactive (see comment at top of hist.c).
+
+The essential point is that now the history line is only stored when
+it actually needs to be.  This simplifies the previous confusing
+overlap between hbegin() and hend().
+
+This is a patch against 3.0.3-test3.  If I remember right and the
+revamped HISTIGNOREDUPS mechanism appears in 3.1, that will require
+extra changes to fix the problems above, since the new mechanism
+compares words of the command line to determine differences; when
+they have been read from a history file the words are not lexically
+determined, simply space-separated.  In other words, if the previous
+history line has been read from a file you need to revert to strcmp()
+as used up to 3.0.x.
+
+We are now essentially in the position to be able not to allocate the
+history list at all for a non-interactive shell.  All that remains is
+to do tests in the appropriate places before trying to access the
+history list.  However, that's not entirely trivial.
+
+The history mechanism gets everywhere, so this could do with some
+testing.  In particular, changes to the history code traditionally
+cause off-by-one errors with fc commands.  I haven't found any yet.
+
+One more thing I noticed:
+
+% echo foo !#<TAB>
+
+fails silently and does ordinary completion instead.  This is not a
+result of this patch.  !# (get current line up to previous word) still
+works when it should.
+
+*** Src/globals.h.oldh	Wed Jan  8 11:27:05 1997
+--- Src/globals.h	Wed Jan  8 15:08:51 1997
+***************
+*** 451,459 ****
+   
+  EXTERN int nocorrect;
+  
+! /* != 0 means we have removed the current event from the history List */
+   
+! EXTERN int histremmed;
+  
+  /* current emulation (used to decide which set of option letters is used) */
+  
+--- 451,459 ----
+   
+  EXTERN int nocorrect;
+  
+! /* state of the history mechanism (see hist.c) */
+   
+! EXTERN int histactive;
+  
+  /* current emulation (used to decide which set of option letters is used) */
+  
+*** Src/hist.c.oldh	Wed Jan  8 11:26:53 1997
+--- Src/hist.c	Wed Jan  8 14:58:02 1997
+***************
+*** 31,39 ****
+  
+  #include "zsh.h"
+  
+  extern int cs, ll;
+  
+- static Histent curhistent;
+  /* Array of word beginnings and endings in current history line. */
+  short *chwords;
+  /* Max, actual position in chwords.
+--- 31,52 ----
+  
+  #include "zsh.h"
+  
++ /*
++  * Note on histactive: bit 0 says the history mechanism is active;
++  * bit 1 says junk the line being processed by the history
++  * when finished with it if (histactive & 1); bit 2 says we have already
++  * junked a line when !(histactive & 1).
++  *
++  * Note on curhist: with !(histactive & 1), this points to the
++  * last line actually added to the history list.  With (histactive & 1),
++  * the line does not get added to the list until hend(), if at all.
++  * However, curhist is incremented to reflect the current line anyway.
++  * Thus if the line is not added to the list, curhist must be
++  * decremented in hend().
++  */
++ 
+  extern int cs, ll;
+  
+  /* Array of word beginnings and endings in current history line. */
+  short *chwords;
+  /* Max, actual position in chwords.
+***************
+*** 61,74 ****
+  
+  	/* Resize history line if necessary */
+  	if (hptr - chline >= hlinesz) {
+! 	    int flag = 0, oldsiz = hlinesz;
+  
+- 	    /* Maybe already linked to a history entry. */
+- 	    if (curhistent->text == chline)
+- 		flag = 1;
+  	    chline = realloc(chline, hlinesz = oldsiz + 16);
+- 	    if (flag)
+- 		curhistent->text = chline;
+  	    hptr = chline + oldsiz;
+  	}
+      }
+--- 74,82 ----
+  
+  	/* Resize history line if necessary */
+  	if (hptr - chline >= hlinesz) {
+! 	    int oldsiz = hlinesz;
+  
+  	    chline = realloc(chline, hlinesz = oldsiz + 16);
+  	    hptr = chline + oldsiz;
+  	}
+      }
+***************
+*** 188,197 ****
+  int
+  getargc(Histent ehist)
+  {
+!   if (ehist == curhistent)
+!     return chwordpos ? chwordpos/2-1 : 0;
+!   else
+!     return ehist->nwords-1;
+  }
+  
+  /* Perform history substitution, returning the next character afterwards. */
+--- 196,202 ----
+  int
+  getargc(Histent ehist)
+  {
+!     return ehist->nwords ? ehist->nwords-1 : 0;
+  }
+  
+  /* Perform history substitution, returning the next character afterwards. */
+***************
+*** 577,584 ****
+  void
+  hbegin(void)
+  {
+      isfirstln = isfirstch = 1;
+!     histremmed = errflag = histdone = spaceflag = 0;
+      stophist = (!interact || unset(BANGHIST) || unset(SHINSTDIN)) << 1;
+      chline = hptr = zcalloc(hlinesz = 16);
+      chwords = zalloc((chwordlen = 16)*sizeof(short));
+--- 582,591 ----
+  void
+  hbegin(void)
+  {
++     Histent curhistent;
++ 
+      isfirstln = isfirstch = 1;
+!     errflag = histdone = spaceflag = 0;
+      stophist = (!interact || unset(BANGHIST) || unset(SHINSTDIN)) << 1;
+      chline = hptr = zcalloc(hlinesz = 16);
+      chwords = zalloc((chwordlen = 16)*sizeof(short));
+***************
+*** 589,604 ****
+  	curhistent->ftim = time(NULL);
+      if (interact && isset(SHINSTDIN) && !strin) {
+  	attachtty(mypgrp);
+! 	defev = curhist++;
+! 	curhistent = gethistent(curhist);
+! 	zsfree(curhistent->text);
+! 	if (curhistent->nwords)
+! 	    zfree(curhistent->words, curhistent->nwords*2*sizeof(short));
+! 	curhistent->text = chline;
+! 	curhistent->words = NULL;
+! 	curhistent->nwords = 0;
+      } else
+! 	histremmed = 1;
+  }
+  
+  /* say we're done using the history mechanism */
+--- 596,607 ----
+  	curhistent->ftim = time(NULL);
+      if (interact && isset(SHINSTDIN) && !strin) {
+  	attachtty(mypgrp);
+! 	defev = curhist;
+! 	histactive = 1;
+      } else
+! 	histactive = 3;
+! 
+!     curhist++;
+  }
+  
+  /* say we're done using the history mechanism */
+***************
+*** 610,621 ****
+      int flag, save = 1;
+      Histent he;
+  
+!     if (!chline)
+! 	return 1;
+!     if (!interact || strin || unset(SHINSTDIN)) {
+  	zfree(chline, hlinesz);
+  	zfree(chwords, chwordlen*sizeof(short));
+  	chline = NULL;
+  	return 1;
+      }
+      flag = histdone;
+--- 613,625 ----
+      int flag, save = 1;
+      Histent he;
+  
+!     DPUTS(!chline, "BUG: chline is NULL in hend()");
+!     if (histactive & 2) {
+  	zfree(chline, hlinesz);
+  	zfree(chwords, chwordlen*sizeof(short));
+  	chline = NULL;
++ 	curhist--;
++ 	histactive = 0;
+  	return 1;
+      }
+      flag = histdone;
+***************
+*** 652,661 ****
+  	} else
+  	    zsfree(ptr);
+      }
+-     curhistent->stim = time(NULL);
+-     curhistent->ftim = 0L;
+-     curhistent->flags = 0;
+      if (save) {
+  #ifdef DEBUG
+  	/* debugging only */
+  	if (chwordpos%2) {
+--- 656,671 ----
+  	} else
+  	    zsfree(ptr);
+      }
+      if (save) {
++ 	Histent curhistent = gethistent(curhist);
++ 	zsfree(curhistent->text);
++ 	if (curhistent->nwords)
++ 	    zfree(curhistent->words, curhistent->nwords*2*sizeof(short));
++ 
++ 	curhistent->text = ztrdup(chline);
++ 	curhistent->stim = time(NULL);
++ 	curhistent->ftim = 0L;
++ 	curhistent->flags = 0;
+  #ifdef DEBUG
+  	/* debugging only */
+  	if (chwordpos%2) {
+***************
+*** 673,689 ****
+  		   curhistent->nwords*2*sizeof(short));
+  	}
+      } else
+! 	remhist();
+!     if (chline && !curhistent->text)
+! 	zfree(chline, hlinesz);
+!     if (curhistent->text) {
+! 	char *s = ztrdup(curhistent->text);
+! 
+! 	zfree(curhistent->text, hlinesz);
+! 	curhistent->text = s;
+!     }
+      zfree(chwords, chwordlen*sizeof(short));
+      chline = NULL;
+      return !(flag & HISTFLAG_NOEXEC || errflag);
+  }
+  
+--- 683,693 ----
+  		   curhistent->nwords*2*sizeof(short));
+  	}
+      } else
+! 	curhist--;
+!     zfree(chline, hlinesz);
+      zfree(chwords, chwordlen*sizeof(short));
+      chline = NULL;
++     histactive = 0;
+      return !(flag & HISTFLAG_NOEXEC || errflag);
+  }
+  
+***************
+*** 693,702 ****
+  void
+  remhist(void)
+  {
+!     if (!histremmed) {
+! 	histremmed = 1;
+! 	curhist--;
+!     }
+  }
+  
+  /* Gives current expansion word if not last word before chwordpos. */
+--- 697,713 ----
+  void
+  remhist(void)
+  {
+!     if (!(histactive & 1)) {
+! 	if (!(histactive & 4)) {
+! 	    /* make sure this doesn't show up when we do firsthist() */
+! 	    Histent he = gethistent(curhist);
+! 	    zsfree(he->text);
+! 	    he->text = NULL;
+! 	    histactive |= 4;
+! 	    curhist--;
+! 	}
+!     } else
+! 	histactive |= 2;
+  }
+  
+  /* Gives current expansion word if not last word before chwordpos. */
+***************
+*** 1059,1067 ****
+  struct histent *
+  quietgethist(int ev)
+  {
+      if (ev < firsthist() || ev > curhist)
+  	return NULL;
+!     return gethistent(ev);
+  }
+  
+  /**/
+--- 1070,1090 ----
+  struct histent *
+  quietgethist(int ev)
+  {
++     static struct histent storehist;
++ 
+      if (ev < firsthist() || ev > curhist)
+  	return NULL;
+!     if (ev == curhist && (histactive & 1)) {
+! 	/* The current history line has not been stored.  Build it up
+! 	 * from other variables.
+! 	 */
+! 	storehist.text = chline;
+! 	storehist.nwords = chwordpos/2;
+! 	storehist.words = chwords;
+! 
+! 	return &storehist;
+!     } else
+! 	return gethistent(ev);
+  }
+  
+  /**/
+***************
+*** 1092,1107 ****
+  getargs(Histent elist, int arg1, int arg2)
+  {
+      char *ret;
+!     short *words;
+!     int pos1, nwords;
+! 
+!     if (elist == curhistent) {
+!       words = chwords;
+!       nwords = chwordpos/2;
+!     } else {
+!       words = elist->words;
+!       nwords = elist->nwords;
+!     }
+  
+      if (arg1 >= nwords || arg2 >= nwords) {
+  	/* remember, argN is indexed from 0, nwords is total no. of words */
+--- 1115,1122 ----
+  getargs(Histent elist, int arg1, int arg2)
+  {
+      char *ret;
+!     short *words = elist->words;
+!     int pos1, nwords = elist->nwords;
+  
+      if (arg1 >= nwords || arg2 >= nwords) {
+  	/* remember, argN is indexed from 0, nwords is total no. of words */
+*** Src/lex.c.oldh	Wed Jan  8 14:13:19 1997
+--- Src/lex.c	Wed Jan  8 14:06:41 1997
+***************
+*** 47,53 ****
+      int dbparens;
+      int isfirstln;
+      int isfirstch;
+!     int histremmed;
+      int histdone;
+      int spaceflag;
+      int stophist;
+--- 47,53 ----
+      int dbparens;
+      int isfirstln;
+      int isfirstch;
+!     int histactive;
+      int histdone;
+      int spaceflag;
+      int stophist;
+***************
+*** 95,101 ****
+      ls->dbparens = dbparens;
+      ls->isfirstln = isfirstln;
+      ls->isfirstch = isfirstch;
+!     ls->histremmed = histremmed;
+      ls->histdone = histdone;
+      ls->spaceflag = spaceflag;
+      ls->stophist = stophist;
+--- 95,101 ----
+      ls->dbparens = dbparens;
+      ls->isfirstln = isfirstln;
+      ls->isfirstch = isfirstch;
+!     ls->histactive = histactive;
+      ls->histdone = histdone;
+      ls->spaceflag = spaceflag;
+      ls->stophist = stophist;
+***************
+*** 140,146 ****
+      dbparens = lstack->dbparens;
+      isfirstln = lstack->isfirstln;
+      isfirstch = lstack->isfirstch;
+!     histremmed = lstack->histremmed;
+      histdone = lstack->histdone;
+      spaceflag = lstack->spaceflag;
+      stophist = lstack->stophist;
+--- 140,146 ----
+      dbparens = lstack->dbparens;
+      isfirstln = lstack->isfirstln;
+      isfirstch = lstack->isfirstch;
+!     histactive = lstack->histactive;
+      histdone = lstack->histdone;
+      spaceflag = lstack->spaceflag;
+      stophist = lstack->stophist;
+ 
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

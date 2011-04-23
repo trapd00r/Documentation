@@ -1,0 +1,205 @@
+From zsh-workers-return-6962-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Jul 03 13:46:38 1999
+Return-Path: <zsh-workers-return-6962-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23976 invoked from network); 3 Jul 1999 13:46:36 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Jul 1999 13:46:36 -0000
+Received: (qmail 10842 invoked by alias); 3 Jul 1999 13:46:24 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6962
+Received: (qmail 10835 invoked from network); 3 Jul 1999 13:46:24 -0000
+Message-Id: <9907031317.AA09537@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: pws-25: prompt path segment rationalization.
+Date: Sat, 03 Jul 1999 15:17:44 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+This is what I intended by my remarks on path segments a propos of %N.  By
+separating the path stuff into a function, %/ and %~ can take integers like
+%c and %C with no extra code.  Since you can do everything with %/ and %~
+you can with %c and %C (the only difference is you need an explicit 1 for
+one path segment as zero is the full path), and since it's much clearer and
+less confusing with just the two, I've moved %c and %C down in the
+documentation and marked them as decreprecated, though I have no intention
+of removing them.
+
+Now we can get %N to work on paths in a natural way:  the default is the
+full path, but integers can specify trailing segments.  I've left %N in the
+default PS4, however.
+
+--- Doc/Zsh/prompt.yo.prdir	Sat Jul  3 15:06:37 1999
++++ Doc/Zsh/prompt.yo	Sat Jul  3 15:05:56 1999
+@@ -42,21 +42,14 @@
+ )
+ xitem(tt(%d))
+ item(tt(%/))(
+-Present working directory (tt($PWD)).
++Present working directory (tt($PWD)).  If an integer follows the `tt(%)',
++it specifies a number of trailing components of tt($PWD) to show; zero
++means the whole path.
+ )
+ item(tt(%~))(
+-tt($PWD).
+-If it has a named directory as its prefix, that part is replaced
+-by a `tt(~)' followed by the name of the directory.
+-If it starts with tt($HOME), that part is
+-replaced by a `tt(~)'.
+-)
+-xitem(tt(%c))
+-xitem(tt(%.))
+-item(tt(%C))(
+-Trailing component of tt($PWD).
+-An integer may follow the `tt(%)' to get more than one component.
+-Unless `tt(%C)' is used, tilde contraction is performed first.
++As tt(%d) and tt(%/), but if tt($PWD) has a named directory as its prefix,
++that part is replaced by a `tt(~)' followed by the name of the directory.
++If it starts with tt($HOME), that part is replaced by a `tt(~)'.
+ )
+ xitem(tt(%h))
+ item(tt(%!))(
+@@ -98,7 +91,9 @@
+ item(tt(%N))(
+ The name of the script, sourced file, or shell function that zsh is
+ currently executing, whichever was started most recently.  If there is
+-none, this is equivalent to the parameter tt($0).
++none, this is equivalent to the parameter tt($0).  An integer may follow
++the `tt(%)' to specify a number of trailing path components to show; zero
++means the full path.
+ )
+ item(tt(%i))(
+ The line number currently being executed in the script, sourced file, or
+@@ -234,5 +229,15 @@
+ current directory, followed by a `tt(%)' or `tt(#)', followed by a
+ space.  Without the `tt(%<<)', those two characters would be included
+ in the string to be truncated.
++)
++xitem(tt(%c))
++xitem(tt(%.))
++item(tt(%C))(
++Trailing component of tt($PWD).
++An integer may follow the `tt(%)' to get more than one component.
++Unless `tt(%C)' is used, tilde contraction is performed first.  These are
++deprecated as tt(%c) and tt(%C) are equivalent to tt(%1~) and tt(%1/),
++respectively, while explicit positive integers have the same effect as for
++the latter two sequences.
+ )
+ enditem()
+--- Src/prompt.c.prdir	Mon Jun 28 10:21:14 1999
++++ Src/prompt.c	Sat Jul  3 14:59:16 1999
+@@ -97,6 +97,38 @@
+ 
+ static char *rstring, *Rstring;
+ 
++/*
++ * Expand path p; maximum is npath segments where 0 means the whole path.
++ * If tilde is 1, try and find a named directory to use.
++ */
++
++static void
++promptpath(char *p, int npath, int tilde)
++{
++    char *modp = p;
++    Nameddir nd;
++
++    if (tilde && ((nd = finddir(p))))
++	modp = tricat("~", nd->nam, p + strlen(nd->dir));
++
++    if (npath) {
++	char *sptr;
++	for (sptr = modp + strlen(modp); sptr > modp; sptr--) {
++	    if (*sptr == '/' && !--npath) {
++		sptr++;
++		break;
++	    }
++	}
++	if (*sptr == '/' && sptr[1] && sptr != modp)
++	    sptr++;
++	stradd(sptr);
++    } else
++	stradd(modp);
++
++    if (p != modp)
++	zsfree(modp);
++}
++
+ /* Perform prompt expansion on a string, putting the result in a *
+  * permanently-allocated string.  If ns is non-zero, this string *
+  * may have embedded Inpar and Outpar, which indicate a toggling *
+@@ -293,49 +325,21 @@
+ 		}
+ 	    switch (*fm) {
+ 	    case '~':
+-		if ((nd = finddir(pwd))) {
+-		    char *t = tricat("~", nd->nam, pwd + strlen(nd->dir));
+-		    stradd(t);
+-		    zsfree(t);
+-		    break;
+-		}
++		promptpath(pwd, arg, 1);
++		break;
+ 	    case 'd':
+ 	    case '/':
+-		stradd(pwd);
++		promptpath(pwd, arg, 0);
+ 		break;
+ 	    case 'c':
+ 	    case '.':
+-	        {
+-		    char *t;
+-
+-		    if ((nd = finddir(pwd)))
+-			t = tricat("~", nd->nam, pwd + strlen(nd->dir));
+-		    else
+-			t = ztrdup(pwd);
+-		    if (!arg)
+-			arg++;
+-		    for (ss = t + strlen(t); ss > t; ss--)
+-			if (*ss == '/' && !--arg) {
+-			    ss++;
+-			    break;
+-			}
+-		    if(*ss == '/' && ss[1] && ss != t)
+-			ss++;
+-		    stradd(ss);
+-		    zsfree(t);
+-		    break;
+-		}
++		promptpath(pwd, arg ? arg : 1, 1);
++		break;
+ 	    case 'C':
+-		if (!arg)
+-		    arg++;
+-		for (ss = pwd + strlen(pwd); ss > pwd; ss--)
+-		    if (*ss == '/' && !--arg) {
+-			ss++;
+-			break;
+-		    }
+-		if (*ss == '/' && ss[1] && (ss != pwd))
+-		    ss++;
+-		stradd(ss);
++		promptpath(pwd, arg ? arg : 1, 0);
++		break;
++	    case 'N':
++		promptpath(scriptname ? scriptname : argzero, arg, 0);
+ 		break;
+ 	    case 'h':
+ 	    case '!':
+@@ -535,9 +539,6 @@
+ 		addbufspc(DIGBUFSIZE);
+ 		sprintf(bp, "%ld", (long)lineno);
+ 		bp += strlen(bp);
+-		break;
+-	    case 'N':
+-		stradd(scriptname ? scriptname : argzero);
+ 		break;
+ 	    case '\0':
+ 		return 0;
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

@@ -1,0 +1,122 @@
+From zsh-workers-request@math.gatech.edu Fri Dec 11 13:28:55 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4029 invoked from network); 11 Dec 1998 13:28:53 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 11 Dec 1998 13:28:53 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id IAA08317;
+	Fri, 11 Dec 1998 08:27:40 -0500 (EST)
+Resent-Date: Fri, 11 Dec 1998 08:27:40 -0500 (EST)
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <981211051822.ZM20223@candle.brasslantern.com>
+Date: Fri, 11 Dec 1998 05:18:22 -0800
+In-Reply-To: <199812091444.PAA02328@beta.informatik.hu-berlin.de>
+Comments: In reply to Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+        "PATCH: wrapper functions in modules" (Dec  9,  3:44pm)
+References: <199812091444.PAA02328@beta.informatik.hu-berlin.de>
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+Subject: Re: wrapper functions in modules
+Cc: zsh-workers@math.gatech.edu
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"TCAHk1.0.u12.CtHSs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4751
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+On Dec 9,  3:44pm, Sven Wischnowsky wrote:
+} Subject: PATCH: wrapper functions in modules
+}
+} The patch below allows modules to register functions that are to be
+} executed before and after a function is called.
+
+I understand why you did this, but it's a potential pit of vipers,
+especially given the linear list traversal used to call the wrappers.
+
+My first concern is with ordering dependencies among modules.  The
+module dependency mechanism can be used to assure that module X's
+"before" wrapper is in the linked list ahead of module Y's, but what
+about the "after" wrappers?  Surely they should be called in opposite
+order from the "before" wrappers, so that Y can unwind its state before
+X yanks some vital data out from under it?
+
+Also, the additional patches to delay module unloading introduce other
+problems.  Suppose I have a module that redefines the "echo" builtin.
+Consider:
+
+	function call-the-wrong-echo {
+	    zmodload my_echo
+	    echo "This should be my own echo."
+	    zmodload -u my_echo
+	    echo "This ought to be builtin echo."
+	}
+
+You have to split unloading into two parts, one that takes away the
+"user interface" and another that finally disengages the C functions.
+
+That probably further introduces the need to split the module's own
+cleanup function into those same two parts, because "zmodload -u" has
+to fail at the moment that it's executed if it's going to fail at all,
+not some long while later when the shell-function call-stack unwinds.
+
+And then we're back to the dependency problems again -- when you're done
+calling all the wrapper functions, you have to unload the modules IN THE
+ORDER THAT THE zmodload -u COMMANDS WERE EXECUTED, not in whatever order
+the modules happen to have been added (or not) to the wrappers list.  It's
+not good enough to delay the unloading only of modules that have wrappers,
+you also have to delay unloading all the way along the module dependency
+chains.
+
+Even with all that fixed, there's the problem of shell functions calling
+other shell functions.  Here's the most glaring example:
+
+	function call-too-many-after-wrappers {
+	    if (($1 == 10))
+	    then
+	    	zmodload example
+	    else
+		call-too-many-after-wrappers $[$1+1]
+	    fi
+	}
+
+Even in nonrecursive cases, every module's wrapper has to maintain its
+own idea of the state of the call stack to "do the right thing" with
+respect to nested shell function scopes.
+
+Worse, this interacts with the staged-unload problem, because once you
+have called "zmodload -u", any further calls to the "before" wrappers
+ought to become no-ops; but you have to be sure the "after" wrappers
+still get called at exactly the scopes where the "before" wrappers were
+active.
+
+You can fix or reduce some of these problems by:
+1.  Make the list of "after" wrappers to be called a part of the
+    doshfunc() stack frame, rather than always using the global list.
+2.  Build that list by pushing wrappers on the front as you loop over
+    the "before" wrappers, to get the reversed call sequence.
+3.  Pass a "call stack depth" parameter or similar identifier to the
+    before/after wrappers, to simplify the tests they must do.  (Even
+    better, pass a pointer to some kind of scope structure that has
+    the stack depth as a member.)
+
+Nevertheless, this is so tangled that I'm sure I haven't yet listed all
+the possible bad interactions.  We should think hard about whether there
+is some other way to deal with the problems the wrappers are intended to
+solve.
+
+} This is completely hidden from the user so there is no documentation
+
+There ought to be *developer* documentation for it, e.g., in the file
+Util/zsh-development-guide or where other module developer documentation
+lives (which is rather scatterbrained at the moment).  The example
+module is totally insufficient to give an understanding of this kind of
+complexity.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

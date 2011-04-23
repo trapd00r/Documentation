@@ -1,0 +1,253 @@
+From zsh-workers-return-5601-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Mar 02 10:51:43 1999
+Return-Path: <zsh-workers-return-5601-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18564 invoked from network); 2 Mar 1999 10:51:41 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 2 Mar 1999 10:51:41 -0000
+Received: (qmail 23945 invoked by alias); 2 Mar 1999 10:51:22 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5601
+Received: (qmail 23933 invoked from network); 2 Mar 1999 10:51:19 -0000
+Date: Tue, 2 Mar 1999 11:50:34 +0100 (MET)
+Message-Id: <199903021050.LAA18164@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: more compstate
+
+
+This adds `compstate[exact_string]' which will be set to the string of 
+an exact match once one is added (we already talked about this) and
+`compstate[total_matchers]' which gives the number of global match
+specs used (this is interesting to have if one wants to write portable 
+completion functions).
+
+Bye
+ Sven
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Mon Mar  1 16:42:12 1999
++++ Src/Zle/comp.h	Tue Mar  2 11:35:48 1999
+@@ -302,15 +302,18 @@
+ #define CP_NMATCHES   (1 <<  6)
+ #define CP_MATCHER    (1 <<  7)
+ #define CP_MATCHERSTR (1 <<  8)
+-#define CP_CONTEXT    (1 <<  9)
+-#define CP_PARAMETER  (1 << 10)
+-#define CP_REDIRECT   (1 << 11)
+-#define CP_QUOTE      (1 << 12)
+-#define CP_QUOTING    (1 << 13)
+-#define CP_RESTORE    (1 << 14)
+-#define CP_LIST       (1 << 15)
+-#define CP_INSERT     (1 << 16)
+-#define CP_EXACT      (1 << 17)
++#define CP_MATCHERTOT (1 <<  9)
++#define CP_CONTEXT    (1 << 10)
++#define CP_PARAMETER  (1 << 11)
++#define CP_REDIRECT   (1 << 12)
++#define CP_QUOTE      (1 << 13)
++#define CP_QUOTING    (1 << 14)
++#define CP_RESTORE    (1 << 15)
++#define CP_LIST       (1 << 16)
++#define CP_INSERT     (1 << 17)
++#define CP_EXACT      (1 << 18)
++#define CP_EXACTSTR   (1 << 19)
++
++#define CP_NUM              20
+ 
+-#define CP_NUM 18
+ #define CP_ALLMASK    ((1 << CP_NUM) - 1)
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Mon Mar  1 16:42:12 1999
++++ Src/Zle/comp1.c	Tue Mar  2 11:37:08 1999
+@@ -99,7 +99,8 @@
+ /**/
+ long compcurrent,
+      compnmatches,
+-     compmatcher;
++     compmatcher,
++     compmatchertot;
+ 
+ /**/
+ char **compwords,
+@@ -115,7 +116,8 @@
+      *comprestore,
+      *complist,
+      *compinsert,
+-     *compexact;
++     *compexact,
++     *compexactstr;
+ 
+ /**/
+ Param *comppms;
+@@ -428,7 +430,7 @@
+     compprefix = compsuffix = compiprefix = compmatcherstr = 
+ 	compcontext = compparameter = compredirect = compquote =
+ 	compquoting = comprestore = complist = compinsert =
+-	compexact = NULL;
++	compexact = compexactstr = NULL;
+     makecompparamsptr = NULL;
+     comp_setunsetptr = NULL;
+     return 0;
+@@ -471,6 +473,7 @@
+     zsfree(complist);
+     zsfree(compinsert);
+     zsfree(compexact);
++    zsfree(compexactstr);
+     return 0;
+ }
+ 
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Mon Mar  1 16:42:12 1999
++++ Src/Zle/compctl.c	Tue Mar  2 11:36:27 1999
+@@ -1840,6 +1840,7 @@
+     { "nmatches", PM_INTEGER, VAR(compnmatches) },
+     { "matcher", PM_INTEGER, VAR(compmatcher) },
+     { "matcher_string", PM_SCALAR, VAR(compmatcherstr) },
++    { "total_matchers", PM_INTEGER, VAR(compmatchertot) },
+     { "context", PM_SCALAR, VAR(compcontext) },
+     { "parameter", PM_SCALAR, VAR(compparameter) },
+     { "redirect", PM_SCALAR, VAR(compredirect) },
+@@ -1849,6 +1850,7 @@
+     { "list", PM_SCALAR, VAR(complist) },
+     { "insert", PM_SCALAR, VAR(compinsert) },
+     { "exact", PM_SCALAR, VAR(compexact) },
++    { "exact_string", PM_SCALAR, VAR(compexactstr) },
+     { NULL, 0, NULL }
+ };
+ 
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Tue Mar  2 09:19:32 1999
++++ Src/Zle/zle_tricky.c	Tue Mar  2 11:46:59 1999
+@@ -4311,11 +4311,23 @@
+ 		    if (!ai->firstm)
+ 			ai->firstm = cm;
+ 		    if (!cp && (aflags & CAF_MATCH) && !(e - (s + pl))) {
+-			if (!ai->exact)
++			if (!ai->exact) {
+ 			    ai->exact = 1;
+-			else {
++			    zsfree(compexactstr);
++			    compexactstr = e = (char *) zalloc(lpl + sl + lsl + 1);
++			    if (ppre) {
++				strcpy(e, ppre);
++				e += lpl;
++			    }
++			    strcpy(e, s);
++			    e += sl;
++			    if (psuf)
++				strcpy(e, psuf);
++			    comp_setunsetptr(CP_EXACTSTR, 0);
++			} else {
+ 			    ai->exact = 2;
+ 			    cm = NULL;
++			    comp_setunsetptr(0, CP_EXACTSTR);
+ 			}
+ 			ai->exactm = cm;
+ 		    }
+@@ -4655,11 +4667,29 @@
+ 
+ 	/* Do we have an exact match? More than one? */
+ 	if (!ispattern && !(e - (s + pl))) {
+-	    if (!ai->exact)
++	    if (!ai->exact) {
+ 		ai->exact = 1;
+-	    else {
++		if (incompfunc) {
++		    int lpl = (cm->ppre ? strlen(cm->ppre) : 0);
++		    int lsl = (cm->psuf ? strlen(cm->psuf) : 0);
++
++		    zsfree(compexactstr);
++		    compexactstr = e = (char *) zalloc(lpl + sl + lsl + 1);
++		    if (cm->ppre) {
++			strcpy(e, cm->ppre);
++			e += lpl;
++		    }
++		    strcpy(e, s);
++		    e += sl;
++		    if (cm->psuf)
++			strcpy(e, cm->psuf);
++		    comp_setunsetptr(CP_EXACTSTR, 0);
++		}
++	    } else {
+ 		ai->exact = 2;
+ 		cm = NULL;
++		if (incompfunc)
++		    comp_setunsetptr(0, CP_EXACTSTR);
+ 	    }
+ 	    ai->exactm = cm;
+ 	}
+@@ -5066,7 +5096,8 @@
+ 
+ 	comppms = (Param *) zalloc(CP_NUM * sizeof(Param));
+ 
+-	set = -1 & ~(CP_PARAMETER | CP_REDIRECT | CP_QUOTE | CP_QUOTING);
++	set = -1 & ~(CP_PARAMETER | CP_REDIRECT | CP_QUOTE | CP_QUOTING |
++		     CP_EXACTSTR);
+ 	zsfree(compcontext);
+ 	zsfree(compparameter);
+ 	zsfree(compredirect);
+@@ -5288,8 +5319,9 @@
+ 
+     if ((m = cmatcher)) {
+ 	Cmlist mm, *mp = &mm;
++	int n;
+ 
+-	for (; m; m = m->next) {
++	for (n = 0; m; m = m->next, n++) {
+ 	    *mp = (Cmlist) zhalloc(sizeof(struct cmlist));
+ 	    (*mp)->matcher = m->matcher;
+ 	    (*mp)->next = NULL;
+@@ -5300,6 +5332,7 @@
+ 	}
+ 	m = mm;
+ 	compmatcher = 1;
++	compmatchertot = n;
+     } else
+ 	compmatcher = 0;
+ 
+diff -u od/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- od/Zsh/compwid.yo	Mon Mar  1 13:19:55 1999
++++ Doc/Zsh/compwid.yo	Tue Mar  2 11:40:11 1999
+@@ -156,6 +156,9 @@
+ item(tt(matcher_string))(
+ This is set to the global match specification string currently used.
+ )
++item(tt(total_matchers))(
++The total number of global match specifications.
++)
+ item(tt(restore))(
+ This is set to tt(auto) before a function is entered. If a function
+ unsets it or sets it to any other string, the special parameters
+@@ -185,6 +188,10 @@
+ This is set to tt(accept) if an exact match would be accepted by the
+ completion code due to tt(REC_EXACT) being set or it is unset if an
+ exact match would not be accepted.
++)
++item(tt(exact_string))(
++This is set to the string of an exact match if one was found and unset 
++otherwise.
+ )
+ enditem()
+ )
+diff -u od/Zsh/params.yo Doc/Zsh/params.yo
+--- od/Zsh/params.yo	Mon Mar  1 13:19:57 1999
++++ Doc/Zsh/params.yo	Mon Mar  1 13:21:55 1999
+@@ -155,6 +155,11 @@
+ the var(n)th or var(n)th last match (if var(expr) evaluates to
+ var(n)).  This flag is ignored when the array is associative.
+ )
++item(tt(b:)var(expr)tt(:))(
++if combined with `tt(r)', `tt(R)', `tt(i)' or `tt(I)', makes them begin
++at the var(n)th or var(n)th last element, word, or character (if var(expr)
++evaluates to var(n)).  This flag is ignored when the array is associative.
++)
+ enditem()
+ texinode(Positional Parameters)(Local Parameters)(Array Parameters)(Parameters)
+ sect(Positional Parameters)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

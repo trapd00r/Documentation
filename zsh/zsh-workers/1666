@@ -1,0 +1,186 @@
+From pws@ifh.de Tue Jul 16 22:04:18 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id WAA02722 for <mason@werple.mira.net.au>; Tue, 16 Jul 1996 22:04:14 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA29323; Tue, 16 Jul 1996 07:52:27 -0400 (EDT)
+Resent-Date: Tue, 16 Jul 1996 07:52:27 -0400 (EDT)
+Message-Id: <199607161148.NAA28101@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Bad exec error message fix
+Date: Tue, 16 Jul 1996 13:48:51 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"te79C2.0.6A7.x9uwn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1666
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 4094
+Status: OR
+
+This fixes the following two related (and long-standing) bugs.
+
+1) Bad error message for a command not found with an unreadable
+directory in the path.
+
+% mkdir ~/noread
+% chmod 000 ~/noread
+% path=(~/noread $path)               # can be anywhere in $path
+% no-such-command-of-this-name
+zsh: permission denied: no-such-command-of-this-name
+
+The shell now checks on an EACCES whether the directory is executable,
+using access().  I realise access() is not perfect when running with
+funny uid's, but this ought to be OK for error message purposes.  (As
+ENOENT is the usual error message for a command not found with paths
+correctly set up, this doesn't produce a big overhead.)
+
+
+2) Bad error message for a command not found with a non-directory
+in the path.
+
+% path=(~/.zshrc $path)
+% nor-this-one-either
+zsh: not a directory: nor-this-one-either
+
+Here, I have simply told it to ignore ENOTDIR (not a directory) errors
+in the same way as it ignores ENOENT (file not found) when searching
+for a command to execute.
+
+
+Does anyone know of other related errors?
+
+Unfortunately I can't test this under working conditions as I'd like
+since the new rules for { and [[ break the initialisation scripts
+here.  Hmmm.
+
+*** Src/exec.c.perm	Mon Jul 15 02:32:31 1996
+--- Src/exec.c	Tue Jul 16 13:40:28 1996
+***************
+*** 242,247 ****
+--- 242,261 ----
+  
+  #define MAXCMDLEN (PATH_MAX*4)
+  
++ /* test whether we really want to believe the error number */
++ 
++ /**/
++ int
++ isgooderr(int e, char *dir)
++ {
++     /*
++      * Maybe the directory was unreadable, or maybe it wasn't
++      * even a directory. 
++      */
++     return ((e != EACCES || !access(dir, X_OK)) &&
++ 	    e != ENOENT && e != ENOTDIR); 
++ }
++ 
+  /* execute an external command */
+  
+  /**/
+***************
+*** 304,310 ****
+  	}
+  
+      if (cn) {
+! 	char nn[PATH_MAX];
+  
+  	if (cn->flags & HASHED)
+  	    strcpy(nn, cn->u.cmd);
+--- 318,324 ----
+  	}
+  
+      if (cn) {
+! 	char nn[PATH_MAX], *dptr;
+  
+  	if (cn->flags & HASHED)
+  	    strcpy(nn, cn->u.cmd);
+***************
+*** 312,318 ****
+  	    for (pp = path; pp < cn->u.name; pp++)
+  		if (**pp == '.' && (*pp)[1] == '\0') {
+  		    ee = zexecve(arg0, argv);
+! 		    if (ee != ENOENT)
+  			eno = ee;
+  		} else if (**pp != '/') {
+  		    z = buf;
+--- 326,332 ----
+  	    for (pp = path; pp < cn->u.name; pp++)
+  		if (**pp == '.' && (*pp)[1] == '\0') {
+  		    ee = zexecve(arg0, argv);
+! 		    if (isgooderr(ee, *pp))
+  			eno = ee;
+  		} else if (**pp != '/') {
+  		    z = buf;
+***************
+*** 320,326 ****
+  		    *z++ = '/';
+  		    strcpy(z, arg0);
+  		    ee = zexecve(buf, argv);
+! 		    if (ee != ENOENT)
+  			eno = ee;
+  		}
+  	    strcpy(nn, cn->u.name ? *(cn->u.name) : "");
+--- 334,340 ----
+  		    *z++ = '/';
+  		    strcpy(z, arg0);
+  		    ee = zexecve(buf, argv);
+! 		    if (isgooderr(ee, *pp))
+  			eno = ee;
+  		}
+  	    strcpy(nn, cn->u.name ? *(cn->u.name) : "");
+***************
+*** 329,341 ****
+  	}
+  	ee = zexecve(nn, argv);
+  
+! 	if (ee != ENOENT)
+  	    eno = ee;
+      }
+      for (pp = path; *pp; pp++)
+  	if ((*pp)[0] == '.' && !(*pp)[1]) {
+  	    ee = zexecve(arg0, argv);
+! 	    if (ee != ENOENT)
+  		eno = ee;
+  	} else {
+  	    z = buf;
+--- 343,357 ----
+  	}
+  	ee = zexecve(nn, argv);
+  
+! 	if ((dptr = strrchr(nn, '/')))
+! 	    *dptr = '\0';
+! 	if (isgooderr(ee, *nn ? nn : "/"))
+  	    eno = ee;
+      }
+      for (pp = path; *pp; pp++)
+  	if ((*pp)[0] == '.' && !(*pp)[1]) {
+  	    ee = zexecve(arg0, argv);
+! 	    if (isgooderr(ee, *pp))
+  		eno = ee;
+  	} else {
+  	    z = buf;
+***************
+*** 343,349 ****
+  	    *z++ = '/';
+  	    strcpy(z, arg0);
+  	    ee = zexecve(buf, argv);
+! 	    if (ee != ENOENT)
+  		eno = ee;
+  	}
+      if (eno)
+--- 359,365 ----
+  	    *z++ = '/';
+  	    strcpy(z, arg0);
+  	    ee = zexecve(buf, argv);
+! 	    if (isgooderr(ee, *pp))
+  		eno = ee;
+  	}
+      if (eno)
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+
+

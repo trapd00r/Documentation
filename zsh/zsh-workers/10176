@@ -1,0 +1,268 @@
+From zsh-workers-return-10176-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Mar 20 10:28:51 2000
+Return-Path: <zsh-workers-return-10176-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24623 invoked from network); 20 Mar 2000 10:28:49 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 20 Mar 2000 10:28:49 -0000
+Received: (qmail 27023 invoked by alias); 20 Mar 2000 10:28:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10176
+Received: (qmail 27007 invoked from network); 20 Mar 2000 10:28:36 -0000
+Date: Mon, 20 Mar 2000 11:28:34 +0100 (MET)
+Message-Id: <200003201028.LAA09992@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Wed, 15 Mar 2000 14:28:07 +0100
+	(MET)
+Subject: Re: command completion taking ages
+
+
+I wrote:
+
+> Oliver Kiddle wrote:
+> 
+> > If I press tab in a position where all commands are completed, I get a
+> > very long delay.
+> 
+> And of course we should have a look why this is so slow...
+
+Another reason why large lists can be slow is LIST_PACKED. For it to
+work we have to repeatedly calculate the lines/columns needed while
+trying to squeeze them together. The code used a rather simple
+approach, just trying one possible value after another to find the
+optimum. This patch makes it use a binary search instead.
+
+And then there are two hunks for `might be used uninitialized' warnings.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/Zle/compresult.c Src/Zle/compresult.c
+--- ../z.old/Src/Zle/compresult.c	Mon Mar 20 11:07:01 2000
++++ Src/Zle/compresult.c	Mon Mar 20 11:14:54 2000
+@@ -1288,9 +1288,11 @@
+ 	}
+     }
+     if (!onlyexpl) {
++	char **pp;
++	int *ws, tlines, tline, tcols, maxlen, nth, width, glines;
++
+ 	for (g = amatches; g; g = g->next) {
+-	    char **pp;
+-	    int glines = 0;
++	    glines = 0;
+ 
+ 	    zfree(g->widths, 0);
+ 	    g->widths = NULL;
+@@ -1332,11 +1334,6 @@
+ 	    g->lins = glines;
+ 	    nlines += glines;
+ 	}
+-    }
+-    if (!onlyexpl) {
+-	char **pp;
+-	int *ws, tlines, tline, tcols, maxlen, nth, width;
+-
+ 	for (g = amatches; g; g = g->next) {
+ 	    if (!(g->flags & CGF_PACKED))
+ 		continue;
+@@ -1357,9 +1354,11 @@
+ 
+ 		    if (g->flags & CGF_ROWS) {
+ 			int count, tcol, first, maxlines = 0, llines;
++			int beg = columns / g->shortest, end = g->cols;
++
++			while (1) {
++			    tcols = (beg + end) >> 1;
+ 
+-			for (tcols = columns / g->shortest; tcols > g->cols;
+-			     tcols--) {
+ 			    for (nth = first = maxlen = width = maxlines =
+ 				     llines = tcol = 0,
+ 				     count = g->dcount;
+@@ -1383,17 +1382,33 @@
+ 				ws[tcol++] = maxlen;
+ 				width += maxlen;
+ 			    }
+-			    if (!count && width < columns)
++			    if (!count && width < columns &&
++				(tcols <= 0 || beg == end))
+ 				break;
++
++			    if (beg == end) {
++				beg--;
++				end--;
++			    } else if (width < columns) {
++				if ((end = tcols) == beg - 1)
++				    end++;
++			    } else {
++				if ((beg = tcols) - 1 == end)
++				    end++;
++			    }
+ 			}
+ 			if (tcols > g->cols)
+ 			    tlines = maxlines;
+ 		    } else {
+-			for (tlines = ((g->totl + columns) / columns);
+-			     tlines < g->lins; tlines++) {
++			int beg = ((g->totl + columns) / columns);
++			int end = g->lins;
++
++			while (1) {
++			    tlines = (beg + end) >> 1;
++
+ 			    for (pp = g->ylist, nth = tline = width =
+ 				     maxlen = tcols = 0;
+-				 *pp; nth++, pp++) {
++				 *pp; pp++) {
+ 				if (ylens[nth] > maxlen)
+ 				    maxlen = ylens[nth];
+ 				if (++tline == tlines) {
+@@ -1402,23 +1417,40 @@
+ 				    ws[tcols++] = maxlen;
+ 				    maxlen = tline = 0;
+ 				}
++				nth++;
+ 			    }
+ 			    if (tline) {
+ 				ws[tcols++] = maxlen;
+ 				width += maxlen;
+ 			    }
+-			    if (nth == yl && width < columns)
++			    if (nth == yl && width < columns &&
++				(beg == end || tlines >= g->lins))
+ 				break;
++
++			    if (beg == end) {
++				beg++;
++				end++;
++			    } else if (width < columns) {
++				if ((end = tlines) == beg + 1)
++				    end--;
++			    } else {
++				if ((beg = tlines) + 1 == end)
++				    end--;
++			    }
+ 			}
++			if (tlines > g->lins)
++			    tlines = g->lins;
+ 		    }
+ 		}
+ 	    } else if (g->width) {
+ 		if (g->flags & CGF_ROWS) {
+ 		    int addlen, count, tcol, maxlines = 0, llines, i;
++		    int beg = columns / g->shortest, end = g->cols;
+ 		    Cmatch *first;
+ 
+-		    for (tcols = columns / g->shortest; tcols > g->cols;
+-			 tcols--) {
++		    while (1) {
++			tcols = (beg + end) >> 1;
++
+ 			p = first = skipnolist(g->matches, showall);
+ 			for (maxlen = width = maxlines = llines = tcol = 0,
+ 				 count = g->dcount;
+@@ -1448,8 +1480,20 @@
+ 			    ws[tcol++] = maxlen;
+ 			    width += maxlen;
+ 			}
+-			if (!count && width < columns)
++			if (!count && width < columns &&
++			    (tcols <= 0 || beg == end))
+ 			    break;
++
++			if (beg == end) {
++			    beg--;
++			    end--;
++			} else if (width < columns) {
++			    if ((end = tcols) == beg - 1)
++				end++;
++			} else {
++			    if ((beg = tcols) - 1 == end)
++				end++;
++			}
+ 		    }
+ 		    if (tcols > g->cols)
+ 			tlines = maxlines;
+@@ -1457,12 +1501,15 @@
+ 		    int addlen;
+ 		    int smask = ((showall ? 0 : (CMF_NOLIST | CMF_MULT)) |
+ 				 CMF_HIDE);
++		    int beg = ((g->totl + columns) / columns);
++		    int end = g->lins;
++
++		    while (1) {
++			tlines = (beg + end) >> 1;
+ 
+-		    for (tlines = ((g->totl + columns) / columns);
+-			 tlines < g->lins; tlines++) {
+ 			for (p = g->matches, nth = tline = width =
+ 				 maxlen = tcols = 0;
+-			     (m = *p); p++, nth++) {
++			     (m = *p); p++) {
+ 			    if (!(m->flags &
+ 				  (m->disp ? (CMF_DISPLINE | CMF_HIDE) :
+ 				   smask))) {
+@@ -1475,15 +1522,30 @@
+ 				    ws[tcols++] = maxlen;
+ 				    maxlen = tline = 0;
+ 				}
++				nth++;
+ 			    }
+ 			}
+ 			if (tline) {
+ 			    ws[tcols++] = maxlen;
+ 			    width += maxlen;
+ 			}
+-			if (nth == g->dcount && width < columns)
++			if (nth == g->dcount && width < columns &&
++			    (beg == end || tlines >= g->lins))
+ 			    break;
++
++			if (beg == end) {
++			    beg++;
++			    end++;
++			} else if (width < columns) {
++			    if ((end = tlines) == beg + 1)
++				end--;
++			} else {
++			    if ((beg = tlines) + 1 == end)
++				end--;
++			}
+ 		    }
++		    if (tlines > g->lins)
++			tlines = g->lins;
+ 		}
+ 	    }
+ 	    if (tlines == g->lins) {
+diff -ru ../z.old/Src/init.c Src/init.c
+--- ../z.old/Src/init.c	Mon Mar 20 11:06:56 2000
++++ Src/init.c	Mon Mar 20 11:14:52 2000
+@@ -896,7 +896,7 @@
+ source(char *s)
+ {
+     Eprog prog;
+-    int tempfd, fd, cj, oldlineno;
++    int tempfd = -1, fd, cj, oldlineno;
+     int oldshst, osubsh, oloops;
+     FILE *obshin;
+     char *old_scriptname = scriptname, *us;
+diff -ru ../z.old/Src/parse.c Src/parse.c
+--- ../z.old/Src/parse.c	Mon Mar 20 11:06:58 2000
++++ Src/parse.c	Mon Mar 20 11:14:52 2000
+@@ -2596,7 +2596,7 @@
+ {
+     int dfd, hlen, tlen;
+     LinkList progs, lnames;
+-    Shfunc shf;
++    Shfunc shf = NULL;
+ 
+     if (!strsfx(FD_EXT, dump))
+ 	dump = dyncat(dump, FD_EXT);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

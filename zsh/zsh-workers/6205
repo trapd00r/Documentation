@@ -1,0 +1,131 @@
+From zsh-workers-return-6205-mason-zsh=primenet.com.au@sunsite.auc.dk Mon May 03 15:53:36 1999
+Return-Path: <zsh-workers-return-6205-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5208 invoked from network); 3 May 1999 15:53:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 May 1999 15:53:35 -0000
+Received: (qmail 12925 invoked by alias); 3 May 1999 15:53:15 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6205
+Received: (qmail 12918 invoked from network); 3 May 1999 15:53:13 -0000
+Message-Id: <9905031528.AA37492@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.5-pws-17: typeahead de-kludge
+Date: Mon, 03 May 1999 17:28:55 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+This is an attempt to remove flakiness permanently from zsh typeahead.
+Some machines mess up typeahead when you go from canonical to non-canonical
+input processing; programmes are usually called with the former in effect,
+while zle works with the latter.  The old code caused the terminal mode not
+to be changed if there was typeahead, but only on the machines where we
+knew there was a problem:  that's because it was possible to get into a
+state where zle didn't work because the terminal hadn't been set up
+for input properly (I've seen this, but haven't worked out how to reproduce
+it systematically).
+
+The test for typeahead actually tells you how many characters there are to
+read.  So this patch implements something if anything even more obvious
+than the existing code: it actually reads those characters and stores them
+in the unget queue, then sets the terminal up unconditionally so all future
+input will work.
+
+I think it's now possible to use this code for all systems, whether there
+was a typeahead problem or not.  The reasoning is
+- Where there was no problem, we just get stuff in the unget buffer instead
+of straight from read(), so there is nothing extra to go wrong.
+- Where there was a problem, it had to perform this test each time it
+wanted to set up the terminal anyway.  So it should introduce no new
+problems.  In particular, the potential race condition between the ioctl()
+test and setting the terminal is hardly worse (just the extra four lines).
+If anyone's worried, it can be changed to loop over the ioctl() until val
+returns 0, and then it is exactly the same as before.  But in that case
+problably the thing to do would be to delay the test until just before the
+final settyinfo().
+
+The only possible troubles I can see are (i) I've got confused over
+ordering of stuff in the unget buffer so typeahead appears in the wrong
+place (i.e. possibly I should have made sure the new input goes at the
+front of the unget buffer and not at the end, since it's LIFO).  However, I
+don't think zsetterm() gets called when this is likely to be a problem.
+Note the internal unget mechanism is entirely separate from the buffer
+stack.
+
+(ii) Some bright spark may have designed an OS where rational
+considerations of this kind don't apply.  I've tested it on AIX 3.2, HPUX
+10.20 and IRIX 6.2 and there's no sign of a problem, however (all define
+FIONREAD, which SunOS 5 appears not to unless in some BSD compatibility
+mode).  Apart from that, this looks a candidate for putting in 3.0.6.
+
+
+--- Src/Zle/zle_main.c.ta	Mon May  3 16:24:11 1999
++++ Src/Zle/zle_main.c	Mon May  3 16:37:39 1999
+@@ -119,12 +119,16 @@
+ {
+     struct ttyinfo ti;
+ 
+-#if defined(CLOBBERS_TYPEAHEAD) && defined(FIONREAD)
++#if defined(FIONREAD)
+     int val;
+ 
+     ioctl(SHTTY, FIONREAD, (char *)&val);
+-    if (val)
+-	return;
++    if (val) {
++	char *tmpline = (char *)zalloc(val);
++	read(SHTTY, tmpline, val);
++	ungetkeys(tmpline, val);
++	zfree(tmpline, val);
++    }
+ #endif
+ 
+ /* sanitize the tty */
+--- acconfig.h.ta	Thu Mar 11 11:20:39 1999
++++ acconfig.h	Mon May  3 16:38:25 1999
+@@ -189,9 +189,6 @@
+ /* Define to 1 if struct timezone is defined by a system header */
+ #undef HAVE_STRUCT_TIMEZONE
+ 
+-/* Define if your system's typeahead disappears from the shell editor. */
+-#undef CLOBBERS_TYPEAHEAD
+-
+ /* Define to 1 if there is a prototype defined for brk() on your system */
+ #undef HAVE_BRK_PROTO
+ 
+--- configure.in.ta	Mon Mar 15 12:11:29 1999
++++ configure.in	Mon May  3 16:38:10 1999
+@@ -883,25 +883,6 @@
+ zsh_PATH_UTMP(utmpx)
+ zsh_PATH_UTMP(wtmpx)
+ 
+-dnl ----------------
+-dnl TYPEAHEAD KLUDGE
+-dnl ----------------
+-dnl Some systems clobber typeahead when you go from canonical input
+-dnl processing to non-canonical, so we need a FIONREAD ioctl.
+-dnl I don't know how to check this with configure, so I am using the
+-dnl system names directly.
+-dnl The doubled square brackets are necessary because autoconf uses m4.
+-AC_CACHE_CHECK(if typeahead needs FIONREAD, zsh_cv_sys_clobbers_typeahead,
+-[case x-$host_vendor-$host_os in
+-    x-*-ultrix* | x-*-dgux* | x-sni-sysv4* | x-*-irix*)
+-	zsh_cv_sys_clobbers_typeahead=yes;;
+-    *)
+-	zsh_cv_sys_clobbers_typeahead=no;;
+-esac])
+-if test $zsh_cv_sys_clobbers_typeahead = yes; then
+-  AC_DEFINE(CLOBBERS_TYPEAHEAD)
+-fi
+-
+ dnl -------------------
+ dnl brk/sbrk PROTOTYPES
+ dnl -------------------
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

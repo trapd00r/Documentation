@@ -1,0 +1,193 @@
+From zsh-workers-request@math.gatech.edu Fri Jan 22 09:38:55 1999
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14803 invoked from network); 22 Jan 1999 09:31:43 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 22 Jan 1999 09:31:43 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id EAA18748;
+	Fri, 22 Jan 1999 04:26:28 -0500 (EST)
+Resent-Date: Fri, 22 Jan 1999 04:26:28 -0500 (EST)
+Message-Id: <9901220910.AA28382@ibmth.df.unipi.it>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: PATCH: zsh-3.1.5-pws-4 + Sven's new completion: dl fix (+ problem)
+Date: Fri, 22 Jan 1999 10:10:25 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"NFLkN2.0.ta4.4H4gs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4945
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Here's a patch which allows Sven's patches for the new completion
+system to work with dynamic loading when the symbols in zle aren't
+directly available from compctl and vice versa.  I added a warning
+where it wasn't obvious you could be sure the pointers to zle
+functions were properly set, however I haven't chased the calling
+sequence and it may be this is unnecessary.  This all now compiles
+OK.
+
+However ----  Sven, I can't find any changes to the widget definitions
+in your patches.  Have I missed a patch, or should there be some
+more hunks to add ZLE_ISCOMP flags to some widgets?  Otherwise zle -c
+won't recognize widgets as being of the right type to use.
+
+--- Src/Zle/comp1.c.sven2	Thu Jan 21 17:22:23 1999
++++ Src/Zle/comp1.c	Thu Jan 21 18:12:17 1999
+@@ -41,13 +41,31 @@
+ /**/
+ Cmlist cmatcher;
+ 
+-/* pointers to functions required by zle */
++/* pointers to functions required by zle and defined by compctl */
+ 
+ /**/
+ void (*printcompctlptr) _((char *, Compctl, int, int));
+ 
+ /**/
+ Compctl (*compctl_widgetptr) _((char *, char **));
++
++/**/
++void (*makecompparamsptr) _((void));
++
++/* pointers to functions required by compctl and defined by zle */
++
++/**/
++void (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, int, int, int, int, int, char **));
++
++/**/
++char *(*comp_strptr) _((int*,int*));
++
++/**/
++int (*getcpatptr) _((char *, int, char *, int));
++
++/**/
++void (*makecomplistcallptr) _((Compctl));
++
+ 
+ /* Hash table for completion info for commands */
+  
+--- Src/Zle/comp1.export.sven2	Thu Jan 21 18:01:03 1999
++++ Src/Zle/comp1.export	Thu Jan 21 18:14:39 1999
+@@ -1,4 +1,5 @@
+ #!
++addmatchesptr
+ cc_compos
+ cc_default
+ cc_dummy
+@@ -16,16 +17,19 @@
+ compiprefix
+ compnmatches
+ compprefix
++comp_strptr
+ compsuffix
+ freecmatcher
+ freecmlist
+ freecompcond
+ freecompctl
++getcpatptr
+ incompctlfunc
+ incompfunc
+ instring
++makecomplistcallptr
++makecompparamsptr
+ patcomps
+ printcompctlptr
+ quotename
+ rembslash
+-
+--- Src/Zle/compctl.c.sven2	Thu Jan 21 18:05:57 1999
++++ Src/Zle/compctl.c	Thu Jan 21 18:12:44 1999
+@@ -1691,7 +1691,7 @@
+ 	zerrnam(name, "command names illegal", NULL, 0);
+ 	ret = 1;
+     } else
+-	makecomplistcall(cc);
++	makecomplistcallptr(cc);
+ 
+     freecompctl(cc);
+     return ret;
+@@ -1796,8 +1796,8 @@
+ 	zerrnam(name, "missing completions", NULL, 0);
+ 	return 1;
+     }
+-    addmatches(ipre, ppre, psuf, prpre, pre, suf, group,
+-	       f, q, m, ns, a, argv);
++    addmatchesptr(ipre, ppre, psuf, prpre, pre, suf, group,
++		  f, q, m, ns, a, argv);
+     return 0;
+ }
+ 
+@@ -2022,7 +2022,11 @@
+ 	    s = cond_str(a, 0);
+ 	    i = -1;
+ 	}
+-	i = getcpat(comp_str(NULL, NULL), i, s, id);
++	if (!getcpatptr) {
++	    zerr("zle not loaded, zle condition not available", NULL, 0);
++	    return 1;
++	}
++	i = getcpatptr(comp_strptr(NULL, NULL), i, s, id);
+ 	if (i != -1) {
+ 	    ignore_prefix(i);
+ 	    return 1;
+@@ -2144,6 +2148,7 @@
+     compctltab->printnode = printcompctlp;
+     printcompctlptr = printcompctl;
+     compctl_widgetptr = compctl_widget;
++    makecompparamsptr = makecompparams;
+     return 0;
+ }
+ 
+@@ -2177,6 +2182,7 @@
+     compctltab->printnode = NULL;
+     printcompctlptr = NULL;
+     compctl_widgetptr = NULL;
++    makecompparamsptr = NULL;
+     return 0;
+ }
+ 
+--- Src/Zle/zle_main.c.sven2	Thu Jan 21 18:02:38 1999
++++ Src/Zle/zle_main.c	Thu Jan 21 18:04:06 1999
+@@ -873,6 +873,11 @@
+     spaceinlineptr = spaceinline;
+     zlereadptr = zleread;
+ 
++    addmatchesptr = addmatches;
++    comp_strptr = comp_str;
++    getcpatptr = getcpat;
++    makecomplistcallptr = makecomplistcall;
++
+     /* initialise the thingies */
+     init_thingies();
+ 
+@@ -934,6 +939,11 @@
+     refreshptr = noop_function;
+     spaceinlineptr = noop_function_int;
+     zlereadptr = fallback_zleread;
++
++    addmatchesptr = NULL;
++    comp_strptr = NULL;
++    getcpatptr = NULL;
++    makecomplistcallptr = NULL;
+ 
+     return 0;
+ }
+--- Src/Zle/zle_tricky.c.sven2	Thu Jan 21 17:25:43 1999
++++ Src/Zle/zle_tricky.c	Thu Jan 21 18:13:16 1999
+@@ -3307,7 +3307,7 @@
+ 		compnmatches = mnum;
+ 		incompfunc = 1;
+ 		startparamscope();
+-		makecompparams();
++		makecompparamsptr();
+ 		NEWHEAPS(compheap) {
+ 		    doshfunc(compfunc, list, args, 0, 1);
+ 		} OLDHEAPS;
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

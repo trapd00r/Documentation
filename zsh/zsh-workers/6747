@@ -1,0 +1,589 @@
+From zsh-workers-return-6747-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jun 21 09:39:09 1999
+Return-Path: <zsh-workers-return-6747-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 787 invoked from network); 21 Jun 1999 09:39:07 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Jun 1999 09:39:07 -0000
+Received: (qmail 2652 invoked by alias); 21 Jun 1999 09:39:01 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6747
+Received: (qmail 2645 invoked from network); 21 Jun 1999 09:39:00 -0000
+Date: Mon, 21 Jun 1999 11:38:58 +0200 (MET DST)
+Message-Id: <199906210938.LAA22143@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Mon, 21 Jun 1999 11:05:44 +0200
+	(MET DST)
+Subject: Re: Patch available for 3.0.6-pre-5
+
+
+I wrote:
+
+> [ ... collist ... ]
+
+This one is even weirder... (if memory serves, Peter once talked about 
+this).
+
+It adds:
+- the `ma' capability to collist; it is used during menucompletion to
+  highlight the match inserted (note that you still have to set
+  `ZLS_COLO(|U)RS' to see this -- an empty string will suffice)
+- the `menu-select' widget which is a bit like `menu-complete' but
+  displays the list and then lets you use cursor-movement keys to
+  navigate in the list; to return to line editing, you can use
+  `accept-line' or `send-break'; `accept-and-hold' leaves the match
+  inserted in place and continues selecting matches from the list
+  (i.e. it's like `accept-and-menu-complete')
+
+Dunno if this is interesting to anyone, so I haven't written a manual
+for this. (sorry :-}
+
+Bye
+ Sven
+
+diff -u -r oos/Zle/collist.c Src/Zle/collist.c
+--- oos/Zle/collist.c	Mon Jun 21 11:07:11 1999
++++ Src/Zle/collist.c	Mon Jun 21 11:32:27 1999
+@@ -30,6 +30,8 @@
+ #include "collist.mdh"
+ #include "collist.pro"
+ 
++static Widget w_menuselect;
++
+ /* We use the parameters ZLS_COLORS and ZLS_COLOURS in the same way as
+  * the color ls does. It's just that we don't support the `or' file
+  * type. */
+@@ -50,21 +52,22 @@
+ #define COL_LC 10
+ #define COL_RC 11
+ #define COL_EC 12
++#define COL_MA 13
+ 
+-#define NUM_COLS 13
++#define NUM_COLS 14
+ 
+ /* Names of the terminal strings. */
+ 
+ static char *colnames[] = {
+     "no", "fi", "di", "ln", "pi", "so", "bd", "cd", "ex", "mi",
+-    "lc", "rc", "ec", NULL
++    "lc", "rc", "ec", "ma", NULL
+ };
+ 
+ /* Default values. */
+ 
+ static char *defcols[] = {
+     "0", "0", "32", "36", "31", "33", "44;37", "44;37", "35", NULL,
+-    "\033[", "m", NULL
++    "\033[", "m", NULL, "7"
+ };
+ 
+ /* This describes a terminal string for a filename extension. */
+@@ -200,9 +203,13 @@
+     int i;
+ 
+     if (!(s = getsparam("ZLS_COLORS")) &&
+-	!(s = getsparam("ZLS_COLOURS")))
++	!(s = getsparam("ZLS_COLOURS"))) {
++	for (i = 0; i < NUM_COLS; i++)
++	    c->cols[i] = "";
++	
++	c->exts = NULL;
+ 	return 1;
+-
++    }
+     /* We have one of the parameters, use it. */
+     memset(c, 0, sizeof(*c));
+     s = dupstring(s);
+@@ -216,6 +223,7 @@
+     /* Default for missing files. */
+     if (!c->cols[COL_MI])
+ 	c->cols[COL_MI] = c->cols[COL_FI];
++
+     if (!c->cols[COL_EC]) {
+ 	char *e = (char *) zhalloc(strlen(c->cols[COL_LC]) +
+ 				   strlen(c->cols[COL_NO]) +
+@@ -260,21 +268,27 @@
+     return c->cols[COL_FI];
+ }
+ 
++/* Information about the list shown. */
++
++static int noselect, mselect, mcol, mline, mcols, mlines;
++static Cmatch *mmatch, **mtab;
++static Cmgroup mgroup, *mgtab;
++
+ /* List the matches. Most of this is just taken from ilistmatches(),
+  * of course. */
+ 
+-static int
+-collistmatches(Hookdef dummy, Cmgroup amatches)
++static void
++icollistmatches(Cmgroup amatches, int mark)
+ {
+     Cmgroup g;
+     Cmatch *p, m;
+     Cexpl *e;
+     int nlines = 0, ncols, nlist = 0, longest = 1, pnl = 0, opl = 0;
+     int of = isset(LISTTYPES);
++    int mc, ml = 0, cc;
+     struct listcols col;
+ 
+-    if (getcols(&col))
+-	return ilistmatches(dummy, amatches);
++    getcols(&col);
+ 
+     /* Set the cursor below the prompt. */
+     trashzle();
+@@ -298,7 +312,7 @@
+ 		char *nlptr, *sptr;
+ 
+ 		g->flags |= CGF_LINES;
+-		
++		noselect = 1;
+ 		while ((sptr = *pp)) {
+ 		    while (sptr && *sptr) {
+ 			nlines += (nlptr = strchr(sptr, '\n'))
+@@ -363,6 +377,7 @@
+     if ((complistmax && nlist > complistmax) ||
+ 	(!complistmax && nlines >= lines)) {
+ 	int qup;
++	noselect = 1;
+ 	zsetterm();
+ 	qup = printfmt("zsh: do you wish to see all %n possibilities? ", nlist, 1);
+ 	fflush(shout);
+@@ -375,7 +390,6 @@
+ 		tcmultout(TCUP, TCMULTUP, nlnct);
+ 	    } else
+ 		putc('\n', shout);
+-	    return 0;
+ 	}
+ 	if (clearflag) {
+ 	    putc('\r', shout);
+@@ -386,7 +400,20 @@
+ 	    putc('\n', shout);
+ 	settyinfo(&shttyinfo);
+     }
++    if (mselect >= 0) {
++	int i;
+ 
++	mark = mselect;
++	i = ncols * nlines;
++	free(mtab);
++	mtab = (Cmatch **) zalloc(i * sizeof(Cmatch **));
++	memset(mtab, 0, i * sizeof(Cmatch **));
++	free(mgtab);
++	mgtab = (Cmgroup *) zalloc(i * sizeof(Cmgroup));
++	memset(mgtab, 0, i * sizeof(Cmgroup));
++	mcols = ncols;
++	mlines = nlines;
++    }
+     /* Now print the matches. */
+     g = amatches;
+     while (g) {
+@@ -398,8 +425,9 @@
+ 		    if (pnl) {
+ 			putc('\n', shout);
+ 			pnl = 0;
++			ml++;
+ 		    }
+-		    printfmt((*e)->str, (*e)->count, 1);
++		    ml += printfmt((*e)->str, (*e)->count, 1);
+ 		    pnl = 1;
+ 		}
+ 		e++;
+@@ -409,6 +437,7 @@
+ 	    if (pnl) {
+ 		putc('\n', shout);
+ 		pnl = 0;
++		ml++;
+ 	    }
+ 	    if (g->flags & CGF_LINES) {
+ 		while (*pp) {
+@@ -422,6 +451,7 @@
+ 
+ 		while (n && nl--) {
+ 		    i = ncols;
++		    mc = 0;
+ 		    pq = pp;
+ 		    while (n && i--) {
+ 			if (pq - g->ylist >= g->lcount)
+@@ -435,8 +465,10 @@
+ 			pq += nc;
+ 			n--;
+ 		    }
+-		    if (n)
++		    if (n) {
+ 			putc('\n', shout);
++			ml++;
++		    }
+ 		    pp++;
+ 		}
+ 	    }
+@@ -448,9 +480,11 @@
+ 	    if (n && pnl) {
+ 		putc('\n', shout);
+ 		pnl = 0;
++		ml++;
+ 	    }
+ 	    for (p = skipnolist(g->matches); n && nl--;) {
+ 		i = ncols;
++		mc = 0;
+ 		q = p;
+ 		while (n && i--) {
+ 		    fputs(col.cols[COL_LC], shout);
+@@ -463,6 +497,18 @@
+ 			fputs(col.cols[COL_EC], shout);
+ 			break;
+ 		    }
++		    if (mselect >= 0) {
++			mtab[mc + (ncols * ml)] = q;
++			mgtab[mc + (ncols * ml)] = g;
++		    }
++		    if (m->gnum == mark) {
++			mcol = mc;
++			mline = ml;
++			mmatch = q;
++			mgroup = g;
++			cc = COL_MA;
++		    } else
++			cc = -1;
+ 		    if (m->flags & CMF_FILE) {
+ 			struct stat buf;
+ 			char *pb;
+@@ -472,7 +518,10 @@
+ 			sprintf(pb, "%s%s", (m->prpre ? m->prpre : "./"),
+ 				m->str);
+ 
+-			if ((zt = ztat(pb, &buf, 1)))
++			zt = ztat(pb, &buf, 1);
++			if (cc >= 0)
++			    fputs(col.cols[cc], shout);
++			else if (zt)
+ 			    fputs(col.cols[COL_NO], shout);
+ 			else
+ 			    fputs(getcolstr(&col, pb, buf.st_mode), shout);
+@@ -483,7 +532,7 @@
+ 			else
+ 			    putc(file_type(buf.st_mode), shout);
+ 		    } else {
+-			fputs(col.cols[COL_NO], shout);
++			fputs(col.cols[cc >= 0 ? cc : COL_NO], shout);
+ 			fputs(col.cols[COL_RC], shout);
+ 			nicezputs(m->str, shout);
+ 			if (of)
+@@ -503,6 +552,7 @@
+ 		    if (--n)
+ 			for (j = nc; j && *q; j--)
+ 			    q = skipnolist(q + 1);
++		    mc++;
+ 		}
+ 		if (i > 0) {
+ 		    fputs(col.cols[COL_LC], shout);
+@@ -515,6 +565,7 @@
+ 		}
+ 		if (n) {
+ 		    putc('\n', shout);
++		    ml++;
+ 		    if (n && nl)
+ 			p = skipnolist(p + 1);
+ 		}
+@@ -536,6 +587,179 @@
+ 	    clearflag = 0, putc('\n', shout);
+     } else
+ 	putc('\n', shout);
++}
++
++static int
++collistmatches(Hookdef dummy, Cmgroup amatches)
++{
++    icollistmatches(amatches, (menucur ? (*menucur)->gnum : -1));
++    return 0;
++}
++
++static int
++markcollistmatches(Hookdef dummy, void **m)
++{
++    if (listshown && menucur)
++	icollistmatches(((Cmgroup) m[0]), ((Cmatch) m[1])->gnum);
++    return 0;
++}
++
++static int
++menuselect(char **args)
++{
++    Cmatch **p;
++    Cmgroup *pg;
++    Thingy cmd;
++    int i = 0;
++
++    if (!menucur)
++	menucomplete(args);
++
++    if (!menucur)
++	return 1;
++
++    noselect = 0;
++    mselect = (*menucur)->gnum;
++    for (;;) {
++	showinglist = -2;
++	zrefresh();
++	if (noselect)
++	    break;
++	if (!i) {
++	    i = mcols * mlines;
++	    while (i--)
++		if (mtab[i])
++		    break;
++	    if (!i)
++		break;
++	    i = 1;
++	}
++	p = mtab + mcol + (mline * mcols);
++	pg = mgtab + mcol + (mline * mcols);
++	menucur = *p;
++	menugrp = *pg;
++
++    getk:
++
++	if (!(cmd = getkeycmd()) || cmd == Th(z_sendbreak) ||
++	    cmd == Th(z_acceptline))
++	    break;
++	else if (cmd == Th(z_acceptandhold)) {
++	    acceptlast();
++	} else if (cmd == Th(z_redisplay)) {
++	    redisplay(zlenoargs);
++	    continue;
++	} else if (cmd == Th(z_clearscreen)) {
++	    clearscreen(zlenoargs);
++	    continue;
++	} else if (cmd == Th(z_downhistory) ||
++		   cmd == Th(z_downlineorhistory) ||
++		   cmd == Th(z_downlineorsearch) ||
++		   cmd == Th(z_vidownlineorhistory)) {
++	    do {
++		if (mline == mlines - 1) {
++		    p -= mline * mcols;
++		    mline = 0;
++		} else {
++		    mline++;
++		    p += mcols;
++		}
++	    } while (!*p);
++	} else if (cmd == Th(z_uphistory) ||
++		   cmd == Th(z_uplineorhistory) ||
++		   cmd == Th(z_uplineorsearch) ||
++		   cmd == Th(z_viuplineorhistory)) {
++	    do {
++		if (!mline) {
++		    mline = mlines - 1;
++		    p += mline * mcols;
++		} else {
++		    mline--;
++		    p -= mcols;
++		}
++	    } while (!*p);
++	} else if (cmd == Th(z_forwardchar) || cmd == Th(z_viforwardchar)) {
++	    do {
++		if (mcol == mcols - 1) {
++		    p -= mcol;
++		    mcol = 0;
++		} else {
++		    mcol++;
++		    p++;
++		}
++	    } while (!*p);
++	} else if (cmd == Th(z_backwardchar) || cmd == Th(z_vibackwardchar)) {
++	    do {
++		if (!mcol) {
++		    mcol = mcols - 1;
++		    p += mcol;
++		} else {
++		    mcol--;
++		    p--;
++		}
++	    } while (!*p);
++	} else if (cmd == Th(z_beginningofbufferorhistory) ||
++		   cmd == Th(z_beginningofline) ||
++		   cmd == Th(z_beginningoflinehist) ||
++		   cmd == Th(z_vibeginningofline)) {
++	    p -= mcol;
++	    mcol = 0;
++	    while (!*p) {
++		mcol++;
++		p++;
++	    }
++	} else if (cmd == Th(z_endofbufferorhistory) ||
++		   cmd == Th(z_endofline) ||
++		   cmd == Th(z_endoflinehist) ||
++		   cmd == Th(z_viendofline)) {
++	    p += mcols - mcol - 1;
++	    mcol = mcols - 1;
++	    while (!*p) {
++		mcol--;
++		p--;
++	    }
++	} else if (cmd == Th(z_forwardword) ||
++		   cmd == Th(z_emacsforwardword) ||
++		   cmd == Th(z_viforwardword) ||
++		   cmd == Th(z_viforwardwordend)) {
++	    Cmgroup g = *pg;
++	    int ol = mline;
++
++	    do {
++		if (mline == mlines - 1) {
++		    p -= mline * mcols;
++		    pg -= mline * mcols;
++		    mline = 0;
++		} else {
++		    mline++;
++		    p += mcols;
++		    pg += mcols;
++		}
++	    } while (ol != mline && (*pg == g || !*pg));
++	} else if (cmd == Th(z_backwardword) ||
++		   cmd == Th(z_emacsbackwardword) ||
++		   cmd == Th(z_vibackwardword)) {
++	    Cmgroup g = *pg;
++	    int ol = mline;
++
++	    do {
++		if (!mline) {
++		    mline = mlines - 1;
++		    p += mline * mcols;
++		    pg += mline * mcols;
++		} else {
++		    mline--;
++		    p -= mcols;
++		    pg -= mcols;
++		}
++	    } while (ol != mline && (*pg == g || !*pg));
++	} else
++	    goto getk;
++
++	do_single(**p);
++	mselect = (**p)->gnum;
++    }
++    mselect = -1;
+     return 0;
+ }
+ 
+@@ -543,7 +767,6 @@
+ int
+ setup_example(Module m)
+ {
+-    addhookfunc("list_matches", (Hookfn) collistmatches);
+     return 0;
+ }
+ 
+@@ -551,6 +774,18 @@
+ int
+ boot_example(Module m)
+ {
++    mtab = NULL;
++    mselect = -1;
++
++    w_menuselect = addzlefunction("menu-select", menuselect,
++                                    ZLE_MENUCMP|ZLE_KEEPSUFFIX|ZLE_ISCOMP);
++    if (!w_menuselect) {
++	zwarnnam(m->nam, "name clash when adding ZLE function `menu-select'",
++		 NULL, 0);
++	return -1;
++    }
++    addhookfunc("list_matches", (Hookfn) collistmatches);
++    addhookfunc("insert_match", (Hookfn) markcollistmatches);
+     return 0;
+ }
+ 
+@@ -560,6 +795,11 @@
+ int
+ cleanup_example(Module m)
+ {
++    free(mtab);
++
++    deletezlefunction(w_menuselect);
++    deletehookfunc("list_matches", (Hookfn) collistmatches);
++    deletehookfunc("insert_match", (Hookfn) markcollistmatches);
+     return 0;
+ }
+ 
+@@ -567,7 +807,6 @@
+ int
+ finish_example(Module m)
+ {
+-    deletehookfunc("list_matches", (Hookfn) collistmatches);
+     return 0;
+ }
+ 
+diff -u -r oos/Zle/zle_main.c Src/Zle/zle_main.c
+--- oos/Zle/zle_main.c	Mon Jun 21 11:07:12 1999
++++ Src/Zle/zle_main.c	Mon Jun 21 11:08:00 1999
+@@ -959,6 +959,7 @@
+ /**/
+ struct hookdef zlehooks[] = {
+     HOOKDEF("list_matches", ilistmatches, 0),
++    HOOKDEF("insert_match", NULL, HOOKF_ALL),
+ };
+ 
+ /**/
+diff -u -r oos/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- oos/Zle/zle_tricky.c	Mon Jun 21 11:07:12 1999
++++ Src/Zle/zle_tricky.c	Mon Jun 21 11:08:01 1999
+@@ -113,8 +113,11 @@
+ /* Pointers to the current position in the groups list and in the menu-    *
+  * completion array (the one that was put in the command line last).       */
+ 
+-static Cmgroup menugrp;
+-static Cmatch *menucur;
++/**/
++Cmgroup menugrp;
++
++/**/
++Cmatch *menucur;
+ 
+ /* menupos is the point (in the command line) where the menu-completion   *
+  * strings are inserted.  menulen is the length of the string that was    *
+@@ -541,7 +544,8 @@
+  * with the next completions. This gives you a way to   *
+  * accept several selections from the list of matches.  */
+ 
+-static void
++/**/
++void
+ acceptlast(void)
+ {
+     if (brbeg && *brbeg) {
+@@ -7513,7 +7517,7 @@
+ /* Insert a single match in the command line. */
+ 
+ /**/
+-static void
++void
+ do_single(Cmatch m)
+ {
+     int l, sr = 0, scs;
+@@ -7669,6 +7673,17 @@
+ 
+     if ((menucmp && !menuwe) || !movetoend)
+ 	cs = menuend;
++    {
++	void *data[2];
++	Cmatch *om = menucur;
++
++	if (menucmp)
++	    menucur = &m;
++	data[0] = (void *) amatches;
++	data[1] = (void *) m;
++	runhookdef(zlehooks + 1, (void *) data);
++	menucur = om;
++    }
+ }
+ 
+ /* This maps the value in v into the range [0,m-1], decrementing v
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,178 @@
+From zsh-workers-return-14578-mason-zsh=primenet.com.au@sunsite.dk Wed May 30 19:55:45 2001
+Return-Path: <zsh-workers-return-14578-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25897 invoked from network); 30 May 2001 19:55:44 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 30 May 2001 19:55:44 -0000
+Received: (qmail 18546 invoked by alias); 30 May 2001 19:55:37 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14578
+Received: (qmail 18534 invoked from network); 30 May 2001 19:55:36 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010530195445.ZM3704@candle.brasslantern.com>
+Date: Wed, 30 May 2001 19:54:45 +0000
+In-Reply-To: <1010530152958.ZM1164@candle.brasslantern.com>
+Comments: In reply to "Bart Schaefer" <schaefer@candle.brasslantern.com>
+        "Re: termcap bug on Linux" (May 30,  3:29pm)
+References: <1010529160507.ZM13557@candle.brasslantern.com> 
+	<000001c0e8d1$33b431b0$21c9ca95@mow.siemens.ru> 
+	<20010530100001.A27922@dman.com> 
+	<1010530152958.ZM1164@candle.brasslantern.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: ZSH Workers Mailing List <zsh-workers@sunsite.dk>
+Subject: PATCH (again) Re: termcap bug on Linux
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+I wrote earlier:
+}
+} I'm going to commit 14516 as it is, and then look at this a bit more.
+
+OK, here's a patch for consideration.  This factors out the tgetflag()
+stuff into a new function ztgetflag(), which believes tgetflag() only
+when it returns -1 [no such cap] or != 0 ["yes"].  Otherwise it searches
+the boolcodes for the cap name and returns 0 ["no"] only if it finds
+the name there; the fallback is to return -1.
+
+The end result is that this consistently treats "known" flag cap names
+as either true or false, even if they don't actually appear in the term
+definition, and will consistently treat "unknown" cap names as "no such
+capability".  An "unknown" cap that is set to true is still at the mercy
+of tgetflag(), but I don't see any way to work around that at all -- and
+we do want to yield true for any previously-unknown capability that may
+come along and be set.
+
+"Consistently" here means on a particular installation -- it might be
+that zsh on an ncurses 4.2 system does not agree with zsh on an ncurses
+5.2 system even given identical term defs.
+
+If we don't want to trust the -1 return from tgetflag() at all, ever,
+just remove the `break' from the -1 case in ztgetflag().
+
+diff -u zsh-forge/current/Src/Modules/termcap.c zsh-4.0/Src/Modules/termcap.c
+--- zsh-forge/current/Src/Modules/termcap.c	Wed May 30 08:30:41 2001
++++ zsh-4.0/Src/Modules/termcap.c	Wed May 30 10:47:34 2001
+@@ -67,6 +67,38 @@
+ 
+ static Param termcap_pm;
+ 
++#ifndef HAVE_BOOLCODES
++static char *boolcodes[] = {
++    "bw", "am", "ut", "cc", "xs", "YA", "YF", "YB", "xt", "xn", "eo",
++    "gn", "hc", "HC", "km", "YC", "hs", "hl", "in", "YG", "da", "db",
++    "mi", "ms", "nx", "xb", "NP", "ND", "NR", "os", "5i", "YD", "YE",
++    "es", "hz", "ul", "xo", NULL};
++#endif
++
++/**/
++static int
++ztgetflag(char *s)
++{
++    char **b;
++
++    /* ncurses can tell if an existing boolean capability is *
++     * off, but other curses variants can't, so we fudge it. *
++     * This feature of ncurses appears to have gone away as  *
++     * of NCURSES_MAJOR_VERSION == 5, so don't rely on it.   */
++    switch (tgetflag(s)) {
++    case -1:
++	break;
++    case 0:
++	for (b = (char **)boolcodes; *b; ++b)
++	    if (s[0] == (*b)[0] && s[1] == (*b)[1])
++		return 0;
++	break;
++    default:
++	return 1;
++    }
++    return -1;
++}
++
+ /* echotc: output a termcap */
+ 
+ /**/
+@@ -86,16 +118,8 @@
+ 	printf("%d\n", num);
+ 	return 0;
+     }
+-    /* if the specified termcap is boolean, and set, say so  *
+-     * ncurses can tell if an existing boolean capability is *
+-     * off so in this case we print "no".                    */
+-#if !defined(NCURSES_VERSION) || !defined(COLOR_PAIR)
+-    if (tgetflag(s) > 0) {
+-	puts("yes");
+-	return (0);
+-    }
+-#else /* NCURSES_VERSION && COLOR_PAIR */
+-    switch (tgetflag(s)) {
++    /* if the specified termcap is boolean, and set, say so  */
++    switch (ztgetflag(s)) {
+     case -1:
+ 	break;
+     case 0:
+@@ -105,7 +129,6 @@
+ 	puts("yes");
+ 	return 0;
+     }
+-#endif /* NCURSES_VERSION && COLOR_PAIR */
+     /* get a string-type capability */
+     u = buf;
+     t = tgetstr(s, &u);
+@@ -232,14 +255,7 @@
+ 	pm->flags |= PM_INTEGER;
+ 	return (HashNode) pm;
+     }
+-#if !defined(NCURSES_VERSION) || !defined(COLOR_PAIR)
+-    if ((num = tgetflag(name)) > 0) {
+-	pm->u.str = dupstring("yes");
+-	pm->flags |= PM_SCALAR;
+-	return (HashNode) pm;
+-    }
+-#else /* NCURSES_VERSION && COLOR_PAIR */
+-    switch (tgetflag(name)) {
++    switch (ztgetflag(name)) {
+     case -1:
+ 	break;
+     case 0:
+@@ -251,7 +267,6 @@
+ 	pm->flags |= PM_SCALAR;
+ 	return (HashNode) pm;
+     }
+-#endif /* NCURSES_VERSION && COLOR_PAIR */
+     if ((tcstr = tgetstr(name, &u)) != NULL && tcstr != (char *)-1)
+     {
+ 	pm->u.str = dupstring(tcstr);
+@@ -274,14 +289,6 @@
+     int num;
+     char **capcode, *tcstr, buf[2048], *u;
+ 
+-#ifndef HAVE_BOOLCODES
+-    static char *boolcodes[] = {
+-	"bw", "am", "ut", "cc", "xs", "YA", "YF", "YB", "xt", "xn", "eo",
+-	"gn", "hc", "HC", "km", "YC", "hs", "hl", "in", "YG", "da", "db",
+-	"mi", "ms", "nx", "xb", "NP", "ND", "NR", "os", "5i", "YD", "YE",
+-	"es", "hz", "ul", "xo", NULL};
+-#endif
+-
+ #ifndef HAVE_NUMCODES
+     static char *numcodes[] = {
+ 	"co", "it", "lh", "lw", "li", "lm", "sg", "ma", "Co", "pa", "MW",
+@@ -344,7 +351,7 @@
+ 
+     pm->flags = PM_READONLY | PM_SCALAR;
+     for (capcode = (char **)boolcodes; *capcode; capcode++) {
+-	if ((num = tgetflag(*capcode)) != -1) {
++	if ((num = ztgetflag(*capcode)) != -1) {
+ 	    pm->u.str = num ? dupstring("yes") : dupstring("no");
+ 	    pm->nam = dupstring(*capcode);
+ 	    func((HashNode) pm, flags);
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

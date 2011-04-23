@@ -1,0 +1,321 @@
+From zsh-workers-return-11866-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Jun 11 21:39:34 2000
+Return-Path: <zsh-workers-return-11866-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8602 invoked from network); 11 Jun 2000 21:39:32 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 Jun 2000 21:39:32 -0000
+Received: (qmail 21443 invoked by alias); 11 Jun 2000 21:39:26 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11866
+Received: (qmail 21436 invoked from network); 11 Jun 2000 21:39:22 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000611213917.ZM8508@candle.brasslantern.com>
+Date: Sun, 11 Jun 2000 21:39:16 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Fiddling with colors
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+This discussion of a more understandable way to set the list-colors style
+got me looking at the `colors' function, `dircolors --print-database` and
+the docs for an ANSI terminal emulator.  In the process I noticed several
+glitches with the themed prompt system (none of which were mentioned in
+sourceforge bug #104884).
+
+After this patch the `colors' function creates an associative array `color'
+(and copies it to `colour' for the color-blind) that maps ANSI code numbers
+to descriptive words and vice-versa.  (Calling these all colors is a bit of
+a misnomer; "text properties" as in emacs would be better, but ...)
+
+The {f,b}g{,{,_no}_bold} arrays are then filled in by looping over indices
+in $color.  I removed the fg_zzzz and bg_zzzz parameters, which were only
+there to clean up the output of `typeset`, and instead typeset parameters
+that contain escape sequences with -H so the values aren't shown.  This is
+something that probably should be done throughout Functions/Prompts/, but
+I didn't get that ambitious.
+
+BTW, see the note in `colors' about black and white, to see why the themed
+prompt system is a bit strange in its use of the term "grey".
+
+The promptinit patch adds `psvar' to the variables that are preserved when
+previewing prompt settings and adds a `prompt_preview_safely' wrapper that
+preserves those values around individual prompt previewings as well.  It's
+a bit of overkill in the current situation because everything utimately goes
+through `prompt_preview_theme', which I also modified to preserve the same
+parameters, but I did it anyway in case somebody writes a prompt_xxx_preview
+function that behaves badly.
+
+An unrelated thing that this patch points up is how painful it is to create
+a local *copy* of an array parameter; see the lines marked "Ick" below.
+
+I also fixed a problem with simulation of preexec in `prompt_preview_theme';
+and I put the themes in alphabetical rather than reverse-alphabetical order
+for previewing, just because.
+
+Index: Functions/Misc/colors
+===================================================================
+@@ -1,85 +1,79 @@
+-# Put standard ANSI color codes in environment for easy use
+-reset_color=$'\e[0m'
+-bold_color=$'\e[1m'
++# Put standard ANSI color codes in shell parameters for easy use.
++# Note that some terminals do not support all combinations.
+ 
+-# Foreground
++typeset -Ag color colour
+ 
+-typeset -Ag fg
+-fg=(
+-  grey      $'\e[30m'
+-  red       $'\e[31m'
+-  green     $'\e[32m'
+-  yellow    $'\e[33m'
+-  blue      $'\e[34m'
+-  magenta   $'\e[35m'
+-  cyan      $'\e[36m'
+-  white     $'\e[37m'
+-)
+-fg_zzzz="$reset_color"
++color=(
++# Attribute codes:
++  00 none
++  01 bold
++  02 faint                  22 normal
++  03 standout               23 no-standout
++  04 underline              24 no-underline
++  05 blink                  25 no-blink
++  07 reverse                27 no-reverse
++  08 conceal
+ 
+-typeset -Ag fg_no_bold
+-fg_no_bold=(
+-  grey      $'\e[0;30m'
+-  red       $'\e[0;31m'
+-  green     $'\e[0;32m'
+-  yellow    $'\e[0;33m'
+-  blue      $'\e[0;34m'
+-  magenta   $'\e[0;35m'
+-  cyan      $'\e[0;36m'
+-  white     $'\e[0;37m'
++# Text color codes:
++  30 black                  40 bg-black
++  31 red                    41 bg-red
++  32 green                  42 bg-green
++  33 yellow                 43 bg-yellow
++  34 blue                   44 bg-blue
++  35 magenta                45 bg-magenta
++  36 cyan                   46 bg-cyan
++  37 white                  47 bg-white
++  39 default                49 bg-default
+ )
+-fg_no_bold_zzzz="$reset_color"
+ 
+-typeset -Ag fg_bold
+-fg_bold=(
+-  grey      $'\e[1;30m'
+-  red       $'\e[1;31m'
+-  green     $'\e[1;32m'
+-  yellow    $'\e[1;33m'
+-  blue      $'\e[1;34m'
+-  magenta   $'\e[1;35m'
+-  cyan      $'\e[1;36m'
+-  white     $'\e[1;37m'
+-)
+-fg_bold_zzzz="$reset_color"
++# A word about black and white:  The "normal" shade of white is really a
++# very pale grey on many terminals; to get truly white text, you have to
++# use bold white, and to get a truly white background you have to use
++# bold reverse white bg-xxx where xxx is your desired foreground color
++# (and which means the foreground is also bold).
+ 
+-# Background
++# Map in both directions; could do this with e.g. ${(k)colors[(i)normal]},
++# but it's clearer to include them all both ways.
+ 
+-typeset -Ag bg
+-bg=(
+-  grey      $'\e[40m'
+-  red       $'\e[41m'
+-  green     $'\e[42m'
+-  yellow    $'\e[43m'
+-  blue      $'\e[44m'
+-  magenta   $'\e[45m'
+-  cyan      $'\e[46m'
+-  white     $'\e[47m'
+-)
+-bg_zzzz="$reset_color"
++local k
++for k in ${(k)color}; do color[${color[$k]}]=$k; done
+ 
+-typeset -Ag bg_no_bold
+-bg_no_bold=(
+-  grey      $'\e[0;40m'
+-  red       $'\e[0;41m'
+-  green     $'\e[0;42m'
+-  yellow    $'\e[0;43m'
+-  blue      $'\e[0;44m'
+-  magenta   $'\e[0;45m'
+-  cyan      $'\e[0;46m'
+-  white     $'\e[0;47m'
+-)
+-bg_no_bold_zzzz="$reset_color"
++# Add "fg-" keys for all the text colors, for clarity.
+ 
+-typeset -Ag bg_bold
+-bg_bold=(
+-  grey      $'\e[1;40m'
+-  red       $'\e[1;41m'
+-  green     $'\e[1;42m'
+-  yellow    $'\e[1;43m'
+-  blue      $'\e[1;44m'
+-  magenta   $'\e[1;45m'
+-  cyan      $'\e[1;46m'
+-  white     $'\e[1;47m'
+-)
+-bg_bold_zzzz="$reset_color"
++for k in ${color[(I)3?]}; do color[fg-${color[$k]}]=$k; done
++
++# This is inaccurate, but the prompt theme system needs it.
++
++color[grey]=${color[black]}
++color[fg-grey]=${color[grey]}
++color[bg-grey]=${color[bg-black]}
++
++# Assistance for the color-blind.
++
++colour=(${(kv)color})	# A case where ksh namerefs would be useful ...
++
++# The following are terminal escape sequences used by colored prompt themes.
++
++local lc=$'\e[' rc=m	# Standard ANSI terminal escape values
++
++typeset -Hg reset_color bold_color
++reset_color="$lc${color[none]}$rc"
++bold_color="$lc${color[bold]}$rc"
++
++# Foreground
++
++typeset -AHg fg fg_bold fg_no_bold
++for k in ${(v)color[(I)fg-*]}; do
++    fg[${color[$k]}]="$lc$k$rc"
++    fg_bold[${color[$k]}]="$lc${color[bold]};$k$rc"
++    fg_no_bold[${color[$k]}]="$lc${color[normal]};$k$rc"
++done
++
++# Background
++
++typeset -AHg bg bg_bold bg_no_bold
++for k in ${(v)color[(I)bg-*]}; do
++    bg[${color[$k]}]="$lc$k$rc"
++    bg_bold[${color[$k]}]="$lc${color[bold]};$k$rc"
++    bg_no_bold[${color[$k]}]="$lc${color[normal]};$k$rc"
++done
+Index: Functions/Prompts/promptinit
+===================================================================
+@@ -20,7 +20,7 @@
+     if [[ $theme == */prompt_(#b)(*)_setup ]]; then
+       name="$match[1]"
+       if [[ -r "$theme" ]]; then
+-        prompt_themes=($name $prompt_themes)
++        prompt_themes=($prompt_themes $name)
+         autoload -U prompt_${name}_setup
+       else
+         print "Couldn't read file $theme containing theme $name."
+@@ -38,6 +38,29 @@
+   prompt_newline=$'\n%{\r%}'
+ }
+ 
++prompt_preview_safely() {
++  print $reset_color
++  if [[ -z "$prompt_themes[(r)$1]" ]]; then
++    print "Unknown theme: $1"
++    return
++  fi
++
++  local -a psv; psv=($psvar); local -a +h psvar; psvar=($psv) # Ick
++  local +h PS1=$PS1 PS2=$PS2 PS3=$PS3 PS4=$PS4 RPS1=$RPS1
++  trap "${$(functions precmd):-:} ; ${$(functions preexec):-:}" 0
++
++  # The next line is a bit ugly.  It (perhaps unnecessarily)
++  # runs the prompt theme setup function to ensure that if
++  # the theme has a _preview function that it's been autoloaded.
++  prompt_${1}_setup
++
++  if typeset +f prompt_${1}_preview >&/dev/null; then
++    prompt_${1}_preview "$@[2,-1]"
++  else
++    prompt_preview_theme "$@"
++  fi
++}
++
+ set_prompt() {
+   emulate -L zsh
+   local opt preview theme usage old_theme
+@@ -59,6 +82,7 @@
+       setopt localtraps
+       if [[ -z "$prompt_theme[1]" ]]; then
+         # Not using a prompt theme; save settings
++        local -a psv; psv=($psvar); local -a +h psvar; psvar=($psv) # Ick
+ 	local +h PS1=$PS1 PS2=$PS2 PS3=$PS3 PS4=$PS4 RPS1=$RPS1
+ 	trap "${$(functions precmd):-:} ; ${$(functions preexec):-:}" 0
+       else
+@@ -102,26 +126,10 @@
+     p) preview=( $prompt_themes )
+        (( $#* > 1 )) && preview=( "$@[2,-1]" )
+        for theme in $preview; do
+-         theme_args=( "$=theme" )
+          [[ "$theme" == "$prompt_theme[*]" ]] && continue
+-         if [[ -z "$prompt_themes[(r)$theme_args[1]]" ]]; then
+-           print "\nUnknown theme: $theme_args[1]"
+-           continue
+-         fi
+-         print
+-
+-         # The next line is a bit ugly.  It (perhaps unnecessarily)
+-         # runs the prompt theme setup function to ensure that if
+-         # the theme has a _preview function that it's been autoloaded.
+-         prompt_${theme_args[1]}_setup
+-
+-         if functions prompt_${theme_args[1]}_preview >&/dev/null; then
+-           prompt_${theme_args[1]}_preview "${(@)theme_args[2,-1]}"
+-         else
+-           prompt_preview_theme "${(@)theme_args}"
+-         fi
++         prompt_preview_safely "$=theme"
+        done
+-       print
++       print $reset_color
+        ;;
+     s) print "Set and save not yet implemented.  Please ensure your ~/.zshrc"
+        print "contains something similar to the following:\n"
+@@ -167,14 +175,17 @@
+ }
+ 
+ prompt_preview_theme () {
++  local -a psv; psv=($psvar); local -a +h psvar; psvar=($psv) # Ick
++  local +h PS1=$PS1 PS2=$PS2 PS3=$PS3 PS4=$PS4 RPS1=$RPS1
++  trap "${$(functions precmd):-:} ; ${$(functions preexec):-:}" 0
++
+   print -n "$1 theme"
+   (( $#* > 1 )) && print -n " with parameters \`$*[2,-1]'"
+   print ":"
+   prompt_${1}_setup "$@[2,-1]"
+   precmd
+-  print -n -P "${PS1}"
++  print -P "${PS1}command arg1 arg2 ... argn"
+   preexec
+-  print "command arg1 arg2 ... argn"
+ }
+ 
+ [[ -o kshautoload ]] || promptinit "$@"
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

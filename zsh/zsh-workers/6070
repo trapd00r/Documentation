@@ -1,0 +1,146 @@
+From zsh-workers-return-6070-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Apr 21 14:50:03 1999
+Return-Path: <zsh-workers-return-6070-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17545 invoked from network); 21 Apr 1999 14:49:54 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Apr 1999 14:49:54 -0000
+Received: (qmail 3851 invoked by alias); 21 Apr 1999 14:49:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6070
+Received: (qmail 3844 invoked from network); 21 Apr 1999 14:49:18 -0000
+Message-Id: <9904211424.AA45017@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: tilde in character class in switch
+Date: Wed, 21 Apr 1999 16:24:58 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Sven quite reasonably introduced the pattern _(|*[^~]) to match a file
+beginning with _ and not ending in a tilde.  Unfortunately, it didn't work
+with extendedglob.  The reason is that ~ for an exclusion has to be
+searched for before the pattern is parsed, so that we can treat exclusions
+specially, but character classes weren't handled by the code that did
+this and so the ~ found in this pattern messed up the parsing.
+
+This whole chunk, before and after, is a little messy, but as far as I can
+see the real problem lies in the syntax; nothing flags in advance that the
+pattern is going to have an exclusion, so none of those sets of initials
+found in books on compiler design which apply to nicely behaved grammars
+applies.
+
+--- Misc/globtests.ksh.tilde	Tue Dec  1 15:39:32 1998
++++ Misc/globtests.ksh	Wed Apr 21 16:22:05 1999
+@@ -68,6 +68,7 @@
+ t moo.cow       !(*.*).!(*.*)
+ f mad.moo.cow   !(*.*).!(*.*)
+ f mucca.pazza   mu!(*(c))?.pa!(*(z))?
++f _foo~         _?(*[^~])
+ t fff           !(f)
+ t fff           *(!(f))
+ t fff           +(!(f))
+--- Misc/globtests.tilde	Tue Feb 23 15:29:54 1999
++++ Misc/globtests	Wed Apr 21 16:20:08 1999
+@@ -75,6 +75,7 @@
+ t moo.cow       (^*.*).(^*.*)
+ f sane.moo.cow  (^*.*).(^*.*)
+ f mucca.pazza   mu(^c#)?.pa(^z#)?
++f _foo~         _(|*[^~])
+ t fff           ((^f))
+ t fff           ((^f)#)
+ t fff           ((^f)##)
+--- Src/glob.c.tilde	Wed Apr 14 12:04:43 1999
++++ Src/glob.c	Wed Apr 21 16:18:09 1999
+@@ -625,6 +625,36 @@
+     return 0;
+ }
+ 
++/**/
++static void
++parse_charset(void)
++{
++    /* Character set: brackets had better match */
++    if (pptr[1] == Outbrack)
++	*++pptr = ']';
++    else if ((pptr[1] == Hat || pptr[1] == '^' || pptr[1] == '!') &&
++	     pptr[2] == Outbrack)
++	*(pptr += 2) = ']';
++    while (*++pptr && *pptr != Outbrack) {
++	if (itok(*pptr)) {
++	    /* POSIX classes: make sure it's a real one,
++	     * leave the Inbrack tokenised if so.
++	     * We need to untokenize the Outbrack since otherwise
++	     * it might look like we got to the end of the range without
++	     * matching; we also need to accept ']' instead of
++	     * Outbrack in case this has already happened.
++	     */
++	    char *nptr;
++	    if (*pptr == Inbrack && pptr[1] == ':'
++		&& (nptr = strchr(pptr+2, ':')) && 
++		(*++nptr == Outbrack || *nptr == ']'))
++		*(pptr = nptr) = ']';
++	    else
++		*pptr = ztokens[*pptr - Pound];
++	}
++    }
++}
++
+ /* enum used with ksh-like patterns, @(...) etc. */
+ 
+ enum { KF_NONE, KF_AT, KF_QUEST, KF_STAR, KF_PLUS, KF_NOT };
+@@ -853,24 +883,7 @@
+ 	    if (*pptr != Outang)
+ 		return NULL;
+ 	} else if (*pptr == Inbrack) {
+-	    /* Character set: brackets had better match */
+-	    if (pptr[1] == Outbrack)
+-		*++pptr = ']';
+-	    else if ((pptr[1] == Hat || pptr[1] == '^' || pptr[1] == '!') &&
+-		     pptr[2] == Outbrack)
+-		*(pptr += 2) = ']';
+-	    while (*++pptr && *pptr != Outbrack) {
+-		if (itok(*pptr)) {
+-		    /* POSIX classes: make sure it's a real one, *
+-		     * leave the Inbrack tokenised if so.        */
+-		    char *nptr;
+-		    if (*pptr == Inbrack && pptr[1] == ':'
+-			&& (nptr = strchr(pptr+2, ':')) && 
+-			*++nptr == Outbrack)
+-			pptr = nptr;
+-		    *pptr = ztokens[*pptr - Pound];
+-		}
+-	    }
++	    parse_charset();
+ 	    if (*pptr != Outbrack)
+ 		return NULL;
+ 	} else if (itok(*pptr) && *pptr != Star && *pptr != Quest)
+@@ -912,7 +925,20 @@
+ 		break;
+ 	    else if (*sptr == Bar && !pct)
+ 		break;
+-	    else if (*sptr == Tilde && !pct) {
++	    else if (*sptr == Inbrack) {
++		/*
++		 * Character classes can have tokenized characters in,
++		 * so we have to parse them properly.
++		 */
++		char *bstart = pptr;
++
++		pptr = sptr;
++		parse_charset();
++		sptr = pptr;
++		pptr = bstart;
++		if (*sptr != Outbrack)
++		    break;
++	    } else if (*sptr == Tilde && !pct) {
+ 		tail = NULL;
+ 		break;
+ 	    }
+
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

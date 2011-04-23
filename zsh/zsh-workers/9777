@@ -1,0 +1,250 @@
+From zsh-workers-return-9777-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Feb 17 14:43:56 2000
+Return-Path: <zsh-workers-return-9777-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21263 invoked from network); 17 Feb 2000 14:43:54 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 Feb 2000 14:43:54 -0000
+Received: (qmail 25501 invoked by alias); 17 Feb 2000 14:43:48 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9777
+Received: (qmail 25494 invoked from network); 17 Feb 2000 14:43:47 -0000
+Date: Thu, 17 Feb 2000 15:43:46 +0100 (MET)
+Message-Id: <200002171443.PAA28025@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Wed, 16 Feb 2000 11:11:18 +0100
+	(MET)
+Subject: Re: help with _match, globcomplete etc. (with a PATCH)
+
+
+I wrote:
+
+> ...
+> 
+> > } zsh -f
+> > } bindkey -me
+> > } unsetopt glob
+> > } typeset -A code
+> > } code[ai]=foo
+> > } echo $code[ai]/{a,<tab>
+> > 
+> > All I get from that is a beep, before Sven's 9749, and
+> > 
+> > zagzig% echo foo/\{a, 
+> >                       ^note trailing space added
+> > with 9749 applied.
+> > 
+> > Of course that seems wrong, too.  I didn't want the brace to be quoted.
+> 
+> As I said: I guess, this was intentional. If you have `a="foo bar"' or 
+> the words from globbing contain special characters, you want them to
+> be quoted. There may be a possibility to fix this by changing the
+> tokenization stuff in doexpansion().
+
+Hrmpff. I still think that things like these should be done in
+shell-code widgets (likewise for the globbing-but-not-expansion
+thing), but...
+
+Part of the problem can be solved quite easily, by swapping the calls
+to quotename() and untokenize() in doexpansion(). Unfortunately this
+still doesn't give what you all want because glob() call untokenize()
+itself (so the call in doexpansion() was superfluous). Hence this
+patch -- *if* it will be accepted/wanted -- gives glob() and
+globlist() an extra argument saying if it should untokenize or
+not. And that only for this expand-word thing (or does anybody see
+other uses for it?).
+
+About the space: this was obviously intentional, too. I've just
+changed the test in doexpansion() so we can go back easily if suddenly 
+we decide the old behaviour was better. But what I would really like
+to have is a better test: when do we want the space and when not.
+
+
+One of the things I'd like to try after 3.2/4.0/whatever is to move
+more stuff out of the zle module into separate modules (zle_vi, and so 
+on), loaded on demand (we need a way to autoload modules due to
+widgets being called then). That plus better support for shell-code
+widgets.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/Zle/compctl.c Src/Zle/compctl.c
+--- ../z.old/Src/Zle/compctl.c	Thu Feb 17 14:57:50 2000
++++ Src/Zle/compctl.c	Thu Feb 17 15:23:16 2000
+@@ -2219,7 +2219,7 @@
+ 			    /* Do the globbing... */
+ 			    remnulargs(p);
+ 			    addlinknode(l, p);
+-			    globlist(l);
++			    globlist(l, 0);
+ 			    /* And see if that produced a filename. */
+ 			    tt = nonempty(l);
+ 			    while (ugetnode(l));
+@@ -3334,7 +3334,7 @@
+ 		tokenize(p);
+ 		remnulargs(p);
+ 		addlinknode(l, p);
+-		globlist(l);
++		globlist(l, 0);
+ 
+ 		if (nonempty(l)) {
+ 		    /* And add the resulting words. */
+@@ -3483,7 +3483,7 @@
+ 				/* Do the globbing. */
+ 				ng = opts[NULLGLOB];
+ 				opts[NULLGLOB] = 1;
+-				globlist(l);
++				globlist(l, 0);
+ 				opts[NULLGLOB] = ng;
+ 				/* Get the results. */
+ 				if (nonempty(l) && peekfirst(l)) {
+@@ -3679,7 +3679,7 @@
+ 	/* Fine, now do full expansion. */
+ 	prefork(foo, 0);
+ 	if (!errflag) {
+-	    globlist(foo);
++	    globlist(foo, 0);
+ 	    if (!errflag)
+ 		/* And add the resulting words as matches. */
+ 		for (n = firstnode(foo); n; incnode(n))
+diff -ru ../z.old/Src/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- ../z.old/Src/Zle/zle_tricky.c	Thu Feb 17 14:57:52 2000
++++ Src/Zle/zle_tricky.c	Thu Feb 17 15:37:59 2000
+@@ -1612,11 +1612,11 @@
+ 	prefork(vl, 0);
+ 	if (errflag)
+ 	    goto end;
+-	if ((lst == COMP_LIST_EXPAND) || (lst == COMP_EXPAND)) {
++	if (lst == COMP_LIST_EXPAND || lst == COMP_EXPAND) {
+ 	    int ng = opts[NULLGLOB];
+ 
+ 	    opts[NULLGLOB] = 1;
+-	    globlist(vl);
++	    globlist(vl, 1);
+ 	    opts[NULLGLOB] = ng;
+ 	}
+ 	if (errflag)
+@@ -1645,11 +1645,14 @@
+ 	foredel(we - wb);
+ 	while ((ss = (char *)ugetnode(vl))) {
+ 	    ret = 0;
+-	    untokenize(ss);
+ 	    ss = quotename(ss, NULL);
++	    untokenize(ss);
+ 	    inststr(ss);
++#if 0
+ 	    if (olst != COMP_EXPAND_COMPLETE || nonempty(vl) ||
+ 		(cs && line[cs-1] != '/')) {
++#endif
++	    if (nonempty(vl)) {
+ 		spaceinline(1);
+ 		line[cs++] = ' ';
+ 	    }
+diff -ru ../z.old/Src/exec.c Src/exec.c
+--- ../z.old/Src/exec.c	Thu Feb 17 14:57:45 2000
++++ Src/exec.c	Thu Feb 17 15:22:48 2000
+@@ -1419,7 +1419,7 @@
+ 		return;
+ 	    }
+ 	    if (isset(GLOBASSIGN) || !isstr)
+-		globlist(vl);
++		globlist(vl, 0);
+ 	    if (errflag) {
+ 		state->pc = opc;
+ 		return;
+@@ -1520,7 +1520,7 @@
+ 	prefork(strs, esprefork);
+ 	if (esglob) {
+ 	    LinkList ostrs = strs;
+-	    globlist(strs);
++	    globlist(strs, 0);
+ 	    strs = ostrs;
+ 	}
+     }
+@@ -1644,7 +1644,7 @@
+ 	    if (!(cflags & BINF_NOGLOB))
+ 		while (!checked && !errflag && args && nonempty(args) &&
+ 		       has_token((char *) peekfirst(args)))
+-		    glob(args, firstnode(args));
++		    glob(args, firstnode(args), 0);
+ 	    else if (!unglobbed) {
+ 		for (node = firstnode(args); node; incnode(node))
+ 		    untokenize((char *) getdata(node));
+@@ -1927,7 +1927,7 @@
+ 
+     if ((esglob = !(cflags & BINF_NOGLOB)) && args) {
+ 	LinkList oargs = args;
+-	globlist(args);
++	globlist(args, 0);
+ 	args = oargs;
+     }
+     if (errflag) {
+diff -ru ../z.old/Src/glob.c Src/glob.c
+--- ../z.old/Src/glob.c	Thu Feb 17 14:57:45 2000
++++ Src/glob.c	Thu Feb 17 15:21:54 2000
+@@ -872,7 +872,7 @@
+ 
+ /**/
+ void
+-glob(LinkList list, LinkNode np)
++glob(LinkList list, LinkNode np, int nountok)
+ {
+     struct qual *qo, *qn, *ql;
+     LinkNode node = prevnode(np);
+@@ -887,7 +887,8 @@
+ 
+     MUSTUSEHEAP("glob");
+     if (unset(GLOBOPT) || !haswilds(ostr)) {
+-	untokenize(ostr);
++	if (!nountok)
++	    untokenize(ostr);
+ 	return;
+     }
+     save_globstate(saved);
+@@ -1339,7 +1340,8 @@
+     if (!q || errflag) {	/* if parsing failed */
+ 	restore_globstate(saved);
+ 	if (unset(BADPATTERN)) {
+-	    untokenize(ostr);
++	    if (!nountok)
++		untokenize(ostr);
+ 	    insertlinknode(list, node, ostr);
+ 	    return;
+ 	}
+@@ -1578,7 +1580,7 @@
+     prefork(fake, isset(MULTIOS) ? 0 : PF_SINGLE);
+     /* Globbing is only done for multios. */
+     if (!errflag && isset(MULTIOS))
+-	globlist(fake);
++	globlist(fake, 0);
+     if (errflag)
+ 	return 0;
+     if (nonempty(fake) && !nextnode(firstnode(fake))) {
+diff -ru ../z.old/Src/subst.c Src/subst.c
+--- ../z.old/Src/subst.c	Thu Feb 17 14:57:48 2000
++++ Src/subst.c	Thu Feb 17 15:22:11 2000
+@@ -212,14 +212,14 @@
+ 
+ /**/
+ mod_export void
+-globlist(LinkList list)
++globlist(LinkList list, int nountok)
+ {
+     LinkNode node, next;
+ 
+     badcshglob = 0;
+     for (node = firstnode(list); !errflag && node; node = next) {
+ 	next = nextnode(node);
+-	glob(list, node);
++	glob(list, node, nountok);
+     }
+     if (badcshglob == 1)
+ 	zerr("no match", NULL, 0);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

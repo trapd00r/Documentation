@@ -1,0 +1,214 @@
+From zsh-workers-return-10334-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Mar 30 14:42:53 2000
+Return-Path: <zsh-workers-return-10334-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3745 invoked from network); 30 Mar 2000 14:42:49 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 30 Mar 2000 14:42:49 -0000
+Received: (qmail 16240 invoked by alias); 30 Mar 2000 14:42:30 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10334
+Received: (qmail 16199 invoked from network); 30 Mar 2000 14:42:28 -0000
+Date: Thu, 30 Mar 2000 16:42:16 +0200 (MET DST)
+Message-Id: <200003301442.QAA02892@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Thu, 30 Mar 2000 12:40:25 +0200
+	(MET DST)
+Subject: Re: PATCH: ** in match specs
+
+
+I wrote:
+
+> I knew trouble would come of that...
+> 
+>   compdef foo foo
+>   foo() { compadd -M 'r:|.=** r:|=*' test.old.ps test.ps }
+> 
+> And trying `foo t.p<TAB>' removed the `p'. This should fix it.
+
+This broke things like `com/cor<TAB>' in some cases.
+
+Anyone interested? The problem was to find the right cline struct to
+stick the CLF_MISS flag (indicating missing characters) on. And then I 
+had totally forgotten to modify the min/max fields of the changed
+cline in some cases.
+
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/Zle/compmatch.c Src/Zle/compmatch.c
+--- ../z.old/Src/Zle/compmatch.c	Thu Mar 30 13:33:02 2000
++++ Src/Zle/compmatch.c	Thu Mar 30 16:37:42 2000
+@@ -134,6 +134,7 @@
+     r->slen = 0;
+     r->flags = fl;
+     r->prefix = r->suffix = NULL;
++    r->min = r->max = 0;
+     return r;
+ }
+ 
+@@ -1676,7 +1677,7 @@
+  * didn't. */
+ 
+ /**/
+-static void
++static int
+ sub_join(Cline a, Cline b, Cline e, int anew)
+ {
+     if (!e->suffix && a->prefix) {
+@@ -1705,27 +1706,22 @@
+ 
+ 	    if (anew) {
+ 		join_psfx(e, a, NULL, NULL, 0);
+-		if (e->prefix) {
+-		    e->min += min;
+-		    e->max += max;
+-		    break;
+-		}
++		if (e->prefix)
++		    return max - min;
+ 	    } else {
+-		join_psfx(e, a, NULL, NULL, 0);
+-		if (a->prefix) {
+-		    a->min += min;
+-		    a->max += max;
+-		    break;
+-		}
++		join_psfx(a, e, NULL, NULL, 0);
++		if (a->prefix)
++		    return max - min;
+ 	    }
+ 	    min -= n->min;
+-	    max -= n->max;
+ 
+ 	    if (n == op)
+ 		break;
+ 	    n = n->next;
+ 	}
++	return max - min;
+     }
++    return 0;
+ }
+ 
+ /* This simplifies the cline list given as the first argument so that
+@@ -1742,7 +1738,8 @@
+     if (!o)
+ 	return n;
+     else {
+-	Cline oo = o, nn = n, po = NULL, pn = NULL;
++	Cline oo = o, nn = n, po = NULL, pn = NULL, x;
++	int diff;
+ 
+ 	/* Walk through the lists. */
+ 	while (o && n) {
+@@ -1754,7 +1751,7 @@
+ 
+ 		for (t = o; (tn = t->next) && (tn->flags & CLF_NEW); t = tn);
+ 		if (tn && cmp_anchors(tn, n, 0)) {
+-		    sub_join(n, o, tn, 1);
++		    diff = sub_join(n, o, tn, 1);
+ 
+ 		    if (po)
+ 			po->next = tn;
+@@ -1762,11 +1759,15 @@
+ 			oo = tn;
+ 		    t->next = NULL;
+ 		    free_cline(o);
++		    x = o;
+ 		    o = tn;
+-		    if (po)
++		    if (po && cmp_anchors(x, po, 0)) {
+ 			po->flags |= CLF_MISS;
+-		    else
++			po->max += diff;
++		    } else {
+ 			o->flags |= CLF_MISS;
++			o->max += diff;
++		    }
+ 		    continue;
+ 		}
+ 	    }
+@@ -1775,13 +1776,16 @@
+ 
+ 		for (t = n; (tn = t->next) && (tn->flags & CLF_NEW); t = tn);
+ 		if (tn && cmp_anchors(o, tn, 0)) {
+-		    sub_join(o, n, tn, 0);
++		    diff = sub_join(o, n, tn, 0);
+ 
+-		    n = tn;
+-		    if (po)
++		    if (po && cmp_anchors(n, pn, 0)) {
+ 			po->flags |= CLF_MISS;
+-		    else
++			po->max += diff;
++		    } else {
+ 			o->flags |= CLF_MISS;
++			o->max += diff;
++		    }
++		    n = tn;
+ 		    continue;
+ 		}
+ 	    }
+@@ -1809,6 +1813,7 @@
+ 		     t = tn);
+ 		if (tn && cmp_anchors(tn, n, 1)) {
+ 		    sub_join(n, o, tn, 1);
++
+ 		    if (po)
+ 			po->next = tn;
+ 		    else
+@@ -1837,14 +1842,16 @@
+ 		for (t = n; (tn = t->next) && !cmp_anchors(o, tn, 1); t = tn);
+ 
+ 		if (tn) {
+-		    sub_join(o, n, tn, 0);
++		    diff = sub_join(o, n, tn, 0);
+ 
+-		    n = tn;
+-		    if (po)
++		    if (po && cmp_anchors(n, pn, 0)) {
+ 			po->flags |= CLF_MISS;
+-		    else
++			po->max += diff;
++		    } else {
+ 			o->flags |= CLF_MISS;
+-
++			o->max += diff;
++		    }
++		    n = tn;
+ 		    po = o;
+ 		    o = o->next;
+ 		    pn = n;
+@@ -1855,17 +1862,21 @@
+ 			 t = tn);
+ 
+ 		    if (tn) {
+-			sub_join(n, o, tn, 1);
++			diff = sub_join(n, o, tn, 1);
+ 
+ 			if (po)
+ 			    po->next = tn;
+ 			else
+ 			    oo = tn;
++			x = o;
+ 			o = tn;
+-			if (po)
++			if (po && cmp_anchors(x, po, 0)) {
+ 			    po->flags |= CLF_MISS;
+-			else
++			    po->max += diff;
++			} else {
+ 			    o->flags |= CLF_MISS;
++			    o->max += diff;
++			}
+ 			continue;
+ 		    } else {
+ 			if (o->flags & CLF_SUF)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

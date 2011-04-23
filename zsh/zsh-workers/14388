@@ -1,0 +1,119 @@
+From zsh-workers-return-14388-mason-zsh=primenet.com.au@sunsite.dk Fri May 18 21:39:37 2001
+Return-Path: <zsh-workers-return-14388-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1396 invoked from network); 18 May 2001 21:39:36 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 May 2001 21:39:36 -0000
+Received: (qmail 23621 invoked by alias); 18 May 2001 21:19:54 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14388
+Received: (qmail 23604 invoked from network); 18 May 2001 21:19:52 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010518211326.ZM19366@candle.brasslantern.com>
+Date: Fri, 18 May 2001 21:13:26 +0000
+In-Reply-To: <Tc0a88d015398b54964@mailsweeper01.cambridgesiliconradio.com>
+Comments: In reply to Peter Stephenson <pws@csr.com>
+        "Re: zsh4.0.1-pre4 : backticks fail if SHLVL nonexistant" (May 18,  2:24pm)
+References: <Tc0a88d015398b54964@mailsweeper01.cambridgesiliconradio.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Richard Curnow <Richard.Curnow@st.com>,
+        zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: Re: zsh4.0.1-pre4 : backticks fail if SHLVL nonexistant
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On May 18,  2:24pm, Peter Stephenson wrote:
+} Subject: Re: zsh4.0.1-pre4 : backticks fail if SHLVL nonexistant
+}
+} % unset SHLVL
+} % (( SHLVL-- ))
+} BUG: parameter not created
+
+It's possible for createparam() to return NULL because it re-used an
+existing special parameter node, rather than because it actually failed.
+Probably there ought to be some kind of wrapper around createparam() for
+this, but for now we can just test it where necessary.
+
+However, that wasn't the only problem: setiparam() and setnparam() were
+also bypassing the parameter's sets.ifn, which was OK only for non-special
+integer parameters.
+
+There's some stuff going on here with `outputradix' that I'm not sure is
+correct.  setiparam() was ignoring the outputradix, setnparam() was using
+it; maybe that's because only setnparam() gets called from the math code?
+Anyway, I made them both use it, but maybe neither one should.
+
+diff -u zsh-forge/current/Src/params.c zsh-4.0/Src/params.c
+--- zsh-forge/current/Src/params.c	Tue May  1 08:37:03 2001
++++ zsh-4.0/Src/params.c	Fri May 18 14:06:10 2001
+@@ -1998,17 +1998,16 @@
+     if (!(v = getvalue(&vbuf, &s, 1))) {
+ 	if ((ss = strchr(s, '[')))
+ 	    *ss = '\0';
+-	pm = createparam(t, ss ? PM_ARRAY : PM_INTEGER);
++	if (!(pm = createparam(t, ss ? PM_ARRAY : PM_INTEGER)))
++	    pm = (Param) paramtab->getnode(paramtab, t);
+ 	DPUTS(!pm, "BUG: parameter not created");
+ 	if (ss) {
+ 	    *ss = '[';
+-	    v = getvalue(&vbuf, &t, 1);
+-	    DPUTS(!v, "BUG: value not found for new parameter");
+ 	} else {
+-	    pm->u.val = val;
+-	    unqueue_signals();
+-	    return pm;
++	    pm->ct = outputradix;
+ 	}
++	v = getvalue(&vbuf, &t, 1);
++	DPUTS(!v, "BUG: value not found for new parameter");
+     }
+     mnval.type = MN_INTEGER;
+     mnval.u.l = val;
+@@ -2042,20 +2041,16 @@
+ 	    *ss = '\0';
+ 	pm = createparam(t, ss ? PM_ARRAY :
+ 			 (val.type & MN_INTEGER) ? PM_INTEGER : PM_FFLOAT);
++	if (!pm)
++	    pm = (Param) paramtab->getnode(paramtab, t);
+ 	DPUTS(!pm, "BUG: parameter not created");
+ 	if (ss) {
+ 	    *ss = '[';
+-	    v = getvalue(&vbuf, &t, 1);
+-	    DPUTS(!v, "BUG: value not found for new parameter");
+-	} else {
+-	    if (val.type & MN_INTEGER) {
+-		pm->ct = outputradix;
+-		pm->u.val = val.u.l;
+-	    } else
+-		pm->u.dval = val.u.d;
+-	    unqueue_signals();
+-	    return pm;
++	} else if (val.type & MN_INTEGER) {
++	    pm->ct = outputradix;
+ 	}
++	v = getvalue(&vbuf, &t, 1);
++	DPUTS(!v, "BUG: value not found for new parameter");
+     }
+     setnumvalue(v, val);
+     unqueue_signals();
+diff -u zsh-forge/current/Src/subst.c zsh-4.0/Src/subst.c
+--- zsh-forge/current/Src/subst.c	Fri May 18 09:15:52 2001
++++ zsh-4.0/Src/subst.c	Fri May 18 13:34:34 2001
+@@ -1149,6 +1149,7 @@
+ 		isarr = 0;
+ 	    }
+ 	    pm = createparam(nulstring, isarr ? PM_ARRAY : PM_SCALAR);
++	    DPUTS(!pm, "BUG: parameter not created");
+ 	    if (isarr)
+ 		pm->u.arr = aval;
+ 	    else
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

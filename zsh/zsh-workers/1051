@@ -1,0 +1,450 @@
+From wayne@tenor.clarinet.com Sat May 11 13:53:44 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id NAA06682 for <mason@werple.mira.net.au>; Sat, 11 May 1996 13:53:40 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id XAA25722; Fri, 10 May 1996 23:32:21 -0400 (EDT)
+Resent-Date: Fri, 10 May 1996 23:32:21 -0400 (EDT)
+Message-Id: <199605110331.UAA01392@tenor.clari.net>
+To: Zefram <A.Main@dcs.warwick.ac.uk>
+Cc: Z Shell workers mailing list <zsh-workers@math.gatech.edu>
+Subject: Updated isearch patch based on ZLE 8-bit patch 
+In-reply-to: A.Main's message of Fri, 10 May 1996 10:39:17 +0100.
+	     <23053.199605100939@stone.dcs.warwick.ac.uk> 
+Date: Fri, 10 May 1996 20:31:40 -0700
+From: Wayne Davison <wayne@tenor.clarinet.com>
+Resent-Message-ID: <"gPHfZ2.0.qH6.4f0bn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1051
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 12680
+Status: O
+
+I've updated the incremental search code based on Zefram's latest 8-bit
+patch.  I am still using the beta 17 release with only my isearch and
+Zefram's 8-bit ZLE patches applied, but since the 8-bit patch applied
+with minimal difficulty I think that this diff should also apply easily
+to the code with the other published patches.
+
+This patch includes my small fix to ztrlen(), so if you already applied
+that it will probably be easier to unapply it before running this through
+patch.
+
+I fixed lots of glitches in the new interaction between a meta-expanded
+line and the non-meta-expanded lines.  I also added a "Failing" string
+to the mini-buffer prompt when the search fails and fixed the way the
+isearch code handles backing up through failure cases (it no longer rings
+the bell if backing up to a previous failure, for instance).
+
+Discussion of internals:
+
+I added two meta-related functions to utils.c since I thought they might
+be useful.  I only use each one once, however, so if you don't want the
+new functions, integrate them into zle_hist.c.  They are:
+
+1. metalen(str, len) -- this function takes a pointer to a metafied
+string and a length from the PRE-metified version of the string and
+returns the length including any meta characters.  I use this function
+to convert "cs" into a "pos" in the metafied line.
+
+2. ztrsub(s2, s1) -- this function performs pointer subtraction in a
+metafied string, returning (s2 - s1) - the_number_of_meta_chars_in_
+_the_substring.
+
+When doisearch() converts the current search string into its metafied
+form, I decided to just use the META_STATIC return and limit the search
+string to PATH_MAX characters.  If you don't like this, META_USEHEAP
+could be used instead -- I just didn't like the thought of a new alloc
+for each typed character (even when backing up).
+
+I needed to add extra variables to the isearch_spots array, so I decided
+to save some memory by making some of the ints unsigned shorts.  If you
+don't like this, change them back to ints.
+
+I modified hstrnstr() to have a separate forward and backward loop,
+making the code more efficient.
+
+Finally, I eliminated one extra call to refresh() that didn't seem to be
+needed.
+
+I tested this with various searches, including some lines with null
+characters on them, and it worked fine.
+
+..wayne..
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: utils.c
+@@ -2872,6 +2872,24 @@
+     return s;
+ }
+ 
++/* Return the character length of a metafied substring, given the      *
++ * unmetafied substring length.                                        */
++
++/**/
++int
++metalen(char *s, int len)
++{
++    int mlen = len;
++
++    while (len--) {
++	if (*s++ == Meta) {
++	    mlen++;
++	    s++;
++	}
++    }
++    return mlen;
++}
++
+ /* This function converts a zsh internal string to a form which can be *
+  * passed to a system call as a filename.  The result is stored in a   *
+  * single static area.  NULL returned if the result is longer than     *
+@@ -2926,7 +2944,7 @@
+ 	return 1;
+ }
+ 
+-/* Unmetafy and check the length of a string. */
++/* Return the unmetafied length of a metafied string. */
+ 
+ /**/
+ int
+@@ -2936,11 +2954,33 @@
+ 
+     for (l = 0; *s; l++)
+ 	if (*s++ == Meta) {
+-	    s++;
+ #ifdef DEBUG
+ 	    if (! *s)
+ 		fprintf(stderr, "BUG: unexpected end of string in ztrlen()\n");
++	    else
+ #endif
++	    s++;
++	}
++    return l;
++}
++
++/* Subtract two pointers in a metafied string. */
++
++/**/
++int
++ztrsub(char const *t, char const *s)
++{
++    int l = t - s;
++
++    while (s != t)
++	if (*s++ == Meta) {
++#ifdef DEBUG
++	    if (! *s || s == t)
++		fprintf(stderr, "BUG: substring ends in the middle of a metachar in ztrsub()\n");
++	    else
++#endif
++	    s++;
++	    l--;
+ 	}
+     return l;
+ }
+Index: zle_hist.c
+@@ -572,17 +572,20 @@
+ extern int ungetok;
+ 
+ struct isrch_spot {
+-    int hl;		/* This spot's histline */
+-    int pos;		/* The search position on the line */
+-    int len;		/* How long the search string was */
+-    int dir;		/* The direction we're searching */
++    int hl;			/* This spot's histline */
++    unsigned short pos;		/* The search position in our metafied str */
++    unsigned short cs;		/* The visible search position to the user */
++    unsigned short len;		/* The search string's length */
++    unsigned short flags;	/* This spot's flags */
++#define ISS_FAILING	1
++#define ISS_FORWARD	2
+ } *isrch_spots;
+ 
+ static int max_spot = 0;
+ 
+ /**/
+ void
+-set_isrch_spot(int num, int hl, int pos, int len, int dir)
++set_isrch_spot(int num, int hl, int pos, int cs, int len, int dir, int nomatch)
+ {
+     if (num >= max_spot) {
+ 	if (!isrch_spots) {
+@@ -595,98 +598,121 @@
+     }
+ 
+     isrch_spots[num].hl = hl;
+-    isrch_spots[num].pos = pos;
+-    isrch_spots[num].len = len;
+-    isrch_spots[num].dir = dir;
++    isrch_spots[num].pos = (unsigned short)pos;
++    isrch_spots[num].cs = (unsigned short)cs;
++    isrch_spots[num].len = (unsigned short)len;
++    isrch_spots[num].flags = (dir > 0? ISS_FORWARD : 0)
++			   + (nomatch? ISS_FAILING : 0);
+ }
+ 
+ /**/
+ void
+-get_isrch_spot(int num, int *hlp, int *posp, int *lenp, int *dirp)
++get_isrch_spot(int num, int *hlp, int *posp, int *csp, int *lenp, int *dirp, int *nomatch)
+ {
+     *hlp = isrch_spots[num].hl;
+-    *posp = isrch_spots[num].pos;
+-    *lenp = isrch_spots[num].len;
+-    *dirp = isrch_spots[num].dir;
++    *posp = (int)isrch_spots[num].pos;
++    *csp = (int)isrch_spots[num].cs;
++    *lenp = (int)isrch_spots[num].len;
++    *dirp = (isrch_spots[num].flags & ISS_FORWARD)? 1 : -1;
++    *nomatch = (isrch_spots[num].flags & ISS_FAILING);
+ }
+ 
++#define ISEARCH_PROMPT		"failing XXX-i-search: "
++#define NORM_PROMPT_POS		8
++#define FIRST_SEARCH_CHAR	(NORM_PROMPT_POS + 14)
++
+ /**/
+ void
+ doisearch(int dir)
+ {
+-    char *s, *ibuf = halloc(80), *sbuf = ibuf + 14;
+-    int sbptr = 0, cmd, top_spot = 0, pos = cs, sibuf = 80;
++    char *s, *ibuf = halloc(80), *sbuf = ibuf + FIRST_SEARCH_CHAR;
++    int sbptr = 0, cmd, top_spot = 0, pos, sibuf = 80;
+     int nomatch = 0, skip_line = 0, skip_pos = 0;
+     int odir = dir, *obindtab = bindtab;
+ 
+-    strcpy(ibuf, (dir == -1) ? "bck-i-search: " : "fwd-i-search: ");
+-    statusline = ibuf;
++    strcpy(ibuf, ISEARCH_PROMPT);
++    memcpy(ibuf + NORM_PROMPT_POS, (dir == 1) ? "fwd" : "bck", 3);
+     if (histline == curhist) {
+ 	zsfree(curhistline);
+-	curhistline = metafy(UTOSCP(line), ll, META_DUP);
++	s = curhistline = metafy(UTOSCP(line), ll, META_DUP);
+     }
++    else
++	s = metafy(UTOSCP(line), ll, META_USEHEAP);
+     bindtab = mainbindtab;
+-    s = curhistline;
++    pos = metalen(s, cs);
+     for (;;) {
+ 	/* Remember the current values in case search fails (doesn't push). */
+-	set_isrch_spot(top_spot, histline, pos, sbptr, dir);
+-	if (sbptr == 1 && sbuf[0] == '^')
++	set_isrch_spot(top_spot, histline, pos, cs, sbptr, dir, nomatch);
++	if (sbptr == 1 && sbuf[0] == '^') {
+ 	    cs = 0;
+-	else if (sbptr > 0) {
+-	    statusline = ibuf = metafy(ibuf, sbptr + 14, META_USEHEAP);
+-	    sbuf = ibuf + 14;
++    	    nomatch = 0;
++	    statusline = ibuf + NORM_PROMPT_POS;
++	} else if (sbptr > 0) {
++	    char *mbuf = metafy(sbuf, sbptr, META_STATIC);
++	    char *last_line = s;
++
+ 	    for (;;) {
+ 		char *t;
+ 
+ 		if (skip_pos) {
+-		    pos += dir;
+-		    if (pos < 0 || sbuf[0] == '^' || pos >= strlen(s))
++		    if (dir < 0) {
++			if (pos == 0)
++			    skip_line = 1;
++			else
++			    pos -= 1 + (pos != 1 && s[pos-2] == Meta);
++		    } else if (sbuf[0] != '^') {
++			if (pos >= strlen(s+1))
++			    skip_line = 1;
++			else
++			    pos += 1 + (s[pos] == Meta);
++		    } else
+ 			skip_line = 1;
+ 		    skip_pos = 0;
+ 		}
+ 		if (!skip_line && ((sbuf[0] == '^') ?
+-		    (t = (strncmp(s, sbuf + 1, strlen(sbuf + 1))) ? NULL : s) :
+-		    (t = hstrnstr(s, pos,  sbuf, strlen(sbuf), dir)))) {
+-		    char savet = *t;
++		    (t = (strncmp(s, mbuf + 1, strlen(mbuf + 1))) ? NULL : s) :
++		    (t = hstrnstr(s, pos, mbuf, strlen(mbuf), dir)))) {
+ 		    setline(s);
+-		    *t = 0;
+-		    pos = strlen(s);
+-		    cs = ztrlen(s);
+-		    *t = savet;
+-		    if (dir == 1)
+-			cs += sbptr - (sbuf[0] == '^');
++		    pos = t - s;
++		    cs = ztrsub(t, s) + (dir == 1? sbptr - (sbuf[0]=='^') : 0);
+ 	    	    nomatch = 0;
++		    statusline = ibuf + NORM_PROMPT_POS;
+ 		    break;
+ 		}
+ 		histline += dir;
+ 		if (!(s = qgetevent(histline))) {
++		    if (sbptr == (int)isrch_spots[top_spot-1].len
++		     && (isrch_spots[top_spot-1].flags & ISS_FAILING))
++			top_spot--;
++		    get_isrch_spot(top_spot, &histline, &pos, &cs, &sbptr,
++				   &dir, &nomatch);
+ 		    if (!nomatch) {
+ 			feep();
+ 			nomatch = 1;
+ 		    }
+-		    if (sbptr == isrch_spots[top_spot-1].len)
+-			top_spot--;
+-		    get_isrch_spot(top_spot, &histline, &pos, &sbptr, &dir);
+-		    s = curhistline;
++		    s = last_line;
+ 		    skip_line = 0;
++		    statusline = ibuf;
+ 		    break;
+ 		}
+-		pos = dir == 1? 0 : ztrlen(s) - sbptr + (sbuf[0] == '^');
+-		skip_line = (pos < 0 || strcmp(curhistline, s) == 0);
++		pos = dir == 1? 0 : strlen(s);
++		skip_line = !strcmp(last_line, s);
+ 	    }
+-	    unmetafy(ibuf, NULL);
+-	} else
++	} else {
+ 	    top_spot = 0;
++    	    nomatch = 0;
++	    statusline = ibuf + NORM_PROMPT_POS;
++	}
+ 	sbuf[sbptr] = '_';
+-	statusline = ibuf;
+-	statusll = sbptr + 15;
++	statusll = sbuf - statusline + sbptr + 1;
+     ref:
+ 	refresh();
+ 	if ((cmd = getkeycmd()) < 0 || cmd == z_sendbreak) {
+-	    get_isrch_spot(0, &histline, &pos, &sbptr, &dir);
++	    int i;
++	    get_isrch_spot(0, &histline, &pos, &i, &sbptr, &dir, &nomatch);
+ 	    s = qgetevent(histline);
+ 	    setline(s);
+-	    cs = pos;
++	    cs = i;
+ 	    break;
+ 	}
+ 	switch (cmd) {
+@@ -702,15 +728,21 @@
+ 	case z_vibackwarddeletechar:
+ 	case z_backwarddeletechar:
+ 	    if (top_spot)
+-		get_isrch_spot(--top_spot, &histline, &pos, &sbptr, &dir);
++		get_isrch_spot(--top_spot, &histline, &pos, &cs, &sbptr,
++			       &dir, &nomatch);
+ 	    else
+ 		feep();
++	    if (nomatch) {
++		statusline = ibuf;
++		skip_pos = 1;
++	    }
+ 	    s = qgetevent(histline);
+ 	    if (!sbptr || (sbptr == 1 && sbuf[0] == '^')) {
++		int i = cs;
+ 		setline(s);
+-		cs = pos;
++		cs = i;
+ 	    }
+-	    memcpy(ibuf, (dir == 1) ? "fwd" : "bck", 3);
++	    memcpy(ibuf + NORM_PROMPT_POS, (dir == 1) ? "fwd" : "bck", 3);
+ 	    continue;
+ 	case z_acceptandhold:
+ 	    acceptandhold();
+@@ -725,31 +757,30 @@
+ 	    acceptline();
+ 	    goto brk;
+ 	case z_historyincrementalsearchbackward:
+-	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
++	    set_isrch_spot(top_spot++, histline, pos, cs, sbptr, dir, nomatch);
+ 	    if (dir != -1)
+ 		dir = -1;
+ 	    else
+ 		skip_pos = 1;
+ 	    goto rpt;
+ 	case z_historyincrementalsearchforward:
+-	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
++	    set_isrch_spot(top_spot++, histline, pos, cs, sbptr, dir, nomatch);
+ 	    if (dir != 1)
+ 		dir = 1;
+ 	    else
+ 		skip_pos = 1;
+ 	    goto rpt;
+ 	case z_virevrepeatsearch:
+-	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
++	    set_isrch_spot(top_spot++, histline, pos, cs, sbptr, dir, nomatch);
+ 	    dir = -odir;
+ 	    skip_pos = 1;
+ 	    goto rpt;
+ 	case z_virepeatsearch:
+-	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
++	    set_isrch_spot(top_spot++, histline, pos, cs, sbptr, dir, nomatch);
+ 	    dir = odir;
+ 	    skip_pos = 1;
+ 	rpt:
+-	    memcpy(ibuf, (dir == 1) ? "fwd" : "bck", 3);
+-	    refresh();
++	    memcpy(ibuf + NORM_PROMPT_POS, (dir == 1) ? "fwd" : "bck", 3);
+ 	    continue;
+ 	case z_sendstring:
+ 	    sendstring();
+@@ -778,10 +809,14 @@
+ 		goto brk;
+ 	    }
+ 	ins:
+-	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
+-	    if(sbptr == sibuf - 16) {
+-		statusline = ibuf = hrealloc(ibuf, sibuf, sibuf * 2);
+-		sbuf = ibuf + 14;
++	    if (sbptr == PATH_MAX) {
++		feep();
++		break;
++	    }
++	    set_isrch_spot(top_spot++, histline, pos, cs, sbptr, dir, nomatch);
++	    if (sbptr == sibuf - FIRST_SEARCH_CHAR - 2) {
++		ibuf = hrealloc(ibuf, sibuf, sibuf * 2);
++		sbuf = ibuf + FIRST_SEARCH_CHAR;
+ 		sibuf *= 2;
+ 	    }
+ 	    sbuf[sbptr++] = c;
+Index: zle_utils.c
+@@ -265,17 +265,22 @@
+ char *
+ hstrnstr(char *str, int pos, char *t, int len, int dir)
+ {
+-    char *s;
++    char *s = str + pos;
+ 
+-    for (s = str + pos; dir == -1 || *s; ) {
+-	if (!strncmp(t, s, len))
+-	    return s;
+-	if(dir == -1) {
+-	    if(s == str)
+-		break;
+-	    s -= 1 + (s>str+1 && s[-2] == Meta);
+-	} else
++    if (dir > 0) {
++	while (*s) {
++	    if (!strncmp(t, s, len))
++		return s;
+ 	    s += 1 + (*s == Meta);
++	}
++    } else {
++	for (;;) {
++	    if (!strncmp(t, s, len))
++		return s;
++	    if (s == str)
++		break;
++	    s -= 1 + (s != str+1 && s[-2] == Meta);
++	}
+     }
+     return NULL;
+ }
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+
+

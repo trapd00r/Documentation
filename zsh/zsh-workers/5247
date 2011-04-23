@@ -1,0 +1,145 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Message-Id: <9902041716.AA19313@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATH: zsh-3.1.5-pws-6: more typeset -T stuff
+Date: Thu, 04 Feb 1999 18:16:41 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5247
+
+This is what happens just when you've finished a paper and can't bring
+yourself to start anything new...
+
+I noticed some problems with typeset -T:
+
+1. `typeset -T FOO foo' wasn't idempotent, because the second time
+round, foo was unset first which destroyed the value of FOO so it
+couldn't be copied when that was recreated.  Likewise, you need to
+pass on whether it was currently exported.  And you need to make sure
+it's really the right parameter from the right level of localness.
+Sob.  (It still recreates the whole thing from scratch, but that's
+what the user ordered.)
+
+I noticed this because I have TEXINPUTS exported when logging in, then
+tied in each individual shell without assigning the value again: this
+sort of thing is supposed to work, even when you do another
+`. ~/.zshenv'.  It's still not quite idempotent, because of the
+right/left/zero flags, but there's such a thing as being fed up.
+
+2. `typeset -T foo foo' wasn't tested for, and could have done such
+awful things I felt too frighened even to test what.
+
+3. Exporting at the same time always worked, but now the array doesn't
+get marked for export (which didn't have an effect anyway).  I've
+documented this.
+
+4. A small memory leak (name1 on an error) has vanished as a side
+effect.
+
+--- Doc/Zsh/builtins.yo.T	Tue Feb  2 12:11:29 1999
++++ Doc/Zsh/builtins.yo	Thu Feb  4 17:50:30 1999
+@@ -913,7 +913,9 @@
+ of untying the variables without unsetting them, or converting the
+ type of one them with another tt(typeset) command; tt(+T) does not work,
+ assigning an array to var(SCALAR) is an error, and assigning a scalar
+-to var(array) sets it to be a single-element array.
++to var(array) sets it to be a single-element array.  Note that
++both tt(typeset -xT ...) and tt(export -T ...) work, but only the
++scalar will be marked for export.
+ 
+ If no var(name) is present, the names and values of all parameters are
+ printed.  In this case the attribute flags restrict the the display to
+--- Src/builtin.c.T	Tue Feb  2 12:11:29 1999
++++ Src/builtin.c	Thu Feb  4 18:12:17 1999
+@@ -1665,7 +1665,8 @@
+ 
+     if (on & PM_TIED) {
+ 	Param apm;
+-	char *name1;
++	struct asgment asg0;
++	char *oldval = NULL;
+ 
+ 	if (ops['m']) {
+ 	    zwarnnam(name, "incompatible options for -T", NULL, 0);
+@@ -1677,36 +1678,61 @@
+ 	    return 1;
+ 	}
+ 
++	if (!(asg = getasg(argv[0])))
++	    return 1;
++	asg0 = *asg;
++	if (!(asg = getasg(argv[1])))
++	    return 1;
++	if (!strcmp(asg0.name, asg->name)) {
++	    zerrnam(name, "can't tie a variable to itself", NULL, 0);
++	    return 1;
++	}
++	/*
++	 * Keep the old value of the scalar.  We need to do this
++	 * here as if it is already tied to the same array it
++	 * will be unset when we retie the array.  This is all
++	 * so that typeset -T is idempotent.
++	 *
++	 * We also need to remember here whether the damn thing is
++	 * exported and pass that along.  Isn't the world complicated?
++	 */
++	if ((pm = (Param) paramtab->getnode(paramtab, asg0.name))
++	    && !(pm->flags & PM_UNSET)
++	    && (locallevel == pm->level || func == BIN_EXPORT)) {
++	    if (!asg0.value && !(PM_TYPE(pm->flags) & (PM_ARRAY|PM_HASHED)))
++		oldval = ztrdup(getsparam(asg0.name));
++	    on |= (pm->flags & PM_EXPORTED);
++	}
+ 	/*
+ 	 * Create the tied array; this is normal except that
+ 	 * it has the PM_TIED flag set.  Do it first because
+ 	 * we need the address.
+ 	 */
+-	if (!(asg = getasg(argv[1])))
+-	    return 1;
+-	name1 = ztrdup(asg->name);
+ 	if (!(apm=typeset_single(name, asg->name,
+ 				 (Param)paramtab->getnode(paramtab,
+ 							  asg->name),
+-				 func, on | PM_ARRAY, off, roff,
+-				 asg->value, NULL)))
++				 func, (on | PM_ARRAY) & ~PM_EXPORTED,
++				 off, roff, asg->value, NULL)))
+ 	    return 1;
+ 
+ 	/*
+ 	 * Create the tied colonarray.  We make it as a normal scalar
+ 	 * and fix up the oddities later.
+ 	 */
+-	if (!(asg = getasg(argv[0])) ||
+-	    !(pm=typeset_single(name, asg->name,
++	if (!(pm=typeset_single(name, asg0.name,
+ 				(Param)paramtab->getnode(paramtab,
+-							 asg->name),
+-				func, on, off, roff, asg->value, apm))) {
++							 asg0.name),
++				func, on, off, roff, asg0.value, apm))) {
++	    if (oldval)
++		zsfree(oldval);
+ 	    unsetparam_pm(apm, 1, 1);
+ 	    return 1;
+ 	}
+ 
+-	pm->ename = name1;
+-	apm->ename = ztrdup(asg->name);
++	pm->ename = ztrdup(asg->name);
++	apm->ename = ztrdup(asg0.name);
++	if (oldval)
++	    setsparam(asg0.name, oldval);
+ 
+ 	return 0;
+     }
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

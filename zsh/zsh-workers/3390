@@ -1,0 +1,122 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Wed Jul 30 05:24:01 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 2559 invoked from network); 30 Jul 1997 05:23:55 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 30 Jul 1997 05:23:55 -0000
+Received: (from list@localhost)
+	by euclid.skiles.gatech.edu (8.8.5/8.8.5) id BAA29470;
+	Wed, 30 Jul 1997 01:16:17 -0400 (EDT)
+Resent-Date: Wed, 30 Jul 1997 01:16:17 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@frontiernet.net>
+Message-Id: <199707300516.BAA01180@hzoli.home>
+Subject: Re: RC_EXPAND_PARAM bug
+In-Reply-To: <970729092705.ZM16897@candle.brasslantern.com> from Bart Schaefer at "Jul 29, 97 09:27:05 am"
+To: schaefer@brasslantern.com (Bart Schaefer)
+Date: Wed, 30 Jul 1997 01:16:10 -0400 (EDT)
+Cc: zsh-workers@math.gatech.edu (Zsh hacking and development)
+X-Mailer: ELM [version 2.4ME+ PL31 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"9-n9T2.0.PC7.Wuitp"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3390
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+> } > % echo ${^a}$[i++]$[++j]${^x}....
+> } > 
+> } > where .... is some arbitary number of other substitutions?  Is it just that
+> } > it now does everything from right to left instead of left to right?  Why?
+> } 
+> } No, it is left to right.  ${^a} is expanded first, then the remaining
+> } part, $[i++]$[++j]${^x} is expanded separately, and the result is
+> } combined with the expansion of ${^a}.  You can see it if you try
+> } 
+> } let i=0; echo $[i++]${^a}$[i++]
+> } 
+> } which gives
+> } 
+> } 0a1 0b1
+> 
+> I'm still not comprehending this.
+> 
+> Are you saying that all the variables are expanded first, left to right,
+> and then all the resulting strings are combined?  Whereas before (2.6 and
+> earlier) each variable would be expanded and combined with what followed,
+> and then the process repeated for each new string?
+
+OK, I tell you what subst.c does.  You have a string of the form
+
+prefix${^a}suffix
+
+Suppose that prefix does not have anything to expand.  paramsubst is
+called to expand this string, which expands ${^a}.  There are three
+cases:
+
+1. `a' was an empty array.  In that case the expansion is the empty list,
+   and suffix is not evaluated (so even if there is a $[i++] in suffix, i
+   will not change).
+
+2. `a' had one element: paransubst replaces ${^a} with its value and
+   returns and the calling routine, stringsubst, which continues parsing
+   the suffix.  If that suffix contains some other parameter expansions,
+   paramsubst will be called again.
+
+3. `a' has more than one elements.  In that case stringsubst is called
+   for suffix alone (which may call paramsubst again to expand something
+   in suffix), and the result will be be a list.  This list is combined
+   with the expansion of ${^a}.  If suffix expands to an empty list, the
+   result will be empty, otherwise the result is the first element of `a'
+   combined with the each element from the expansion of suffix, followed
+   by the second element of `a' combined with list etc.  Note that suffix
+   can only expand to an empty list as a result of an rc-expansion in
+   suffix (that's because null-argument removal is only done in prefork
+   after stringsubst).  With this, in ${^a}1${^^x} the expansion of
+   1${^^x} gives two elements, 1x y, which is combined with `a'.  If you
+   replace 1${^^x} with 1${^x}, it is expanded to 1x 1y instead of 1x y.
+
+This guarantees left to right evaluation, everything is evaluated at most
+once, and everything is evaluated once unless there is an rc-expansion of
+an empty array which discards everything following that array.
+
+The 2.6-beta16 and earlier behavior:
+
+${^a} was expanded, and a list was created prepending prefix and
+appending suffix for each array element.  The resulting list is parsed
+again from the beginning.  For example:
+
+a=('${~^a}' '${~^a}')
+
+prefix${~^a}suffix
+
+expands to
+
+prefix${~^a}suffix prefix${~^a}suffix
+
+and the expansion is restarted, the first element of this list is
+expanded again, the result is
+
+prefix${~^a}suffix prefix${~^a}suffix prefix${~^a}suffix
+
+and the expansion is restarted...  For this infinite loop, the ~ or the
+globsubst option was necessary.
+
+What would be the preferred evaluation of ${^a}1${^^x}?
+
+Alternatives:
+
+1. a1x ay b1x by  (current)
+
+2. a1x y b1x y    (beta16 and older)
+
+3. a1x b1x y      (just an other logical solution).
+
+The current behaviour is the simplest to code solution, I think the other
+two are not very hard to implement, but I'm not sure it is worth the
+extra effort.
+
+Zoltan
+

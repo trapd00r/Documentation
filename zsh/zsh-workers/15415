@@ -1,0 +1,222 @@
+From zsh-workers-return-15415-mason-zsh=primenet.com.au@sunsite.dk Thu Jul 19 08:37:40 2001
+Return-Path: <zsh-workers-return-15415-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12595 invoked from network); 19 Jul 2001 08:37:34 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Jul 2001 08:37:34 -0000
+Received: (qmail 18575 invoked by alias); 19 Jul 2001 08:37:15 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15415
+Received: (qmail 18560 invoked from network); 19 Jul 2001 08:37:14 -0000
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+Date: Thu, 19 Jul 2001 10:36:57 +0200 (MET DST)
+Message-Id: <200107190836.KAA08293@beta.informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+Subject: Re: PATCH: Re: long/short options
+In-Reply-To: <3B55C579.A353D62B@u.genie.co.uk>
+
+Oliver Kiddle wrote:
+
+> ...
+> 
+> gzip --<tab> seems to just be offering --fast and --best. It seems to be
+> all options up to but not including the first where we have a reused
+> description. It is fine with just gzip -<tab>. Similarly for other
+> commands.
+
+Actually, it was offering them, it just didn't show them.  Stupid me, I
+should have thought about that.  The only solution I can see is to make
+sure the arrays contain only matching strings before calling
+compdescribe.  The patch below does that.
+
+> There is possibly scope for _arguments parsing of --help output (as used
+> by _gnu_generic) to make better use of output where options are listed
+> together, i.e. looking something like this:
+>   -?, --help        display this option help
+
+We don't even try to use the descriptions in the --help output yet.
+
+I've been thinking about that, too, but getting the options is already
+difficult and trying to get the descriptions...
+
+> > [ how duplicate descriptions appear ]
+> 
+> This bit doesn't seem entirely ideal. For menu selection what might be
+> better would possibly be if the separate options were highlghted
+> separately instead of having to expand it out. I think it would also be
+> good if there was a style so the user could perhaps select whether they
+> wanted selection to pick the long or short option (as I think someone
+> else suggested). With the current implementation, a centred ditto mark
+> (") might be better than the pipe (|). It might also be better if when
+> expanding it, you just got `-H' and `--help' on each line instead of
+> `-H, --help' duplicated.
+
+I know all that and am thinking the same.  But.  That would require some
+serious changes (note that my patch really only changed _describe and
+compdescribe -- the other hunks were only bug fixes and cleanup).
+
+A first step could be to be able to tell the listing code about a
+`region of interest'.  complist could use that to highlight only that
+part (useful elsewhere, e.g. process listings).  Then we would have to
+be able to tell it that two matches share the same display string.
+
+Adding a style so that menu selection allows to select only one of the
+options would be a lot easier to write.  Making it display only one of
+the options per line (instead of a duplicated `-H, --help') is something
+I thought about, too, but that would require that we are able to tell in
+_describe if we are going to enter menu selection.  And that isn't
+always possible because it might depend on the number of matches
+generated.  If people would be satisfied with an approximation, i.e.
+simplifying the strings if it thinks it will enter menu selection, but
+probably sometimes entering menu selection with duplicated `-H, --help',
+I could probably implement that without much work.
+
+And about using `"' instead of the `|': as I said, this would require
+_describe to modify the option arrays it gets to use unsorted groups and
+then sort the options itself.  Probably not too complicated either (I
+think I've got most of the code in my head now).  If we do that we could
+probably also use this to make the menu selection listing either because
+we don't need to put any option name in front of the display string, e.g.:
+
+  % foo -<TAB>
+  -H, --help    -- print help
+      --help    --     "
+
+or
+
+  % foo -<TAB>
+  -H, --help    -- print help
+      "         --     "
+
+or whatever.  Anyone else want to draw some pictures? ;-)
+
+> We have a lot of completion functions where we've not used the braces to
+> offer descriptions for both long and short options. Specifying
+> descriptions for only short options seems to have been fairly common.
+> Converting them will be a tedious job which I will get round to if
+> nobody else does it first but I have roughly zero spare time at the
+> moment.
+
+I fear this is partly my fault.
+
+> One other thing which this has reminded me of is that I would quite like
+> it to be able to remove from the completion listings extra options which
+> some commands have like gzip's --to-stdout which is the same as
+> --stdout. So some sort of style which says list/complete only the
+> canonical form of something and some way of saying in _arguments that an
+> option is just an extra synonym. However with this new patch of,
+> --to-stdout is now less annoying anyway because it isn't there with a
+> full description taking a whole line.
+
+Maybe this could be solved together with the `only short/long' options
+you mentioned above.  Filtering out some options is simple to implement
+as long as they use the same description (so tht we can use this new
+code) and as long as it's well defined which options are to be used/removed.
+
+
+Bye
+  Sven
+
+Index: Completion/Base/Utility/_describe
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/Utility/_describe,v
+retrieving revision 1.2
+diff -u -r1.2 _describe
+--- Completion/Base/Utility/_describe	2001/07/18 13:10:09	1.2
++++ Completion/Base/Utility/_describe	2001/07/19 08:36:43
+@@ -21,8 +21,49 @@
+ # Do the tests. `showd' is set if the descriptions should be shown.
+ 
+ zstyle -T ":completion:${curcontext}:$_type" verbose && _showd=yes
++
+ if zstyle -T ":completion:${curcontext}:$_type" list-grouped; then
++  local _argv _new _strs _mats _opts _i=2
++
++  _argv=( "$@" )
+   _grp=(-g)
++  _new=( "$1" )
++  shift
++
++  while (( $# )); do
++
++    _strs="_a_$_i"
++    eval local "_a_$_i;_a_$_i"'=( "${'$1'[@]}" )'
++    _argv[_i]="_a_$_i"
++    shift
++    (( _i++ ))
++
++    if [[ "$1" = (|-*) ]]; then
++      _mats=
++    else
++      _matss="_a_$_i"
++      eval local "_a_$_i;_a_$_i"'=( "${'$1'[@]}" )'
++      _argv[_i]="_a_$_i"
++      shift
++      (( _i++ ))
++    fi
++
++    _opts=( "${(@)argv[1,(i)--]:#--}" )
++    shift "$#_opts"
++    (( _i += $#_opts ))
++    if [[ $1 == -- ]]; then
++      shift
++      (( _i++ ))
++    fi
++
++    if [[ -n $_mats ]]; then
++      compadd "$_opts[@]" -O $_strs -D $_mats -a $_strs
++    else
++      compadd "$_opts[@]" -O $_strs -a $_strs
++    fi
++  done
++
++  set - "$_argv[@]"
+ else
+   _grp=()
+ fi
+@@ -50,9 +91,11 @@
+       if [[ -n "$_hide" ]]; then
+         if [[ "$PREFIX" = --* ]]; then
+           _tmpd=( "${(@)_tmpd#--}" )
++          _tmph=( "${(@)_tmph#--}" )
+           _tmps=( "${(@)_tmps#--}" )
+         elif [[ "$PREFIX" = [-+]* ]]; then
+           _tmpd=( "${(@)_tmpd#[-+]}" )
++          _tmph=( "${(@)_tmph#[-+]}" )
+           _tmps=( "${(@)_tmps#[-+]}" )
+         fi
+       fi
+Index: Src/Zle/computil.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/computil.c,v
+retrieving revision 1.64
+diff -u -r1.64 computil.c
+--- Src/Zle/computil.c	2001/07/18 13:52:53	1.64
++++ Src/Zle/computil.c	2001/07/19 08:36:44
+@@ -64,7 +64,7 @@
+ 
+ /* Maximum string length when used with descriptions. */
+ 
+-#define CD_MAXLEN 20
++#define CD_MAXLEN 30
+ 
+ 
+ static struct cdstate cd_state;
+@@ -171,8 +171,8 @@
+             }
+         }
+     }
+-    if (cd_state.pre > 20)
+-        cd_state.pre = 20;
++    if (cd_state.pre > CD_MAXLEN)
++        cd_state.pre = CD_MAXLEN;
+ }
+ 
+ /* Initialisation. Store and calculate the string and matches and so on. */
+
+-- 
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

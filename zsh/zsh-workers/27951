@@ -1,0 +1,591 @@
+From zsh-workers-return-27951-mason-zsh=primenet.com.au@zsh.org Tue May 11 13:48:57 2010
+Return-Path: <zsh-workers-return-27951-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1919 invoked by alias); 11 May 2010 13:48:57 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27951
+Received: (qmail 1766 invoked from network); 11 May 2010 13:48:53 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.1 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS,SUBJ_ALL_CAPS autolearn=no version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+X-Authentication-Warning: pwslap01u.europe.root.pri: pws owned process doing -bs
+To: zsh-workers@zsh.org (Zsh hackers list)
+Subject: PATCH: $ZSH_EVAL_CONTEXT
+X-Mailer: MH-E 8.2; nmh 1.3; GNU Emacs 23.1.1
+Date: Tue, 11 May 2010 14:48:40 +0100
+Message-ID: <17704.1273585720@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 11 May 2010 13:48:42.0985 (UTC) FILETIME=[AB56E590:01CAF110]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A_09_40_00 (www.mailcontrol.com) on 10.71.0.121
+
+I have a function that selects files based on the output of running
+"file" on each file.  It occurred to me it would be useful to make this
+sensitive to whether it was running as a glob qualifier.  There appears
+to be no way to do this without making special arrangments for the
+environment.  It seemed to me that as the shell knows the context it
+should make it available.
+
+The first thought was to do something special for glob qualifiers, such
+as setting ZSH_GLOB_QUAL.
+
+Then it occurred to me this didn't scale very well and it should be
+possible to do a lot more with not so much extra work by providing a
+context every time code was evaluated.
+
+Then it occurred to me that this would have to be a stack of values,
+since otherwise when you called a function the glob-qualness would be
+hidden.
+
+I've come up with an array / colon-separated list called
+zsh_eval_context / ZSH_EVAL_CONTEXT with the possible contexts you can
+see in the documentation.  This should be fairly lightweight---it's a
+special readonly variable so the entries don't need to be copied and the
+array only gets extended if the call stack gets large.  Most of
+the patch is simply sticking the context on the end of function calls.
+
+My function that can run as a glob qualifier now just has to test
+
+  [[ $ZSH_EVAL_CONTEXT = *globqual:shfunc ]]
+
+diff --git a/Doc/Zsh/expn.yo b/Doc/Zsh/expn.yo
+index f04d6ea..98c8ab2 100644
+--- a/Doc/Zsh/expn.yo
++++ b/Doc/Zsh/expn.yo
+@@ -2149,12 +2149,17 @@ xitem(tt(e)var(string))
+ item(tt(PLUS())var(cmd))(
+ The var(string) will be executed as shell code.  The filename will be
+ included in the list if and only if the code returns a zero status (usually
+-the status of the last command).  The first character after the `tt(e)'
++the status of the last command).
++
++In the first form, the first character after the `tt(e)'
+ will be used as a separator and anything up to the next matching separator
+ will be taken  as the var(string); `tt([)', `tt({)', and `tt(<)' match
+ `tt(])', `tt(})', and `tt(>)', respectively, while any other character
+ matches itself. Note that expansions must be quoted in the var(string)
+ to prevent them from being expanded before globbing is done.
++var(string) is then executed as shell code.  The string tt(globqual)
++is appended to the array tt(zsh_eval_context) the duration of
++execution.
+ 
+ vindex(REPLY, use of)
+ vindex(reply, use of)
+@@ -2288,12 +2293,13 @@ specifiers may occur to resolve ties.
+ tt(oe) and tt(o+) are special cases; they are each followed by shell code,
+ delimited as for the tt(e) glob qualifier and the tt(+) glob qualifier
+ respectively (see above).  The code is executed for each matched file with
+-the parameter tt(REPLY) set to the name of the file on entry.  The code
+-should modify the parameter tt(REPLY) in some fashion.  On return, the value
+-of the parameter is used instead of the file name as the string on which to
+-sort.  Unlike other sort operators, tt(oe) and tt(o+) may be repeated, but
+-note that the maximum number of sort operators of any kind that may appear
+-in any glob expression is 12.
++the parameter tt(REPLY) set to the name of the file on entry and
++tt(globsort) appended to tt(zsh_eval_context).  The code
++should modify the parameter tt(REPLY) in some fashion.  On return, the
++value of the parameter is used instead of the file name as the string on
++which to sort.  Unlike other sort operators, tt(oe) and tt(o+) may be
++repeated, but note that the maximum number of sort operators of any kind
++that may appear in any glob expression is 12.
+ )
+ item(tt(O)var(c))(
+ like `tt(o)', but sorts in descending order; i.e. `tt(*(^oc))' is the
+diff --git a/Doc/Zsh/params.yo b/Doc/Zsh/params.yo
+index 99a6e69..55d5cda 100644
+--- a/Doc/Zsh/params.yo
++++ b/Doc/Zsh/params.yo
+@@ -722,6 +722,100 @@ vindex(VENDOR)
+ item(tt(VENDOR))(
+ The vendor, as determined at compile time.
+ )
++vindex(zsh_eval_context)
++vindex(ZSH_EVAL_CONTEXT)
++item(tt(zsh_eval_context) <S> <Z> (tt(ZSH_EVAL_CONTEXT) <S>))(
++An array (colon-separated list) indicating the context of shell
++code that is being run.  Each time a piece of shell code that
++is stored within the shell is executed a string is temporarily appended to
++the array to indicate the type of operation that is being performed.
++Read in order the array gives an indication of the stack of
++operations being performed with the most immediate context last.
++
++The context is one of the following:
++startitem()
++item(tt(cmdarg))(
++Code specified by the tt(-c) option to the command line that invoked
++the shell.
++)
++item(tt(cmdsubst))(
++Command substitution using the tt(`)var(...)tt(`) or
++tt($+LPAR())var(...)tt(RPAR()) construct.
++)
++item(tt(equalsubst))(
++File substitution using the tt(=+LPAR())var(...)tt(RPAR()) construct.
++)
++item(tt(eval))(
++Code executed by the tt(eval) builtin.
++)
++item(tt(evalautofunc))(
++Code executed with the tt(KSH_AUTOLOAD) mechanism in order to define
++an autoloaded function.
++)
++item(tt(fc))(
++Code from the shell history executed by the tt(-e) option to the tt(fc)
++builtin.
++)
++item(tt(file))(
++Lines of code being read directly from a file, for example by
++the tt(source) builtin.
++)
++item(tt(filecode))(
++Lines of code being read from a tt(.zwc) file instead of directly
++from the source file.
++)
++item(tt(globqual))(
++Code executed by the tt(e) or tt(+) glob qualifier.
++)
++item(tt(globsort))(
++Code executed to order files by the tt(o) glob qualifier.
++)
++item(tt(insubst))(
++File substitution using the tt(<LPAR())var(...)tt(RPAR()) construct.
++)
++item(tt(loadautofunc))(
++Code read directly from a file to define an autoloaded function.
++)
++item(tt(outsubst))(
++File substitution using the tt(>LPAR())var(...)tt(RPAR()) construct.
++)
++item(tt(sched))(
++Code executed by the tt(sched) builtin.
++)
++item(tt(shfunc))(
++A shell function.
++)
++item(tt(stty))(
++Code passed to tt(stty) by the tt(STTY) environment variable.
++Normally this is passed directly to the system's tt(stty) command,
++so this value is unlikely to be seen in practice.
++)
++item(tt(style))(
++Code executed as part of a style retrieved by the tt(zstyle) builtin
++from the tt(zsh/zutil) module.
++)
++item(tt(toplevel))(
++The highest execution level of a script or interactive shell.
++)
++item(tt(trap))(
++Code executed as a trap defined by the tt(trap) builtin.  Traps
++defined as functions have the context tt(shfunc).  As traps are
++asynchronous they may have a different hierarchy from other
++code.
++)
++item(tt(zpty))(
++Code executed by the tt(zpty) builtin from the tt(zsh/zpty) module.
++)
++item(tt(zregesparse-guard))(
++Code executed as a guard by the tt(zregexparse) command from the
++tt(zsh/zutil) module.
++)
++item(tt(zregexparse-action))(
++Code executed as an action by the tt(zregexparse) command from the
++tt(zsh/zutil) module.
++)
++enditem()
++)
+ vindex(ZSH_NAME)
+ item(tt(ZSH_NAME))(
+ Expands to the basename of the command used to invoke this instance
+diff --git a/Src/Builtins/sched.c b/Src/Builtins/sched.c
+index 99167e1..1ec3269 100644
+--- a/Src/Builtins/sched.c
++++ b/Src/Builtins/sched.c
+@@ -119,7 +119,7 @@ checksched(void)
+ 
+ 	if ((sch->flags & SCHEDFLAG_TRASH_ZLE) && zleactive)
+ 	    zleentry(ZLE_CMD_TRASH);
+-	execstring(sch->cmd, 0, 0);
++	execstring(sch->cmd, 0, 0, "sched");
+ 	zsfree(sch->cmd);
+ 	zfree(sch, sizeof(struct schedcmd));
+ 
+diff --git a/Src/Modules/zpty.c b/Src/Modules/zpty.c
+index f25d442..2a81e68 100644
+--- a/Src/Modules/zpty.c
++++ b/Src/Modules/zpty.c
+@@ -396,7 +396,7 @@ newptycmd(char *nam, char *pname, char **args, int echo, int nblock)
+ 	setsparam("TTY", ztrdup(ttystrname));
+ 
+ 	opts[INTERACTIVE] = 0;
+-	execode(prog, 1, 0);
++	execode(prog, 1, 0, "zpty");
+ 	stopmsg = 2;
+ 	zexit(lastval, 0);
+     }
+diff --git a/Src/Modules/zutil.c b/Src/Modules/zutil.c
+index 698b7e3..76ca92f 100644
+--- a/Src/Modules/zutil.c
++++ b/Src/Modules/zutil.c
+@@ -343,7 +343,7 @@ evalstyle(Stypat p)
+     char **ret, *str;
+ 
+     unsetparam("reply");
+-    execode(p->eval, 1, 0);
++    execode(p->eval, 1, 0, "style");
+     if (errflag) {
+ 	errflag = ef;
+ 	return NULL;
+@@ -1253,7 +1253,7 @@ rmatch(RParseResult *sm, char *subj, char *var1, char *var2, int comp)
+ 	    char *action = getdata(ln);
+ 
+ 	    if (action)
+-		execstring(action, 1, 0);
++		execstring(action, 1, 0, "zregexparse-action");
+ 	}
+ 	return 0;
+     }
+@@ -1278,7 +1278,8 @@ rmatch(RParseResult *sm, char *subj, char *var1, char *var2, int comp)
+ 		    return 3;
+ 	    }
+ 	    if (next->pattern && pattry(next->patprog, subj) &&
+-		(!next->guard || (execstring(next->guard, 1, 0), !lastval))) {
++		(!next->guard || (execstring(next->guard, 1, 0,
++					     "zregesparse-guard"), !lastval))) {
+ 		LinkNode aln;
+ 		char **mend;
+ 		int len;
+@@ -1299,7 +1300,7 @@ rmatch(RParseResult *sm, char *subj, char *var1, char *var2, int comp)
+ 		    char *action = getdata(aln);
+ 
+ 		    if (action)
+-			execstring(action, 1, 0);
++			execstring(action, 1, 0, "zregexparse-action");
+ 		}
+ 		restorematch(&match2);
+ 
+@@ -1328,7 +1329,7 @@ rmatch(RParseResult *sm, char *subj, char *var1, char *var2, int comp)
+ 		    char *action = getdata(ln);
+ 
+ 		    if (action)
+-			execstring(action, 1, 0);
++			execstring(action, 1, 0, "zregexparse-action");
+ 		}
+ 		return 0;
+ 	    }
+@@ -1339,7 +1340,7 @@ rmatch(RParseResult *sm, char *subj, char *var1, char *var2, int comp)
+ 	for (ln = firstnode(nexts); ln; ln = nextnode(ln)) {
+ 	    br = getdata(ln);
+ 	    if (br->state->action)
+-		execstring(br->state->action, 1, 0);
++		execstring(br->state->action, 1, 0, "zregexparse-action");
+ 	}
+     }
+     return empty(nexts) ? 2 : 1;
+diff --git a/Src/builtin.c b/Src/builtin.c
+index d293a7a..3f26f03 100644
+--- a/Src/builtin.c
++++ b/Src/builtin.c
+@@ -1755,7 +1755,7 @@ fcedit(char *ename, char *fn)
+ 	return 1;
+ 
+     s = tricat(ename, " ", fn);
+-    execstring(s, 1, 0);
++    execstring(s, 1, 0, "fc");
+     zsfree(s);
+ 
+     return !lastval;
+@@ -4883,7 +4883,7 @@ eval(char **argv)
+ 	    /* No code to execute */
+ 	    lastval = 0;
+ 	} else {
+-	    execode(prog, 1, 0);
++	    execode(prog, 1, 0, "eval");
+ 
+ 	    if (errflag && !lastval)
+ 		lastval = errflag;
+diff --git a/Src/exec.c b/Src/exec.c
+index 19afc4c..8fd5242 100644
+--- a/Src/exec.c
++++ b/Src/exec.c
+@@ -564,7 +564,7 @@ execute(LinkList args, int flags, int defpath)
+ 
+ 	STTYval = 0;	/* this prevents infinite recursion */
+ 	zsfree(s);
+-	execstring(t, 1, 0);
++	execstring(t, 1, 0, "stty");
+ 	zsfree(t);
+     } else if (s) {
+ 	STTYval = 0;
+@@ -970,21 +970,40 @@ entersubsh(int flags)
+ 
+ /**/
+ mod_export void
+-execstring(char *s, int dont_change_job, int exiting)
++execstring(char *s, int dont_change_job, int exiting, char *context)
+ {
+     Eprog prog;
+ 
+     pushheap();
+     if ((prog = parse_string(s, 0)))
+-	execode(prog, dont_change_job, exiting);
++	execode(prog, dont_change_job, exiting, context);
+     popheap();
+ }
+ 
+ /**/
+ mod_export void
+-execode(Eprog p, int dont_change_job, int exiting)
++execode(Eprog p, int dont_change_job, int exiting, char *context)
+ {
+     struct estate s;
++    static int zsh_eval_context_len;
++    int alen;
++
++    if (!zsh_eval_context_len) {
++	zsh_eval_context_len = 16;
++	alen = 0;
++	zsh_eval_context = (char **)zalloc(zsh_eval_context_len *
++					   sizeof(*zsh_eval_context));
++    } else {
++	alen = arrlen(zsh_eval_context);
++	if (zsh_eval_context_len == alen + 1) {
++	    zsh_eval_context_len *= 2;
++	    zsh_eval_context = zrealloc(zsh_eval_context,
++					zsh_eval_context_len *
++					sizeof(*zsh_eval_context));
++	}
++    }
++    zsh_eval_context[alen] = context;
++    zsh_eval_context[alen+1] = NULL;
+ 
+     s.prog = p;
+     s.pc = p->prog;
+@@ -994,6 +1013,12 @@ execode(Eprog p, int dont_change_job, int exiting)
+     execlist(&s, dont_change_job, exiting);
+ 
+     freeeprog(p);		/* Free if now unused */
++
++    /*
++     * zsh_eval_context may have been altered by a recursive
++     * call, but that's OK since we're using the global value.
++     */
++    zsh_eval_context[alen] = NULL;
+ }
+ 
+ /* Execute a simplified command. This is used to execute things that
+@@ -3571,7 +3596,7 @@ getoutput(char *cmd, int qt)
+     redup(pipes[1], 1);
+     entersubsh(ESUB_PGRP|ESUB_NOMONITOR);
+     cmdpush(CS_CMDSUBST);
+-    execode(prog, 0, 1);
++    execode(prog, 0, 1, "cmdsubst");
+     cmdpop();
+     close(1);
+     _exit(lastval);
+@@ -3725,7 +3750,7 @@ getoutputfile(char *cmd, char **eptr)
+     redup(fd, 1);
+     entersubsh(ESUB_PGRP|ESUB_NOMONITOR);
+     cmdpush(CS_CMDSUBST);
+-    execode(prog, 0, 1);
++    execode(prog, 0, 1, "equalsubst");
+     cmdpop();
+     close(1);
+     _exit(lastval);
+@@ -3827,7 +3852,7 @@ getproc(char *cmd, char **eptr)
+ #endif /* PATH_DEV_FD */
+ 
+     cmdpush(CS_CMDSUBST);
+-    execode(prog, 0, 1);
++    execode(prog, 0, 1, out ? "outsubst" : "insubst");
+     cmdpop();
+     zclose(out);
+     _exit(lastval);
+@@ -3875,7 +3900,7 @@ getpipe(char *cmd, int nullexec)
+     redup(pipes[out], out);
+     closem(FDT_UNUSED);	/* this closes pipes[!out] as well */
+     cmdpush(CS_CMDSUBST);
+-    execode(prog, 0, 1);
++    execode(prog, 0, 1, out ? "outsubst" : "insubst");
+     cmdpop();
+     _exit(lastval);
+     return 0;
+@@ -4196,7 +4221,7 @@ execautofn(Estate state, UNUSED(int do_exec))
+     oldscriptname = scriptname;
+     oldscriptfilename = scriptfilename;
+     scriptname = scriptfilename = dupstring(shf->node.nam);
+-    execode(shf->funcdef, 1, 0);
++    execode(shf->funcdef, 1, 0, "loadautofunc");
+     scriptname = oldscriptname;
+     scriptfilename = oldscriptfilename;
+ 
+@@ -4250,7 +4275,7 @@ loadautofn(Shfunc shf, int fksh, int autol)
+ 	} else {
+ 	    VARARR(char, n, strlen(shf->node.nam) + 1);
+ 	    strcpy(n, shf->node.nam);
+-	    execode(prog, 1, 0);
++	    execode(prog, 1, 0, "evalautofunc");
+ 	    shf = (Shfunc) shfunctab->getnode(shfunctab, n);
+ 	    if (!shf || (shf->node.flags & PM_UNDEFINED)) {
+ 		/* We're not actually in the function; decrement locallevel */
+@@ -4538,7 +4563,7 @@ runshfunc(Eprog prog, FuncWrap wrap, char *name)
+ 	wrap = wrap->next;
+     }
+     startparamscope();
+-    execode(prog, 1, 0);
++    execode(prog, 1, 0, "shfunc");
+     if (ou) {
+ 	setunderscore(ou);
+ 	zfree(ou, ouu);
+diff --git a/Src/glob.c b/Src/glob.c
+index 036f88c..c552e6c 100644
+--- a/Src/glob.c
++++ b/Src/glob.c
+@@ -1806,7 +1806,7 @@ zglob(LinkList list, LinkNode np, int nountok)
+ 			/* Parsed OK, execute for each name */
+ 			for (tmpptr = matchbuf; tmpptr < matchptr; tmpptr++) {
+ 			    setsparam("REPLY", ztrdup(tmpptr->name));
+-			    execode(prog, 1, 0);
++			    execode(prog, 1, 0, "globsort");
+ 			    if (!errflag)
+ 				tmpptr->sortstrs[iexec] =
+ 				    dupstring(getsparam("REPLY"));
+@@ -3497,7 +3497,7 @@ qualsheval(char *name, UNUSED(struct stat *buf), UNUSED(off_t days), char *str)
+ 	unsetparam("reply");
+ 	setsparam("REPLY", ztrdup(name));
+ 
+-	execode(prog, 1, 0);
++	execode(prog, 1, 0, "globqual");
+ 
+ 	ret = lastval;
+ 	errflag = ef;
+@@ -3516,6 +3516,7 @@ qualsheval(char *name, UNUSED(struct stat *buf), UNUSED(off_t days), char *str)
+ 		inserts = tmparr;
+ 	    }
+ 	}
++
+ 	return !ret;
+     }
+     return 0;
+diff --git a/Src/init.c b/Src/init.c
+index 56c8c18..dea9aff 100644
+--- a/Src/init.c
++++ b/Src/init.c
+@@ -182,7 +182,7 @@ loop(int toplevel, int justonce)
+ 	    }
+ 	    if (stopmsg)	/* unset 'you have stopped jobs' flag */
+ 		stopmsg--;
+-	    execode(prog, 0, 0);
++	    execode(prog, 0, 0, toplevel ? "toplevel" : "file");
+ 	    tok = toksav;
+ 	    if (toplevel)
+ 		noexitct = 0;
+@@ -1125,7 +1125,7 @@ init_misc(void)
+ 	    fclose(bshin);
+ 	SHIN = movefd(open("/dev/null", O_RDONLY | O_NOCTTY));
+ 	bshin = fdopen(SHIN, "r");
+-	execstring(cmd, 0, 1);
++	execstring(cmd, 0, 1, "cmdarg");
+ 	stopmsg = 1;
+ 	zexit(lastval, 0);
+     }
+@@ -1213,7 +1213,7 @@ source(char *s)
+     if (prog) {
+ 	pushheap();
+ 	errflag = 0;
+-	execode(prog, 1, 0);
++	execode(prog, 1, 0, "filecode");
+ 	popheap();
+ 	if (errflag)
+ 	    ret = SOURCE_ERROR;
+diff --git a/Src/params.c b/Src/params.c
+index b19881e..576de2f 100644
+--- a/Src/params.c
++++ b/Src/params.c
+@@ -57,7 +57,8 @@ char **pparams,		/* $argv        */
+      **mailpath,	/* $mailpath    */
+      **manpath,		/* $manpath     */
+      **psvar,		/* $psvar       */
+-     **watch;		/* $watch       */
++     **watch,		/* $watch       */
++     **zsh_eval_context; /* $zsh_eval_context */
+ /**/
+ mod_export
+ char **path,		/* $path        */
+@@ -341,6 +342,7 @@ IPDEF8("MAILPATH", &mailpath, "mailpath", 0),
+ IPDEF8("WATCH", &watch, "watch", 0),
+ IPDEF8("PATH", &path, "path", PM_RESTRICTED),
+ IPDEF8("PSVAR", &psvar, "psvar", 0),
++IPDEF8("ZSH_EVAL_CONTEXT", &zsh_eval_context, "zsh_eval_context", PM_READONLY),
+ 
+ /* MODULE_PATH is not imported for security reasons */
+ IPDEF8("MODULE_PATH", &module_path, "module_path", PM_DONTIMPORT|PM_RESTRICTED),
+@@ -349,12 +351,21 @@ IPDEF8("MODULE_PATH", &module_path, "module_path", PM_DONTIMPORT|PM_RESTRICTED),
+ #define IPDEF9(A,B,C) IPDEF9F(A,B,C,0)
+ IPDEF9F("*", &pparams, NULL, PM_ARRAY|PM_SPECIAL|PM_DONTIMPORT|PM_READONLY),
+ IPDEF9F("@", &pparams, NULL, PM_ARRAY|PM_SPECIAL|PM_DONTIMPORT|PM_READONLY),
++
++/*
++ * This empty row indicates the end of parameters available in
++ * all emulations.
++ */
+ {{NULL,NULL,0},BR(NULL),NULL_GSU,0,0,NULL,NULL,NULL,0},
+ 
+ #define IPDEF10(A,B) {{NULL,A,PM_ARRAY|PM_SPECIAL},BR(NULL),GSU(B),10,0,NULL,NULL,NULL,0}
+ 
+-/* The following parameters are not available in sh/ksh compatibility *
+- * mode. All of these have sh compatible equivalents.                */
++/*
++ * The following parameters are not available in sh/ksh compatibility *
++ * mode.
++ */
++
++/* All of these have sh compatible equivalents.                */
+ IPDEF1("ARGC", argc_gsu, PM_READONLY),
+ IPDEF2("HISTCHARS", histchars_gsu, PM_DONTIMPORT),
+ IPDEF4("status", &lastval),
+@@ -373,9 +384,13 @@ IPDEF9("manpath", &manpath, "MANPATH"),
+ IPDEF9("psvar", &psvar, "PSVAR"),
+ IPDEF9("watch", &watch, "WATCH"),
+ 
++IPDEF9F("zsh_eval_context", &zsh_eval_context, "ZSH_EVAL_CONTEXT", PM_READONLY),
++
+ IPDEF9F("module_path", &module_path, "MODULE_PATH", PM_RESTRICTED),
+ IPDEF9F("path", &path, "PATH", PM_RESTRICTED),
+ 
++/* These are known to zsh alone. */
++
+ IPDEF10("pipestatus", pipestatus_gsu),
+ 
+ {{NULL,NULL,0},BR(NULL),NULL_GSU,0,0,NULL,NULL,NULL,0},
+diff --git a/Src/signals.c b/Src/signals.c
+index f67a3e8..74aeadd 100644
+--- a/Src/signals.c
++++ b/Src/signals.c
+@@ -1198,7 +1198,7 @@ dotrapargs(int sig, int *sigtr, void *sigfn)
+ 	trap_state = TRAP_STATE_PRIMED;
+ 	trapisfunc = isfunc = 0;
+ 
+-	execode((Eprog)sigfn, 1, 0);
++	execode((Eprog)sigfn, 1, 0, "trap");
+     }
+     runhookdef(AFTERTRAPHOOK, NULL);
+ 
+
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

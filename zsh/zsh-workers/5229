@@ -1,0 +1,229 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Message-Id: <9902041124.AA58893@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk, Dag-Erling Smorgrav <des@flood.ping.uio.no>
+Subject: PATCH: zsh-3.1.5-pws-6: bash-style completion 
+In-Reply-To: "Sven Wischnowsky"'s message of "Thu, 04 Feb 1999 09:15:44 NFT."
+             <199902040815.JAA14136@beta.informatik.hu-berlin.de> 
+Date: Thu, 04 Feb 1999 12:22:32 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5229
+
+Sven Wischnowsky wrote:
+> I don't have a 3.0.5, so I couldn't try the patch. But as far as I can 
+> see, this should behave like normal completion with `setopt AUTOLIST'
+> and `setopt LISTAMBIGUOUS'.
+
+We seem to have this discussion every week.  It's not like bash,
+because bash only shows the list on the *second* tab, and zsh can't
+currently do that.  Nor do I think it's fair to rely on the new
+completion to try to get this behaviour.
+
+It's so often requested by bash converts --- it seems to be the first
+thing they noticed --- and it's not so hard to do, along the lines of
+the 3.0.5 patch, and it's a good deal shorter than most of the recent
+zle changes, so I would suggest simply doing it.  The following is a
+suggestion for 3.1.5: it probably won't work in 3.0.5 without quite
+major surgery, though it should be relatively straightforward since
+the algorithms in question haven't changed as far as I know.
+
+However, it's a bit problematic making it a function, since you might
+want that behaviour with complete-word, expand-or-complete or
+expand-or-complete-prefix (those are the three I've tracked down,
+anyway).  So I've made it an option, called BASH_AUTO_LIST.  It takes
+precedence over AUTO_LIST and LIST_AMBIGUOUS:  the reason
+for that is that those are now set by default, so this provides the
+simplest way for the user to change the default behaviour (without
+having to decode lines like
+  noautolist            off
+to invert the double negative).
+
+Note the behaviour when combined with AUTO_MENU:  one tab, complete
+unambiguous part if any; two tabs, show list; three tabs, start
+cycling through completions.
+
+I've done basic testing on this, but with all the possible options I
+can't claim everything's OK.
+
+I only just discovered quite how LIST_AMBIGUOUS works, so I added to
+the manual entry.
+
+I've also been having strange effects when combining all this with:
+  compctl -M 'm:{a-z}={A-Z}' 'r:|[.,_-]=* r:|=*'
+but I haven't tracked it down (and it's there anyway, I just normally
+use menu completion so hadn't noticed).  I think there may be a
+problem with `compctl -M' on its own, too, since I got a crash after
+that once.
+
+--- Doc/Zsh/options.yo.2tab	Thu Feb  4 11:12:16 1999
++++ Doc/Zsh/options.yo	Thu Feb  4 11:45:49 1999
+@@ -150,6 +150,15 @@
+ list, if it contains no `tt(|)', `tt(LPAR())' or (if special) `tt(~)'
+ characters.  See noderef(Filename Generation).
+ )
++pindex(BASH_AUTO_LIST)
++cindex(completion, listing choices, bash style)
++item(tt(BASH_AUTO_LIST))(
++On an ambiguous completion, automatically list choices when the
++completion function is called twice in succession.  This takes
++precedence over tt(AUTO_LIST) and tt(LIST_AMBIGUOUS).  If
++tt(AUTO_MENU) is set, the menu behaviour will then start with the
++third press.
++)
+ pindex(BEEP)
+ cindex(beep, enabling)
+ cindex(enabling the beep)
+@@ -488,9 +497,10 @@
+ cindex(ambiguous completion)
+ cindex(completion, ambiguous)
+ item(tt(LIST_AMBIGUOUS))(
+-If this option is set, completions are shown only if the completions
+-don't have a unambiguous prefix or suffix that could be inserted in
+-the command line.
++This option works when tt(AUTO_LIST) is also set.  If there is an
++unambiguous prefix to insert on the command line, that is done without
++a completion list being displayed; in other words, auto-listing
++behaviour only takes place when nothing would be inserted.
+ )
+ pindex(LIST_BEEP)
+ cindex(beep, ambiguous completion)
+--- Src/Zle/zle_tricky.c.2tab	Thu Feb  4 11:02:49 1999
++++ Src/Zle/zle_tricky.c	Thu Feb  4 12:07:33 1999
+@@ -270,6 +270,19 @@
+        COMP_LIST_EXPAND };
+ #define COMP_ISEXPAND(X) ((X) >= COMP_EXPAND)
+ 
++/* Non-zero if the last completion done was ambiguous (used to find   *
++ * out if AUTOMENU should start).  More precisely, it's nonzero after *
++ * successfully doing any completion, unless the completion was       *
++ * unambiguous and did not cause the display of a completion list.    *
++ * From the other point of view, it's nonzero iff AUTOMENU (if set)   *
++ * should kick in on another completion.                              *
++ *                                                                    *
++ * If both AUTOMENU and BASHAUTOLIST are set, then we get a listing   *
++ * on the second tab, a` la bash, and then automenu kicks in when     *
++ * lastambig == 2.                                                    */
++
++static int lastambig;
++
+ /**/
+ void
+ completecall(void)
+@@ -287,8 +300,13 @@
+     useglob = isset(GLOBCOMPLETE);
+     if (c == '\t' && usetab())
+ 	selfinsert();
+-    else
+-	docomplete(COMP_COMPLETE);
++    else {
++	if (lastambig == 1 && isset(BASHAUTOLIST) && !usemenu && !menucmp) {
++	    docomplete(COMP_LIST_COMPLETE);
++	    lastambig == 2;
++	} else
++	    docomplete(COMP_COMPLETE);
++    }
+ }
+ 
+ /**/
+@@ -358,8 +376,13 @@
+     useglob = isset(GLOBCOMPLETE);
+     if (c == '\t' && usetab())
+ 	selfinsert();
+-    else
+-	docomplete(COMP_EXPAND_COMPLETE);
++    else {
++	if (lastambig == 1 && isset(BASHAUTOLIST) && !usemenu && !menucmp) {
++	    docomplete(COMP_LIST_COMPLETE);
++	    lastambig = 2;
++	} else
++	    docomplete(COMP_EXPAND_COMPLETE);
++    }
+ }
+ 
+ /**/
+@@ -451,15 +474,6 @@
+ 
+ static char *rdstr;
+ 
+-/* Non-zero if the last completion done was ambiguous (used to find   *
+- * out if AUTOMENU should start).  More precisely, it's nonzero after *
+- * successfully doing any completion, unless the completion was       *
+- * unambiguous and did not cause the display of a completion list.    *
+- * From the other point of view, it's nonzero iff AUTOMENU (if set)   *
+- * should kick in on another completion.                              */
+-
+-static int lastambig;
+-
+ /* This holds the name of the current command (used to find the right *
+  * compctl).                                                          */
+ 
+@@ -569,7 +583,8 @@
+ 
+     /* Check if we have to start a menu-completion (via automenu). */
+ 
+-    if ((amenu = (isset(AUTOMENU) && lastambig)))
++    if ((amenu = (isset(AUTOMENU) && lastambig &&
++		  (!isset(BASHAUTOLIST) || lastambig == 2))))
+ 	usemenu = 1;
+ 
+     /* Expand history references before starting completion.  If anything *
+@@ -5459,12 +5474,17 @@
+ 	if (isset(RECEXACT) && !lc && !ainfo->prerest)
+ 	    am = 1;
+ 
+-	/* If the LIST_AMBIGUOUS option (meaning roughly `show a list only *
++	/*
++	 * If the LIST_AMBIGUOUS option (meaning roughly `show a list only *
+ 	 * if the completion is completely ambiguous') is set, and some    *
+ 	 * prefix was inserted, return now, bypassing the list-displaying  *
+ 	 * code.  On the way, invalidate the list and note that we don't   *
+-	 * want to enter an AUTO_MENU imediately.                          */
+-	if(isset(LISTAMBIGUOUS) && !am &&
++	 * want to enter an AUTO_MENU imediately.                          *
++	 *                                                                 *
++	 * We don't do this when BASH_AUTO_LIST is set, because that would *
++	 * mean you only got a completion list the third time you hit tab  *
++	 * (or whichever key).                                             */
++	if(isset(LISTAMBIGUOUS) && !isset(BASHAUTOLIST) && !am &&
+ 	   (ics != cs || (ainfo->suflen && !atend))) {
+ 	    invalidatelist();
+ 	    lastambig = 0;
+@@ -5475,7 +5495,8 @@
+      * if it is needed.                                                     */
+     if (isset(LISTBEEP))
+ 	feep();
+-    if (isset(AUTOLIST) && !amenu && !showinglist && smatches >= 2)
++    if (isset(AUTOLIST) && !isset(BASHAUTOLIST) && !amenu && !showinglist &&
++	smatches >= 2)
+ 	showinglist = -2;
+     if (am)
+ 	lastambig = 1;
+--- Src/options.c.2tab	Thu Feb  4 11:06:13 1999
++++ Src/options.c	Thu Feb  4 10:42:30 1999
+@@ -90,6 +90,7 @@
+ {NULL, "badpattern",	      OPT_EMULATE|OPT_NONBOURNE, BADPATTERN},
+ {NULL, "banghist",	      OPT_EMULATE|OPT_NONBOURNE, BANGHIST},
+ {NULL, "bareglobqual",        OPT_EMULATE|OPT_ZSH,       BAREGLOBQUAL},
++{NULL, "bashautolist",	      0,                         BASHAUTOLIST},
+ {NULL, "beep",		      OPT_ALL,			 BEEP},
+ {NULL, "bgnice",	      OPT_EMULATE|OPT_NONBOURNE, BGNICE},
+ {NULL, "braceccl",	      0,			 BRACECCL},
+--- Src/zsh.h.2tab	Thu Feb  4 11:07:22 1999
++++ Src/zsh.h	Thu Feb  4 10:44:55 1999
+@@ -1057,6 +1057,7 @@
+     BADPATTERN,
+     BANGHIST,
+     BAREGLOBQUAL,
++    BASHAUTOLIST,
+     BEEP,
+     BGNICE,
+     BRACECCL,
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

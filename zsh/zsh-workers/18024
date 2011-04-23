@@ -1,0 +1,157 @@
+From zsh-workers-return-18024-mason-zsh=primenet.com.au@sunsite.dk Thu Dec 19 20:17:00 2002
+Return-Path: <zsh-workers-return-18024-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12569 invoked from network); 19 Dec 2002 20:16:59 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 19 Dec 2002 20:16:59 -0000
+Received: (qmail 16285 invoked by alias); 19 Dec 2002 20:16:52 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 18024
+Received: (qmail 16270 invoked from network); 19 Dec 2002 20:16:51 -0000
+X-VirusChecked: Checked
+X-Env-Sender: kiddleo@logica.com
+X-Msg-Ref: server-9.tower-4.messagelabs.com!1040328979!45260
+X-Authentication-Warning: iris.logica.co.uk: Host [158.234.142.11] claimed to be finches.logica.co.uk
+From: Oliver Kiddle <okiddle@yahoo.co.uk>
+To: Zsh workers <zsh-workers@sunsite.dk>
+Subject: Completing e-mail addresses
+Date: Thu, 19 Dec 2002 21:18:23 +0100
+Message-ID: <7428.1040329103@finches.logica.co.uk>
+Sender: kiddleo@logica.com
+
+Below is a start at a function for completing e-mail addresses.
+
+_email-xxxx() functions are used as plugins for different sources of
+e-mail address. I've included functions for mail,mutt,mush,MH,local users
+and ldap (though ldap will need a lot more work).
+
+It will complete aliases/nicknames if given a -n option specifying the
+plugin. -s sep will allow separated lists of addresses and this copes with
+the separator being quoted in an e-mail address.
+
+I'm not too sure about how it should determine the plugins to use by
+default.  It'd be nice if I could use ${(k)functions[(I)_email-*]} but
+with the ldap plugin, that isn't ideal. If it was possible to specify a
+default for the tag-order style, the plugins style would not be necessary.
+
+The hard bit which I have yet to attempt is to turn addresses which
+include comments (display names etc) into something of a simple user@host
+form. This would be necessary for completing something like a mailto:
+url properly and I suspect that some people would want to do it for
+all addresses (configured with a style). Can this be done using Bart's
+RFC822 gramma in 14050 by using back references? Or should I just try
+something fairly simple. Thanks for that grammar by the way Bart, it was
+interesting and helped with the quoting stuff. zregexparse seems to be
+useful only when completing separate words so I doubt it could be used
+with that.
+
+So does anyone have any comments or thoughts on this?
+
+Oliver
+
+#autoload
+# options:
+# -n plugin - can complete nicknames from specified plugin
+# -s sep    - complete a list of addresses separated by specified character
+# -..       - e-mail address must be of form user@host
+# plugins are written as separate functions with _email- prefixing their names
+# they should either do their own completion or return the addresses in
+# the ali array in the form 'alias:address' and return 300
+
+# plugins
+_email-mail() {
+  ali=( ${${${(M)${(f)"$(<$files[$plugin])"}:#alias*}##alias[[:blank:]]##}/[[:blank:]]##/:} )
+  return 300
+}
+_email-mutt() { _email-mail }
+_email-mush() { _email-mail }
+
+_email-MH() {
+  ali=( ${${(f)"$(_call_program aliases ali)"}/: /:} )
+  return 300
+}
+
+_email-ldap() {
+  local -a ali res
+  local dn cn mail
+
+  res=( ${(f)"$(ldapsearch -x -LLL "(sn=$PREFIX*$SUFFIX)" cn mail)"} )
+  for dn cn mail in "${res[@]}"; do
+    ali+=( "\"${cn#*: }\" <${mail#*: }>" )
+  done
+  _wanted addresses expl 'matching names' compadd -U "$@" -a ali
+}
+
+_email-local() {
+  local suf
+
+  if compset -P '*@'; then
+    _hosts "$@"
+  else
+    compset -S '@*' || suf=( -qS @ )
+    _users $suf "$@"
+  fi
+}
+
+local nm=$compstate[nmatches]
+local -a plugins ali list
+local -A opts files
+local plugin rcfile expl ret
+
+local __qtext='[^"\\]'
+local __qpair='\\?'
+local __beginq='"'
+local __endq='(|[^\\])"'
+local __addresses="($__qtext|$__beginq($__qtext|$__qpair)#$__endq)##"
+
+zparseopts -D -E -A opts n: s:
+
+if [[ -n $opts[-s] ]]; then
+  # remove up to the last unquoted separator
+  if [[ ${(Q)PREFIX} = (#b)($~__addresses$opts[-s])* ]]; then
+    compset -P $(( ${#${(s:,:)${:-x${match[1]}x}}} - 1 )) "*${opts[-s]}"
+  fi
+  
+  # for the suffix, I'm too lazy to work out how to preserve quoted separators
+  compset -S ',*' || set -- -qS "$opts[-s]" "$@"
+fi
+
+files=( mutt ~/.muttrc mush ~/.mushrc mail ${MAILRC:-.mailrc} )
+zstyle -a ":completion:${curcontext}:email-addresses" plugins plugins ||
+  plugins=( local $opts[-n] $files(Ne:'REPLY=( ${(k)files[(r)$REPLY]} ):') )
+
+ret=1
+_tags email-$plugins
+while _tags; do
+  for plugin in $plugins; do
+    if _requested email-$plugin; then
+
+      if (( ! $+functions[_email-$plugin] )); then
+	_message "$plugin: unknown plugin not found"
+      fi
+
+      _email-$plugin "$@" && ret=0
+      if (( $? == 300 )); then
+
+	if [[ $opts[-n] = $plugin ]]; then
+	  zformat -a list ' -- ' "${ali[@]}"
+	  _wanted mail-aliases expl 'alias' compadd "$@" \
+	      -d list - ${ali%%:*} && ret=0
+	else
+	  # remove lines not containing `@' as they probably aren't addresses
+	  _wanted addresses expl 'address' compadd "$@" - \
+	      "${(@)${(M@)ali:#*@*}#*:}" && ret=0
+	fi
+      fi
+    fi
+  done
+  (( ret )) || return 0
+done
+
+[[ nm -ne compstate[nmatches] ]]
+
+This e-mail and any attachment is for authorised use by the intended recipient(s) only.  It may contain proprietary material, confidential information and/or be subject to legal privilege.  It should not be copied, disclosed to, retained or used by, any other party.  If you are not an intended recipient then please promptly delete this e-mail and any attachment and all copies and inform the sender.  Thank you.
+

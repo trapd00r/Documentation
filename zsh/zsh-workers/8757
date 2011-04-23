@@ -1,0 +1,145 @@
+From zsh-workers-return-8757-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Nov 23 18:08:56 1999
+Return-Path: <zsh-workers-return-8757-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11272 invoked from network); 23 Nov 1999 18:08:54 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Nov 1999 18:08:54 -0000
+Received: (qmail 9478 invoked by alias); 23 Nov 1999 18:08:48 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8757
+Received: (qmail 9469 invoked from network); 23 Nov 1999 18:08:46 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <991123180832.ZM29676@candle.brasslantern.com>
+Date: Tue, 23 Nov 1999 18:08:32 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: "getopts" bugs and bad interactions with "shift"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+Consider:
+
+function oops() {
+    while getopts :m: f
+    do
+	echo $OPTIND is $f with $OPTARG
+	shift $((OPTIND - 1))
+    done
+}
+
+3.0.7 gives:
+
+zagzig% oops -m 0664 something
+3 is m with 0664
+zagzig% 
+
+3.1.6-pws-9 gives:
+
+zagzig% oops -m 0664 something 
+2 is m with 0664
+2 is ? with t
+zagzig% 
+
+There are two problems here: (1) OPTIND is different. (2) Parsing didn't
+stop soon enough; it should have returned nonzero once -m was shifted off.
+You can see the latter by changing the optstring to :m:t:, which gives
+
+2 is m with 0664
+2 is t with hing
+
+I originally thought both had something to do with 7765,  but it behaves
+like this at least as far back as 3.1.6-pws-4 (I didn't try any older).
+
+I believe the following has something to do with (2), though this can't be
+the entire issue, because I should be able to "fool" 3.0.7 by putting '-'
+at the beginnings of selected words; yet I find I can't.
+
+In 3.0 (which lacks the getopts rewrite from 3.1.2-zefram-3), this test
+is used:
+
+    if ((*str != '+' && *str != '-') || optcind >= lenstr ||
+	(lenstr == 2 && str[0] == '-' && str[1] == '-')) {
+	/* current argument doesn't contain options, or optcind is impossibly
+	large */
+	if (*str == '+' || *str == '-')
+	    zoptind++;
+	optcind = 0;
+	return 1;
+    }
+
+But 3.1.x for x > 2 uses:
+
+    if(optcind >= lenstr) {
+	optcind = 0;
+	if(!args[zoptind++])
+	    return 1;
+	str = unmetafy(dupstring(args[zoptind - 1]), &lenstr);
+    }
+    if(!optcind) {
+	if(lenstr < 2 || (*str != '-' && *str != '+'))
+	    return 1;
+	if(lenstr == 2 && str[0] == '-' && str[1] == '-') {
+	    zoptind++;
+	    return 1;
+	}
+	optcind++;
+    }
+
+Note that the test of (*str != '-' && *str != '+') isn't done unless the
+index into the string is zero, but the index isn't reset to zero unless
+it's at or past the end of the string to begin with.
+
+(At the very least, optcind should be getting reset to 0 whenever an
+explicit assignment to OPTIND is done.)
+
+However, this brings up the question of whether "getopts" and "shift" are
+even -intended- to play nicely together.  I thought briefly about putting
+an "optcind = 0;" into bin_shift(), but that doesn't cover this case:
+
+    while getopts :m: f
+    do
+	argv[0,OPTIND-1]=()
+    done
+
+Nor this:
+
+    array=($*)
+    while getopts :m: f $array
+    do
+	array[OPTIND]=()
+    done
+
+Finally, there's the question of exactly what OPTIND is supposed to be.
+The documentation for both versions says:
+
+OPTIND <S>
+     The index of the last option argument processed by the getopts
+     command.
+
+But when you assign to OPTIND, you assign the index of the *next* option
+to be processed by the getopts command -- and the 3.0.7 behavior is to
+leave OPTIND set to that *next* index.  3.1.6, on the other hand, uses
+(optcind >= lenstr) to pre-increment zoptind, which leads to this third
+bug when the presumed option argument is the empty string (-pws-9 again):
+
+zagzig% oops "" -m 0664 something 
+3 is m with 0664
+zagzig% 
+
+Question:  Is "getopts" based on some standard or emulated behavior of
+some other shell, or is it strictly a zsh thing?  If the latter, I think
+we should change the documentation and the 3.1.6 behavior of OPTIND to
+match the 3.0.7 behavior, which fixes (1) and should make it much easier
+to fix (2) if in fact we decide that's supposed to work at all.
+
+I think the third bug will disappear as a side-effect of fixing OPTIND.
+
+Comments?
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

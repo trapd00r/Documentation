@@ -1,0 +1,97 @@
+From zsh-workers-return-26220-mason-zsh=primenet.com.au@sunsite.dk Thu Jan 01 04:01:51 2009
+Return-Path: <zsh-workers-return-26220-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27158 invoked from network); 1 Jan 2009 04:01:47 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 1 Jan 2009 04:01:47 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 5103 invoked from network); 1 Jan 2009 04:01:40 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 1 Jan 2009 04:01:40 -0000
+Received: (qmail 1135 invoked by alias); 1 Jan 2009 04:01:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 26220
+Received: (qmail 1119 invoked from network); 1 Jan 2009 04:01:33 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 1 Jan 2009 04:01:33 -0000
+Received: from prunille.vinc17.org (vinc17.pck.nerim.net [213.41.242.187])
+	by bifrost.dotsrc.org (Postfix) with ESMTP id 9ECD980308BE
+	for <zsh-workers@sunsite.dk>; Thu,  1 Jan 2009 05:01:29 +0100 (CET)
+Received: by prunille.vinc17.org (Postfix, from userid 501)
+	id BAD842F83D94; Thu,  1 Jan 2009 05:01:19 +0100 (CET)
+Date: Thu, 1 Jan 2009 05:01:19 +0100
+From: Vincent Lefevre <vincent@vinc17.org>
+To: zsh-workers@sunsite.dk
+Subject: Re: [PATCH] history locking with fcntl
+Message-ID: <20090101040119.GC2137@prunille.vinc17.org>
+Mail-Followup-To: zsh-workers@sunsite.dk
+References: <20080415153120.GE1223@prunille.vinc17.org> <20080417162307.GB22594@blorf.net> <20080418005959.GB1067@prunille.vinc17.org> <20080419023155.GB23964@blorf.net> <20080421131937.GM4304@prunille.vinc17.org> <20080505012551.GC11804@blorf.net>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=iso-8859-1
+Content-Disposition: inline
+Content-Transfer-Encoding: 8bit
+In-Reply-To: <20080505012551.GC11804@blorf.net>
+X-Mailer-Info: http://www.vinc17.org/mutt/
+User-Agent: Mutt/1.5.18-vl-r26315 (2008-12-20)
+X-Virus-Scanned: ClamAV 0.92.1/8822/Thu Jan  1 03:24:59 2009 on bifrost
+X-Virus-Status: Clean
+
+On 2008-05-04 18:25:51 -0700, Wayne Davison wrote:
+> On Mon, Apr 21, 2008 at 03:19:37PM +0200, Vincent Lefevre wrote:
+> > Note that since out has been closed, tmpfile is no longer locked.
+> > The target file isn't locked either.
+> 
+> The target file was locked prior to the rename (since that's the only
+> file my code is locking -- the HISTFILE itself).  So, the rename does
+> essentially unlock the HISTFILE as far as fcntl() is concerned.
+
+I've looked again at the current zsh code (which corresponds to your
+patch). This is incorrect.
+
+As I've said, there's a fclose() that has the effect to unlock the file:
+
+        if (fclose(out) < 0 && ret >= 0)
+            ret = -1;
+
+Indeed, out is a stream associated with fd, which corresponds to the
+history file in general (there's also a case of a tmp file, let's
+forget this one). And according to the Linux fclose() man page, the
+fclose() function closes the underlying file descriptor:
+
+    The fclose() function will flush the stream pointed to by fp
+    (writing any buffered output data using fflush(3)) and close
+    the underlying file descriptor.
+
+As a file descriptor associated with the file has been closed, the
+file is no longer locked by the process, according to the Linux
+fcntl(2) man page:
+
+    As well as being removed by an explicit F_UNLCK, record locks
+    are automatically released when the process terminates or if
+    it closes _any_ file descriptor referring to a file on which
+    locks are held.
+
+So, there's a possible race condition, in particular knowning the
+fact that preemption at system calls are more likely to occur. If
+  1. the kernel preempts the process (A) at the end of the close()
+     [the system call used by fclose()] or just before the rename(),
+  2. another process (B) locks the history file,
+  3. B is preempted,
+  4. (A) does the rename,
+then bad things can happen.
+
+In my patch, I did a fflush() instead of fclose() to avoid removing
+the lock at this time, and I did the fclose() after the rename().
+
+-- 
+Vincent Lefèvre <vincent@vinc17.org> - Web: <http://www.vinc17.org/>
+100% accessible validated (X)HTML - Blog: <http://www.vinc17.org/blog/>
+Work: CR INRIA - computer arithmetic / Arenaire project (LIP, ENS-Lyon)
+

@@ -1,0 +1,291 @@
+From zsh-workers-return-12414-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jul 27 17:40:56 2000
+Return-Path: <zsh-workers-return-12414-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16972 invoked from network); 27 Jul 2000 17:40:54 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Jul 2000 17:40:54 -0000
+Received: (qmail 12138 invoked by alias); 27 Jul 2000 17:40:42 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12414
+Received: (qmail 12131 invoked from network); 27 Jul 2000 17:40:41 -0000
+Date: Thu, 27 Jul 2000 18:40:09 +0100
+From: Peter Stephenson <pws@csr.com>
+Subject: PATCH: quote separators when using vared on array.
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Message-id: <0FYD00KQLAEWE6@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+I bet lots of people have run across this and thought `can't be bothered to
+do anything, we'll wait for some schmuck to fix it'.
+
+% print -l $path
+/usr/local/bin
+/bin
+/c/WINNT/system32
+/c/WINNT
+/c/Program Files/Microsoft Office/Office
+% vared path
+<do nothing, hit return>
+% print -l $path
+/usr/local/bin
+/bin
+/c/WINNT/system32
+/c/WINNT
+/c/Program
+Files/Microsoft
+Office/Office
+
+This is not right (and this time I'm not referring to the contents of the
+final directory in $path).  This patch tries to do the minimum to fix
+things, by quoting separators when reading an array, and unquoting them
+when writing back to them.  I've stained the white radiance of utils.c with
+a few comments, hope nobody minds.
+
+Index: Doc/Zsh/mod_zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/mod_zle.yo,v
+retrieving revision 1.5
+diff -u -r1.5 mod_zle.yo
+--- Doc/Zsh/mod_zle.yo	2000/05/21 18:27:36	1.5
++++ Doc/Zsh/mod_zle.yo	2000/07/27 17:31:24
+@@ -161,6 +161,12 @@
+ If the type of an existing parameter does not match the type to be
+ created, the parameter is unset and recreated.
+ 
++If an array or array slice is being edited, separator characters as defined
++in tt($IFS) will be shown quoted with a backslash.  Conversely, when the
++edited text is split into an array, a backslash quotes an immediately
++following separator character; no other special handling of backslashes, or
++any handling of quotes, is performed.
++
+ Individual elements of existing array or associative array parameters
+ may be edited by using subscript syntax on var(name).  New elements are
+ created automatically, even without tt(-c).
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.13
+diff -u -r1.13 exec.c
+--- Src/exec.c	2000/07/19 20:43:51	1.13
++++ Src/exec.c	2000/07/27 17:31:25
+@@ -2744,7 +2744,7 @@
+ 	}
+ 	addlinknode(ret, buf);
+     } else {
+-	char **words = spacesplit(buf, 0, 1);
++	char **words = spacesplit(buf, 0, 1, 0);
+ 
+ 	while (*words) {
+ 	    if (isset(GLOBSUBST))
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.11
+diff -u -r1.11 utils.c
+--- Src/utils.c	2000/07/26 09:16:13	1.11
++++ Src/utils.c	2000/07/27 17:31:25
+@@ -1831,7 +1831,7 @@
+ 
+ /**/
+ mod_export char **
+-spacesplit(char *s, int allownull, int heap)
++spacesplit(char *s, int allownull, int heap, int quote)
+ {
+     char *t, **ret, **ptr;
+     int l = sizeof(*ret) * (wordcount(s, NULL, -!allownull) + 1);
+@@ -1839,6 +1839,14 @@
+ 
+     ptr = ret = (heap ? (char **) hcalloc(l) : (char **) zcalloc(l));
+ 
++    if (quote) {
++	/*
++	 * we will be stripping quoted separators by hacking string,
++	 * so make sure it's hackable.
++	 */
++	s = dupstring(s);
++    }
++
+     t = s;
+     skipwsep(&s);
+     if (*s && isep(*s == Meta ? s[1] ^ 32 : *s))
+@@ -1853,7 +1861,7 @@
+ 	    skipwsep(&s);
+ 	}
+ 	t = s;
+-	findsep(&s, NULL);
++	findsep(&s, NULL, quote);
+ 	if (s > t || allownull) {
+ 	    *ptr = (heap ? (char *) hcalloc((s - t) + 1) :
+ 		    (char *) zcalloc((s - t) + 1));
+@@ -1871,13 +1879,30 @@
+ 
+ /**/
+ static int
+-findsep(char **s, char *sep)
++findsep(char **s, char *sep, int quote)
+ {
++    /*
++     * *s is the string we are looking along, which will be updated
++     * to the point we have got to.
++     *
++     * sep is a possibly multicharacter separator to look for.  If NULL,
++     * use normal separator characters.
++     *
++     * quote is a flag that '\<sep>' should not be treated as a separator.
++     * in this case we need to be able to strip the backslash directly
++     * in the string, so the calling function must have sent us something
++     * modifiable.  currently this only works for sep == NULL.
++     */
+     int i;
+     char *t, *tt;
+ 
+     if (!sep) {
+ 	for (t = *s; *t; t++) {
++	    if (quote && *t == '\\' &&
++		isep(t[1] == Meta ? (t[2] ^ 32) : t[1])) {
++		chuck(t);
++		continue;
++	    }
+ 	    if (*t == Meta) {
+ 		if (isep(t[1] ^ 32))
+ 		    break;
+@@ -1928,7 +1953,7 @@
+     if (sep) {
+ 	sl = strlen(sep);
+ 	r = *s;
+-	while (! findsep(s, sep)) {
++	while (! findsep(s, sep, 0)) {
+ 	    r = *s += sl;
+ 	}
+ 	return r;
+@@ -1942,7 +1967,7 @@
+ 	    break;
+     }
+     *s = t;
+-    findsep(s, sep);
++    findsep(s, sep, 0);
+     return t;
+ }
+ 
+@@ -1955,7 +1980,7 @@
+     if (sep) {
+ 	r = 1;
+ 	sl = strlen(sep);
+-	for (; (c = findsep(&s, sep)) >= 0; s += sl)
++	for (; (c = findsep(&s, sep, 0)) >= 0; s += sl)
+ 	    if ((c && *(s + sl)) || mul)
+ 		r++;
+     } else {
+@@ -1975,7 +2000,7 @@
+ 		if (mul <= 0)
+ 		    skipwsep(&s);
+ 	    }
+-	    findsep(&s, NULL);
++	    findsep(&s, NULL, 0);
+ 	    t = s;
+ 	    if (mul <= 0)
+ 		skipwsep(&s);
+@@ -2023,7 +2048,7 @@
+     char *t, *tt, **r, **p;
+ 
+     if (!sep)
+-	return spacesplit(s, allownull, heap);
++	return spacesplit(s, allownull, heap, 0);
+ 
+     sl = strlen(sep);
+     n = wordcount(s, sep, 1);
+@@ -2032,7 +2057,7 @@
+ 
+     for (t = s; n--;) {
+ 	tt = t;
+-	findsep(&t, sep);
++	findsep(&t, sep, 0);
+ 	*p = (heap ? (char *) hcalloc(t - tt + 1) :
+ 	      (char *) zcalloc(t - tt + 1));
+ 	strncpy(*p, tt, t - tt);
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.7
+diff -u -r1.7 zle_main.c
+--- Src/Zle/zle_main.c	2000/07/19 21:10:18	1.7
++++ Src/Zle/zle_main.c	2000/07/27 17:31:25
+@@ -823,7 +823,46 @@
+ 	zwarnnam(name, "no such variable: %s", args[0], 0);
+ 	return 1;
+     } else if (v) {
+-	s = getstrvalue(v);
++	if (v->isarr) {
++	    /* Array: check for separators and quote them. */
++	    char **arr = getarrvalue(v), **aptr, **tmparr, **tptr;
++	    tptr = tmparr = (char **)zhalloc(sizeof(char *)*(arrlen(arr)+1));
++	    for (aptr = arr; *aptr; aptr++) {
++		int sepcount = 0;
++		/* See if this word contains a separator character */
++		for (t = *aptr; *t; t++) {
++		    if (*t == Meta) {
++			if (isep(t[1] ^ 32))
++			    sepcount++;
++			t++;
++		    } else if (isep(*t))
++			sepcount++;
++		}
++		if (sepcount) {
++		    /* Yes, so allocate enough space to quote it. */
++		    char *newstr, *nptr;
++		    newstr = zhalloc(strlen(*aptr)+sepcount+1);
++		    /* Go through string quoting separators */
++		    for (t = *aptr, nptr = newstr; *t; ) {
++			if (*t == Meta) {
++			    if (isep(t[1] ^ 32))
++				*nptr++ = '\\';
++			    *nptr++ = *t++;
++			} else if (isep(*t))
++			    *nptr++ = '\\';
++			*nptr++ = *t++;
++		    }
++		    *nptr = '\0';
++		    /* Stick this into the array of words to join up */
++		    *tptr++ = newstr;
++		} else
++		    *tptr++ = *aptr; /* No, keep original array element */
++	    }
++	    *tptr = NULL;
++	    s = sepjoin(tmparr, NULL, 0);
++	} else {
++	    s = ztrdup(getstrvalue(v));
++	}
+ 	pm = v->pm;
+     } else if (*s) {
+ 	zwarnnam(name, "invalid parameter name: %s", args[0], 0);
+@@ -842,7 +881,7 @@
+ 	haso = 1;
+     }
+     /* edit the parameter value */
+-    zpushnode(bufstack, ztrdup(s));
++    zpushnode(bufstack, s);
+ 
+     varedarg = *args;
+     ifl = isfirstln;
+@@ -881,7 +920,11 @@
+     if (pm && (PM_TYPE(pm->flags) & (PM_ARRAY|PM_HASHED))) {
+ 	char **a;
+ 
+-	a = spacesplit(t, 1, 0);
++	/*
++	 * Use spacesplit with fourth argument 1: identify quoted separators,
++	 * unquote but don't split.
++	 */
++	a = spacesplit(t, 1, 0, 1);
+ 	if (PM_TYPE(pm->flags) == PM_ARRAY)
+ 	    setaparam(args[0], a);
+ 	else
+
+-- 
+Peter Stephenson <pws@csr.com>
+Cambridge Silicon Radio, Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+

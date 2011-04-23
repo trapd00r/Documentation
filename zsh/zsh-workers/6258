@@ -1,0 +1,104 @@
+From zsh-workers-return-6258-mason-zsh=primenet.com.au@sunsite.auc.dk Tue May 11 13:40:31 1999
+Return-Path: <zsh-workers-return-6258-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13383 invoked from network); 11 May 1999 13:40:28 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 May 1999 13:40:28 -0000
+Received: (qmail 3150 invoked by alias); 11 May 1999 13:39:52 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6258
+Received: (qmail 3142 invoked from network); 11 May 1999 13:39:49 -0000
+Message-Id: <9905111315.AA24788@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: tty pgrp problem again: third attempt
+In-Reply-To: "Peter Stephenson"'s message of "Tue, 11 May 1999 13:58:21 DFT."
+             <9905111158.AA34596@ibmth.df.unipi.it> 
+Date: Tue, 11 May 1999 15:15:17 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Peter Stephenson wrote:
+> The only thing for it seems to be to trust the STAT_CURSH flag on the job,
+> which says the last stage of the pipeline was run in the current shell, and
+> hence must be in the foreground whatever the job number, which can get
+> jiggled about if there are different structures like the while-loop above
+> running in the current shell.  This should work, since that's what it's
+> there for.  But maybe there are pathological cases [the whole @!$!!! shell,
+> if you ask me sometimes].  This goes on top of the other one.
+> 
+> (I can't actually swear to understanding why thisjob isn't the job that's
+> terminating, but it's to do with the pipeline code.)
+
+Nope, that's no good.  In something like
+
+% zcat foo.gz | if true; less; fi
+
+the zcat can exit, in which case the test for messing around with the pgrp
+comes up.  The code in update_job (called asynchronously as soon as zcat
+finishes) doesn't know that the shell part of the code hasn't yet finished,
+so it calls attachtty(mypgrp), with the consequence that the end of the
+pipeline fails disastrously.
+
+The best I can think of is simply marking the fact when we can't reattach
+the tty, and the calling it when we know its safe, which is when the job
+that's executing is finally deleted.  At least this seems to fix up the
+problem without destroying the previous fixes (which still need applying).
+
+Sven, you're the only person that ever understood the list_pipe stuff. Is
+there a better way of handling this?  Should it really go somewhere in
+execpline() or execpline2()?
+
+--- Src/jobs.c.try3	Tue May 11 13:41:21 1999
++++ Src/jobs.c	Tue May 11 15:01:35 1999
+@@ -201,8 +201,20 @@
+ 	/* is this job in the foreground of an interactive shell? */
+ 	if (mypgrp != pgrp && inforeground &&
+ 	    (jn->gleader == pgrp || (pgrp > 1 && kill(-pgrp, 0) == -1))) {
+-	    attachtty(mypgrp);
+-	    adjustwinsize(0);   /* check window size and adjust if necessary */
++	    if (list_pipe) {
++		/*
++		 * Oh, dear, we're right in the middle of some confusion
++		 * of shell jobs on the righthand side of a pipeline, so
++		 * it's death to call attachtty() just yet.  Mark the
++		 * fact in the job, so that the attachtty() will be called
++		 * when the job is finally deleted.
++		 */
++		jn->stat |= STAT_ATTACH;
++	    } else {
++		attachtty(mypgrp);
++		/* check window size and adjust if necessary */
++		adjustwinsize(0);
++	    }
+ 	}
+     }
+ 
+@@ -611,6 +623,11 @@
+ deletejob(Job jn)
+ {
+     struct process *pn, *nx;
++
++    if (jn->stat & STAT_ATTACH) {
++	attachtty(mypgrp);
++	adjustwinsize(0);
++    }
+ 
+     pn = jn->procs;
+     jn->procs = NULL;
+--- Src/zsh.h.try3	Sat May  8 14:31:51 1999
++++ Src/zsh.h	Tue May 11 14:54:58 1999
+@@ -611,6 +611,7 @@
+ #define STAT_CURSH	(1<<9)	/* last command is in current shell     */
+ #define STAT_NOSTTY	(1<<10)	/* the tty settings are not inherited   */
+ 				/* from this job when it exits.         */
++#define STAT_ATTACH	(1<<11)	/* delay reattaching shell to tty       */
+ 
+ #define SP_RUNNING -1		/* fake status for jobs currently running */
+ 
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

@@ -1,0 +1,482 @@
+From zsh-workers-request@math.gatech.edu Fri Apr 24 12:40:35 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26660 invoked from network); 24 Apr 1998 12:40:35 -0000
+Received: from ns2.primenet.com.au (HELO primenet.com.au) (7795@203.24.36.3)
+  by ns1.primenet.com.au with SMTP; 24 Apr 1998 12:40:35 -0000
+Received: (qmail 6266 invoked from network); 24 Apr 1998 12:40:14 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns2.primenet.com.au with SMTP; 24 Apr 1998 12:40:14 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id IAA28773;
+	Fri, 24 Apr 1998 08:20:06 -0400 (EDT)
+Resent-Date: Fri, 24 Apr 1998 08:20:06 -0400 (EDT)
+Message-Id: <199804241219.OAA29635@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: PATCH: zsh-3.1.2-zefram4 negated patterns
+Date: Fri, 24 Apr 1998 14:19:56 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"2fa6R1.0.W17.rD8Gr"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3870
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Here's my effort at getting all the globbing tests to work (plus a
+couple of others which were giving problems).  As usual, it would
+probably be nicer to start from scratch, but without that I don't see
+any much simpler way than the following, which treats all exclusions
+by backtracking: that's because a pattern like (*~foo) or (^foo) in a
+pattern might originally match `foo', then have to backtrack to match
+just the `fo'; in general both the thing before the ~ and the
+expression in which this subexpression is embedded can be arbitrarily
+complicated and backtracking is the only certain way of getting it
+right.
+
+This means that even simple command-line things `ls ^*.o' now do this,
+so they are a bit slower.  If this is noticeable, I could probably
+optimise ^'s somewhat when they are not inside a closure.  In the
+meantime, I have instead optimised non-final *'s, which explains
+references to C_STAR and STARP in the code.  Instead of laboriously
+calling doesmatch() to get each new character, it now simply builds a
+list for backtracking in one go.  This isn't a fundamental part of the
+new code, but it's not very big either.  I'd be happy to provide a
+patch without that in.
+
+*** Misc/globtests.excl	Tue Apr  7 01:02:16 1998
+--- Misc/globtests	Thu Apr 23 13:58:59 1998
+***************
+*** 91,95 ****
+--- 91,99 ----
+  f zoot          (^z*|*x)
+  t foox          (^z*|*x)
+  t zoox          (^z*|*x)
++ t foo           (^foo)#
++ f foob          (^foo)b*
++ t foobb         (^foo)b*
++ f zsh           ^z*
+  EOT
+  print "$failed tests failed."
+*** Misc/globtests.ksh.excl	Tue Apr  7 01:02:15 1998
+--- Misc/globtests.ksh	Thu Apr 23 13:35:16 1998
+***************
+*** 84,88 ****
+--- 84,91 ----
+  f zoot          @(!(z*)|*x)
+  t foox          @(!(z*)|*x)
+  t zoox          @(!(z*)|*x)
++ t foo           *(!(foo))
++ f foob          !(foo)b*
++ t foobb         !(foo)b*
+  EOT
+  print "$failed tests failed."
+*** Src/glob.c.excl	Wed Apr  8 22:46:52 1998
+--- Src/glob.c	Fri Apr 24 14:15:41 1998
+***************
+*** 108,122 ****
+  #define C_ONEHASH	1
+  #define C_TWOHASH	2
+  #define C_OPTIONAL	4
+! #define C_CLOSURE	(C_ONEHASH|C_TWOHASH|C_OPTIONAL)
+! #define C_LAST		8
+! #define C_PATHADD	16
+  
+  /* Test macros for the above */
+  #define CLOSUREP(c)	(c->stat & C_CLOSURE)
+! #define ONEHASHP(c)	(c->stat & C_ONEHASH)
+  #define TWOHASHP(c)	(c->stat & C_TWOHASH)
+  #define OPTIONALP(c)	(c->stat & C_OPTIONAL)
+  #define LASTP(c)	(c->stat & C_LAST)
+  #define PATHADDP(c)	(c->stat & C_PATHADD)
+  
+--- 108,124 ----
+  #define C_ONEHASH	1
+  #define C_TWOHASH	2
+  #define C_OPTIONAL	4
+! #define C_STAR		8    
+! #define C_CLOSURE	(C_ONEHASH|C_TWOHASH|C_OPTIONAL|C_STAR)
+! #define C_LAST		16
+! #define C_PATHADD	32
+  
+  /* Test macros for the above */
+  #define CLOSUREP(c)	(c->stat & C_CLOSURE)
+! #define ONEHASHP(c)	(c->stat & (C_ONEHASH|C_STAR))
+  #define TWOHASHP(c)	(c->stat & C_TWOHASH)
+  #define OPTIONALP(c)	(c->stat & C_OPTIONAL)
++ #define STARP(c)	(c->stat & C_STAR)
+  #define LASTP(c)	(c->stat & C_LAST)
+  #define PATHADDP(c)	(c->stat & C_PATHADD)
+  
+***************
+*** 465,474 ****
+  	 */
+  	if (*pptr == Hat && isset(EXTENDEDGLOB)) {
+  	    /* negate remaining pattern */
+! 	    pptr++;
+  	    c->str = dupstrpfx(cstr, pptr - cstr);
+! 	    if (!(c->next = parsecomp(gflag)))
+  		return NULL;
+  	    return c;
+  	}
+  
+--- 467,489 ----
+  	 */
+  	if (*pptr == Hat && isset(EXTENDEDGLOB)) {
+  	    /* negate remaining pattern */
+! 	    Comp stail = tail;
+! 	    tail = NULL;
+  	    c->str = dupstrpfx(cstr, pptr - cstr);
+! 	    pptr++;
+! 
+! 	    c1 = (Comp) alloc(sizeof *c1);
+! 	    c1->stat |= C_STAR;
+! 
+! 	    c2 = (Comp) alloc(sizeof *c2);
+! 	    if (!(c2->exclude = parsecomp(gflag)))
+  		return NULL;
++ 	    if (!*pptr || *pptr == '/')
++ 		c2->stat |= C_LAST;
++ 	    c2->left = c1;
++ 	    c2->next = stail;
++ 	    c->next = c2;
++ 	    tail = stail;
+  	    return c;
+  	}
+  
+***************
+*** 535,541 ****
+  	    if (!(c1 = parsecomp(gflag)))
+  		return NULL;
+  	    /* ...remembering what comes after it... */
+! 	    tail = dpnd ? NULL : c1;
+  	    /* ...before going back and parsing inside the group. */
+  	    endp = pptr;
+  	    pptr = startp;
+--- 550,556 ----
+  	    if (!(c1 = parsecomp(gflag)))
+  		return NULL;
+  	    /* ...remembering what comes after it... */
+! 	    tail = (dpnd || kshfunc == KF_NOT) ? NULL : c1;
+  	    /* ...before going back and parsing inside the group. */
+  	    endp = pptr;
+  	    pptr = startp;
+***************
+*** 543,558 ****
+  	    pptr++;
+  	    c2 = (Comp) alloc(sizeof *c);
+  	    c->next = c2;
+! 	    c2->next = dpnd ? c1 : (Comp) alloc(sizeof *c);
+  	    if (!(c2->left = parsecompsw(0)))
+  		return NULL;
+  	    if (kshfunc == KF_NOT) {
+  		/* we'd actually rather it didn't match.  Instead, match *
+  		 * a star and put the parsed pattern into exclude.       */
+  		Comp c3 = (Comp) alloc(sizeof *c3);
+! 		*(c3->str = dupstring("?")) = Quest;
+! 		c3->stat |= C_ONEHASH;
+! 		c3->next = tail;
+  
+  		c2->exclude = c2->left;
+  		c2->left = c3;
+--- 558,572 ----
+  	    pptr++;
+  	    c2 = (Comp) alloc(sizeof *c);
+  	    c->next = c2;
+! 	    c2->next = (dpnd || kshfunc == KF_NOT) ?
+! 		c1 : (Comp) alloc(sizeof *c);
+  	    if (!(c2->left = parsecompsw(0)))
+  		return NULL;
+  	    if (kshfunc == KF_NOT) {
+  		/* we'd actually rather it didn't match.  Instead, match *
+  		 * a star and put the parsed pattern into exclude.       */
+  		Comp c3 = (Comp) alloc(sizeof *c3);
+! 		c3->stat |= C_STAR;
+  
+  		c2->exclude = c2->left;
+  		c2->left = c3;
+***************
+*** 569,583 ****
+  	    (unset(EXTENDEDGLOB) || !(gflag & GF_TOPLEV) ||
+  	     pptr[1] != Tilde || !pptr[2] || pptr[2] == Bar ||
+  	     pptr[2] == Outpar) && (mode || pptr[1] != '/')) {
+! 	    /* Star followed by other patterns is treated like a closure
+! 	     * (zero or more repetitions) of the single character pattern
+! 	     * operator `?'.
+  	     */
+  	    c->str = dupstrpfx(cstr, pptr - cstr);
+  	    pptr++;
+  	    c1 = (Comp) alloc(sizeof *c1);
+! 	    *(c1->str = dupstring("?")) = Quest;
+! 	    c1->stat |= C_ONEHASH;
+  	    if (!(c2 = parsecomp(gflag)))
+  		return NULL;
+  	    c1->next = c2;
+--- 583,595 ----
+  	    (unset(EXTENDEDGLOB) || !(gflag & GF_TOPLEV) ||
+  	     pptr[1] != Tilde || !pptr[2] || pptr[2] == Bar ||
+  	     pptr[2] == Outpar) && (mode || pptr[1] != '/')) {
+! 	    /* Star followed by other patterns is now treated as a special
+! 	     * type of closure in doesmatch().
+  	     */
+  	    c->str = dupstrpfx(cstr, pptr - cstr);
+  	    pptr++;
+  	    c1 = (Comp) alloc(sizeof *c1);
+! 	    c1->stat |= C_STAR;
+  	    if (!(c2 = parsecomp(gflag)))
+  		return NULL;
+  	    c1->next = c2;
+***************
+*** 646,652 ****
+  static Comp
+  parsecompsw(int gflag)
+  {
+!     Comp c1, c2, c3, excl = NULL;
+  
+      c1 = parsecomp(gflag);
+      if (!c1)
+--- 658,686 ----
+  static Comp
+  parsecompsw(int gflag)
+  {
+!     Comp c1, c2, c3, excl = NULL, stail = tail;
+!     char *sptr;
+! 
+!     /*
+!      * Check for a tilde in the expression.  We need to know this in 
+!      * advance so as to be able to treat the whole a~b expression by
+!      * backtracking:  see exclusion code in doesmatch().
+!      */
+!     if (isset(EXTENDEDGLOB)) {
+! 	int pct = 0;
+! 	for (sptr = pptr; *sptr; sptr++) {
+! 	    if (*sptr == Inpar)
+! 		pct++;
+! 	    else if (*sptr == Outpar && --pct < 0)
+! 		break;
+! 	    else if (*sptr == Bar && !pct)
+! 		break;
+! 	    else if (*sptr == Tilde && !pct) {
+! 		tail = NULL;
+! 		break;
+! 	    }
+! 	}
+!     }
+  
+      c1 = parsecomp(gflag);
+      if (!c1)
+***************
+*** 662,667 ****
+--- 696,702 ----
+  	if (!excl)
+  	    return NULL;
+      }
++     tail = stail;
+      if (*pptr == Bar || excl) {
+  	/* found an alternative or something to exclude */
+  	c2 = (Comp) alloc(sizeof *c2);
+***************
+*** 680,686 ****
+  	c2->str = dupstring("");
+  	c2->left = c1;
+  	c2->right = c3;
+! 	c2->exclude = excl;
+  	if (gflag & GF_PATHADD)
+  	    c2->stat |= C_PATHADD;
+  	return c2;
+--- 715,722 ----
+  	c2->str = dupstring("");
+  	c2->left = c1;
+  	c2->right = c3;
+! 	if ((c2->exclude = excl))
+! 	    c2->next = stail;
+  	if (gflag & GF_PATHADD)
+  	    c2->stat |= C_PATHADD;
+  	return c2;
+***************
+*** 1983,1988 ****
+--- 2019,2026 ----
+  	pptr = eptr;
+  	ret = doesmatch(c->exclude);
+      }
++     if (*pptr)
++ 	ret = 0;
+  
+      pptr = saves;
+      first = savei;
+***************
+*** 2016,2032 ****
+      char *opptr = pptr;
+  
+      while (*pptr) {
+! 	char *saves = pptr;
+! 	if (OPTIONALP(c) && *pdone >= 1)
+! 	    return;
+! 	if (!matchonce(c) || saves == pptr ||
+! 	    trystring[pptr-opptr]) {
+! 	    pptr = saves;
+! 	    break;
+  	}
+- 	gcnode = (Gclose)zalloc(sizeof(struct gclose));
+- 	gcnode->start = saves;
+- 	gcnode->end = pptr;
+  	pushnode(closlist, gcnode);
+  	(*pdone)++;
+      }
+--- 2054,2078 ----
+      char *opptr = pptr;
+  
+      while (*pptr) {
+! 	if (STARP(c)) {
+! 	    if (trystring[(pptr+1)-opptr])
+! 		break;
+! 	    gcnode = (Gclose)zalloc(sizeof(struct gclose));
+! 	    gcnode->start = pptr;
+! 	    gcnode->end = ++pptr;
+! 	} else {
+! 	    char *saves = pptr;
+! 	    if (OPTIONALP(c) && *pdone >= 1)
+! 		return;
+! 	    if (!matchonce(c) || saves == pptr ||
+! 		trystring[pptr-opptr]) {
+! 		pptr = saves;
+! 		break;
+! 	    }
+! 	    gcnode = (Gclose)zalloc(sizeof(struct gclose));
+! 	    gcnode->start = saves;
+! 	    gcnode->end = pptr;
+  	}
+  	pushnode(closlist, gcnode);
+  	(*pdone)++;
+      }
+***************
+*** 2057,2067 ****
+  	     */
+  	    char looka;
+  
+! 	    if (*c->str == Quest && !c->str[1] && c->next &&
+  		!c->next->left && (looka = *c->next->str) &&
+  		!itok(looka)) {
+  		/* Another simple optimisation for a very common case:
+! 		 * we are processing a * (i.e. ?#) and there is
+  		 * an ordinary character match next.  We look ahead for
+  		 * that character, taking care of Meta bytes.
+  		 */
+--- 2103,2113 ----
+  	     */
+  	    char looka;
+  
+! 	    if (STARP(c) && c->next &&
+  		!c->next->left && (looka = *c->next->str) &&
+  		!itok(looka)) {
+  		/* Another simple optimisation for a very common case:
+! 		 * we are processing a * and there is
+  		 * an ordinary character match next.  We look ahead for
+  		 * that character, taking care of Meta bytes.
+  		 */
+***************
+*** 2090,2096 ****
+  			return 0;
+  		    pptr = saves;
+  		    first = 0;
+! 		    if (!matchonce(c) || pptr == saves)
+  			return 0;
+  		}
+  	    }
+--- 2136,2146 ----
+  			return 0;
+  		    pptr = saves;
+  		    first = 0;
+! 		    if (STARP(c)) {
+! 			if (!*pptr)
+! 			    return 0;
+! 			pptr++;
+! 		    } else if (!matchonce(c) || pptr == saves)
+  			return 0;
+  		}
+  	    }
+***************
+*** 2182,2190 ****
+  	    /* Loop over alternatives with exclusions: (foo~bar|...). *
+  	     * Exclusions apply to the pattern in c->left.            */
+  	    if (c->left || c->right) {
+! 		int ret, ret2;
+! 		ret = doesmatch(c->left) &&
+! 		    !(c->exclude && excluded(c, saves));
+  		ret2 = 0;
+  		if (c->right && (!ret || inclosure)) {
+  		    /* If in a closure, we always want the longest match. */
+--- 2232,2286 ----
+  	    /* Loop over alternatives with exclusions: (foo~bar|...). *
+  	     * Exclusions apply to the pattern in c->left.            */
+  	    if (c->left || c->right) {
+! 		int ret = 0, ret2 = 0;
+! 		if (c->exclude) {
+! 		    char *exclend = 0;
+! 
+! 		    /* We may need to back up on things like `(*~foo)'
+! 		     * if the `*' matched `foo' but needs to match `fo'.
+! 		     * exclend marks the end of the shortened text.  We
+! 		     * need to restore it to match the tail.
+! 		     * We set `inclosure' because we need the more
+! 		     * sophisticated code in doesmatch() for any nested
+! 		     * closures.
+! 		     */
+! 		    inclosure++;
+! 
+! 		    while (!exclend || exclend >= pptr) {
+! 			char exclsav = 0;
+! 			if (exclend) {
+! 			     exclsav = *exclend;
+! 			    *exclend = '\0';
+! 			 }
+! 			if ((ret = doesmatch(c->left))) {
+! 			    if (exclend)
+! 				*exclend = exclsav;
+! 			    exclsav = *(exclend = pptr);
+! 			    *exclend = '\0';
+! 			    ret2 = !excluded(c, saves);
+! 			}
+! 			if (exclend)
+! 			    *exclend = exclsav;
+! 
+! 			if (!ret)
+! 			    break;
+! 			if ((ret = ret2 &&
+! 			     ((!c->next && (!LASTP(c) || !*pptr))
+! 			      || (c->next && doesmatch(c->next)))) ||
+! 			    (!c->next && LASTP(c)))
+! 			    break;
+! 			/* Back up if necessary: exclend gives the position
+! 			 * of the end of the match we are excluding,
+! 			 * so only try to match to there.
+! 			 */
+! 			exclend--;
+! 			pptr = saves;
+! 		    }
+! 		    inclosure--;
+! 		    if (ret)
+! 			return 1;
+! 		} else
+! 		    ret = doesmatch(c->left);
+  		ret2 = 0;
+  		if (c->right && (!ret || inclosure)) {
+  		    /* If in a closure, we always want the longest match. */
+***************
+*** 2227,2234 ****
+  	    pat++;
+  	    continue;
+  	}
+- 	if (*pat == Hat)	/* following pattern is negated */
+- 	    return 1 - doesmatch(c->next);
+  	if (*pat == Inbrack) {
+  	    /* Match groups of characters */
+  #define PAT(X) (pat[X] == Meta ? pat[(X)+1] ^ 32 : untok(pat[X]))
+--- 2323,2328 ----
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +39 50 844536
+WWW:  http://www.ifh.de/~pws/
+Gruppo Teorico, Dipartimento di Fisica
+Piazza Torricelli 2, 56100 Pisa, Italy
+

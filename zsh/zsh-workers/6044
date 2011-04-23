@@ -1,0 +1,144 @@
+From zsh-workers-return-6044-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Apr 15 20:13:41 1999
+Return-Path: <zsh-workers-return-6044-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14919 invoked from network); 15 Apr 1999 20:13:40 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 Apr 1999 20:13:40 -0000
+Received: (qmail 18352 invoked by alias); 15 Apr 1999 20:13:31 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6044
+Received: (qmail 18317 invoked from network); 15 Apr 1999 20:12:11 -0000
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <990415131031.ZM10896@candle.brasslantern.com>
+Date: Thu, 15 Apr 1999 13:10:31 -0700
+In-Reply-To: <199904151208.OAA08105@beta.informatik.hu-berlin.de>
+Comments: In reply to Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+        "Re: BUG: zsh-3.1.5-pws-14: parameter expansion not working properly" (Apr 15,  2:08pm)
+References: <199904151208.OAA08105@beta.informatik.hu-berlin.de>
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: BUG: zsh-3.1.5-pws-14: parameter expansion not working properly
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Apr 15,  2:08pm, Sven Wischnowsky wrote:
+} Subject: Re: BUG: zsh-3.1.5-pws-14: parameter expansion not working proper
+}
+} We have this call chain:
+} 
+}    A paramsubst(), calls
+}    B    multsub(), calls
+}    C       paramsubst()
+} 
+} Now, we could make the multsub() save (and at the end restore) the
+} value of, say `static int mult_isarr'. It then sets it to zero and
+} calls paramsubst() (via prefork(), as usual). At the end of
+} paramsubst() we set `mult_isarr = isarr'.
+
+I actually tried this last night -- although I had paramsubst() set the
+static to 0 on the way in; multsub() just saved and restored it -- and
+it worked for some cases but not others, so I decided I was missing a
+subtlety somewhere and threw it out.
+
+} After the prefork(), multsub() now knows that the list it gets was an
+} array expression if `mult_isarr != 0'.
+
+Right; this is interesting only when there's exactly one linknode in the
+list returned by prefork().  (Hmm, or is it also interesting for zero
+linknodes?  Should an empty array behave the same as an unset parameter,
+or not?  Ah, no, it should not -- "$@" goes away entirely when $# == 0,
+but "$*" yields the empty string.)
+
+} This was the first part of what I meant -- getting information about
+} the array'ness. With the other part I meant the call to multsub() we
+} are talking about here (line 980). There we have to decide if we give
+} `&aval' or `NULL' to multsub() where it is used to decide if the
+} joining should be done -- the problem to solve, as you said.
+
+Actually, that's NOT the problem to solve, or at least I didn't think so.
+I think the code was correct back when `aspar' was the sole determinant
+of whether NULL was passed in.  It's `mult_isarr', as you call it, that
+should otherwise determine whether multsub() does a join.
+
+} > No, that's too confusing and not necessary.  The only real issue is the
+} > "precedence" if you will, of subscripting vs. joining.
+
+The foregoing is the important point; I was confused here:
+
+} > We "solved" the problem of subscripting scalars that were
+} > accidentally treated as arrays, by forcing all quoted arrays to
+} > be taken as scalars; I think we need to back off from that and
+} > concentrate on not accidentally treating scalars as arrays.
+} 
+} I don't think I understand this. And I thought I kept it from arrays
+} being accidentally being treated as scalars.
+
+Um, yes; that's probably the subtlety that I missed.
+
+} From your first mail about this I got the impression that you wanted
+} nested expressions to keep their knowledge about whether they are
+} arrays or not, so that (with foo being an array) in "${${${${(@)foo}}}[1]}"
+} the outer paramsubst() (A) gets notified by multsub() (B) that the
+} inner paramsubst() (C) returned an array and the subscripting gives
+} the first array element.
+
+Yes, that's the general idea.  I'm not sure how many levels of ${ } the
+array-ness should propagate through, except that I currently believe it
+should be at least one more level than it currently does.
+
+Think about it this way:
+
+1. The expression "${(@)foo}" produces an array of quoted words.
+
+2. In the expression "${${(@)foo}}", the outer ${ ... } can include both
+flags in leading () and subscripts in trailing [].  The inner ${(@)foo}
+should *still* produce an array of quoted words, to which the flags and
+subscripts of the outer ${ ... } are applied.
+
+3. To work like the old zsh, the subscripts should apply *before* any
+split or join operation implied by the flags (or by the lack of a flag).
+The exception being the (P) flag, because it is defined to change the
+interpretation of the parameter's name and thus must "bind tighter" than
+anything including subscripts.
+
+In pws-14+, at step (2), the inner expression does NOT produce an array
+unless the outer expression uses (@).  This is what I think is wrong.
+I don't think it's possible to "pass down" from paramsubst-->multsub
+the knowledge of whether an array should be returned [except when (P)];
+it has to be "passed up," multsub<--prefork<--stringsubst<--paramsubst.
+
+Beyond those three steps, things get fuzzy.  In trying to reason about
+this without actually seeing it in action, I *believe* that it's OK if:
+
+4. *After* the subscripts are applied, the outer ${ ... } joins the
+quoted words into a single string, *unless*: the (@) flag is present
+or the [@] subscript was applied, and the (j) flag is not present.
+
+I know that's still a change from the old behavior, so I can't be sure
+that it'll work out, but I *think* it will.
+
+5. Finally, the string is split again according to SHWORDSPLIT or the
+(s) flag.
+
+6. If there is a split, or if (@) or [@] was present, an array of quoted
+words is returned.  If there's another outer ${ ... }, go to step (3).
+
+} With respect to the outer paramsubst()s this would make things
+} independent of whether the whole thing is in quotes or not, only the
+} inner paramsubst()s `control' if the outer ones work on an array
+} by testing if the thing is in quotes and if the `(@)' flag (or
+} something similar like the `s' flag or `=') is used.
+
+As I just said, I don't *think* it should be independent of whether the
+whole thing is in quotes.  The quotes should affect what happens at (4),
+but they should *not* affect what happens at 2-->3 or 6-->3.
+
+Does that make sense?
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

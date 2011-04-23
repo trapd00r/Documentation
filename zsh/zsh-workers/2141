@@ -1,0 +1,714 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Sat Sep 14 14:56:03 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id OAA00148 for <mason@primenet.com.au>; Sat, 14 Sep 1996 14:55:54 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id AAA10847; Sat, 14 Sep 1996 00:36:53 -0400 (EDT)
+Resent-Date: Sat, 14 Sep 1996 00:36:53 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199609140435.GAA16462@bolyai.cs.elte.hu>
+Subject: read builtin revision
+To: zsh-workers@math.gatech.edu (Zsh workers list)
+Date: Sat, 14 Sep 1996 06:35:29 +0200 (MET DST)
+Organization: Dept. of Comp. Sci., Eotvos University, Budapest, Hungary
+Phone: (36 1)2669833 ext: 2667, home phone: (36 1) 2752368
+X-Mailer: ELM [version 2.4ME+ PL16 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"hlCmx1.0.Pf2.bPZEo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2141
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+The large patch below simplifies the read builtin.  It also adds new
+functionality: -k can now be combined with -u0 to read binary data from
+stdin.  When -k is combined with -e and -E the input just echoed on stderr
+and no extra trailing newline is printed.  This can be used to write a
+simple and fast cat shell function using
+
+while read -u0ek 4096; do ; done
+
+with redirections.  Several metafication problems are also corrected by
+this patch.  A patch to util.c is also included which makes
+metafy/unmetafy more efficient.  I wrote last week that I had planned to
+release 3.0.1 this week.  Unfortunately I have no time for zsh at the
+moment so this release will be delayed.
+
+Zoltan
+
+
+*** Src/builtin.c	1996/09/03 20:33:07	2.86
+--- Src/builtin.c	1996/09/13 03:30:51
+***************
+*** 4813,4832 ****
+  int
+  bin_read(char *name, char **args, char *ops, int func)
+  {
+!     char *reply = "REPLY", *readpmpt;
+!     int bsiz, c = 0, gotnl = 0, al = 0, first;
+!     char *buf, *bptr, *firstarg = *args, *zbuforig;
+      LinkList readll = newlinklist();
+  
+!     /* option -k means read only a given number of characters (default 1) */
+!     if (ops['k']) {
+! 	int nchars, val;
+! 	char d;
+! 	/* haso indicates that /dev/tty has been opened specially, *
+! 	 * and needs to be closed again before returning.  isem    *
+! 	 * indicates that the terminal type is emacs.              */
+! 	int haso = 0, isem = !strcmp(term, "emacs");
+  
+  	if (SHTTY == -1) {
+  	    /* need to open /dev/tty specially */
+  	    SHTTY = open("/dev/tty", O_RDWR);
+--- 4813,4842 ----
+  int
+  bin_read(char *name, char **args, char *ops, int func)
+  {
+!     char *reply, *readpmpt;
+!     int bsiz, c = 0, gotnl = 0, al = 0, first, nchars = 1;
+!     int haso = 0;	/* true if /dev/tty has been opened specially */
+!     int isem = !strcmp(term, "emacs");
+!     char *buf, *bptr, *firstarg, *zbuforig;
+      LinkList readll = newlinklist();
+  
+!     if ((ops['k'] || ops['b']) && *args && idigit(**args)) {
+! 	if (!(nchars = atoi(*args)))
+! 	    nchars = 1;
+! 	args++;
+!     }
+  
++     firstarg = *args;
++     if (*args && **args == '?')
++ 	args++;
++     /* default result parameter */
++     reply = *args ? *args++ : ops['A'] ? "reply" : "REPLY";
++     if (ops['A'] && *args) {
++ 	zwarnnam(name, "only one array argument allowed", NULL, 0);
++ 	return 1;
++     }
++ 
++     if ((ops['k'] && !ops['u'] && !ops['p']) || ops['q']) {
+  	if (SHTTY == -1) {
+  	    /* need to open /dev/tty specially */
+  	    SHTTY = open("/dev/tty", O_RDWR);
+***************
+*** 4841,4927 ****
+  	}
+  	if (unset(INTERACTIVE))
+  	    gettyinfo(&shttyinfo);
+! 	/* sort out the number of characters to read */
+! 	if (*args && idigit(**args)) {
+! 	    if (!(nchars = atoi(*args)))
+! 		nchars = 1;
+! 	    args++;
+! 	} else
+! 	    nchars = 1;
+! 
+! 	/* handle the prompt string, if provided */
+! 	firstarg = *args;
+! 	if (*args && **args == '?')
+! 	    args++;
+! 	if (firstarg) {
+! 	    for (readpmpt = firstarg;
+! 		 *readpmpt && *readpmpt != '?'; readpmpt++);
+! 	    if (*readpmpt++) {
+! 		if (isatty(0))
+! 		    write(2, readpmpt, strlen(readpmpt));
+! 		readpmpt[-1] = '\0';
+  	    }
+  	}
+  
+! 	/* default result parameter */
+! 	reply = (*args) ? *args++ : "REPLY";
+! 	/* allocate buffer space for result */
+! 	bptr = buf = (char *)zalloc(nchars + 1);
+  
+! 	/* attach to the tty */
+! 	attachtty(mypgrp);
+! 	if (!isem)
+! 	    setcbreak();
+  
+! 	while (nchars>0) {
+  	    /* If read returns 0, is end of file */
+! 	    if ((val=read(SHTTY, bptr, nchars))<=0) {
+! 	        /* If end of file, or an error occurred */
+! 		*bptr='\0';
+! 		if (!isem)
+! 		    settyinfo(&shttyinfo);
+! 		if (ops['e'] || ops['E']) {
+! 		    printf("%s\n", buf);
+! 		    if (ops['e'])
+! 			zsfree(buf);
+! 		}
+! 		if (!ops['e'])
+! 		    setsparam(reply, metafy(buf, -1, META_REALLOC));
+!  
+! 		if (haso) {
+! 		    close(SHTTY);
+! 		    SHTTY = -1;
+! 		}
+! 		return 1;
+! 	    }
+  	    
+  	    /* decrement number of characters read from number required */
+! 	    nchars-=val;
+! 	    
+  	    /* increment pointer past read characters */
+! 	    bptr+=val;
+! 	}
+  	
+! 	/* Terminate string */
+! 	*bptr='\0';
+! 
+! 	/* dispose of result appropriately, etc. */
+! 	if (isem)
+! 	    while (read(SHTTY, &d, 1) == 1 && d != '\n');
+! 	else
+! 	    settyinfo(&shttyinfo);
+! 	if (haso) {
+! 	    close(SHTTY);
+! 	    SHTTY = -1;
+! 	}
+! 	if (ops['e'] || ops['E']) {
+! 	    printf("%s\n", buf);
+! 	    if (ops['e'])
+! 		zsfree(buf);
+  	}
+  	if (!ops['e'])
+! 	    setsparam(reply, metafy(buf, -1, META_REALLOC));
+! 	return 0;
+      }
+  
+      /* option -l is used in compctl functions */
+--- 4851,4937 ----
+  	}
+  	if (unset(INTERACTIVE))
+  	    gettyinfo(&shttyinfo);
+! 	/* attach to the tty */
+! 	attachtty(mypgrp);
+! 	if (!isem && ops['k'])
+! 	    setcbreak();
+! 	readfd = SHTTY;
+!     } else if (ops['u'] && !ops['p']) {
+! 	/* -u means take input from the specified file descriptor. *
+! 	 * -up means take input from the coprocess.                */
+! 	for (readfd = 0; readfd < 10; ++readfd)
+! 	    if (ops[readfd + '0'])
+! 		break;
+! 	if (readfd == 10)
+! 	    readfd = 0;
+!     } else if (ops['p'])
+! 	readfd = coprocin;
+!     else {
+! 	/* last resort: take input from plain old stdin */
+! 	attachtty((jobtab[thisjob].gleader) ? jobtab[thisjob].gleader : mypgrp);
+! 	readfd = 0;
+! #if 0
+! 	  else if (isset(SHINSTDIN) && unset(INTERACTIVE)) {
+! 	    /* use stdout or stderr, if either is a tty */
+! 	    if (isatty(1))
+! 		readfd = 1;
+! 	    else if (isatty(2))
+! 		readfd = 2;
+! 	}
+! #endif
+!     }
+!     /* handle prompt */
+!     if (firstarg) {
+! 	for (readpmpt = firstarg;
+! 	     *readpmpt && *readpmpt != '?'; readpmpt++);
+! 	if (*readpmpt++) {
+! 	    if (isatty(0)) {
+! 		zputs(readpmpt, stderr);
+! 		fflush(stderr);
+  	    }
++ 	    readpmpt[-1] = '\0';
+  	}
++     }
+  
+!     /* option -k means read only a given number of characters (default 1) */
+!     if (ops['k']) {
+! 	int val;
+! 	char d;
+  
+! 	/* allocate buffer space for result */
+! 	bptr = buf = (char *)zalloc(nchars);
+  
+! 	do {
+  	    /* If read returns 0, is end of file */
+! 	    if ((val = read(readfd, bptr, nchars)) <= 0)
+! 		break;
+  	    
+  	    /* decrement number of characters read from number required */
+! 	    nchars -= val;
+! 
+  	    /* increment pointer past read characters */
+! 	    bptr += val;
+! 	} while (nchars > 0);
+  	
+! 	if (!ops['u'] && !ops['p']) {
+! 	    /* dispose of result appropriately, etc. */
+! 	    if (isem)
+! 		while (val > 0 && read(SHTTY, &d, 1) == 1 && d != '\n');
+! 	    else
+! 		settyinfo(&shttyinfo);
+! 	    if (haso) {
+! 		close(SHTTY);
+! 		SHTTY = -1;
+! 	    }
+  	}
++ 
++ 	if (ops['e'] || ops['E'])
++ 	    fwrite(buf, bptr - buf, 1, stdout);
+  	if (!ops['e'])
+! 	    setsparam(reply, metafy(buf, bptr - buf, META_REALLOC));
+! 	else
+! 	    zfree(buf, bptr - buf);
+! 	return val <= 0;
+      }
+  
+      /* option -l is used in compctl functions */
+***************
+*** 4941,4956 ****
+  		printf("%d\n", cs + 1);
+  	    if (!ops['e']) {
+  		sprintf(nbuf, "%d", cs + 1);
+! 		setsparam(*args ? *args : "REPLY", ztrdup(nbuf));
+  	    }
+  	    return 0;
+  	}
+  	/* without -n, the current line is assigned to the given parameter as a
+  	scalar */
+! 	if (ops['e'] || ops['E'])
+! 	    printf("%s\n", (char *)line);
+  	if (!ops['e'])
+! 	    setsparam(*args ? *args : "REPLY", metafy((char *)line, ll, META_DUP));
+  	return 0;
+      }
+  
+--- 4951,4968 ----
+  		printf("%d\n", cs + 1);
+  	    if (!ops['e']) {
+  		sprintf(nbuf, "%d", cs + 1);
+! 		setsparam(reply, ztrdup(nbuf));
+  	    }
+  	    return 0;
+  	}
+  	/* without -n, the current line is assigned to the given parameter as a
+  	scalar */
+! 	if (ops['e'] || ops['E']) {
+! 	    zputs((char *) line, stdout);
+! 	    putchar('\n');
+! 	}
+  	if (!ops['e'])
+! 	    setsparam(reply, line);
+  	return 0;
+      }
+  
+***************
+*** 4972,4978 ****
+  		printf("%d\n", clwpos + 1);
+  	    if (!ops['e']) {
+  		sprintf(nbuf, "%d", clwpos + 1);
+! 		setsparam(*args ? *args : "REPLY", ztrdup(nbuf));
+  	    }
+  	    return 0;
+  	}
+--- 4984,4990 ----
+  		printf("%d\n", clwpos + 1);
+  	    if (!ops['e']) {
+  		sprintf(nbuf, "%d", clwpos + 1);
+! 		setsparam(reply, ztrdup(nbuf));
+  	    }
+  	    return 0;
+  	}
+***************
+*** 4987,5000 ****
+  	    for (i = 0, p = b; i < clwnum; p++, i++)
+  		*p = ztrdup(clwords[i]);
+  
+! 	    setaparam(*args ? *args : "reply", b);
+  	    return 0;
+  	}
+  	if (ops['e'] || ops['E']) {
+  	    int i;
+  
+! 	    for (i = 0; i < clwnum; i++)
+! 		printf("%s\n", clwords[i]);
+  
+  	    if (ops['e'])
+  		return 0;
+--- 4999,5014 ----
+  	    for (i = 0, p = b; i < clwnum; p++, i++)
+  		*p = ztrdup(clwords[i]);
+  
+! 	    setaparam(reply, b);
+  	    return 0;
+  	}
+  	if (ops['e'] || ops['E']) {
+  	    int i;
+  
+! 	    for (i = 0; i < clwnum; i++) {
+! 		zputs(clwords[i], stdout);
+! 		putchar('\n');
+! 	    }
+  
+  	    if (ops['e'])
+  		return 0;
+***************
+*** 5012,5053 ****
+  
+      /* option -q means get one character, and interpret it as a Y or N */
+      if (ops['q']) {
+! 	char *readbuf;
+! 	/* haso indicates that /dev/tty has been opened specially, and needs to
+! 	be closed again before returning */
+! 	int haso = 0;
+! 
+! 	if (SHTTY == -1) {
+! 	    /* need to open /dev/tty specially */
+! 	    SHTTY = open("/dev/tty", O_RDWR);
+! 	    haso = 1;
+! 	}
+! 	/* we should have a SHTTY open by now */
+! 	if (SHTTY == -1) {
+! 	    fprintf(stderr, "not interactive and can't open terminal\n");
+! 	    fflush(stderr);
+! 	    return 1;
+! 	}
+! 	if (unset(INTERACTIVE))
+! 	    gettyinfo(&shttyinfo);
+  
+  	/* set up the buffer */
+- 	readbuf = (char *)zalloc(2);
+  	readbuf[1] = '\0';
+! 	/* handle prompt */
+! 	if (*args && **args == '?')
+! 	    args++;
+! 	if (firstarg) {
+! 	    for (readpmpt = firstarg;
+! 		 *readpmpt && *readpmpt != '?'; readpmpt++);
+! 	    if (*readpmpt++) {
+! 		if (isatty(0))
+! 		    write(2, readpmpt, strlen(readpmpt));
+! 		readpmpt[-1] = '\0';
+! 	    }
+! 	}
+! 	/* default result parameter */
+! 	reply = (*args) ? *args++ : "REPLY";
+  	/* get, and store, reply */
+  	readbuf[0] = ((char)getquery(NULL)) == 'y' ? 'y' : 'n';
+  
+--- 5026,5036 ----
+  
+      /* option -q means get one character, and interpret it as a Y or N */
+      if (ops['q']) {
+! 	char readbuf[2];
+  
+  	/* set up the buffer */
+  	readbuf[1] = '\0';
+! 
+  	/* get, and store, reply */
+  	readbuf[0] = ((char)getquery(NULL)) == 'y' ? 'y' : 'n';
+  
+***************
+*** 5056,5068 ****
+  	    close(SHTTY);
+  	    SHTTY = -1;
+  	}
+! 	if (ops['e'] || ops['E']) {
+  	    printf("%s\n", readbuf);
+- 	    if (ops['e'])
+- 		free(readbuf);
+- 	}
+  	if (!ops['e'])
+! 	    setsparam(reply, readbuf);
+  
+  	return readbuf[0] == 'n';
+      }
+--- 5039,5049 ----
+  	    close(SHTTY);
+  	    SHTTY = -1;
+  	}
+! 
+! 	if (ops['e'] || ops['E'])
+  	    printf("%s\n", readbuf);
+  	if (!ops['e'])
+! 	    setsparam(reply, ztrdup(readbuf));
+  
+  	return readbuf[0] == 'n';
+      }
+***************
+*** 5071,5118 ****
+      and assign words to the parameters until they run out.  Leftover words go
+      onto the last parameter.  If an array is specified, all the words become
+      separate elements of the array. */
+-     if (*args && **args == '?')
+- 	args++;
+-     /* default result parameter */
+-     reply = *args ? *args++ : ops['A'] ? "reply" : "REPLY";
+-     if (ops['A'] && *args) {
+- 	zwarnnam(name, "only one array argument allowed", NULL, 0);
+- 	return 1;
+-     }
+-     /* -u means take input from the specified file descriptor.  -up means take
+-     input from the coprocess. */
+-     if (ops['u'] && !ops['p']) {
+- 	for (readfd = 0; readfd < 10; ++readfd)
+- 	    if (ops[readfd + '0'])
+- 		break;
+- 	if (readfd == 10)
+- 	    readfd = 0;
+-     } else if (ops['p'])
+- 	readfd = coprocin;
+-     else {
+- 	/* last resort: take input from plain old stdin */
+- 	attachtty((jobtab[thisjob].gleader) ? jobtab[thisjob].gleader : mypgrp);
+- 	readfd = 0;
+- 	/* handle prompt */
+- 	if (firstarg) {
+- 	    for (readpmpt = firstarg;
+- 		 *readpmpt && *readpmpt != '?'; readpmpt++);
+- 	    if (*readpmpt++) {
+- 		if (isatty(0))
+- 		    write(2, readpmpt, strlen(readpmpt));
+- 		readpmpt[-1] = '\0';
+- 	    }
+- 	}
+- #if 0
+- 	  else if (isset(SHINSTDIN) && unset(INTERACTIVE)) {
+- 	    /* use stdout or stderr, if either is a tty */
+- 	    if (isatty(1))
+- 		readfd = 1;
+- 	    else if (isatty(2))
+- 		readfd = 2;
+- 	}
+- #endif
+-     }
+  
+      zbuforig = zbuf = (!ops['z']) ? NULL :
+  	(nonempty(bufstack)) ? (char *) getlinknode(bufstack) : ztrdup("");
+--- 5052,5057 ----
+***************
+*** 5159,5175 ****
+  	*bptr = '\0';
+  	/* dispose of word appropriately */
+  	if (ops['e'] || ops['E']) {
+! 	    printf("%s\n", buf);
+! 	    if (ops['e'])
+! 		free(buf);
+  	}
+  	if (!ops['e']) {
+  	    if (ops['A']) {
+! 		addlinknode(readll, metafy(buf, -1, META_REALLOC));
+  		al++;
+  	    } else
+! 		setsparam(reply, metafy(buf, -1, META_REALLOC));
+! 	}
+  	if (!ops['A'])
+  	    reply = *args++;
+      }
+--- 5098,5114 ----
+  	*bptr = '\0';
+  	/* dispose of word appropriately */
+  	if (ops['e'] || ops['E']) {
+! 	    zputs(buf, stdout);
+! 	    putchar('\n');
+  	}
+  	if (!ops['e']) {
+  	    if (ops['A']) {
+! 		addlinknode(readll, buf);
+  		al++;
+  	    } else
+! 		setsparam(reply, buf);
+! 	} else
+! 	    free(buf);
+  	if (!ops['A'])
+  	    reply = *args++;
+      }
+***************
+*** 5187,5204 ****
+  	LinkNode n;
+  
+  	p = (ops['e'] ? (char **)NULL
+! 	     : (char **)zcalloc((al + 1) * sizeof(char *)));
+  
+  	for (pp = p, n = firstnode(readll); n; incnode(n)) {
+  	    if (ops['e'] || ops['E']) {
+! 		printf("%s\n", (char *)getdata(n));
+! 		if (p)
+! 		    zsfree(getdata(n));
+! 	    } else
+  		*pp++ = (char *)getdata(n);
+  	}
+! 	if (p)
+  	    setaparam(reply, p);
+  	return c == EOF;
+      }
+      buf = bptr = (char *)zalloc(bsiz = 64);
+--- 5126,5147 ----
+  	LinkNode n;
+  
+  	p = (ops['e'] ? (char **)NULL
+! 	     : (char **)zalloc((al + 1) * sizeof(char *)));
+  
+  	for (pp = p, n = firstnode(readll); n; incnode(n)) {
+  	    if (ops['e'] || ops['E']) {
+! 		zputs((char *) getdata(n), stdout);
+! 		putchar('\n');
+! 	    }
+! 	    if (p)
+  		*pp++ = (char *)getdata(n);
++ 	    else
++ 		zsfree(getdata(n));
+  	}
+! 	if (p) {
+! 	    *pp++ = NULL;
+  	    setaparam(reply, p);
++ 	}
+  	return c == EOF;
+      }
+      buf = bptr = (char *)zalloc(bsiz = 64);
+***************
+*** 5239,5250 ****
+      *bptr = '\0';
+      /* final assignment of reply, etc. */
+      if (ops['e'] || ops['E']) {
+! 	printf("%s\n", buf);
+! 	if (ops['e'])
+! 	    zsfree(buf);
+      }
+      if (!ops['e'])
+! 	setsparam(reply, metafy(buf, -1, META_REALLOC));
+      if (zbuforig) {
+  	char first = *zbuforig;
+  
+--- 5182,5194 ----
+      *bptr = '\0';
+      /* final assignment of reply, etc. */
+      if (ops['e'] || ops['E']) {
+! 	zputs(buf, stdout);
+! 	putchar('\n');
+      }
+      if (!ops['e'])
+! 	setsparam(reply, buf);
+!     else
+! 	zsfree(buf);
+      if (zbuforig) {
+  	char first = *zbuforig;
+  
+***************
+*** 5274,5288 ****
+  	buffer.  This may be a null byte to indicate EOF.  If reading from the
+  	buffer, move on the buffer pointer. */
+  	if (*zbuf == Meta)
+! 	    return zbuf++, *zbuf++ ^ 32;
+  	else
+! 	    return (*zbuf) ? *zbuf++ : EOF;
+      /* read a character from readfd */
+      if (read(readfd, &cc, 1) != 1)
+  	/* on EOF, return EOF */
+  	return EOF;
+      /* return the character read */
+!     return (int)cc;
+  }
+  
+  /* sched: execute commands at scheduled times */
+--- 5218,5232 ----
+  	buffer.  This may be a null byte to indicate EOF.  If reading from the
+  	buffer, move on the buffer pointer. */
+  	if (*zbuf == Meta)
+! 	    return zbuf++, STOUC(*zbuf++ ^ 32);
+  	else
+! 	    return (*zbuf) ? STOUC(*zbuf++) : EOF;
+      /* read a character from readfd */
+      if (read(readfd, &cc, 1) != 1)
+  	/* on EOF, return EOF */
+  	return EOF;
+      /* return the character read */
+!     return STOUC(cc);
+  }
+  
+  /* sched: execute commands at scheduled times */
+rcsdiff -qc -kk -r2.53 -r2.54 Src/utils.c
+*** Src/utils.c
+--- Src/utils.c	1996/09/14 04:19:41	2.54
+***************
+*** 2918,2930 ****
+  	    break;
+  #endif
+  	}
+! 	e = p = buf + len;
+  	while (meta) {
+! 	    if (imeta(*--p)) {
+! 		*p ^= 32;
+  		meta--;
+- 		for (t = e++; t > p; t[0] = t[-1], --t);
+- 		*p = Meta;
+  	    }
+  	}
+      }
+--- 2918,2930 ----
+  	    break;
+  #endif
+  	}
+! 	p = buf + len;
+! 	e = t = buf + len + meta;
+  	while (meta) {
+! 	    if (imeta(*--t = *--p)) {
+! 		*t-- ^= 32;
+! 		*t = Meta;
+  		meta--;
+  	    }
+  	}
+      }
+***************
+*** 2936,2950 ****
+  char *
+  unmetafy(char *s, int *len)
+  {
+!     char *p;
+!     for (p = s; *p; p++) {
+! 	if (*p == Meta) {
+! 	    chuck(p);
+! 	    *p ^= 32;
+! 	}
+!     }
+      if (len)
+! 	*len = p - s;
+      return s;
+  }
+  
+--- 2936,2947 ----
+  char *
+  unmetafy(char *s, int *len)
+  {
+!     char *p, *t;
+!     for (t = p = s; *p;)
+! 	if ((*t++ = *p++) == Meta)
+! 	    t[-1] = *p++ ^ 32;
+      if (len)
+! 	*len = t - s;
+      return s;
+  }
+  
+*len = p - s;
+      return s;
+  }
+  
+--- 2936,2947 ----
+  char *
+  unmetafy(char *s, int *len)
+  {
+!     char *p, *t;
+!     for (t = p = s; *p;)
+! 	if ((*t++ = *p++) == Meta)
+! 	    t[-1] = *p++ ^ 32;
+      if (len)
+! 	*len = t - s;
+      return s;
+  }
+  
+THE END
+

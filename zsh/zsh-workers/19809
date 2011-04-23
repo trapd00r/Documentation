@@ -1,0 +1,194 @@
+From zsh-workers-return-19809-mason-zsh=primenet.com.au@sunsite.dk Wed Apr 21 11:05:45 2004
+Return-Path: <zsh-workers-return-19809-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19215 invoked from network); 21 Apr 2004 11:05:45 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 21 Apr 2004 11:05:45 -0000
+Received: (qmail 12460 invoked by alias); 21 Apr 2004 11:05:32 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19809
+Received: (qmail 12448 invoked from network); 21 Apr 2004 11:05:31 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 21 Apr 2004 11:05:31 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [130.225.247.86] by sunsite.dk (MessageWall 1.0.8) with SMTP; 21 Apr 2004 11:5:31 -0000
+Received: (qmail 13329 invoked from network); 21 Apr 2004 11:05:31 -0000
+Received: from lhuumrelay3.lnd.ops.eu.uu.net (62.189.58.19)
+  by a.mx.sunsite.dk with SMTP; 21 Apr 2004 11:05:28 -0000
+Received: from MAILSWEEPER01.csr.com (mailhost1.csr.com [62.189.183.235])
+	by lhuumrelay3.lnd.ops.eu.uu.net (8.11.0/8.11.0) with ESMTP id i3LB52v26983
+	for <zsh-workers@sunsite.dk>; Wed, 21 Apr 2004 11:05:02 GMT
+Received: from EXCHANGE02.csr.com (unverified [192.168.137.45]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T69195cc009c0a88d01368@MAILSWEEPER01.csr.com>;
+ Wed, 21 Apr 2004 12:04:34 +0100
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Wed, 21 Apr 2004 12:05:44 +0100
+To: Vincent Stemen <zsh@hightek.org>,
+   zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: (2) Re: FreeBSD compatability feature request 
+In-reply-to: "Vincent Stemen"'s message of "Wed, 21 Apr 2004 03:21:51 CDT."
+             <20040421082151.GA61057@quark.hightek.org> 
+Date: Wed, 21 Apr 2004 12:05:00 +0100
+Message-ID: <18144.1082545500@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 21 Apr 2004 11:05:44.0156 (UTC) FILETIME=[975EC1C0:01C42790]
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.2 required=6.0 tests=EXCUSE_16 autolearn=no 
+	version=2.63
+X-Spam-Hits: 0.2
+
+OK, plan B.
+
+I am now frightened about what happens when any signals are blocked
+while we are waiting for a child.  So instead of doing that, I propose
+queuing traps separately from signals.  This can't cause any races,
+since no extra signal or process handling is involved.  The code is a
+bit more verbose, but should be much safer.  This patches on top of the
+other one.
+
+Again, this should be exactly equivalent to 4.2.0 unless TRAPS_ASYNC is
+unset (POSIX compatibility mode).
+
+This ought to fix the hang.
+
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.26
+diff -u -r1.26 jobs.c
+--- Src/jobs.c	19 Apr 2004 16:02:22 -0000	1.26
++++ Src/jobs.c	21 Apr 2004 10:40:30 -0000
+@@ -994,11 +994,8 @@
+     int q = queue_signal_level();
+     Job jn = jobtab + job;
+ 
+-    queue_not_sigchld++;
+-    if (isset(TRAPSASYNC))
+-	dont_queue_signals();
+-    else
+-	queue_signals();
++    dont_queue_signals();
++    queue_traps();
+     child_block();		 /* unblocked during child_suspend() */
+     if (jn->procs || jn->auxprocs) { /* if any forks were done         */
+ 	jn->stat |= STAT_LOCKED;
+@@ -1029,10 +1026,8 @@
+ 	numpipestats = 1;
+     }
+     child_unblock();
++    dont_queue_traps();
+     restore_queue_signals(q);
+-    if (!queueing_enabled)
+-	run_queued_signals();
+-    queue_not_sigchld--;
+ }
+ 
+ /* wait for running job to finish */
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.26
+diff -u -r1.26 signals.c
+--- Src/signals.c	19 Apr 2004 16:02:22 -0000	1.26
++++ Src/signals.c	21 Apr 2004 10:40:30 -0000
+@@ -49,12 +49,19 @@
+ /* Variables used by signal queueing */
+ 
+ /**/
+-mod_export int queueing_enabled, queue_front, queue_rear, queue_not_sigchld;
++mod_export int queueing_enabled, queue_front, queue_rear;
+ /**/
+ mod_export int signal_queue[MAX_QUEUE_SIZE];
+ /**/
+ mod_export sigset_t signal_mask_queue[MAX_QUEUE_SIZE];
+ 
++/* Variables used by trap queueing */
++
++/**/
++mod_export int trap_queueing_enabled, trap_queue_front, trap_queue_rear;
++/**/
++mod_export int trap_queue[MAX_QUEUE_SIZE];
++
+ /* This is only used on machines that don't understand signal sets.  *
+  * On SYSV machines this will represent the signals that are blocked *
+  * (held) using sighold.  On machines which can't block signals at   *
+@@ -426,7 +433,7 @@
+ #endif
+ 
+     /* Are we queueing signals now?      */
+-    if (queueing_enabled && (sig != SIGCHLD || !queue_not_sigchld)) {
++    if (queueing_enabled) {
+         int temp_rear = ++queue_rear % MAX_QUEUE_SIZE;
+ 
+ 	DPUTS(temp_rear == queue_front, "BUG: signal queue full");
+@@ -1058,5 +1065,17 @@
+     if ((sigtrapped[sig] & ZSIG_IGNORED) || !sigfuncs[sig] || errflag)
+ 	return;
+ 
++    /* Adapted from signal queueing in zhandler */
++    if (trap_queueing_enabled && !isset(TRAPSASYNC)) {
++	int temp_rear = ++trap_queue_rear % MAX_QUEUE_SIZE;
++
++	DPUTS(temp_rear == trap_queue_front, "BUG: trap queue full");
++	if (temp_rear != trap_queue_front) {
++	    trap_queue_rear = temp_rear;
++	    trap_queue[trap_queue_rear] = sig;
++	}
++	return;
++    }
++
+     dotrapargs(sig, sigtrapped+sig, sigfuncs[sig]);
+ }
+Index: Src/signals.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.h,v
+retrieving revision 1.4
+diff -u -r1.4 signals.h
+--- Src/signals.h	18 Jun 2001 07:24:23 -0000	1.4
++++ Src/signals.h	21 Apr 2004 10:40:30 -0000
+@@ -101,6 +101,23 @@
+ 
+ #define restore_queue_signals(q) (queueing_enabled = (q))
+ 
++/*
++ * Similar (but simpler) mechanism used for queueing traps.
++ * Only needed if NO_TRAPS_ASYNC is set.
++ */
++#define queue_traps()	(trap_queueing_enabled++)
++
++#define run_queued_traps() do { \
++    while (trap_queue_front != trap_queue_rear) { /* while traps in queue */ \
++	trap_queue_front = (trap_queue_front + 1) % MAX_QUEUE_SIZE; \
++	dotrap(trap_queue[trap_queue_front]);  /* handle queued trap   */ \
++    } \
++} while (0)
++
++#define dont_queue_traps() do { \
++    trap_queueing_enabled = 0; \
++    run_queued_traps(); \
++} while (0)
+ 
+ /* Make some signal functions faster. */
+ 
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

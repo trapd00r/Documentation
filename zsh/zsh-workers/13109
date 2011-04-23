@@ -1,0 +1,165 @@
+From zsh-workers-return-13109-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Nov 02 11:21:34 2000
+Return-Path: <zsh-workers-return-13109-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28780 invoked from network); 2 Nov 2000 11:21:33 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 2 Nov 2000 11:21:33 -0000
+Received: (qmail 28257 invoked by alias); 2 Nov 2000 11:21:26 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13109
+Received: (qmail 28249 invoked from network); 2 Nov 2000 11:21:25 -0000
+Date: Thu, 02 Nov 2000 11:20:57 +0000
+From: Peter Stephenson <pws@csr.com>
+Subject: PATCH: Polite output from traps with zle active
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Message-id: <0G3E0018CA6WEG@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+In parallel to Sven's changes for traps, here is something I have wanted
+for some time:  the ability for traps to keep the line editing display neat
+in the same way that e.g. information from exiting background jobs has
+always done.  It alters zle -R to allow it to be called when zle is not
+active --- it simply returns zero --- and adds `zle -I' (invalidate), which
+simply calls trashzle().  Both are allowed when zle is not active (and do
+nothing) because there is no good reason for forcing the onus of deciding
+whether the display needs to be cleared and refreshed onto the writer of the
+trap function.  So a prototype is:
+
+TRAPUSR1() {
+  zle -I
+  print Hello, I am output
+  zle -R
+}
+
+It's possible there are extra safeguards I should have added but missed.
+If anyone thinks this should be done a different way, now would be a good
+time to mention it.
+
+I probably won't commit this at the moment, anyway, because my zle_main.c
+has Sven's trap changes mixed in it --- maybe they can eventually go in
+together.
+
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.13
+diff -u -r1.13 zle_main.c
+--- Src/Zle/zle_main.c	2000/10/22 02:34:19	1.13
++++ Src/Zle/zle_main.c	2000/11/02 11:08:56
+@@ -1083,7 +1092,7 @@
+ static struct builtin bintab[] = {
+     BUILTIN("bindkey", 0, bin_bindkey, 0, -1, 0, "evaMldDANmrsLR", NULL),
+     BUILTIN("vared",   0, bin_vared,   1,  7, 0, NULL,             NULL),
+-    BUILTIN("zle",     0, bin_zle,     0, -1, 0, "lDANCLmMgGcRaU", NULL),
++    BUILTIN("zle",     0, bin_zle,     0, -1, 0, "lDANCLmMgGcRaUI", NULL),
+ };
+ 
+ /* The order of the entries in this table has to match the *HOOK
+Index: Src/Zle/zle_thingy.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_thingy.c,v
+retrieving revision 1.2
+diff -u -r1.2 zle_thingy.c
+--- Src/Zle/zle_thingy.c	2000/07/13 09:11:54	1.2
++++ Src/Zle/zle_thingy.c	2000/11/02 11:08:56
+@@ -339,6 +339,7 @@
+ 	{ 'R', bin_zle_refresh, 0, -1 },
+ 	{ 'M', bin_zle_mesg, 1, 1 },
+ 	{ 'U', bin_zle_unget, 1, 1 },
++	{ 'I', bin_zle_invalidate, 0, 0 },
+ 	{ 0,   bin_zle_call, 0, -1 },
+     };
+     struct opn const *op, *opp;
+@@ -396,10 +397,8 @@
+     char *s = statusline;
+     int sl = statusll, ocl = clearlist;
+ 
+-    if (!zleactive) {
+-	zwarnnam(name, "can only be called from widget function", NULL, 0);
+-	return 1;
+-    }
++    if (!zleactive)
++	return 0;
+     statusline = NULL;
+     statusll = 0;
+     if (*args) {
+@@ -654,6 +653,14 @@
+     if (saveflag)
+ 	zmod = modsave;
+     return ret;
++}
++
++/**/
++static int
++bin_zle_invalidate(char *name, char **args, char *ops, char func)
++{
++    trashzle();
++    return 0;
+ }
+ 
+ /*******************/
+Index: Doc/Zsh/mod_zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/mod_zle.yo,v
+retrieving revision 1.8
+diff -u -r1.8 mod_zle.yo
+--- Doc/Zsh/mod_zle.yo	2000/09/11 07:08:28	1.8
++++ Doc/Zsh/mod_zle.yo	2000/11/02 11:08:56
+@@ -198,6 +198,7 @@
+ xitem(tt(zle) tt(-R) [ tt(-c) ] [ var(display-string) ] [ var(string) ... ])
+ xitem(tt(zle) tt(-M) var(string))
+ xitem(tt(zle) tt(-U) var(string))
++xitem(tt(zle) tt(-I))
+ xitem(tt(zle) var(widget) tt([ -n) var(num) tt(]) tt([ -N ]) var(args) ...)
+ item(tt(zle))(
+ The tt(zle) builtin performs a number of different actions concerning
+@@ -263,6 +264,12 @@
+ Note that this option is only useful for widgets that do not exit
+ immediately after using it because the strings displayed will be erased 
+ immediately after return from the widget.
++
++This command can safely be called outside user defined widgets; if zle is
++active, the display will be refreshed, while if zle is not active, the
++command has no effect.  This is useful for trap functions, which may be
++called while zle is active, in order to tidy up the display on exit.
++In this case there will usually be no other arguments.
+ )
+ item(tt(-M) var(string))(
+ As with the tt(-R) option, the var(string) will be displayed below the 
+@@ -280,6 +287,27 @@
+ the last string pushed onto the stack will be processed first.  However,
+ the characters in each var(string) will be processed in the order in which
+ they appear in the string.
++)
++item(tt(-I))(
++Unusually, this option is only useful em(outside) ordinary widget functions.
++It invalidates the current zle display in preparation for output; usually
++this will be from a trap function.  As it has no effect if zle is not
++active, a safe idiom for ensuring that output from traps interacts cleanly
++with text being edited is:
++
++example(TRAPUSR1() {
++    # Invalidate zle display
++  zle -I
++    # Show output
++  print Hello
++    # Refresh display
++  zle -R
++})
++
++Note that there are better ways of manipulating the display from within zle
++widgets.  In general, the trap function may need to test whether zle is
++loaded before using this method; if it is not, there is no point in loading
++it specially since the line editor will not be active.
+ )
+ item(var(widget) tt([ -n) var(num) tt(]) tt([ -N ]) var(args) ...)(
+ Invoke the specified widget.  This can only be done when ZLE is
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+Cambridge Silicon Radio, Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+

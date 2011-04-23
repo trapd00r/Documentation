@@ -1,0 +1,141 @@
+From zsh-workers-return-5629-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Mar 03 16:20:59 1999
+Return-Path: <zsh-workers-return-5629-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12392 invoked from network); 3 Mar 1999 16:20:58 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Mar 1999 16:20:58 -0000
+Received: (qmail 7156 invoked by alias); 3 Mar 1999 16:20:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5629
+Received: (qmail 7146 invoked from network); 3 Mar 1999 16:20:41 -0000
+Date: Wed, 3 Mar 1999 17:19:58 +0100 (MET)
+Message-Id: <199903031619.RAA01495@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Wed, 03 Mar 1999 15:54:58 +0100
+Subject: Re: Weird bug with approximate completion
+
+
+Peter Stephenson wrote:
+
+> I'm getting a weird bug with approximate completion:  the shell exits with
+> an out-of-memory error.  One command that did this (there were more) was
+> % echo ~/bin/comp/set<TAB>
+> where the real file is ~/bin/comp/_setopt.
+> 
+> It looks like zhalloc() is being called with one argument and getting
+> another much larger one.  It could be specific to AIX 3.2, and related to
+> the fact that my stack backtrace is now 97 frames deep (but another time it
+> was `only' 88).  No fewer then 12 of those (10 in the other case) are
+> runshfunc(), because of the effect of wrappers.  The limits are all large,
+> e.g. stacksize is 32MB.  Maybe it would be nice to flatten out the
+> hierarchy for calls to shell functions a bit.
+> 
+> But it's strange it only happens when correcting, so I can't be sure it
+> isn't a shell problem.  I couldn't get it to happen as such on HPUX or
+> IRIX, but I did see something weird with correction on IRIX, lots of 255
+> characters appeared (which isn't even German).  So maybe there is some
+> corruption coming from the shell.  Looks rather subtle though.  In that
+> case it may be useful to know that the call to zhalloc() that goes wrong is
+> always from
+> 
+> 		p = (char *)ncalloc(lpl + lsl + 3);
+> 
+> in make complistflags() around line 6192.  The arguments lpl and lsl
+> themselves seem to be sensible, so it's nothing simple.  One clue might be
+> that I don't use pattern matching much apart from correction, and this is
+> in a (ispattern & 1) section (fairly innocuous looking, however, and
+> ordinary glob completion doesn't seem to do this).
+
+Problem #1 (patched):
+  `rpre' should be set to the expanded prefix even if called from a
+  completion widget
+
+Problem #2:
+  sticking it after the first slash will make the completion code use
+  `/users/foo/(#a...)bin/comp' as the expanded prefix and make it
+  search in that directory -- which doesn't exists, so it will
+  generate no matches; should we have some special casing in the
+  C-code or in the shell code here?
+
+Problem #3 (patched):
+  due to #2, with automatic correction, the `(#a...)' should not be
+  put at the beginning of the string if it starts with `~'; this would
+  lead to `(#a1)~/bin/comp/set' which matches files in the current
+  directory whose name is only one character long (in a certain sense
+  this is correct)
+
+I couldn't reproduce your bug, though (and for me the line you quoted
+is line number 6239). The bugs fixed by the patch made this fail for
+me, but I didn't get any strange allocation behaviour. The 255 you
+mention, btw, suggest a memory problem, too, since (at least with
+debugging) newly allocated memory is filled with `-1's.
+
+Bye
+ Sven
+
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Wed Mar  3 12:51:36 1999
++++ Src/Zle/zle_tricky.c	Wed Mar  3 17:09:41 1999
+@@ -6067,7 +6067,7 @@
+     noreal = !delit;
+     for (p = lpre; *p && *p != String && *p != Tick; p++);
+     tt = ic && !ispar ? lpre + 1 : lpre;
+-    rpre = (*p || (!incompfunc && (*lpre == Tilde || *lpre == Equals))) ?
++    rpre = (*p || *lpre == Tilde || *lpre == Equals) ?
+ 	(noreal = 0, getreal(tt)) :
+ 	dupstring(tt);
+ 
+@@ -6086,6 +6086,7 @@
+ 	    if (!s1)
+ 		s1 = p;
+ 	}
++    rsl = strlen(rsuf);
+     for (s2 = NULL, sf2 = t = 0, p = rsuf; *p && (!t || !sf2); p++)
+ 	if (itok(*p))
+ 	    t |= sf2 ? 4 : 2;
+diff -u -r oc/Core/_main_complete Completion/Core/_main_complete
+--- oc/Core/_main_complete	Wed Mar  3 13:00:41 1999
++++ Completion/Core/_main_complete	Wed Mar  3 16:41:18 1999
+@@ -104,7 +104,7 @@
+ 	# original string as a possible match, let it not be shown in
+ 	# the list, and probably display the `CCPROMPT'.
+ 
+-        (( $+CCORIG )) && builtin compadd -n - "$PREFIX$SUFFIX"
++        (( $+CCORIG )) && builtin compadd -nQ - "$PREFIX$SUFFIX"
+ 
+ 	# If you always want to see the list of possible corrections,
+ 	# set `compstate[list]=list' here.
+@@ -145,7 +145,11 @@
+       # ignored prefix).
+ 
+       compadd() {
+-        PREFIX="(#a${_comp_correct})$PREFIX"
++        if [[ "$PREFIX" = \~*/* ]]; then
++	  PREFIX="${PREFIX%%/*}/(#a${_comp_correct})${PREFIX#*/}"
++	else
++          PREFIX="(#a${_comp_correct})$PREFIX"
++	fi
+ 	if (( $+CCPROMPT )); then
+ 	  builtin compadd -X "$CCPROMPT" -J _correct "$@"
+ 	else
+@@ -153,7 +157,11 @@
+ 	fi
+       }
+       compgen() {
+-        PREFIX="(#a${_comp_correct})$PREFIX"
++        if [[ "$PREFIX" = \~*/* ]]; then
++	  PREFIX="${PREFIX%%/*}/(#a${_comp_correct})${PREFIX#*/}"
++	else
++          PREFIX="(#a${_comp_correct})$PREFIX"
++	fi
+ 	if (( $+CCPROMPT )); then
+ 	  builtin compgen "$@" -X "$CCPROMPT" -J _correct
+ 	else
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

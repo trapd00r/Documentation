@@ -1,0 +1,339 @@
+From zsh-workers-return-14008-mason-zsh=primenet.com.au@sunsite.dk Wed Apr 18 08:20:17 2001
+Return-Path: <zsh-workers-return-14008-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19145 invoked from network); 18 Apr 2001 08:20:16 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Apr 2001 08:20:16 -0000
+Received: (qmail 20022 invoked by alias); 18 Apr 2001 08:20:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14008
+Received: (qmail 20003 invoked from network); 18 Apr 2001 08:20:10 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010418074747.ZM29068@candle.brasslantern.com>
+Date: Wed, 18 Apr 2001 07:47:46 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.dk
+Subject: PATCH (v2): Assorted parameter stuff
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+I wrote:
+} You just didn't try enough backslashes yet:
+} 
+} schaefer[507] print -r $foo[(r)\\\\\?]
+} \?
+
+And:
+} schaefer[513] print -r "$foo[(r)\\\\\?]"
+} \?
+} 
+} Five backslashes, just as before; same result.
+
+It occurred to me that the version of the patch as posted in 13992 might not
+produce the same results as the variant I have running here.  So here is the
+current complete patch, against current SourceForge CVS.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.43
+diff -u -r1.43 builtin.c
+--- Src/builtin.c	2001/03/29 10:52:15	1.43
++++ Src/builtin.c	2001/04/18 07:42:38
+@@ -1690,8 +1690,8 @@
+ 		delenv(pm->env);
+ 		pm->env = NULL;
+ 	    }
+-	    if (value)
+-		setsparam(pname, ztrdup(value));
++	    if (value && !(pm = setsparam(pname, ztrdup(value))))
++		return 0;
+ 	} else if (value) {
+ 	    zwarnnam(cname, "can't assign new value for array %s", pname, 0);
+ 	    return NULL;
+@@ -1807,9 +1807,10 @@
+ 	pm->level = keeplocal;
+     else if (on & PM_LOCAL)
+ 	pm->level = locallevel;
+-    if (value && !(pm->flags & (PM_ARRAY|PM_HASHED)))
+-	setsparam(pname, ztrdup(value));
+-    else if (newspecial && !(pm->old->flags & PM_NORESTORE)) {
++    if (value && !(pm->flags & (PM_ARRAY|PM_HASHED))) {
++	if (!(pm = setsparam(pname, ztrdup(value))))
++	    return 0;
++    } else if (newspecial && !(pm->old->flags & PM_NORESTORE)) {
+ 	/*
+ 	 * We need to use the special setting function to re-initialise
+ 	 * the special parameter to empty.
+@@ -2061,12 +2062,6 @@
+ 
+     /* Take arguments literally.  Don't glob */
+     while ((asg = getasg(*argv++))) {
+-	/* check if argument is a valid identifier */
+-	if (!isident(asg->name)) {
+-	    zerr("not an identifier: %s", asg->name, 0);
+-	    returnval = 1;
+-	    continue;
+-	}
+ 	if (!typeset_single(name, asg->name,
+ 			    (Param) (paramtab == realparamtab ?
+ 				     gethashnode2(paramtab, asg->name) :
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.24
+diff -u -r1.24 hist.c
+--- Src/hist.c	2001/04/10 18:03:58	1.24
++++ Src/hist.c	2001/04/18 07:42:52
+@@ -1011,7 +1011,6 @@
+     DPUTS(stophist != 2 && !(inbufflags & INP_ALIAS) && !chline,
+ 	  "BUG: chline is NULL in hend()");
+     queue_signals();
+-    hf = getsparam("HISTFILE");
+     if (histdone & HISTFLAG_SETTY)
+ 	settyinfo(&shttyinfo);
+     if (!(histactive & HA_NOINC))
+@@ -1028,6 +1027,7 @@
+      && (hist_ignore_all_dups = isset(HISTIGNOREALLDUPS)) != 0)
+ 	histremovedups();
+     /* For history sharing, lock history file once for both read and write */
++    hf = getsparam("HISTFILE");
+     if (isset(SHAREHISTORY) && lockhistfile(hf, 0)) {
+ 	readhistfile(hf, 0, HFILE_USE_OPTIONS | HFILE_FAST);
+ 	curline.histnum = curhist+1;
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.16
+diff -u -r1.16 lex.c
+--- Src/lex.c	2001/03/06 13:00:41	1.16
++++ Src/lex.c	2001/04/18 07:43:03
+@@ -1458,6 +1458,38 @@
+     return err;
+ }
+ 
++/**/
++mod_export char *
++parse_subscript(char *s)
++{
++    int l = strlen(s), err;
++    char *t;
++
++    if (!*s || *s == ']')
++	return 0;
++    lexsave();
++    untokenize(t = dupstring(s));
++    inpush(t, 0, NULL);
++    strinbeg(0);
++    len = 0;
++    bptr = tokstr = s;
++    bsiz = l + 1;
++    err = dquote_parse(']', 1);
++    if (err) {
++	err = *bptr;
++	*bptr = 0;
++	untokenize(s);
++	*bptr = err;
++	s = 0;
++    } else
++	s = bptr;
++    strinend();
++    inpop();
++    DPUTS(cmdsp, "BUG: parse_subscript: cmdstack not empty.");
++    lexrestore();
++    return s;
++}
++
+ /* Tokenize a string given in s. Parsing is done as if s were a normal *
+  * command-line argument but it may contain separators.  This is used  *
+  * to parse the right-hand side of ${...%...} substitutions.           */
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.8
+diff -u -r1.8 math.c
+--- Src/math.c	2001/01/16 13:44:20	1.8
++++ Src/math.c	2001/04/18 07:43:10
+@@ -517,6 +517,7 @@
+     }
+     if (noeval)
+ 	return v;
++    untokenize(s);
+     setnparam(s, v);
+     return v;
+ }
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.36
+diff -u -r1.36 params.c
+--- Src/params.c	2001/04/06 07:55:13	1.36
++++ Src/params.c	2001/04/18 07:43:33
+@@ -770,38 +770,18 @@
+ 	if (!iident(*ss))
+ 	    break;
+ 
+-#if 0
+-    /* If this exhaust `s' or the next two characters *
+-     * are [(, then it is a valid identifier.         */
+-    if (!*ss || (*ss == '[' && ss[1] == '('))
+-	return 1;
+-
+-    /* Else if the next character is not [, then it is *
+-     * definitely not a valid identifier.              */
+-    if (*ss != '[')
+-	return 0;
+-
+-    noeval = 1;
+-    (void)mathevalarg(++ss, &ss);
+-    if (*ss == ',')
+-	(void)mathevalarg(++ss, &ss);
+-    noeval = ne;		/* restore the value of noeval */
+-    if (*ss != ']' || ss[1])
+-	return 0;
+-    return 1;
+-#else
+     /* If the next character is not [, then it is *
+-     * definitely not a valid identifier.              */
++     * definitely not a valid identifier.         */
+     if (!*ss)
+ 	return 1;
+     if (*ss != '[')
+ 	return 0;
+ 
+-    /* Require balanced [ ] pairs */
+-    if (skipparens('[', ']', &ss))
++    /* Require balanced [ ] pairs with something between */
++    if (!(ss = parse_subscript(++ss)))
+ 	return 0;
+-    return !*ss;
+-#endif
++    untokenize(s);
++    return !ss[1];
+ }
+ 
+ /**/
+@@ -933,18 +913,22 @@
+     }
+ 
+     for (t = s, i = 0;
+-	 (c = *t) && ((c != ']' && c != Outbrack &&
++	 (c = *t) && ((c != Outbrack &&
+ 		       (ishash || c != ',')) || i); t++) {
+-	if (c == '[' || c == Inbrack)
++	if (c == Inbrack)
+ 	    i++;
+-	else if (c == ']' || c == Outbrack)
++	else if (c == Outbrack)
+ 	    i--;
+-	if (ispecial(c))
++	if (INULL(c)) {
++	    if (!*++t)
++		break;
++	} else if (ispecial(c))
+ 	    needtok = 1;
+     }
+     if (!c)
+ 	return 0;
+     s = dupstrpfx(s, t - s);
++    remnulargs(s);
+     *str = tt = t;
+     if (needtok) {
+ 	if (parsestr(s))
+@@ -958,6 +942,7 @@
+ 		ht = newparamtable(17, v->pm->nam);
+ 		v->pm->sets.hfn(v->pm, ht);
+ 	    }
++	    remnulargs(s);
+ 	    untokenize(s);
+ 	    if (!(v->pm = (Param) ht->getnode(ht, s))) {
+ 		HashTable tht = paramtab;
+@@ -1019,7 +1004,7 @@
+ 		    s = d;
+ 		}
+ 	    } else {
+-		if (!l || s[l - 1] != '*') {
++		if (!l || s[l - 1] != '*' || (l > 1 && s[l - 2] == '\\')) {
+ 		    d = (char *) hcalloc(l + 2);
+ 		    strcpy(d, s);
+ 		    strcat(d, "*");
+@@ -1028,6 +1013,7 @@
+ 	    }
+ 	}
+ 	tokenize(s);
++	remnulargs(s);
+ 
+ 	if (keymatch || (pprog = patcompile(s, 0, NULL))) {
+ 	    int len;
+@@ -1156,7 +1142,7 @@
+ 				    return r;
+ 		    }
+ 		}
+-		return 0;
++		return down ? 0 : len + 1;
+ 	    }
+ 	}
+     }
+@@ -1170,13 +1156,23 @@
+     int start, end, inv = 0;
+     char *s = *pptr, *tbrack;
+ 
+-    *s++ = '[';
+-    for (tbrack = s; *tbrack && *tbrack != ']' && *tbrack != Outbrack; tbrack++)
++    *s++ = Inbrack;
++    s = parse_subscript(s); /* Error handled elsewhere */
++    for (tbrack = *pptr + 1; *tbrack && tbrack != s; tbrack++) {
++	if (INULL(*tbrack) && !*++tbrack)
++	    break;
+ 	if (itok(*tbrack))
+ 	    *tbrack = ztokens[*tbrack - Pound];
+-    if (*tbrack == Outbrack)
+-	*tbrack = ']';
+-    if ((s[0] == '*' || s[0] == '@') && s[1] == ']') {
++    }
++    if (*tbrack)
++	*tbrack = Outbrack;
++    else {
++	zerr("invalid subscript", NULL, 0);
++	*pptr = tbrack;
++	return 1;
++    }
++    s = *pptr + 1;
++    if ((s[0] == '*' || s[0] == '@') && s[1] == Outbrack) {
+ 	if ((v->isarr || IS_UNSET_VALUE(v)) && s[0] == '@')
+ 	    v->isarr |= SCANPM_ISVAR_AT;
+ 	v->start = 0;
+@@ -1208,12 +1204,12 @@
+ 	    }
+ 	    if (*s == ',') {
+ 		zerr("invalid subscript", NULL, 0);
+-		while (*s != ']' && *s != Outbrack)
++		while (*s && *s != Outbrack)
+ 		    s++;
+ 		*pptr = s;
+ 		return 1;
+ 	    }
+-	    if (*s == ']' || *s == Outbrack)
++	    if (*s == Outbrack)
+ 		s++;
+ 	} else {
+ 	    int com;
+@@ -1228,7 +1224,7 @@
+ 		start--;
+ 	    else if (start == 0 && end == 0)
+ 		end++;
+-	    if (*s == ']' || *s == Outbrack) {
++	    if (*s == Outbrack) {
+ 		s++;
+ 		if (v->isarr && start == end-1 && !com &&
+ 		    (!(v->isarr & SCANPM_MATCHMANY) ||
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,427 @@
+From zsh-workers-return-8939-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Dec 08 09:09:49 1999
+Return-Path: <zsh-workers-return-8939-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19700 invoked from network); 8 Dec 1999 09:09:39 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 Dec 1999 09:09:39 -0000
+Received: (qmail 5339 invoked by alias); 8 Dec 1999 09:08:59 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8939
+Received: (qmail 5331 invoked from network); 8 Dec 1999 09:08:56 -0000
+Date: Wed, 8 Dec 1999 10:08:55 +0100 (MET)
+Message-Id: <199912080908.KAA15466@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: hidden matches in menu-select
+
+
+Is mentioned, menu-selection didn't work if there were hidden matches, 
+where `hidden' means that either the completion function writer
+decided to use the -n option to compadd (this is also used for the
+hidden style), or that the completion code found out that multiple
+matches would be displayed as the same string and decided to show that 
+string only once.
+
+After actually trying, I think that it isn't *that* irritating to get
+the same string more than once, so I don't have tried to do any fancy
+stuff to display these hidden strings differently from each other.
+I've only added two more capabilities for ZLS_COLO(|U)RS: `hi' for
+matches that would be hidden because of -n and `mu' for strings that
+would appear multiple times. I'm not so sure that the latter is really 
+of any interest... opinions? And: should we try to change what is
+displayed for those multiple-matches-with-the-same-display-string?
+
+Bye
+ Sven
+
+P.S.: This patch looks bigger than it is -- some functions got a new
+      argument...
+
+diff -ru ../z.old/Doc/Zsh/mod_complist.yo Doc/Zsh/mod_complist.yo
+--- ../z.old/Doc/Zsh/mod_complist.yo	Wed Dec  8 09:36:47 1999
++++ Doc/Zsh/mod_complist.yo	Wed Dec  8 09:52:30 1999
+@@ -149,10 +149,22 @@
+ matches to insert into the command line can be selected from this
+ list. In the list one match is highlighted using the value for tt(ma)
+ from the tt(ZLS_COLORS) or tt(ZLS_COLOURS) parameter. The default
+-value for this it `tt(7)' which forces the selected match to be
++value for this is `tt(7)' which forces the selected match to be
+ highlighted using standout mode on a vt100-compatible terminal. If
+ neither tt(ZLS_COLORS) nor tt(ZLS_COLOURS) is set, the same terminal
+ control sequence as for the `tt(%S)' escape in prompts is used.
++
++Normally, the completion code may decide to not show of the matches in 
++the list. These hidden matches are either matches for which the
++completion function which added them explicitly requested that they
++don't appear in the list (using the tt(-n) option of the tt(compadd)
++builtin command) or they are matches which show the the same string in 
++the list (because they differ only in things like prefixes or suffixes 
++that are never listed). In the list used for menu-selection, however,
++even these matches will be shown so that it is possible to select
++them. To be able to highlight such matches the tt(hi) and tt(mu)
++capabilities in the tt(ZLS_COLORS) and tt(ZLS_COLOURS) parameters are
++supported for hidden matches of the first and second kind, respectively.
+ 
+ Selecting matches is done by moving the mark around using the zle movement
+ functions. The zle functions tt(send-break) and tt(accept-line) can be used
+diff -ru ../z.old/Src/Zle/comp.h Src/Zle/comp.h
+--- ../z.old/Src/Zle/comp.h	Wed Dec  8 09:36:36 1999
++++ Src/Zle/comp.h	Wed Dec  8 09:52:29 1999
+@@ -120,6 +120,8 @@
+ #define CMF_NOSPACE  (1<< 8)	/* don't add a space */
+ #define CMF_PACKED   (1<< 9)	/* prefer LIST_PACKED */
+ #define CMF_ROWS     (1<<10)	/* prefer LIST_ROWS_FIRST */
++#define CMF_MULT     (1<<11)	/* string appears more than once */
++#define CMF_FMULT    (1<<12)	/* first of multiple equal strings */
+ 
+ /* Stuff for completion matcher control. */
+ 
+@@ -269,6 +271,7 @@
+     int nlines;			/* number of lines needed */
+     int hidden;			/* != 0 if there are hidden matches */
+     int onlyexpl;		/* != 0 if only explanations to print */
++    int showall;		/* != 0 if hidden matches should be shown */
+ };
+ 
+ typedef void (*CLPrintFunc)(Cmgroup, Cmatch *, int, int, int, int,
+diff -ru ../z.old/Src/Zle/compcore.c Src/Zle/compcore.c
+--- ../z.old/Src/Zle/compcore.c	Wed Dec  8 09:36:37 1999
++++ Src/Zle/compcore.c	Wed Dec  8 09:52:29 1999
+@@ -2376,14 +2376,15 @@
+ 		    /* Mark those, that would show the same string in the list. */
+ 		    for (; bp[1] && !(*ap)->disp && !(bp[1])->disp &&
+ 			     !strcmp((*ap)->str, (bp[1])->str); bp++)
+-			(bp[1])->flags |= CMF_NOLIST;
++			(bp[1])->flags |= CMF_MULT;
++		    (*ap)->flags |= CMF_FMULT;
+ 		}
+ 		*cp = NULL;
+ 	    }
+ 	    for (ap = rp; *ap; ap++) {
+ 		if ((*ap)->disp && ((*ap)->flags & CMF_DISPLINE))
+ 		    ll++;
+-		if ((*ap)->flags & CMF_NOLIST)
++		if ((*ap)->flags & (CMF_NOLIST | CMF_MULT))
+ 		    nl++;
+ 	    }
+ 	} else {
+@@ -2404,14 +2405,15 @@
+ 		    ap = bp;
+ 		    for (; bp[1] && !(*ap)->disp && !(bp[1])->disp &&
+ 			     !strcmp((*ap)->str, (bp[1])->str); bp++)
+-			(bp[1])->flags |= CMF_NOLIST;
++			(bp[1])->flags |= CMF_MULT;
++		    (*ap)->flags |= CMF_FMULT;
+ 		}
+ 		*cp = NULL;
+ 	    }
+ 	    for (ap = rp; *ap; ap++) {
+ 		if ((*ap)->disp && ((*ap)->flags & CMF_DISPLINE))
+ 		    ll++;
+-		if ((*ap)->flags & CMF_NOLIST)
++		if ((*ap)->flags & (CMF_NOLIST | CMF_MULT))
+ 		    nl++;
+ 	    }
+ 	}
+diff -ru ../z.old/Src/Zle/complist.c Src/Zle/complist.c
+--- ../z.old/Src/Zle/complist.c	Wed Dec  8 09:36:37 1999
++++ Src/Zle/complist.c	Wed Dec  8 09:52:29 1999
+@@ -57,8 +57,10 @@
+ #define COL_TC 13
+ #define COL_SP 14
+ #define COL_MA 15
++#define COL_HI 16
++#define COL_MU 17
+ 
+-#define NUM_COLS 16
++#define NUM_COLS 18
+ 
+ /* Maximum number of in-string colours supported. */
+ 
+@@ -68,14 +70,14 @@
+ 
+ static char *colnames[] = {
+     "no", "fi", "di", "ln", "pi", "so", "bd", "cd", "ex", "mi",
+-    "lc", "rc", "ec", "tc", "sp", "ma", NULL
++    "lc", "rc", "ec", "tc", "sp", "ma", "hi", "mu", NULL
+ };
+ 
+ /* Default values. */
+ 
+ static char *defcols[] = {
+     "0", "0", "1;34", "1;36", "33", "1;35", "1;33", "1;33", "1;32", NULL,
+-    "\033[", "m", NULL, "0", "0", "7"
++    "\033[", "m", NULL, "0", "0", "7", "0", "0"
+ };
+ 
+ /* This describes a terminal string for a file type. */
+@@ -654,7 +656,11 @@
+ 	    mgtabp = mgtab + mm;
+ 	    mmlen = mcols;
+ 	    zcputs(&mcolors, g->name, COL_MA);
+-	} else
++	} else if (m->flags & CMF_NOLIST)
++	    zcputs(&mcolors, g->name, COL_HI);
++	else if (mselect >= 0 && (m->flags & (CMF_MULT | CMF_FMULT)))
++	    zcputs(&mcolors, g->name, COL_MU);
++	else
+ 	    subcols = putmatchcol(&mcolors, g->name, m->disp);
+ 	if (subcols)
+ 	    clprintfmt(&mcolors, m->disp);
+@@ -689,7 +695,11 @@
+ 	    mgtabp = mgtab + mx + mm;
+ 	    mmlen = width;
+ 	    zcputs(&mcolors, g->name, COL_MA);
+-	} else if (buf)
++	} else if (m->flags & CMF_NOLIST)
++	    zcputs(&mcolors, g->name, COL_HI);
++	else if (mselect >= 0 && (m->flags & (CMF_MULT | CMF_FMULT)))
++	    zcputs(&mcolors, g->name, COL_MU);
++	else if (buf)
+ 	    subcols = putfilecol(&mcolors, g->name, path, buf->st_mode);
+ 	else
+ 	    subcols = putmatchcol(&mcolors, g->name, (m->disp ? m->disp : m->str));
+@@ -739,7 +749,7 @@
+     }
+     getcols(&mcolors);
+ 
+-    calclist();
++    calclist(mselect >= 0);
+ 
+     if (!listdat.nlines || (mselect >= 0 &&
+ 			    (!(isset(USEZLE) && !termflags &&
+@@ -750,10 +760,6 @@
+ 	amatches = oamatches;
+ 	return 1;
+     }
+-    if (listdat.hidden) {
+-	noselect = 1;
+-	mselect = -1;
+-    }
+     if (inselect)
+ 	clearflag = 0;
+ 
+@@ -777,7 +783,7 @@
+     last_cap = (char *) zhalloc(max_caplen + 1);
+     *last_cap = '\0';
+ 
+-    if (!printlist(1, clprintm) || listdat.nlines >= lines)
++    if (!printlist(1, clprintm, (mselect >= 0)) || listdat.nlines >= lines)
+ 	noselect = 1;
+ 
+     amatches = oamatches;
+@@ -1159,6 +1165,8 @@
+ 	if (!noselect) {
+ 	    showinglist = -2;
+ 	    onlyexpl = oe;
++	    if (!smatches)
++		clearlist = 1;
+ 	    zrefresh();
+ 	}
+ 	fdat = NULL;
+diff -ru ../z.old/Src/Zle/compresult.c Src/Zle/compresult.c
+--- ../z.old/Src/Zle/compresult.c	Wed Dec  8 09:36:38 1999
++++ Src/Zle/compresult.c	Wed Dec  8 09:52:29 1999
+@@ -1101,7 +1101,7 @@
+     oam = amatches;
+     amatches = pmatches;
+     listdat.valid = 0;
+-    calclist();
++    calclist(0);
+     listdat.valid = 0;
+     amatches = oam;
+ 
+@@ -1122,10 +1122,13 @@
+ 
+ /**/
+ Cmatch *
+-skipnolist(Cmatch *p)
++skipnolist(Cmatch *p, int showall)
+ {
+-    while (*p && (((*p)->flags & (CMF_NOLIST | CMF_HIDE)) ||
+-		  ((*p)->disp && ((*p)->flags & (CMF_DISPLINE | CMF_HIDE)))))
++    int mask = (showall ? 0 : (CMF_NOLIST | CMF_MULT)) | CMF_HIDE;
++
++    while (*p && (((*p)->flags & mask) ||
++		  ((*p)->disp &&
++		   ((*p)->flags & (CMF_DISPLINE | CMF_HIDE)))))
+ 	p++;
+ 
+     return p;
+@@ -1133,7 +1136,7 @@
+ 
+ /**/
+ mod_export void
+-calclist(void)
++calclist(int showall)
+ {
+     Cmgroup g;
+     Cmatch *p, m;
+@@ -1143,7 +1146,7 @@
+     VARARR(int, mlens, nmatches + 1);
+ 
+     if (listdat.valid && onlyexpl == listdat.onlyexpl &&
+-	menuacc == listdat.menuacc &&
++	menuacc == listdat.menuacc && showall == listdat.showall &&
+ 	lines == listdat.lines && columns == listdat.columns)
+ 	return;
+ 
+@@ -1169,8 +1172,8 @@
+ 		while ((sptr = *pp)) {
+ 		    while (sptr && *sptr) {
+ 			nlines += (nlptr = strchr(sptr, '\n'))
+-			    ? 1 + (nlptr-sptr)/columns
+-			    : strlen(sptr)/columns;
++			    ? 1 + (nlptr-sptr) / columns
++			    : strlen(sptr) / columns;
+ 			sptr = nlptr ? nlptr+1 : NULL;
+ 		    }
+ 		    nlines++;
+@@ -1217,7 +1220,7 @@
+ 			g->flags &= ~CGF_PACKED;
+ 		    if (!(m->flags & CMF_ROWS))
+ 			g->flags &= ~CGF_ROWS;
+-		} else if (!(m->flags & CMF_NOLIST)) {
++		} else if (showall || !(m->flags & (CMF_NOLIST | CMF_MULT))) {
+ 		    l = niceztrlen(m->str);
+ 		    ndisp++;
+ 		    if (l > glong)
+@@ -1290,7 +1293,8 @@
+ 			    if (m->disp) {
+ 				if (!(m->flags & CMF_DISPLINE))
+ 				    glines += 1 + (mlens[m->gnum] / columns);
+-			    } else if (!(m->flags & CMF_NOLIST))
++			    } else if (showall ||
++				       !(m->flags & (CMF_NOLIST | CMF_MULT)))
+ 				glines += 1 + ((mlens[m->gnum]) / columns);
+ 			}
+ 		}
+@@ -1385,7 +1389,7 @@
+ 
+ 		    for (tcols = columns / g->shortest; tcols > g->cols;
+ 			 tcols--) {
+-			p = first = skipnolist(g->matches);
++			p = first = skipnolist(g->matches, showall);
+ 			for (maxlen = width = maxlines = llines = tcol = 0,
+ 				 count = g->dcount;
+ 			     count > 0; count--) {
+@@ -1394,7 +1398,7 @@
+ 			    if (addlen > maxlen)
+ 				maxlen = addlen;
+ 			    for (i = tcols; i && *p; i--)
+-				p = skipnolist(p + 1);
++				p = skipnolist(p + 1, showall);
+ 
+ 			    llines++;
+ 			    if (!*p) {
+@@ -1407,7 +1411,7 @@
+ 				ws[tcol++] = maxlen;
+ 				maxlen = 0;
+ 
+-				p = first = skipnolist(first + 1);
++				p = first = skipnolist(first + 1, showall);
+ 			    }
+ 			}
+ 			if (tlines) {
+@@ -1421,6 +1425,8 @@
+ 			tlines = maxlines;
+ 		} else {
+ 		    int addlen;
++		    int smask = ((showall ? 0 : (CMF_NOLIST | CMF_MULT)) |
++				 CMF_HIDE);
+ 
+ 		    for (tlines = ((g->totl + columns) / columns);
+ 			 tlines < g->lins; tlines++) {
+@@ -1429,7 +1435,7 @@
+ 			     (m = *p); p++, nth++) {
+ 			    if (!(m->flags &
+ 				  (m->disp ? (CMF_DISPLINE | CMF_HIDE) :
+-				   (CMF_NOLIST | CMF_HIDE)))) {
++				   smask))) {
+ 				addlen = mlens[m->gnum] + add;
+ 				if (addlen > maxlen)
+ 				    maxlen = addlen;
+@@ -1481,6 +1487,7 @@
+     listdat.onlyexpl = onlyexpl;
+     listdat.columns = columns;
+     listdat.lines = lines;
++    listdat.showall = showall;
+ }
+ 
+ /**/
+@@ -1531,7 +1538,7 @@
+ 
+ /**/
+ mod_export int
+-printlist(int over, CLPrintFunc printm)
++printlist(int over, CLPrintFunc printm, int showall)
+ {
+     Cmgroup g;
+     Cmatch *p, m;
+@@ -1628,7 +1635,8 @@
+ 		    pp += ((g->flags & CGF_ROWS) ? g->cols : 1);
+ 		}
+ 	    }
+-	} else if (!listdat.onlyexpl && g->lcount) {
++	} else if (!listdat.onlyexpl &&
++		   (g->lcount || (showall && g->mcount))) {
+ 	    int n = g->dcount, nl, nc, i, j, wid;
+ 	    Cmatch *q;
+ 
+@@ -1662,7 +1670,7 @@
+ 			tcout(TCCLEAREOD);
+ 		}
+ 	    }
+-	    for (p = skipnolist(g->matches); n && nl--;) {
++	    for (p = skipnolist(g->matches, showall); n && nl--;) {
+ 		i = g->cols;
+ 		mc = 0;
+ 		q = p;
+@@ -1693,7 +1701,7 @@
+ 		    if (--n)
+ 			for (j = ((g->flags & CGF_ROWS) ? 1 : nc);
+ 			     j && *q; j--)
+-			    q = skipnolist(q + 1);
++			    q = skipnolist(q + 1, showall);
+ 		    mc++;
+ 		}
+ 		while (i-- > 0) {
+@@ -1712,11 +1720,11 @@
+ 		    if (nl)
+ 			for (j = ((g->flags & CGF_ROWS) ? g->cols : 1);
+ 			     j && *p; j--)
+-			    p = skipnolist(p + 1);
++			    p = skipnolist(p + 1, showall);
+ 		}
+ 	    }
+ 	}
+-	if (g->lcount)
++	if (g->lcount || (showall && g->mcount))
+ 	    pnl = 1;
+ 	g = g->next;
+     }
+@@ -1776,7 +1784,7 @@
+ int
+ ilistmatches(Hookdef dummy, Chdata dat)
+ {
+-    calclist();
++    calclist(0);
+ 
+     if (!listdat.nlines) {
+ 	showinglist = listshown = 0;
+@@ -1785,7 +1793,7 @@
+     if (asklist())
+ 	return 0;
+ 
+-    printlist(0, iprintm);
++    printlist(0, iprintm, 0);
+ 
+     return 0;
+ }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,232 @@
+From zsh-workers-return-10459-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Apr 04 11:22:56 2000
+Return-Path: <zsh-workers-return-10459-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1491 invoked from network); 4 Apr 2000 11:22:30 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 4 Apr 2000 11:22:30 -0000
+Received: (qmail 25988 invoked by alias); 4 Apr 2000 11:22:17 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10459
+Received: (qmail 25975 invoked from network); 4 Apr 2000 11:22:17 -0000
+Date: Tue, 4 Apr 2000 13:22:15 +0200 (MET DST)
+Message-Id: <200004041122.NAA11467@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Sat, 01 Apr 2000 21:26:10 +0100
+Subject: PATCH: Re: Completion issues
+
+
+Peter Stephenson wrote:
+
+> ...
+>
+> I came across the same problem when trying to explain _next_label using the
+> code in _mh.  Looking at the code, which is this:
+>   if _wanted sequences; then
+>     while _next_label sequences expl sequence; do
+>       compadd "$expl[@]" $(mark $foldnam 2>/dev/null | 
+> 			   awk -F: '{ print $1 }') &&
+>         ret=0
+>       compadd "$expl[@]" reply next cur prev first last all unseen && ret=0
+>       _files "$expl[@]" -W folddir -g '<->' && ret=0
+>       (( ret )) || return 0
+>     done
+> I would expect the following to work:
+>   zstyle ':completion:*:sequences' tag-order sequences:-name sequences:-num
+>   zstlye ':completion:*:sequences-name' ignored-patterns '<->'
+>   zstyle ':completion:*:sequences-num' ignored-patterns '^<->'
+> prefering named sequences to messages which are just numbers.  But it
+> doesn't.  I noted that despite being inside the _wanted, _files is used
+> instead of _path_files, so I thought maybe it was using the files tag, but
+> assuming a split into `sequences' and `files' doesn't seem to work either.
+> What's the right way of doing this?
+
+[ the ':completion:*:sequences' -> ':completion:*' should be clear
+  after my first answer too all this, I hope ]
+
+When I first read the above, I read `_next_tags' instead of
+`_next_label'. One might think that this should work, switching from
+sequences-name to sequences-num. One problem is that _wanted doesn't
+implement a tag-loop, of course, so _next_tags has no way to
+intervene. And then it still doesn't know about labels...
+
+No patch for this yet. I've got to think a whole lot more about this
+and I don't know if we ever can make it work...
+
+> ...
+>
+> This is probably known, but _next_tags doesn't work well with menu
+> completion.  Ideally, it should probably remove the current choice if the
+> last command was a menu completion and replace it with the first choice
+> from the list generated with the next tag.  Also, the message at the top
+> doesn't change; you still see `Completing TeX or LaTeX file' if you cycle
+> through to completing directories.  Maybe this is a feature.
+
+But this is hopefully fixed by the patch below. As you all know, I
+don't use menu-completion, so I need opinions from others...
+
+To make this work the way Peter (and I, after reading Peter's comment) 
+want it, I had to add a bit of code to compcore.c, to allow values
+like `menu:2' for $compstate[insert] to make it start menu-completion, 
+but begin with inserting the second match.
+
+
+Bye
+ Sven
+
+Index: Completion/Commands/_next_tags
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Commands/_next_tags,v
+retrieving revision 1.2
+diff -u -r1.2 _next_tags
+--- Completion/Commands/_next_tags	2000/04/01 20:43:43	1.2
++++ Completion/Commands/_next_tags	2000/04/04 11:16:59
+@@ -3,7 +3,7 @@
+ # Main widget.
+ 
+ _next_tags() {
+-  local comp
++  local comp ins
+ 
+   if [[ -z $compstate[old_list] ]]; then
+     comp=()
+@@ -17,12 +17,18 @@
+   _next_tags_pre="${LBUFFER%${PREFIX}}"
+   _next_tags_not="$_next_tags_not $_lastcomp[tags]"
+ 
++  if [[ -n "$compstate[old_insert]" ]]; then
++    PREFIX="$_lastcomp[prefix]"
++    SUFFIX="$_lastcomp[suffix]"
++    ins=1
++  fi
++
+   _main_complete "$comp[@]"
+ 
+   [[ $compstate[insert] = automenu ]] &&
+      compstate[insert]=automenu-unambiguous
+ 
+-  compstate[insert]=''
++  compstate[insert]="$ins"
+   compstate[list]='list force'
+ 
+   compprefuncs=( "$compprefuncs[@]" _next_tags_pre )
+@@ -36,10 +42,16 @@
+   # I think one should still be able to edit the current word between
+   # attempts to complete it.
+ 
+-  if [[ $_next_tags_pre != ${LBUFFER%${PREFIX}} ]]; then
++  if [[ -n $compstate[old_insert] && $WIDGET != _next_tags ]]; then
++    compstate[old_list]=keep
++    compstate[insert]=menu:2
++    return 0
++  elif [[ ${LBUFFER%${PREFIX}} != ${_next_tags_pre}* ]]; then
+     unset _sort_tags
+   else
+     compprefuncs=( "$compprefuncs[@]" _next_tags_pre )
++    [[ -n "$compstate[old_list]" && -n "$_next_tags_reset" ]] &&
++        _next_tags_not= _next_tags_reset=
+   fi
+ }
+ 
+@@ -60,13 +72,13 @@
+   if [[ $funcstack[4] = _files ]]; then
+     if zstyle -a ":completion:${curcontext}:" file-patterns tmp; then
+       [[ "$tags" = *${${tmp[-1]##[^\\]:}%:*}* ]] &&
+-          tags=( $order ) _next_tags_not=
++          tags=( $order ) _next_tags_reset=yes
+     else
+-      [[ "$tags" = *all-files* ]] && tags=( $order ) _next_tags_not=
++      [[ "$tags" = *all-files* ]] && tags=( $order ) _next_tags_reset=yes
+     fi
+   else
+      [[ $#tags -ne $#order && "$tags" != *(${(j:|:)~argv})* ]] &&
+-        tags=( $order ) _next_tags_not=
++        tags=( $order ) _next_tags_reset=yes
+   fi
+   for tag in $tags; do
+     case $tag in
+@@ -80,9 +92,9 @@
+   if [[ -z "$nodef" ]]; then
+     if [[ $funcstack[4] = _files ]]; then
+       if zstyle -a ":completion:${curcontext}:" file-patterns tmp; then
+-        [[ "$argv" = *${${tmp[-1]##[^\\]:}%:*}* ]] && _next_tags_not=
++        [[ "$argv" = *${${tmp[-1]##[^\\]:}%:*}* ]] && _next_tags_reset=yes
+       else
+-        [[ "$argv" = *all-files* ]] && _next_tags_not=
++        [[ "$argv" = *all-files* ]] && _next_tags_reset=yes
+       fi
+     fi
+     comptry "${(@)argv:#(${(j:|:)~${=_next_tags_not}})(|:*)}"
+Index: Doc/Zsh/compwid.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compwid.yo,v
+retrieving revision 1.2
+diff -u -r1.2 compwid.yo
+--- Doc/Zsh/compwid.yo	2000/04/01 20:43:44	1.2
++++ Doc/Zsh/compwid.yo	2000/04/04 11:17:00
+@@ -290,6 +290,12 @@
+ key ends in a space, the match is inserted as in a menu-completion,
+ i.e. without automatically appending a space.
+ 
++Both tt(menu) and tt(automenu) may also specify the the number of the
++match to insert, given after a colon, optionally followed by a second
++colon and a group number. For example, `tt(menu:2)' says to start
++menu-completion, beginning with the second match and `tt(menu:3:2)'
++says to start menu-completion with the third match in the second group.
++
+ It may also be set to tt(all), which makes all matches generated be
+ inserted into the line.
+ )
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.3
+diff -u -r1.3 compcore.c
+--- Src/Zle/compcore.c	2000/04/04 09:53:04	1.3
++++ Src/Zle/compcore.c	2000/04/04 11:17:01
+@@ -746,11 +746,6 @@
+ 		 !strcmp(compinsert, "unambiguous") ||
+ 		 !strcmp(compinsert, "automenu-unambiguous"))
+ 	    useline = 1, usemenu = 0;
+-	else if (!strcmp(compinsert, "menu"))
+-	    useline = 1, usemenu = 1;
+-	else if (!strcmp(compinsert, "auto") ||
+-		 !strcmp(compinsert, "automenu"))
+-	    useline = 1, usemenu = 2;
+ 	else if (!strcmp(compinsert, "all"))
+ 	    useline = 2, usemenu = 0;
+ 	else if (idigit(*compinsert)) {
+@@ -763,8 +758,24 @@
+ 		insgnum = atoi(m + 1);
+ 	    }
+ 	    insspace = (compinsert[strlen(compinsert) - 1] == ' ');
+-	} else
+-	    useline = usemenu = 0;
++	} else {
++	    char *p;
++
++	    if (strpfx("menu", compinsert))
++		useline = 1, usemenu = 1;
++	    else if (strpfx("auto", compinsert))
++		useline = 1, usemenu = 2;
++	    else
++		useline = usemenu = 0;
++
++	    if (useline && (p = strchr(compinsert, ':'))) {
++		insmnum = atoi(++p);
++		if ((p = strchr(p, ':'))) {
++		    insgroup = 1;
++		    insgnum = atoi(p + 1);
++		}
++	    }
++	}
+ 	startauto = (compinsert &&
+ 		     !strcmp(compinsert, "automenu-unambiguous"));
+ 	useexact = (compexact && !strcmp(compexact, "accept"));
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

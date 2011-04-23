@@ -1,0 +1,390 @@
+From zsh-workers-return-9792-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Feb 19 19:20:32 2000
+Return-Path: <zsh-workers-return-9792-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2455 invoked from network); 19 Feb 2000 19:20:31 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Feb 2000 19:20:31 -0000
+Received: (qmail 28523 invoked by alias); 19 Feb 2000 19:20:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9792
+Received: (qmail 28506 invoked from network); 19 Feb 2000 19:20:16 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000219191951.ZM11073@candle.brasslantern.com>
+Date: Sat, 19 Feb 2000 19:19:51 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: redirection and xtrace output
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+This patch introduces a global FILE *xtrerr which is used for (hopefully)
+all xtrace output.  Normally it just points to stderr, but during execcmd()
+it's fdopened on a dup of fileno(stderr) before redirections are performed,
+then restored before returning.
+
+There's probably some test that I haven't figured out yet that would permit
+changing xtrerr only if fd 2 is actually being redirected.  Or maybe there
+isn't any reason to reclaim the file descriptor, and we should just open
+xtrerr once in init_io() and leave it open forever?
+
+There is still one problem with this:  The xtrace output of ( ... ) and
+{ ... } constructs is NOT redirected with stderr, which it should be. I
+suspect that's a matter of restoring xtrerr = stderr in entersubsh(), but
+I wasn't sure exactly where.
+
+Index: Src/builtin.c
+===================================================================
+@@ -351,13 +351,13 @@
+     /* display execution trace information, if required */
+     if (xtr) {
+ 	printprompt4();
+-	fprintf(stderr, "%s", name);
++	fprintf(xtrerr, "%s", name);
+ 	if (xarg)
+-	    fprintf(stderr, " %s", xarg);
++	    fprintf(xtrerr, " %s", xarg);
+ 	while (*oargv)
+-	    fprintf(stderr, " %s", *oargv++);
+-	fputc('\n', stderr);
+-	fflush(stderr);
++	    fprintf(xtrerr, " %s", *oargv++);
++	fputc('\n', xtrerr);
++	fflush(xtrerr);
+     }
+     /* call the handler function, and return its return value */
+     return (*(bn->handlerfunc)) (name, argv, ops, bn->funcid);
+Index: Src/cond.c
+===================================================================
+@@ -50,12 +50,12 @@
+     switch (ctype) {
+     case COND_NOT:
+ 	if (tracingcond)
+-	    fprintf(stderr, " %s", condstr[ctype]);
++	    fprintf(xtrerr, " %s", condstr[ctype]);
+ 	return !evalcond(state);
+     case COND_AND:
+ 	if (evalcond(state)) {
+ 	    if (tracingcond)
+-		fprintf(stderr, " %s", condstr[ctype]);
++		fprintf(xtrerr, " %s", condstr[ctype]);
+ 	    return evalcond(state);
+ 	} else {
+ 	    state->pc = pcode + (WC_COND_SKIP(code) + 1);
+@@ -64,7 +64,7 @@
+     case COND_OR:
+ 	if (!evalcond(state)) {
+ 	    if (tracingcond)
+-		fprintf(stderr, " %s", condstr[ctype]);
++		fprintf(xtrerr, " %s", condstr[ctype]);
+ 	    return evalcond(state);
+ 	} else {
+ 	    state->pc = pcode + (WC_COND_SKIP(code) + 1);
+@@ -136,9 +136,9 @@
+ 		singsub(&rt);
+ 		untokenize(rt);
+ 	    }
+-	    fprintf(stderr, " %s %s %s", left, condstr[ctype], rt);
++	    fprintf(xtrerr, " %s %s %s", left, condstr[ctype], rt);
+ 	} else
+-	    fprintf(stderr, " -%c %s", ctype, left);
++	    fprintf(xtrerr, " -%c %s", ctype, left);
+     }
+ 
+     if (ctype >= COND_EQ && ctype <= COND_GE) {
+@@ -410,10 +410,10 @@
+     for (aptr = args; *aptr; aptr++)
+ 	untokenize(*aptr);
+     if (inf) {
+-	fprintf(stderr, " %s %s %s", args[0], name, args[1]);
++	fprintf(xtrerr, " %s %s %s", args[0], name, args[1]);
+     } else {
+-	fprintf(stderr, " %s", name);
++	fprintf(xtrerr, " %s", name);
+ 	while (*args)
+-	    fprintf(stderr, " %s", *args++);
++	    fprintf(xtrerr, " %s", *args++);
+     }
+ }
+Index: Src/exec.c
+===================================================================
+@@ -1195,12 +1195,12 @@
+ 
+ 	for (node = firstnode(list); node; incnode(node)) {
+ 	    *ptr++ = (char *)getdata(node);
+-	    zputs(getdata(node), stderr);
++	    zputs(getdata(node), xtrerr);
+ 	    if (nextnode(node))
+-		fputc(' ', stderr);
++		fputc(' ', xtrerr);
+ 	}
+-	fputc('\n', stderr);
+-	fflush(stderr);
++	fputc('\n', xtrerr);
++	fflush(xtrerr);
+     } else {
+ 	for (node = firstnode(list); node; incnode(node))
+ 	    *ptr++ = (char *)getdata(node);
+@@ -1404,7 +1404,7 @@
+ 	name = ecgetstr(state, 1);
+ 	untokenize(name);
+ 	if (xtr)
+-	    fprintf(stderr, "%s=", name);
++	    fprintf(xtrerr, "%s=", name);
+ 	if ((isstr = (WC_ASSIGN_TYPE(ac) == WC_ASSIGN_SCALAR))) {
+ 	    vl = newlinklist();
+ 	    addlinknode(vl, ecgetstr(state, 1));
+@@ -1437,7 +1437,7 @@
+ 		val = ztrdup(ugetnode(vl));
+ 	    }
+ 	    if (xtr)
+-		fprintf(stderr, "%s ", val);
++		fprintf(xtrerr, "%s ", val);
+ 	    if (export && !strchr(name, '[')) {
+ 		if (export < 0 && isset(RESTRICTED) &&
+ 		    (pm = (Param) paramtab->removenode(paramtab, name)) &&
+@@ -1470,10 +1470,10 @@
+ 
+ 	*ptr = NULL;
+ 	if (xtr) {
+-	    fprintf(stderr, "( ");
++	    fprintf(xtrerr, "( ");
+ 	    for (ptr = arr; *ptr; ptr++)
+-		fprintf(stderr, "%s ", *ptr);
+-	    fprintf(stderr, ") ");
++		fprintf(xtrerr, "%s ", *ptr);
++	    fprintf(xtrerr, ") ");
+ 	}
+ 	setaparam(name, arr);
+ 	if (errflag) {
+@@ -1698,8 +1698,8 @@
+ 		    else
+ 			lastval = cmdoutval;
+ 		    if (isset(XTRACE)) {
+-			fputc('\n', stderr);
+-			fflush(stderr);
++			fputc('\n', xtrerr);
++			fflush(xtrerr);
+ 		    }
+ 		    return;
+ 		}
+@@ -1935,6 +1935,12 @@
+ 	goto err;
+     }
+ 
++    /* Make a copy of stderr for xtrace output before redirecting */
++    fflush(xtrerr);
++    if (xtrerr == stderr &&
++	!(xtrerr = fdopen(movefd(dup(fileno(stderr))), "w")))
++	xtrerr = stderr;
++
+     /* Add pipeline input/output to mnodes */
+     if (input)
+ 	addfd(forked, save, mfds, 0, input, 0);
+@@ -2088,7 +2094,7 @@
+ 	    for (i = 0; i < 10; i++)
+ 		if (save[i] != -2)
+ 		    zclose(save[i]);
+-	    return;
++	    goto done;
+ 	}
+ 	/*
+ 	 * If nullexec is 2, we have variables to add with the redirections
+@@ -2098,8 +2104,8 @@
+ 	    addvars(state, varspc, 0);
+ 	lastval = errflag ? errflag : cmdoutval;
+ 	if (isset(XTRACE)) {
+-	    fputc('\n', stderr);
+-	    fflush(stderr);
++	    fputc('\n', xtrerr);
++	    fflush(xtrerr);
+ 	}
+     } else if (isset(EXECOPT) && !errflag) {
+ 	/*
+@@ -2138,7 +2144,7 @@
+ 		    restore_params(restorelist, removelist);
+ 		    lastval = 1;
+ 		    fixfds(save);
+-		    return;
++		    goto done;
+ 		}
+ 	    }
+ 
+@@ -2239,6 +2245,14 @@
+     if (forked)
+ 	_exit(lastval);
+     fixfds(save);
++
++ done:
++    if (xtrerr != stderr) {
++	fil = fileno(xtrerr);
++	fclose(xtrerr);
++	zclose(fil);
++	xtrerr = stderr;
++    }
+ }
+ 
+ /* Arrange to have variables restored. */
+@@ -2870,13 +2884,13 @@
+     state->pc--;
+     if (isset(XTRACE)) {
+ 	printprompt4();
+-	fprintf(stderr, "[[");
++	fprintf(xtrerr, "[[");
+ 	tracingcond++;
+     }
+     stat = !evalcond(state);
+     if (isset(XTRACE)) {
+-	fprintf(stderr, " ]]\n");
+-	fflush(stderr);
++	fprintf(xtrerr, " ]]\n");
++	fflush(xtrerr);
+ 	tracingcond--;
+     }
+     return stat;
+@@ -2893,18 +2907,18 @@
+ 
+     if (isset(XTRACE)) {
+ 	printprompt4();
+-	fprintf(stderr, "((");
++	fprintf(xtrerr, "((");
+     }
+     e = ecgetstr(state, 1);
+     singsub(&e);
+     if (isset(XTRACE))
+-	fprintf(stderr, " %s", e);
++	fprintf(xtrerr, " %s", e);
+ 
+     val = mathevali(e);
+ 
+     if (isset(XTRACE)) {
+-	fprintf(stderr, " ))\n");
+-	fflush(stderr);
++	fprintf(xtrerr, " ))\n");
++	fflush(xtrerr);
+     }
+     errflag = 0;
+     return !val;
+@@ -3017,11 +3031,11 @@
+ 	if (args)
+ 	    for (lptr = firstnode(args); lptr; incnode(lptr)) {
+ 		if (lptr != firstnode(args))
+-		    fputc(' ', stderr);
+-		fprintf(stderr, "%s", (char *)getdata(lptr));
++		    fputc(' ', xtrerr);
++		fprintf(xtrerr, "%s", (char *)getdata(lptr));
+ 	    }
+-	fputc('\n', stderr);
+-	fflush(stderr);
++	fputc('\n', xtrerr);
++	fflush(xtrerr);
+     }
+     ocs = cmdstack;
+     ocsp = cmdsp;
+Index: Src/init.c
+===================================================================
+@@ -331,6 +331,9 @@
+ 	SHTTY = -1;
+     }
+ 
++    /* Send xtrace output to stderr -- see execcmd() */
++    xtrerr = stderr;
++
+     /* Make sure the tty is opened read/write. */
+     if (isatty(0)) {
+ 	zsfree(ttystrname);
+Index: Src/loop.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/loop.c,v
+retrieving revision 1.21
+diff -u -r1.21 loop.c
+--- loop.c	2000/02/06 18:42:31	1.21
++++ loop.c	2000/02/19 18:53:58
+@@ -66,8 +66,8 @@
+ 	    char *str2 = dupstring(str);
+ 	    untokenize(str2);
+ 	    printprompt4();
+-	    fprintf(stderr, "%s\n", str2);
+-	    fflush(stderr);
++	    fprintf(xtrerr, "%s\n", str2);
++	    fflush(xtrerr);
+ 	}
+ 	if (!errflag)
+ 	    matheval(str);
+@@ -105,8 +105,8 @@
+ 		if (*str) {
+ 		    if (isset(XTRACE)) {
+ 			printprompt4();
+-			fprintf(stderr, "%s\n", str);
+-			fflush(stderr);
++			fprintf(xtrerr, "%s\n", str);
++			fflush(xtrerr);
+ 		    }
+ 		    val = mathevali(str);
+ 		} else
+@@ -125,8 +125,8 @@
+ 		break;
+ 	    if (isset(XTRACE)) {
+ 		printprompt4();
+-		fprintf(stderr, "%s=%s\n", name, str);
+-		fflush(stderr);
++		fprintf(xtrerr, "%s=%s\n", name, str);
++		fflush(xtrerr);
+ 	    }
+ 	    setsparam(name, ztrdup(str));
+ 	}
+@@ -144,8 +144,8 @@
+ 	    str = dupstring(advance);
+ 	    if (isset(XTRACE)) {
+ 		printprompt4();
+-		fprintf(stderr, "%s\n", str);
+-		fflush(stderr);
++		fprintf(xtrerr, "%s\n", str);
++		fflush(xtrerr);
+ 	    }
+ 	    singsub(&str);
+ 	    if (!errflag)
+@@ -517,8 +517,8 @@
+ 	    pat2 = dupstring(pat);
+ 	    untokenize(pat2);
+ 	    printprompt4();
+-	    fprintf(stderr, "case %s (%s)\n", word, pat2);
+-	    fflush(stderr);
++	    fprintf(xtrerr, "case %s (%s)\n", word, pat2);
++	    fflush(xtrerr);
+ 	    state->pc++;
+ 	} else
+ 	    state->pc += 2;
+Index: Src/utils.c
+===================================================================
+@@ -791,9 +791,14 @@
+ /* This prints the XTRACE prompt. */
+ 
+ /**/
++FILE *xtrerr = 0;
++
++/**/
+ void
+ printprompt4(void)
+ {
++    if (!xtrerr)
++	xtrerr = stderr;
+     if (prompt4) {
+ 	int l;
+ 	char *s = dupstring(prompt4);
+@@ -801,7 +806,7 @@
+ 	unmetafy(s, &l);
+ 	s = unmetafy(promptexpand(metafy(s, l, META_NOALLOC), 0, NULL, NULL), &l);
+ 
+-	fprintf(stderr, "%s", s);
++	fprintf(xtrerr, "%s", s);
+     }
+ }
+ 
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

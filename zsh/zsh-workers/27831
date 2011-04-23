@@ -1,0 +1,325 @@
+From zsh-workers-return-27831-mason-zsh=primenet.com.au@zsh.org Thu Mar 25 22:05:56 2010
+Return-Path: <zsh-workers-return-27831-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3758 invoked by alias); 25 Mar 2010 22:05:56 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27831
+Received: (qmail 3043 invoked from network); 25 Mar 2010 22:05:53 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=0.8 required=5.0 tests=BAYES_00,RCVD_IN_PSBL
+	autolearn=no version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.56 as permitted sender)
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@zsh.org (Zsh hackers list)
+Subject: PATCH: count glyphs in multibyte strings
+X-Mailer: MH-E 8.2; nmh 1.3; GNU Emacs 23.1.1
+Date: Thu, 25 Mar 2010 21:35:03 +0000
+Message-ID: <22950.1269552903@pws-pc>
+X-Cloudmark-Analysis: v=1.1 cv=1ggfb5FlKZQUfF3vzm9UBYZ2uTfLsbs/8dSljwg5+mE= c=1 sm=0 a=vQjUigJXlpMA:10 a=DogomfpGjd0A:10 a=NLZqzBF-AAAA:8 a=CkAZwk8Vf0BseXSUvQMA:9 a=99bdZVQKxa0blMRstzwA:7 a=HU30vhIUME-zRpbeKOmxrKs4ycUA:4 a=_dQi-Dcv4p4A:10 a=cb9ee6o5Vwdtxfg0:21 a=0V1RtscMCDbx_s63:21 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+I noticed we were missing this capability; not sure how useful it is in
+practice, but it was straightforward to add.
+
+You might want to check my terminology and assumptions about the way
+Unicode works aren't gibberish.
+
+--- ../zsh-git/zsh/Doc/Zsh/expn.yo	2010-03-25 21:01:19.000000000 +0000
++++ Doc/Zsh/expn.yo	2010-03-25 21:23:29.000000000 +0000
+@@ -1004,6 +1004,12 @@
+ length of the string.  Most printable characters have a width of one
+ unit, however certain Asian character sets and certain special effects
+ use wider characters; combining characters have zero width.
++
++If the tt(m) is repeated, the character either counts zero (if it has
++zero width), else one.  For printable character strings this has the
++effect of counting the number of glyphs (visibly separate characters),
++except for the case where combining characters themselves have non-zero
++width (true in certain alphabets).
+ )
+ item(tt(r:)var(expr)tt(::)var(string1)tt(::)var(string2)tt(:))(
+ As tt(l), but pad the words on the right and insert var(string2)
+--- ../zsh-git/zsh/Src/subst.c	2010-03-25 21:01:19.000000000 +0000
++++ Src/subst.c	2010-03-25 21:15:21.000000000 +0000
+@@ -675,6 +675,35 @@
+     return dest;
+ }
+ 
++#ifdef MULTIBYTE_SUPPORT
++#define WCPADWIDTH(cchar, mw)	wcpadwidth(cchar, mw)
++
++/*
++ * Width of character for padding purposes.
++ * 0: all characters count 1.
++ * 1: use width of multibyte character.
++ * 2: non-zero width characters count 1, zero width 0.
++ */
++static int
++wcpadwidth(wchar_t wc, int multi_width)
++{
++    switch (multi_width)
++    {
++    case 0:
++	return 1;
++
++    case 1:
++	return WCWIDTH(wc);
++
++    default:
++	return WCWIDTH(wc) ? 1 : 0;
++    }
++}
++
++#else
++#define WCPADWIDTH(cchar, mw)	(1)
++#endif
++
+ /*
+  * Pad the string str, returning a result from the heap (or str itself,
+  * if it didn't need padding).  If str is too large, it will be truncated.
+@@ -703,12 +732,6 @@
+ #endif
+     )
+ {
+-#ifdef MULTIBYTE_SUPPORT
+-#define WCPADWIDTH(cchar)	(multi_width ? WCWIDTH(cchar) : 1)
+-#else
+-#define WCPADWIDTH(cchar)	(1)
+-#endif
+-
+     char *def, *ret, *t, *r;
+     int ls, ls2, lpreone, lpostone, lpremul, lpostmul, lr, f, m, c, cc, cl;
+     convchar_t cchar;
+@@ -775,14 +798,14 @@
+ 		MB_METACHARINIT();
+ 		while (f > 0) {
+ 		    str += MB_METACHARLENCONV(str, &cchar);
+-		    f -= WCPADWIDTH(cchar);
++		    f -= WCPADWIDTH(cchar, multi_width);
+ 		}
+ 		/* Now finish the first half. */
+ 		for (c = prenum; c > 0; ) {
+ 		    cl = MB_METACHARLENCONV(str, &cchar);
+ 		    while (cl--)
+ 			*r++ = *str++;
+-		    c -= WCPADWIDTH(cchar);
++		    c -= WCPADWIDTH(cchar, multi_width);
+ 		}
+ 	    } else {
+ 		if (f <= lpreone) {
+@@ -796,7 +819,7 @@
+ 			/* So skip. */
+ 			for (t = preone; f > 0; ) {
+ 			    t += MB_METACHARLENCONV(t, &cchar);
+-			    f -= WCPADWIDTH(cchar);
++			    f -= WCPADWIDTH(cchar, multi_width);
+ 			}
+ 			/* Then copy the entire remainder. */
+ 			while (*t)
+@@ -814,7 +837,7 @@
+ 			    m = lpremul - m;
+ 			    for (t = premul; m > 0; ) {
+ 				t += MB_METACHARLENCONV(t, &cchar);
+-				m -= WCPADWIDTH(cchar);
++				m -= WCPADWIDTH(cchar, multi_width);
+ 			    }
+ 			    /* Output the rest. */
+ 			    while (*t)
+@@ -827,7 +850,7 @@
+ 				cl = MB_METACHARLENCONV(t, &cchar);
+ 				while (cl--)
+ 				    *r++ = *t++;
+-				c -= WCPADWIDTH(cchar);
++				c -= WCPADWIDTH(cchar, multi_width);
+ 			    }
+ 			}
+ 		    }
+@@ -840,7 +863,7 @@
+ 		/* Output the first half width of the original string. */
+ 		for (c = ls2; c > 0; ) {
+ 		    cl = MB_METACHARLENCONV(str, &cchar);
+-		    c -= WCPADWIDTH(cchar);
++		    c -= WCPADWIDTH(cchar, multi_width);
+ 		    while (cl--)
+ 			*r++ = *str++;
+ 		}
+@@ -854,7 +877,7 @@
+ 		MB_METACHARINIT();
+ 		for (c = postnum; c > 0; ) {
+ 		    cl = MB_METACHARLENCONV(str, &cchar);
+-		    c -= WCPADWIDTH(cchar);
++		    c -= WCPADWIDTH(cchar, multi_width);
+ 		    while (cl--)
+ 			*r++ = *str++;
+ 		}
+@@ -867,7 +890,7 @@
+ 			/* Can't fit unrepeated string, truncate it */
+ 			for (c = f; c > 0; ) {
+ 			    cl = MB_METACHARLENCONV(postone, &cchar);
+-			    c -= WCPADWIDTH(cchar);
++			    c -= WCPADWIDTH(cchar, multi_width);
+ 			    while (cl--)
+ 				*r++ = *postone++;
+ 			}
+@@ -890,7 +913,7 @@
+ 			    MB_METACHARINIT();
+ 			    while (m > 0) {
+ 				cl = MB_METACHARLENCONV(postmul, &cchar);
+-				m -= WCPADWIDTH(cchar);
++				m -= WCPADWIDTH(cchar, multi_width);
+ 				while (cl--)
+ 				    *r++ = *postmul++;
+ 			    }
+@@ -914,14 +937,14 @@
+ 		MB_METACHARINIT();
+ 		while (f > 0) {
+ 		    str += MB_METACHARLENCONV(str, &cchar);
+-		    f -= WCPADWIDTH(cchar);
++		    f -= WCPADWIDTH(cchar, multi_width);
+ 		}
+ 		/* Copy the rest of the original string */
+ 		for (c = prenum; c > 0; ) {
+ 		    cl = MB_METACHARLENCONV(str, &cchar);
+ 		    while (cl--)
+ 			*r++ = *str++;
+-		    c -= WCPADWIDTH(cchar);
++		    c -= WCPADWIDTH(cchar, multi_width);
+ 		}
+ 	    } else {
+ 		/*
+@@ -942,7 +965,7 @@
+ 			MB_METACHARINIT();
+ 			for (t = preone; f > 0; ) {
+ 			    t += MB_METACHARLENCONV(t, &cchar);
+-			    f -= WCPADWIDTH(cchar);
++			    f -= WCPADWIDTH(cchar, multi_width);
+ 			}
+ 			/* Copy the rest of preone */
+ 			while (*t)
+@@ -966,14 +989,14 @@
+ 			    MB_METACHARINIT();
+ 			    for (t = premul; m > 0; ) {
+ 				t += MB_METACHARLENCONV(t, &cchar);
+-				m -= WCPADWIDTH(cchar);
++				m -= WCPADWIDTH(cchar, multi_width);
+ 			    }
+ 			    /* Now the rest of the repeated string. */
+ 			    while (c > 0) {
+ 				cl = MB_METACHARLENCONV(t, &cchar);
+ 				while (cl--)
+ 				    *r++ = *t++;
+-				c -= WCPADWIDTH(cchar);
++				c -= WCPADWIDTH(cchar, multi_width);
+ 			    }
+ 			}
+ 			for (cc = f / lpremul; cc--;) {
+@@ -985,7 +1008,7 @@
+ 				cl = MB_METACHARLENCONV(t, &cchar);
+ 				while (cl--)
+ 				    *r++ = *t++;
+-				c -= WCPADWIDTH(cchar);
++				c -= WCPADWIDTH(cchar, multi_width);
+ 			    }
+ 			}
+ 		    }
+@@ -1023,7 +1046,7 @@
+ 		cl = MB_METACHARLENCONV(str, &cchar);
+ 		while (cl--)
+ 		    *r++ = *str++;
+-		c -= WCPADWIDTH(cchar);
++		c -= WCPADWIDTH(cchar, multi_width);
+ 	    }
+ 	} else {
+ 	    /*
+@@ -1035,7 +1058,7 @@
+ 		cl = MB_METACHARLENCONV(str, &cchar);
+ 		while (cl--)
+ 		    *r++ = *str++;
+-		c -= WCPADWIDTH(cchar);
++		c -= WCPADWIDTH(cchar, multi_width);
+ 	    }
+ 	    MB_METACHARINIT();
+ 	    if (f <= lpostone) {
+@@ -1048,7 +1071,7 @@
+ 			cl = MB_METACHARLENCONV(postone, &cchar);
+ 			while (cl--)
+ 			    *r++ = *postone++;
+-			c -= WCPADWIDTH(cchar);
++			c -= WCPADWIDTH(cchar, multi_width);
+ 		    }
+ 		}
+ 	    } else {
+@@ -1059,7 +1082,7 @@
+ 			cl = MB_METACHARLENCONV(postone, &cchar);
+ 			while (cl--)
+ 			    *r++ = *postone++;
+-			c -= WCPADWIDTH(cchar);
++			c -= WCPADWIDTH(cchar, multi_width);
+ 		    }
+ 		}
+ 		if (lpostmul) {
+@@ -1070,7 +1093,7 @@
+ 			    cl = MB_METACHARLENCONV(t, &cchar);
+ 			    while (cl--)
+ 				*r++ = *t++;
+-			    c -= WCPADWIDTH(cchar);
++			    c -= WCPADWIDTH(cchar, multi_width);
+ 			}
+ 		    }
+ 		    /*
+@@ -1083,7 +1106,7 @@
+ 			    cl = MB_METACHARLENCONV(postmul, &cchar);
+ 			    while (cl--)
+ 				*r++ = *postmul++;
+-			    m -= WCPADWIDTH(cchar);
++			    m -= WCPADWIDTH(cchar, multi_width);
+ 			}
+ 		    }
+ 		}
+@@ -1782,7 +1805,7 @@
+ 
+ 		case 'm':
+ #ifdef MULTIBYTE_SUPPORT
+-		    multi_width = 1;
++		    multi_width++;
+ #endif
+ 		    break;
+ 
+--- ../zsh-git/zsh/Src/utils.c	2010-03-25 21:01:19.000000000 +0000
++++ Src/utils.c	2010-03-25 21:14:17.000000000 +0000
+@@ -4406,6 +4406,8 @@
+  * until end of string.
+  *
+  * If width is 1, return total character width rather than number.
++ * If width is greater than 1, return 1 if character has non-zero width,
++ * else 0.
+  */
+ 
+ /**/
+@@ -4447,9 +4449,12 @@
+ 		 * turn this into 1 for backward compatibility.
+ 		 */
+ 		int wcw = WCWIDTH(wc);
+-		if (wcw >= 0)
+-		    num += wcw;
+-		else
++		if (wcw >= 0) {
++		    if (width == 1)
++			num += wcw;
++		    else
++			num += (wcw > 0);
++		} else
+ 		    num++;
+ 	    } else
+ 		num++;
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

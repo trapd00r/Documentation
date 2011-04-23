@@ -1,0 +1,261 @@
+From zsh-workers-request@math.gatech.edu  Sat Jul 22 04:34:53 1995
+Received: from gatech.edu (gatech.edu [130.207.244.244]) by werple.mira.net.au (8.6.12/8.6.9) with SMTP id EAA12185 for <mason@werple.mira.net.au>; Sat, 22 Jul 1995 04:34:49 +1000
+Received: from math (math.skiles.gatech.edu) by gatech.edu with SMTP id AA18625
+  (5.65c/Gatech-10.0-IDA for <mason@werple.mira.net.au>); Fri, 21 Jul 1995 14:34:47 -0400
+Received: by math (5.x/SMI-SVR4)
+	id AA19974; Fri, 21 Jul 1995 14:30:50 -0400
+Resent-Date: Fri, 21 Jul 1995 20:29:30 +0100 (MET DST)
+Old-Return-Path: <hzoli@cs.elte.hu>
+From: hzoli@cs.elte.hu (Zoltan Hidvegi)
+Message-Id: <9507211829.AA09086@turan.elte.hu>
+Subject: Re: list-expand fix and a bug report
+To: zsh-workers@math.gatech.edu (zsh-workers)
+Date: Fri, 21 Jul 1995 20:29:30 +0100 (MET DST)
+In-Reply-To: <28944.199507160205@stone.dcs.warwick.ac.uk> from "Zefram" at Jul 16, 95 03:05:31 am
+X-Mailer: ELM [version 2.4 PL21]
+Content-Type: text
+Resent-Message-Id: <"GtNyI.0.0u4.P9_3m"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/250
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+> ...
+> On an unrelated matter, I have found a problem with completion of filenames containing spaces.  If I type:
+> 
+> % touch 'spoon '
+> % echo spoon\ <TAB>
+> 
+> then in plain beta10 the space disappears after a couple of tabs, and
+> then the backslash goes, and it's a bit of a mess.  In an up-to-date
+> patched beta10, a space gets inserted *after* the cursor, and repeated
+> tabs insert more spaces without moving the cursor.  This happens in
+> beta10-hzoli10.1 too.  Can someone tell me which patch could have done
+> this, as my patch list doesn't show anything changing in this area.
+> More importantly, can anyone actually fix it?
+> 
+> Probably the same bug:
+> 
+> % mkdir t
+> % cd t
+> % touch spoon-
+> % touch 'spoon '
+> % echo spoon<TAB>
+> 
+> during menu completion, I get the sequence (_ representing cursor):
+> 
+> % echo spoon\_
+> % echo spoon-_
+> 
+> If I stop menu completion on the first of these, I find that there is a
+> space under the cursor.  This happens with plain beta10, patched beta10
+> and with beta10-hzoli10.1.  Also note that it only happens with space;
+> tab and other special characters are fine.
+
+The patch below fixes all of these bugs and even some more:
+
+% echo \f$V<TAB>  rsulted:
+% echo \f$VENDO R
+
+With the cursor under the `R'.
+
+The patch is for beta10-hzoli10+. It can be applied to stock beta10. In that
+case the rejection to hist.c should be ignored, and the rejection to
+zle_tricky.c should be merged by hand in addx(). I'll make a
+patch to stock beta10 if I'll have time.
+
+Bye,
+  Zoltan
+
+
+--- 1.6	1995/07/17 22:00:18
++++ Src/hist.c	1995/07/18 22:37:00
+@@ -116,7 +116,7 @@
+ 	 * history line where \ was used to escape the bang). So if     *
+ 	 * c == '\\' we fetch one more character to see if it's a bang, *
+ 	 * and if it is not, we unget it and reset c back to '\\'       */
+-	inungetc(c), c = '\\';
++	safeinungetc(c), c = '\\';
+     if (stophist || alstackind)
+ 	/* If the result is a bangchar which came from history or alias  *
+ 	 * expansion, we treat it as an escaped bangchar, unless history *
+@@ -134,6 +134,15 @@
+     return c;
+ }
+ 
++/**/
++void
++safeinungetc(int c)
++{
++    if (lexstop)
++	lexstop = 0;
++    else
++	inungetc(c);
++}
+ 
+ /* extract :s/foo/bar/ delimiters and arguments */
+ 
+@@ -192,7 +201,7 @@
+ 	    int g = ingetc();
+ 
+ 	    if (g != bangchar)
+-		inungetc(g);
++		safeinungetc(g);
+ 	    else {
+ 		qbang = 1;
+ 		return bangchar;
+@@ -210,10 +219,7 @@
+ 	    return ingetc();
+ 	}
+ 	if ((!cflag && inblank(c)) || c == '=' || c == '(' || lexstop) {
+-	    if (lexstop)
+-		lexstop = 0;
+-	    else
+-		inungetc(c);
++	    safeinungetc(c);
+ 	    return bangchar;
+ 	}
+ 	cflag = 0;
+--- 1.28	1995/07/17 20:36:06
++++ Src/zle_tricky.c	1995/07/18 23:00:44
+@@ -54,9 +54,11 @@
+ 
+ extern char *glob_pre, *glob_suf;
+ 
+-/* we and wb hold the end/beginning position of the word we are completing */
++/* we and wb hold the end/beginning position of the word we are completing *
++ * offs is the cursor position within the tokenized current word after     *
++ * removing nulargs.                                                       */
+ 
+-static int we, wb, usemenu, useglob;
++static int we, wb, offs, usemenu, useglob;
+ 
+ /* A pointer to the current position in the menu-completion array (the one
+    that was put in the command line last). */
+@@ -550,7 +552,7 @@
+     noerrs = ne;
+     /* When completing between words, the contents of wb and we may be
+        garbled. */
+-    if (we > wb && inblank(line[we - 1]))
++    if (we > wb && inblank(line[we - 1]) && (we < 2 || line[we - 2] != '\\'))
+ 	we--;
+     /* For vi mode, reset the start-of-insertion pointer to the beginning of
+     the word being completed, if it is currently later.  Vi itself would never
+@@ -772,7 +774,9 @@
+ void
+ addx(char **ptmp)
+ {
+-    if (!line[cs] || inblank(line[cs]) || line[cs] == ')' || line[cs] == '`') {
++    if (!line[cs] || line[cs] == '\n' ||
++	(iblank(line[cs]) && (!cs || line[cs-1] != '\\')) ||
++	line[cs] == ')' || line[cs] == '`') {
+ 	*ptmp = (char *)line;
+ 	line = (unsigned char *)halloc(strlen((char *)line) + 3);
+ 	memcpy(line, *ptmp, cs);
+@@ -916,7 +920,8 @@
+ 	clwords[i] = ztrdup(tokstr);
+ 	sl = strlen(tokstr);
+ 	/* sometimes the lexer gives us token strings ending with spaces. */
+-	while (sl && clwords[i][sl - 1] == ' ')
++	while (sl && clwords[i][sl - 1] == ' ' &&
++	       (sl < 2 || clwords[i][sl - 2] != Bnull))
+ 	    clwords[i][--sl] = '\0';
+ 	/* If this is the word the cursor is in and we added a `x',
+ 	   remove it. */
+@@ -1083,12 +1088,17 @@
+     /* This variable will hold the current word in quoted form. */
+     qword = ztrdup(s);
+     /* While buildin the quoted form, we also clean up the command line. */
++    offs = cs - wb;
+     for (p = s, tt = qword, i = wb; *p; p++, tt++, i++)
+ 	if (INULL(*p)) {
++	    if (i < cs)
++		offs--;
+ 	    if (p[1] || *p != Bnull) {
+-		if (*p == Bnull)
++		if (*p == Bnull) {
+ 		    *tt = '\\';
+-		else {
++		    if (cs == i + 1)
++			cs++, offs++;
++		} else {
+ 		    ocs = cs;
+ 		    cs = i;
+ 		    foredel(1);
+@@ -2162,7 +2172,7 @@
+ {
+     Compctl cc = NULL;
+     int owe = we, owb = wb, ocs = cs, isf = 1;
+-    int offs, t, sf1, sf2, ooffs;
++    int t, sf1, sf2, ooffs;
+     char *p, *sd = NULL, sav, *tt, *s1, *s2, *os = NULL;
+     unsigned char *ol = NULL;
+ 
+@@ -2178,11 +2188,7 @@
+ 
+     /* Go to the end of the word if complete_in_word is not set. */
+     if (unset(COMPLETEINWORD) && cs != we)
+-	cs = we;
+-    /* offs holds the distance between the cursor and the beginning of the
+-       word. */
+-    if ((offs = cs - wb) > (t = strlen(s)))
+-	offs = t;
++	cs = we, offs = strlen(s);
+ 
+     ispattern = haswhat = lastambig = 0;
+     patcomp = filecomp = NULL;
+@@ -2233,6 +2239,7 @@
+ 	/* And adjust the word beginning/end variables. */
+ 	wb += sl;
+ 	we += sl - pl;
++	offs -= pl;
+     }
+     /* Does this compctl have a suffix (compctl -S)? */
+     if ((ccsuffix = cc->suffix) && *ccsuffix) {
+@@ -2258,12 +2265,18 @@
+     }
+     /* Do we have one of the special characters `~' and `=' at the
+        beginning? */
+-    if ((ic = *s) != Tilde && ic != Equals)
+-	ic = (*s == '~' ? Tilde : (*s == '=' ? Equals : '\0'));
+-    /* Re-adjust the offs variable after all the changes we might have done
+-       to s, cs, and wb. */
+-    if ((offs = cs - wb) > (t = strlen(s)))
+-	offs = t;
++    switch (*s) {
++    case '~':
++    case Tilde:
++	ic = Tilde;
++	break;
++    case '=':
++    case Equals:
++	ic = Equals;
++	break;
++    default:
++	ic = '\0';
++    }
+ 
+     /* Check if we have to complete a parameter name... */
+ 
+@@ -2328,8 +2341,8 @@
+ 	    qparprelen = strlen(qparampre);
+ 	    *b = sav;
+ 	    /* And adjust wb, we, and offs again. */
+-	    wb += qparprelen;
+ 	    offs -= b - s;
++	    wb = cs - offs;
+ 	    we = wb + e - b;
+ 	    s = b;
+ 	    /* And now make sure that we complete parameter names. */
+@@ -3262,7 +3275,8 @@
+ 	}
+ 	if (menuend > ll)
+ 	    menuend = ll;
+-	if (menuend && ((char)line[menuend - 1]) != singlec)
++	if (menuend && ((((char)line[menuend - 1]) != singlec) ||
++		(menuend > 1 && singlec == ' ' && line[menuend - 2] == '\\')))
+ 	    if (parampre && singlec == '/' && ((char)line[menuend]) == '/')
+ 		addedsuffix = 0;
+ 	    /* Now insert the slash or space if there is none already. */
+

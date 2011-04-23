@@ -1,0 +1,295 @@
+From schaefer@candle.brasslantern.com Thu Jul 25 04:59:52 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id EAA18731 for <mason@werple.mira.net.au>; Thu, 25 Jul 1996 04:59:49 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id OAA13716; Wed, 24 Jul 1996 14:46:43 -0400 (EDT)
+Resent-Date: Wed, 24 Jul 1996 14:46:43 -0400 (EDT)
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <960724114350.ZM8700@candle.brasslantern.com>
+Date: Wed, 24 Jul 1996 11:43:50 -0700
+In-Reply-To: Zoltan Hidvegi <hzoli@cs.elte.hu>
+        "Re: PATH_MAX used dangerously -- do we care?" (Jul  9,  2:40am)
+References: <199607090040.CAA11288@bolyai.cs.elte.hu>
+Reply-To: schaefer@nbn.com
+X-Mailer: Z-Mail (4.0b.702 02jul96)
+To: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Subject: Re: PATH_MAX used dangerously -- do we care?
+Cc: zsh-workers@math.gatech.edu
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"5jgFp1.0.EM3.J-czn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1760
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 8092
+Status: O
+
+On Jul 9,  2:40am, Zoltan Hidvegi wrote:
+} Subject: Re: PATH_MAX used dangerously -- do we care?
+}
+[I wrote:]
+} > I can find at least half a dozen places where some form of user input is
+} > sprintf'd or strcpy'd into a PATH_MAX-sized stack buffer or static buffer.
+} > The most obvious one is in sourcehome() in init.c, where $ZDOTDIR plus a
+} > slash and file name is sprintf'd into such a buffer.
+} > 
+} > In all cases I found, the string being placed in the buffer really is a
+} > path name, so PATH_MAX is a reasonable limit upon it; so I don't suggest
+} > switching to dynamic buffers, but shouldn't there be a bounds check?
+} 
+} Yes there should be.  If you know the places where it should be fexed, send
+} in that list or send a patch which fixes that.  There can be two solutions:
+} we can silently truncate the string or we may give some error message and
+} refuse to do anything with the string.  The later is probably more correct
+} behaviour.  Perhaps the behaviour of other shells can be examined before
+} the decision.
+
+Here's a patch for many (still not all) of the PATH_MAX problems.  Missing
+are utils.c (where there are a huge number of uses of PATH_MAX buffers, so
+I have not yet undertaken to verify which of them may have problems); and
+some of the completion code in zle_tricky.c, where I don't understand
+what's going on well enough to know the best fixes, or even whether fixing
+is needed.  For similar reasons, I avoided parsecomp() in glob.c.
+
+I also didn't change a couple of places in exec.c where the buffer might
+get overflowed but we've already forked and are about to execve() the
+buffer in question, and I didn't mess with MAXCMDLEN even though it has
+similar potential problems.  Somebody more familiar with zexecve() should
+look at this.
+
+In making the changes below, I tried to follow these guidelines:
+
+1.  When doing path searches, skip paths that are too long, but continue
+    looking for shorter paths that may succeed.
+
+2.  If a function already has a failure mode, overlong paths should fail
+    the same way (with respect to return values and whether warnings are
+    printed).
+
+3.  If a function has no failure mode, overlong paths should zerr() a
+    warning.  This only applied in sourcehome() below, so I simply
+    bailed out after the warning.  Other functions (utils.c?) might
+    need to try to recover and proceed sensibly.
+
+Finally, the last hunk below makes use of DIGBUFSIZE in a couple of
+places in params.c where it appeared it should have been used.
+
+diff -c zsh-3.0-pre3/Src/builtin.c zsh-3.0-pre3-work/Src/builtin.c
+*** zsh-3.0-pre3/Src/builtin.c	Fri Jul 19 11:18:39 1996
+--- zsh-3.0-pre3-work/Src/builtin.c	Wed Jul 24 09:43:51 1996
+***************
+*** 1166,1175 ****
+      int dotsct;
+  
+      /* handle directory prefix */
+!     if (pfix)
+  	sprintf(buf, "%s/%s", (!strcmp("/", pfix)) ? "" : pfix, dest);
+!     else
+  	strcpy(buf, dest);
+      /* Normalise path.  See the definition of fixdir() for what this means. */
+      dotsct = fixdir(buf2, buf);
+  
+--- 1166,1180 ----
+      int dotsct;
+  
+      /* handle directory prefix */
+!     if (pfix) {
+! 	if (strlen(dest) + strlen(pfix) + 1 >= PATH_MAX)
+! 	    return NULL;
+  	sprintf(buf, "%s/%s", (!strcmp("/", pfix)) ? "" : pfix, dest);
+!     } else {
+! 	if (strlen(dest) >= PATH_MAX)
+! 	    return NULL;
+  	strcpy(buf, dest);
++     }
+      /* Normalise path.  See the definition of fixdir() for what this means. */
+      dotsct = fixdir(buf2, buf);
+  
+***************
+*** 1183,1191 ****
+      if (!dotsct) {
+  	if (chdir(unmeta(buf)) == -1)
+  	    return NULL;
+! 	if (*buf2)
+  	    sprintf(buf, "%s/%s", (!strcmp("/", pwd)) ? "" : pwd, buf2);
+! 	else
+  	    strcpy(buf, pwd);
+  	return ztrdup(buf);
+      }
+--- 1188,1198 ----
+      if (!dotsct) {
+  	if (chdir(unmeta(buf)) == -1)
+  	    return NULL;
+! 	if (*buf2) {
+! 	    if (strlen(pwd) + strlen(buf2) + 1 >= PATH_MAX)
+! 		return NULL;
+  	    sprintf(buf, "%s/%s", (!strcmp("/", pwd)) ? "" : pwd, buf2);
+! 	} else
+  	    strcpy(buf, pwd);
+  	return ztrdup(buf);
+      }
+***************
+*** 3258,3263 ****
+--- 3265,3272 ----
+  		z = buf;
+  		strucpy(&z, *pp);
+  		*z++ = '/';
++ 		if ((z - buf) + strlen(*argv) >= PATH_MAX)
++ 		    continue;
+  		strcpy(z, *argv);
+  		if (iscom(buf)) {
+  		    if (v && !csh)
+***************
+*** 4610,4616 ****
+      char *s, **t, *enam, *arg0;
+      struct stat st;
+  
+!     if (!*argv)
+  	return 0;
+      old = pparams;
+      /* get arguments for the script */
+--- 4619,4625 ----
+      char *s, **t, *enam, *arg0;
+      struct stat st;
+  
+!     if (!*argv || strlen(*argv) >= PATH_MAX)
+  	return 0;
+      old = pparams;
+      /* get arguments for the script */
+***************
+*** 4654,4661 ****
+  			continue;
+  		    diddot = 1;
+  		    strcpy(buf, arg0);
+! 		} else
+  		    sprintf(buf, "%s/%s", *t, arg0);
+  		s = unmeta(buf);
+  		if (access(s, F_OK) == 0 && stat(s, &st) >= 0
+  		    && !S_ISDIR(st.st_mode)) {
+--- 4663,4673 ----
+  			continue;
+  		    diddot = 1;
+  		    strcpy(buf, arg0);
+! 		} else {
+! 		    if (strlen(*t) + strlen(arg0) + 1 >= PATH_MAX)
+! 			continue;
+  		    sprintf(buf, "%s/%s", *t, arg0);
++ 		}
+  		s = unmeta(buf);
+  		if (access(s, F_OK) == 0 && stat(s, &st) >= 0
+  		    && !S_ISDIR(st.st_mode)) {
+diff -c zsh-3.0-pre3/Src/exec.c zsh-3.0-pre3-work/Src/exec.c
+*** zsh-3.0-pre3/Src/exec.c	Mon Jul 22 11:31:06 1996
+--- zsh-3.0-pre3-work/Src/exec.c	Wed Jul 24 10:12:31 1996
+***************
+*** 301,307 ****
+  
+      argv = makecline(args);
+      child_unblock();
+!     if ((int) strlen(arg0) > PATH_MAX) {
+  	zerr("command too long: %s", arg0, 0);
+  	_exit(1);
+      }
+--- 301,307 ----
+  
+      argv = makecline(args);
+      child_unblock();
+!     if ((int) strlen(arg0) >= PATH_MAX) {
+  	zerr("command too long: %s", arg0, 0);
+  	_exit(1);
+      }
+***************
+*** 462,467 ****
+--- 462,469 ----
+  	    s = buf;
+  	    strucpy(&s, *pp);
+  	    *s++ = '/';
++ 	    if ((s - buf) + strlen(arg0) >= PATH_MAX)
++ 		continue;
+  	    strcpy(s, arg0);
+  	    if (iscom(buf))
+  		break;
+***************
+*** 2531,2536 ****
+--- 2533,2540 ----
+  
+      pp = fpath;
+      for (; *pp; pp++) {
++ 	if (strlen(*pp) + strlen(s) + 1 >= PATH_MAX)
++ 	    continue;
+  	sprintf(buf, "%s/%s", *pp, s);
+  	unmetafy(buf, NULL);
+  	if (!access(buf, R_OK) && (fd = open(buf, O_RDONLY)) != -1) {
+***************
+*** 2581,2586 ****
+--- 2585,2592 ----
+  	    return NULL;
+  	if (!nocdpath)
+  	    for (cp = cdpath; *cp; cp++) {
++ 		if (strlen(*cp) + strlen(s) + 1 >= PATH_MAX)
++ 		    continue;
+  		sprintf(sbuf, "%s/%s", *cp, s);
+  		if (cancd2(sbuf)) {
+  		    doprintdir = -1;
+diff -c zsh-3.0-pre3/Src/init.c zsh-3.0-pre3-work/Src/init.c
+*** zsh-3.0-pre3/Src/init.c	Mon Jul 15 10:47:50 1996
+--- zsh-3.0-pre3-work/Src/init.c	Wed Jul 24 10:33:13 1996
+***************
+*** 816,821 ****
+--- 816,825 ----
+  
+      if (!(h = getsparam("ZDOTDIR")))
+  	h = home;
++     if (strlen(h) + strlen(s) + 1 >= PATH_MAX) {
++ 	zerr("path too long: %s", s, 0);
++ 	return;
++     }
+      sprintf(buf, "%s/%s", h, s);
+      source(buf);
+  }
+diff -c zsh-3.0-pre3/Src/params.c zsh-3.0-pre3-work/Src/params.c
+*** zsh-3.0-pre3/Src/params.c	Tue Jul 23 18:29:27 1996
+--- zsh-3.0-pre3-work/Src/params.c	Wed Jul 24 09:51:27 1996
+***************
+*** 648,654 ****
+  getstrvalue(Value v)
+  {
+      char *s, **ss;
+!     static char buf[(SIZEOF_LONG * 8) + 4];
+  
+      if (!v || !v->pm)
+  	return "";
+--- 648,654 ----
+  getstrvalue(Value v)
+  {
+      char *s, **ss;
+!     static char buf[DIGBUFSIZE];
+  
+      if (!v || !v->pm)
+  	return "";
+***************
+*** 747,753 ****
+  void
+  setstrvalue(Value v, char *val)
+  {
+!     char buf[(SIZEOF_LONG * 8) + 4];
+  
+      if (v->pm->flags & PM_READONLY) {
+  	zsfree(val);
+--- 747,753 ----
+  void
+  setstrvalue(Value v, char *val)
+  {
+!     char buf[DIGBUFSIZE];
+  
+      if (v->pm->flags & PM_READONLY) {
+  	zsfree(val);
+
+-- 
+Bart Schaefer                             Brass Lantern Enterprises
+http://www.well.com/user/barts            http://www.nbn.com/people/lantern
+
+New male in /home/schaefer:
+>N  2 Justin William Schaefer  Sat May 11 03:43  53/4040  "Happy Birthday"
+
+

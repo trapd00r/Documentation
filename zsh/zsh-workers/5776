@@ -1,0 +1,178 @@
+From zsh-workers-return-5776-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Mar 12 14:39:10 1999
+Return-Path: <zsh-workers-return-5776-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5508 invoked from network); 12 Mar 1999 14:39:09 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Mar 1999 14:39:09 -0000
+Received: (qmail 3076 invoked by alias); 12 Mar 1999 14:18:36 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5776
+Received: (qmail 3068 invoked from network); 12 Mar 1999 14:18:29 -0000
+Message-Id: <9903121402.AA46034@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: cut'n'paste on IRIX 
+In-Reply-To: ""Andrej Borsenkow""'s message of "Fri, 12 Mar 1999 13:21:30 NFT."
+             <001201be6c72$18aaa260$21c9ca95@mowp.siemens.ru> 
+Date: Fri, 12 Mar 1999 15:02:26 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+"Andrej Borsenkow" wrote:
+> Looks, like it is done in settyinfo(), that is (unconditionally) called from
+> trashzle() that is called from zleread() after we've seen new line. (It is
+> actually using tcsetattr() on our system)
+
+OK, here's my first attempt.  Unfortunately I can't test whether this fixes
+the bug, since I don't have it.  However, so far it hasn't blown anything
+else.  The only way to see if it does is by testing, so it will appear in
+pws-12 and I'll wait for expostulations.
+
+What now happens is that zleread() doesn't restore the tty when called in
+the normal run of things from the main input routine, since that may want
+more input, as in the case that caused the bug.  Instead, the
+end-of-history (that sounds rather alarming) routine is made responsible
+for putting the terminal back.  I've tried to arrange it so other calls to
+trashzle() and zleread() do what they always did, which is why there are
+three sets of flags --- one to zleread(), one to get hend() to restore the
+terminal, one static flag between zleread() and trashzle().  I could
+probably have made fewer changes, but it would have had possible side
+effects such as the terminal not being restored when zle was temporarily
+interrupted (e.g. by a background job exiting).
+
+Now I'll probably find it doesn't fix the bug.
+
+If it does work, it's a candidate for porting to 3.0.6.
+
+--- Src/Zle/zle_main.c.trash	Mon Mar  1 10:35:34 1999
++++ Src/Zle/zle_main.c	Fri Mar 12 14:33:22 1999
+@@ -394,11 +394,13 @@
+     return ret;
+ }
+ 
++static int no_restore_tty;
++
+ /* Read a line.  It is returned metafied. */
+ 
+ /**/
+ unsigned char *
+-zleread(char *lp, char *rp, int ha)
++zleread(char *lp, char *rp, int flags)
+ {
+     unsigned char *s;
+     int old_errno = errno;
+@@ -451,7 +453,7 @@
+     pmpt_attr = txtchange;
+     rpromptbuf = promptexpand(rp, 1, NULL, NULL);
+     rpmpt_attr = txtchange;
+-    histallowed = ha;
++    histallowed = (flags & ZLRF_HISTORY);
+     PERMALLOC {
+ 	histline = curhist;
+ #ifdef HAVE_SELECT
+@@ -486,6 +488,8 @@
+ 	if (tmout)
+ 	    alarm(tmout);
+ 	zleactive = 1;
++	if (flags & ZLRF_NOSETTY)
++	  no_restore_tty = 1;
+ 	resetneeded = 1;
+ 	errflag = retflag = 0;
+ 	lastcol = -1;
+@@ -535,7 +539,7 @@
+ 	trashzle();
+ 	free(lpromptbuf);
+ 	free(rpromptbuf);
+-	zleactive = 0;
++	zleactive = no_restore_tty = 0;
+ 	alarm(0);
+     } LASTALLOC;
+     zsfree(curhistline);
+@@ -754,7 +758,7 @@
+     PERMALLOC {
+ 	pushnode(bufstack, ztrdup(s));
+     } LASTALLOC;
+-    t = (char *) zleread(p1, p2, ops['h']);
++    t = (char *) zleread(p1, p2, ops['h'] ? ZLRF_HISTORY : 0);
+     if (!t || errflag) {
+ 	/* error in editing */
+ 	errflag = 0;
+@@ -885,7 +889,8 @@
+ 	    fprintf(shout, "%s", postedit);
+ 	fflush(shout);
+ 	resetneeded = 1;
+-	settyinfo(&shttyinfo);
++	if (!no_restore_tty)
++	  settyinfo(&shttyinfo);
+     }
+     if (errflag)
+ 	kungetct = 0;
+--- Src/hist.c.trash	Fri Mar 12 13:56:08 1999
++++ Src/hist.c	Fri Mar 12 14:53:25 1999
+@@ -735,6 +735,8 @@
+     int flag, save = 1;
+ 
+     DPUTS(!chline, "BUG: chline is NULL in hend()");
++    if (histdone & HISTFLAG_SETTY)
++	settyinfo(&shttyinfo);
+     if (histactive & (HA_NOSTORE|HA_NOINC)) {
+ 	zfree(chline, hlinesz);
+ 	zfree(chwords, chwordlen*sizeof(short));
+--- Src/input.c.trash	Fri Mar 12 13:56:27 1999
++++ Src/input.c	Fri Mar 12 14:47:05 1999
+@@ -249,8 +249,21 @@
+ 	    free(pptbuf);
+ 	}
+ 	ingetcline = shingetline();
+-    } else
+-	ingetcline = (char *)zleread(ingetcpmptl, ingetcpmptr, 1);
++    } else {
++	/*
++	 * Since we may have to read multiple lines before getting
++	 * a complete piece of input, we tell zle not to restore the
++	 * original tty settings after reading each chunk.  Instead,
++	 * this is done when the history mechanism for the current input
++	 * terminates, which is not until we have the whole input.
++	 * This is supposed to minimise problems on systems that clobber
++	 * typeahead when the terminal settings are altered.
++	 *                     pws 1998/03/12
++	 */
++	ingetcline = (char *)zleread(ingetcpmptl, ingetcpmptr,
++				     ZLRF_HISTORY|ZLRF_NOSETTY);
++	histdone |= HISTFLAG_SETTY;
++    }
+     if (!ingetcline) {
+ 	return lexstop = 1;
+     }
+--- Src/zsh.h.trash	Fri Mar 12 13:55:43 1999
++++ Src/zsh.h	Fri Mar 12 13:59:37 1999
+@@ -1013,7 +1013,7 @@
+ #define HISTFLAG_DONE   1
+ #define HISTFLAG_NOEXEC 2
+ #define HISTFLAG_RECALL 4
+-
++#define HISTFLAG_SETTY  8
+ 
+ /******************************************/
+ /* Definitions for programable completion */
+@@ -1402,6 +1402,13 @@
+ #define ZSIG_TRAPPED	(1<<0)
+ #define ZSIG_IGNORED	(1<<1)
+ #define ZSIG_FUNC	(1<<2)
++
++/**********************************/
++/* Flags to third argument of zle */
++/**********************************/
++
++#define ZLRF_HISTORY	0x01
++#define ZLRF_NOSETTY	0x02
+ 
+ /****************/
+ /* Entry points */
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

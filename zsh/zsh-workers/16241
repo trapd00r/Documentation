@@ -1,0 +1,220 @@
+From zsh-workers-return-16241-mason-zsh=primenet.com.au@sunsite.dk Mon Nov 12 18:15:23 2001
+Return-Path: <zsh-workers-return-16241-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21020 invoked from network); 12 Nov 2001 18:15:23 -0000
+Received: from ns2.primenet.com.au (HELO primenet.com.au) (?6Qas13+yIwU6GnTk7tPQ8j/paRJnaaKD?@203.24.36.3)
+  by ns1.primenet.com.au with SMTP; 12 Nov 2001 18:15:23 -0000
+Received: (qmail 9403 invoked from network); 12 Nov 2001 18:15:21 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by proxy.melb.primenet.com.au with SMTP; 12 Nov 2001 18:15:21 -0000
+Received: (qmail 11119 invoked by alias); 12 Nov 2001 18:15:13 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16241
+Received: (qmail 11108 invoked from network); 12 Nov 2001 18:15:13 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: better pseudorandom numbers
+Date: Mon, 12 Nov 2001 18:14:45 +0000
+Message-ID: <773.1005588885@tinky-winky>
+From: Peter Stephenson <pws@tinky-winky>
+
+This allows the mathfunc library access to erand48() where available.  It
+makes use of the hitherto unused feature that Sven added, to allow math
+functions to take string arguments.
+
+Others may think of a better of doing things.  If there's an RNG expert
+around, they probably disagree with everything.
+
+I'm not happy with the way the seed is stored as raw bytes.  It might be
+better to keep it as an array of three numbers and convert to and from
+string format each time.  With 64-bit zlong's, it will fit in a single
+integer parameter, but that's not portable.
+
+Index: zshconfig.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/zshconfig.ac,v
+retrieving revision 1.20
+diff -u -r1.20 zshconfig.ac
+--- zshconfig.ac	2001/10/10 16:02:24	1.20
++++ zshconfig.ac	2001/11/12 18:06:07
+@@ -938,7 +938,8 @@
+ 	       brk sbrk \
+ 	       pathconf sysconf \
+ 	       tgetent tigetflag tigetnum tigetstr setupterm \
+-	       pcre_compile pcre_study pcre_exec)
++	       pcre_compile pcre_study pcre_exec \
++	       erand48)
+ AC_FUNC_STRCOLL
+ 
+ dnl  Check if tgetent accepts NULL (and will allocate its own termcap buffer)
+Index: Doc/Zsh/mod_mathfunc.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/mod_mathfunc.yo,v
+retrieving revision 1.2
+diff -u -r1.2 mod_mathfunc.yo
+--- Doc/Zsh/mod_mathfunc.yo	2000/05/11 00:01:03	1.2
++++ Doc/Zsh/mod_mathfunc.yo	2001/11/12 18:06:07
+@@ -52,3 +52,34 @@
+ 
+ Note that the C tt(pow) function is available in ordinary math evaluation
+ as the `tt(**)' operator and is not provided here.
++
++The function tt(rand48) is available if your system's mathematical library
++has the function tt(erand48(3)).  It returns a pseudo-random floating point
++number between 0 and 1.  It takes a single string optional argument.
++
++If the argument is not present, the random number seed is initialised by
++three calls to the tt(rand(3)) function --- this produces the same random
++numbers as the next three values of tt($RANDOM).
++
++If the argument is present, it gives the name of a scalar parameter where
++the current random number seed will be stored.  On the first call, the
++value must be at least six bytes long, or the seed will be initialised in
++the same manner as for a call to tt(rand48) with no argument.  Subsequent
++calls to tt(rand48)LPAR()var(param)RPAR() will then maintain the seed in
++the parameter var(param) as a raw string of bytes.  The random number
++sequences for different parameters are completely independent, and are also
++independent from that used by calls to tt(rand48) with no argument.
++
++For example, consider
++
++example(print $(( rand48(seed) ))
++print $(( rand48() ))
++print $(( rand48(seed) )))
++
++Assuming tt($seed) does not exist, it will be initialised by the first
++call.  In the second call, the default seed is initialised; note, however,
++that because of the properties of tt(rand()) there is a correlation between
++the seeds used for the two initialisations, so for more secure uses, you
++should generate your own 6-byte seed.  The third call returns to the same
++sequence of random numbers used in the first call, unaffected by the
++intervening tt(rand48()).
+Index: Src/Modules/mathfunc.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/mathfunc.c,v
+retrieving revision 1.2
+diff -u -r1.2 mathfunc.c
+--- Src/Modules/mathfunc.c	2000/05/26 09:47:28	1.2
++++ Src/Modules/mathfunc.c	2001/11/12 18:06:08
+@@ -82,6 +82,12 @@
+ MF_YN
+ };
+ 
++/* also functions taking a string argument */
++
++enum {
++MS_RAND48
++};
++
+ /*
+  * also to do, but differently argument or returned: abs (no type
+  * conversion), atan2.
+@@ -119,6 +125,12 @@
+ 
+ 
+ static struct mathfunc mftab[] = {
++  /* Functions taking string arguments */
++#ifdef HAVE_ERAND48
++  /* here to avoid comma hassle */
++  STRMATHFUNC("rand48", math_string, MS_RAND48),
++#endif
++
+   NUMMATHFUNC("abs", math_func, 1, 1, MF_ABS | BFLAG(BF_FRAC) |
+ 	      TFLAG(TF_NOCONV|TF_NOASS)),
+   NUMMATHFUNC("acos", math_func, 1, 1, MF_ACOS | BFLAG(BF_FRAC)),
+@@ -167,7 +179,7 @@
+   NUMMATHFUNC("tanh", math_func, 1, 1, MF_TANH),
+   NUMMATHFUNC("y0", math_func, 1, 1, MF_Y0 | BFLAG(BF_POS)),
+   NUMMATHFUNC("y1", math_func, 1, 1, MF_Y1 | BFLAG(BF_POS)),
+-  NUMMATHFUNC("yn", math_func, 2, 2, MF_YN | BFLAG(BF_POS2) | TFLAG(TF_INT1))
++  NUMMATHFUNC("yn", math_func, 2, 2, MF_YN | BFLAG(BF_POS2) | TFLAG(TF_INT1)),
+ };
+ 
+ /**/
+@@ -447,6 +459,78 @@
+ 
+   return ret;
+ }
++
++/**/
++static mnumber
++math_string(char *name, char *arg, int id)
++{
++    mnumber ret = zero_mnumber;
++    char *send;
++    /*
++     * Post-process the string argument, which is just passed verbatim.
++     * Not clear if any other functions that use math_string() will
++     * want this, but assume so for now.
++     */
++    while (iblank(*arg))
++	arg++;
++    send = arg + strlen(arg);
++    while (send > arg && iblank(send[-1]))
++	send--;
++    *send = '\0';
++
++    switch (id)
++    {
++#ifdef HAVE_ERAND48
++    case MS_RAND48:
++	{
++	    static unsigned short seedbuf[3];
++	    static int seedbuf_init;
++	    unsigned short tmp_seedbuf[3], *seedbufptr;
++	    int do_init = 1;
++
++	    if (*arg) {
++		/* Seed is contained in parameter named by arg */
++		char *seedstr;
++		int seedstr_len;
++		seedbufptr = tmp_seedbuf;
++		if ((seedstr = getsparam(arg))) {
++		   unmetafy(seedstr, &seedstr_len);
++		   if (seedstr_len >= sizeof(tmp_seedbuf))
++		   {
++		       memcpy(tmp_seedbuf, seedstr,  sizeof(tmp_seedbuf));
++		       do_init = 0;
++		   }
++		} else if (errflag)
++		    break;
++	    }
++	    else
++	    {
++		/* Use default seed: must be initialised. */
++		seedbufptr = seedbuf;
++		if (!seedbuf_init)
++		    seedbuf_init = 1;
++		else
++		    do_init = 1;
++	    }
++	    if (do_init) {
++		seedbufptr[0] = (unsigned short)rand();
++		seedbufptr[1] = (unsigned short)rand();
++		seedbufptr[2] = (unsigned short)rand();
++	    }
++	    ret.type = MN_FLOAT;
++	    ret.u.d = erand48(seedbufptr);
++
++	    if (*arg)
++		setsparam(arg, metafy((char *)seedbufptr, sizeof(tmp_seedbuf),
++				      META_DUP));
++	}
++	break;
++#endif
++    }
++
++    return ret;
++}
++
+ 
+ /**/
+ int
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+

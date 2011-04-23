@@ -1,0 +1,186 @@
+From zsh-workers-return-8222-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Oct 12 11:08:30 1999
+Return-Path: <zsh-workers-return-8222-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5703 invoked from network); 12 Oct 1999 11:08:29 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Oct 1999 11:08:29 -0000
+Received: (qmail 9468 invoked by alias); 12 Oct 1999 11:08:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8222
+Received: (qmail 9454 invoked from network); 12 Oct 1999 11:08:07 -0000
+Date: Tue, 12 Oct 1999 13:08:01 +0200 (MET DST)
+Message-Id: <199910121108.NAA06595@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Andrej Borsenkow"'s message of Mon, 11 Oct 1999 18:58:58 +0400
+Subject: PATHC: Re: Prblems with _match and exact matches (was: RE: BUG: RE: What happened to _path_files?)
+
+
+Andrej Borsenkow wrote:
+
+> Just to make sure - the actual bug is, that cursor is moved to the end of word
+> and not to the end of ambiguous part (path_cursor). I just tried with
+> zsh-3.1.6-pws-3 - and there it is the same ... so, may be, it was there for a
+> long time.
+
+I haven't tried every possible configuartion combination, but this
+should fix it. It's a result of the improved (;-) cursor positioning
+which decided that the end is a better place to leave the cursor
+in. This patch makes positions in the actually matched part of the
+word -- i.e. *not* the `-p' prefix of `-s' suffix -- be prefered over
+positions in those prefixes/suffixes. As long as completion functions
+make correct use of these (which they should do anyway), it should
+work.
+
+Bye
+ Sven
+
+diff -u oldsrc/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- oldsrc/Zle/zle_tricky.c	Tue Oct 12 11:42:37 1999
++++ Src/Zle/zle_tricky.c	Tue Oct 12 13:00:13 1999
+@@ -308,13 +308,14 @@
+     int min, max;
+ };
+ 
+-#define CLF_MISS  1
+-#define CLF_DIFF  2
+-#define CLF_SUF   4
+-#define CLF_MID   8
+-#define CLF_NEW  16
+-#define CLF_LINE 32
+-#define CLF_JOIN 64
++#define CLF_MISS      1
++#define CLF_DIFF      2
++#define CLF_SUF       4
++#define CLF_MID       8
++#define CLF_NEW      16
++#define CLF_LINE     32
++#define CLF_JOIN     64
++#define CLF_MATCHED 128
+ 
+ /* A heap of free Cline structures. */
+ 
+@@ -2079,6 +2080,20 @@
+     }
+ }
+ 
++/* This sets the CLF_MATCHED flag in the given clines. */
++
++static void
++cline_matched(Cline p)
++{
++    while (p) {
++	p->flags |= CLF_MATCHED;
++	cline_matched(p->prefix);
++	cline_matched(p->suffix);
++
++	p = p->next;
++    }
++}
++
+ /* This reverts the order of the elements of the given cline list and
+  * returns a pointer to the new head. */
+ 
+@@ -3734,6 +3749,8 @@
+ 
+     DPUTS(!line, "BUG: add_match_data() without cline");
+ 
++    cline_matched(line);
++
+     /* If there is a path suffix, we build a cline list for it and
+      * append it to the list for the match itself. */
+     if (psuf)
+@@ -3769,6 +3786,7 @@
+ 		    s->prefix = p->prefix;
+ 		    p->prefix = NULL;
+ 		}
++		s->flags |= (p->flags & CLF_MATCHED);
+ 		free_cline(p);
+ 		if (pp)
+ 		    pp->next = s;
+@@ -7764,13 +7782,13 @@
+ cline_str(Cline l, int ins, int *csp)
+ {
+     Cline s;
+-    int ocs = cs, ncs, pcs, pm, pmax, sm, smax, d, b, i, j, li = 0;
+-    int pl, sl, hasp, hass, ppos, spos, plen, slen;
++    int ocs = cs, ncs, pcs, pm, pmax, pmm, sm, smax, smm, d, dm, mid;
++    int pl, sl, hasp, hass, ppos, spos, plen, slen, i, j, li = 0;
+ 
+     l = cut_cline(l);
+ 
+-    ppos = spos = plen = slen = hasp = hass = 0;
+-    pm = pmax = sm = smax = d = b = pl = sl = -1;
++    pmm = smm = dm = ppos = spos = plen = slen = hasp = hass = 0;
++    pm = pmax = sm = smax = d = mid = pl = sl = -1;
+ 
+     /* Get the information about the brace beginning and end we have
+      * to re-insert. */
+@@ -7817,8 +7835,9 @@
+ 		    inststrlen(s->line, 1, s->llen);
+ 		else
+ 		    inststrlen(s->word, 1, s->wlen);
+-		if (s->flags & CLF_DIFF)
+-		    d = cs;
++		if ((s->flags & CLF_DIFF) && (!dm || (s->flags & CLF_MATCHED))) {
++		    d = cs; dm = s->flags & CLF_MATCHED;
++		}
+ 		if (ins) {
+ 		    li += s->llen;
+ 		    if (pl >= 0 && li >= pl) {
+@@ -7833,8 +7852,9 @@
+ 	/* Remember the position if this is the first prefix with
+ 	 * missing characters. */
+ 	if ((l->flags & CLF_MISS) && !(l->flags & CLF_SUF) &&
+-	    (pmax < (l->min - l->max))) {
+-	    pm = cs; pmax = l->min - l->max;
++	    ((pmax < (l->min - l->max) && (!pmm || (l->flags & CLF_MATCHED))) ||
++	     ((l->flags & CLF_MATCHED) && !pmm))) {
++	    pm = cs; pmax = l->min - l->max; pmm = l->flags & CLF_MATCHED;
+ 	}
+ 	pcs = cs;
+ 	/* Insert the anchor. */
+@@ -7854,9 +7874,12 @@
+ 	/* Remember the cursor position for suffixes and mids. */
+ 	if (l->flags & CLF_MISS) {
+ 	    if (l->flags & CLF_MID)
+-		b = cs;
+-	    else if ((l->flags & CLF_SUF) && smax < (l->min - l->max)) {
+-		sm = cs; smax = l->min - l->max;
++		mid = cs;
++	    else if ((l->flags & CLF_SUF) && 
++		     ((smax < (l->min - l->max) &&
++		       (!smm || (l->flags & CLF_MATCHED))) ||
++		      ((l->flags & CLF_MATCHED) && !smm))) {
++		sm = cs; smax = l->min - l->max; smm = l->flags & CLF_MATCHED;
+ 	    }
+ 	}
+ 	/* And now insert the suffix or the original string. */
+@@ -7901,8 +7924,9 @@
+ 	    if (hs)
+ 		spos += i;
+ 	    cs += i;
+-	    if (j >= 0)
+-		d = cs - j;
++	    if (j >= 0 && (!dm || (js->flags & CLF_MATCHED))) {
++		d = cs - j; dm = js->flags & CLF_MATCHED;
++	    }
+ 	}
+ 	/* If we reached the right positions, re-insert the braces. */
+ 	if (ins) {
+@@ -7932,7 +7956,7 @@
+      * with missing characters, we take this, otherwise if we have a
+      * prefix with missing characters, we take that, the same for a
+      * suffix, and finally a place where the matches differ. */
+-    ncs = (b >= 0 ? b : (pm >= 0 ? pm : (sm >= 0 ? sm : (d >= 0 ? d : cs))));
++    ncs = (mid >= 0 ? mid : (pm >= 0 ? pm : (sm >= 0 ? sm : (d >= 0 ? d : cs))));
+ 
+     if (!ins) {
+ 	/* We always inserted the string in the line. If that was not
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

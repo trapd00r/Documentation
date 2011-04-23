@@ -1,0 +1,231 @@
+From zsh-workers-return-15919-mason-zsh=primenet.com.au@sunsite.dk Tue Oct 02 02:32:44 2001
+Return-Path: <zsh-workers-return-15919-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11928 invoked from network); 2 Oct 2001 02:32:42 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 2 Oct 2001 02:32:42 -0000
+Received: (qmail 29022 invoked by alias); 2 Oct 2001 02:32:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15919
+Received: (qmail 29009 invoked from network); 2 Oct 2001 02:32:31 -0000
+Date: Mon, 1 Oct 2001 22:32:25 -0400
+From: Clint Adams <clint@zsh.org>
+To: zsh-workers@sunsite.dk
+Subject: PATCH: zsh/net/tcp and linked lists
+Message-ID: <20011001223225.A14747@dman.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.2.5i
+
+This reduces some code duplication by using LinkLists.
+zftp continues to work for me, so I have no insight
+into the problems being encountered.
+
+Index: Src/linklist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/linklist.c,v
+retrieving revision 1.1.1.7
+diff -u -r1.1.1.7 linklist.c
+--- Src/linklist.c	2000/03/15 09:39:14	1.1.1.7
++++ Src/linklist.c	2001/10/02 02:24:37
+@@ -284,3 +284,16 @@
+ 
+     return 0;
+ }
++
++/**/
++mod_export LinkNode
++linknodebydatum(LinkList list, void *dat)
++{
++    LinkNode node;
++
++    for (node = firstnode(list); node; incnode(node))
++	if (getdata(node) == dat)
++	    return node;
++
++    return NULL;
++}
+Index: Src/Modules/tcp.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/tcp.c,v
+retrieving revision 1.15
+diff -u -r1.15 tcp.c
+--- Src/Modules/tcp.c	2001/09/27 15:36:42	1.15
++++ Src/Modules/tcp.c	2001/10/02 02:24:37
+@@ -226,20 +226,8 @@
+ /**/
+ #endif /* !HAVE_GETIPNODEBYNAME */
+ 
+-Tcp_session ztcp_head = NULL, ztcp_tail = NULL;
++LinkList ztcp_sessions;
+ 
+-static Tcp_session
+-zts_head(void)
+-{
+-    return ztcp_head;
+-}
+-
+-static Tcp_session
+-zts_next(Tcp_session cur)
+-{
+-    return cur ? cur->next : NULL;
+-}
+-
+ /* "allocate" a tcp_session */
+ static Tcp_session
+ zts_alloc(int ztflags)
+@@ -249,16 +237,10 @@
+     sess = (Tcp_session)zcalloc(sizeof(struct tcp_session));
+     if (!sess) return NULL;
+     sess->fd=-1;
+-    sess->next=NULL;
+     sess->flags=ztflags;
+ 
+-    if (!zts_head()) {
+-	ztcp_head = ztcp_tail = sess;
+-    }
+-    else {
+-	ztcp_tail->next = sess;
+-	ztcp_tail = sess;
+-    }
++    zinsertlinknode(ztcp_sessions, lastnode(ztcp_sessions), (void *)sess);
++
+     return sess;
+ }
+ 
+@@ -276,62 +258,50 @@
+ }
+ 
+ static int
+-zts_delete(Tcp_session sess)
++ztcp_free_session(Tcp_session sess)
+ {
+-    Tcp_session tsess;
++    zfree(sess, sizeof(struct tcp_session));
+ 
+-    tsess = zts_head();
++    return 0;
++}
+ 
+-    if(!sess) return 1;
++static int
++zts_delete(Tcp_session sess)
++{
++    LinkNode node;
+ 
+-    if (tsess == sess)
+-    {
+-	ztcp_head = sess->next;
+-	free(sess);
+-	return 0;
+-    }
++    node = linknodebydatum(ztcp_sessions, (void *)sess);
+ 
+-    while((tsess->next != sess) && (tsess->next)) {
+-	tsess = zts_next(tsess);
++    if (!node)
++    {
++	return 1;
+     }
+ 
+-    if (!tsess->next) return 1;
++    ztcp_free_session(getdata(node));
++    remnode(ztcp_sessions, node);
+ 
+-    if (ztcp_tail == sess)
+-	ztcp_tail = tsess;
+-    tsess->next = sess->next;
+-    free(sess);
+     return 0;
+-
+ }
+ 
+ static Tcp_session
+ zts_byfd(int fd)
+ {
+-    Tcp_session tsess;
+-
+-    tsess = zts_head();
+-
+-    while(tsess != NULL) {
+-	if (tsess->fd == fd)
+-	    return tsess;
+-
+-	tsess = zts_next(tsess);
+-    }
+-
++    LinkNode node;
++    
++    for (node = firstnode(ztcp_sessions); node; incnode(node))
++	if (((Tcp_session)getdata(node))->fd == fd)
++	    return (Tcp_session)node;
++    
+     return NULL;
+ }
+ 
+ static void
+ tcp_cleanup(void)
+ {
+-    Tcp_session sess, prev;
+-    
+-    for(sess = zts_head(); sess != NULL; sess = zts_next(prev))
+-    {
+-	prev = sess;
+-	tcp_close(sess);
+-    }
++    LinkNode node;
++
++    for (node = firstnode(ztcp_sessions); node; incnode(node))
++	tcp_close((Tcp_session)getdata(node));
+ }
+ 
+ /**/
+@@ -601,8 +571,11 @@
+     {
+ 	
+ 	if (!dargs[0]) {
+-	    for(sess = zts_head(); sess != NULL; sess = zts_next(sess))
++	    LinkNode node;
++	    for(node = firstnode(ztcp_sessions); node; incnode(node))
+ 	    {
++		sess = (Tcp_session)getdata(node);
++
+ 		if (sess->fd != -1)
+ 		{
+ 		    zthost = gethostbyaddr(&(sess->sock.in.sin_addr), sizeof(struct sockaddr_in), AF_INET);
+@@ -708,6 +681,7 @@
+ int
+ boot_(Module m)
+ {
++    ztcp_sessions = znewlinklist();
+     return !addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
+ }
+ 
+@@ -717,6 +691,7 @@
+ cleanup_(Module m)
+ {
+     tcp_cleanup();
++    freelinklist(ztcp_sessions, (FreeFunc) ztcp_free_session);
+     return 0;
+ }
+ 
+Index: Src/Modules/tcp.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/tcp.h,v
+retrieving revision 1.5
+diff -u -r1.5 tcp.h
+--- Src/Modules/tcp.h	2001/09/09 23:33:06	1.5
++++ Src/Modules/tcp.h	2001/10/02 02:24:37
+@@ -80,7 +80,6 @@
+     int fd;				/* file descriptor */
+     union tcp_sockaddr sock;  	/* local address   */
+     union tcp_sockaddr peer;  	/* remote address  */
+-    Tcp_session next;
+     int flags;
+ };
+ 
+

@@ -1,0 +1,158 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Date: Fri, 5 Feb 1999 09:28:34 +0100 (MET)
+Message-Id: <199902050828.JAA19267@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Thu, 04 Feb 1999 15:12:57 +0100
+Subject: Re: PATCH: zsh-3.1.5-pws-6: bash-style completion
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5262
+
+
+Peter Stephenson wrote:
+
+> Sven Wischnowsky wrote:
+> > > I've also been having strange effects when combining all this with:
+> > >   compctl -M 'm:{a-z}={A-Z}' 'r:|[.,_-]=* r:|=*'
+> > 
+> > Hm, I haven't found any unusual behavior here, so I guess, I need an
+> > example.
+> 
+> The following alone works for me, in the Src directory of the
+> distribution where z<TAB> is ambiguous.
+> 
+> % zsh -f
+> % compctl -M 'm:{a-z}={A-Z}' 'r:|[.,_-]=* r:|=*'
+> % echo z<TAB>
+>        ^cursor is now over the z.
+> 
+> Now delete the line with ^U, enter `compctl -M', and try the same
+> example again, and the shell dies.
+
+The patch below fixes both of these. I'll write an extra comment about 
+the positioning of the cursor.
+
+> > I have only a bash-2.01.1 here but that version shows the behavior to
+> > list the matches only on the third TAB: 1) insert unambiguous prefix,
+> > 2) do nothing, 3) show list. If the unambiguous prefix was completely
+> > typed (not automatically inserted), it first does nothing and shows
+> > the list on the second TAB. So I'd vote for removing the test, see the 
+> > patch below which also fixes a typo in your patch. Otherwise using
+> > BASHAUTOLIST will be the same as LISTAMBIGUOUS+AUTOLIST if the
+> > unambiguous prefix had to be automatically inserted.
+> 
+> That's fine by me; you can unset LISTAMBIGUOUS to get the other
+> behaviour.  The patch changes the documentation.
+> 
+> However, I'm having problems with LISTAMBIGUOUS when RECEXACT is set,
+> because `am' then gets set a few lines above that, apparently even if
+> there isn't an exact completion, and the chunk in question is skipped.
+> Any ideas?
+
+Yes, there was a problem with listambiguous showing the list too
+early. This was caused by a wrong calculation in ainfo->prerest. I've
+changed that to collect the minimum match length and compare it to
+what is inserted.
+
+Another problem I can see is the combination of menucomplete and
+bashautolist. Here the list is never shown since we never get to the
+second tab. Maybe we should just document this.
+
+Bye
+ Sven
+
+--- oos/Zle/zle_tricky.c	Fri Feb  5 08:49:33 1999
++++ Src/Zle/zle_tricky.c	Fri Feb  5 09:26:42 1999
+@@ -223,7 +223,7 @@
+ 
+ struct aminfo {
+     int cpl, csl, icpl, icsl;	/* common prefix/suffix lengths           */
+-    int prerest;		/* minimum prefix rest                    */
++    int minlen;			/* minimum match length                   */
+     int suflen;			/* minimum suffix length                  */
+     Cmatch firstm;		/* the first match                        */
+     char *pprefix;		/* common part of the -P prefixes         */
+@@ -1824,9 +1824,17 @@
+     pl += brpl;
+ 
+     i = cs - wb;
++    if (pl >= 0 && i >= pl && brbeg && *brbeg) {
++	inststrlen(brbeg, 1, -1);
++	pl = -1;
++	hb = 1;
++    }
++    if (sl >= 0 && i >= sl && brend && *brend) {
++	inststrlen(brend, 1, -1);
++	sl = -1;
++	hb = 1;
++    }
+     while (l) {
+-	if (d < 0 && (l->flags & CLF_DIFF))
+-	    d = cs;
+ 	if (m < 0 && (l->flags & (CLF_MISS | CLF_SUF)) == (CLF_MISS | CLF_SUF))
+ 	    m = cs;
+ 	if (l->flags & CLF_MID) {
+@@ -1840,6 +1848,8 @@
+ 	} else {
+ 	    inststrlen(l->line, 1, l->llen);
+ 	}
++	if (d < 0 && (l->flags & CLF_DIFF))
++	    d = cs;
+ 	if (m < 0 && (l->flags & CLF_MISS))
+ 	    m = cs;
+ 	i += l->llen;
+@@ -2556,8 +2566,8 @@
+ 		    sl = strlen(s);
+ 		}
+ 		if (!ms && ai->firstm) {
+-		    if ((i = pfxlen(ai->firstm->str, s)) < ai->prerest)
+-			ai->prerest = i;
++		    if (sl < ai->minlen)
++			ai->minlen = sl;
+ 		    if ((i = sfxlen(ai->firstm->str, s)) < ai->suflen)
+ 			ai->suflen = i;
+ 		}
+@@ -2823,8 +2833,8 @@
+     if (!test)
+ 	return;
+     if (!ms && !ispattern && ai->firstm) {
+-	if ((test = sl - pfxlen(ai->firstm->str, s)) < ai->prerest)
+-	    ai->prerest = test;
++	if (sl < ai->minlen)
++	    ai->minlen = sl;
+ 	if ((test = sfxlen(ai->firstm->str, s)) < ai->suflen)
+ 	    ai->suflen = test;
+     }
+@@ -3452,12 +3462,13 @@
+ 	    ms.next = NULL;
+ 	    ms.matcher = m->matcher;
+ 	    mstack = &ms;
+-	}
++	} else
++	    mstack = NULL;
+ 	ainfo = (Aminfo) hcalloc(sizeof(struct aminfo));
+ 	fainfo = (Aminfo) hcalloc(sizeof(struct aminfo));
+ 
+-	ainfo->prerest = ainfo->suflen = 
+-	    fainfo->prerest = fainfo->suflen = 10000;
++	ainfo->minlen = ainfo->suflen = 
++	    fainfo->minlen = fainfo->suflen = 10000;
+ 	ainfo->noipre = fainfo->noipre= 1;
+ 
+ 	freecl = NULL;
+@@ -5471,7 +5482,7 @@
+ 	 * on the next call to completion the inserted string would be     *
+ 	 * taken as a match and no menu completion would be started.       */
+ 
+-	if (isset(RECEXACT) && !lc && !ainfo->prerest)
++	if (isset(RECEXACT) && !lc && ps && ainfo->minlen == strlen(ps))
+ 	    am = 1;
+ 
+ 	/*
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

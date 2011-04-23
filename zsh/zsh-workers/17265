@@ -1,0 +1,267 @@
+From zsh-workers-return-17265-mason-zsh=primenet.com.au@sunsite.dk Thu May 30 17:23:29 2002
+Return-Path: <zsh-workers-return-17265-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14508 invoked from network); 30 May 2002 17:23:28 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 30 May 2002 17:23:28 -0000
+Received: (qmail 17073 invoked by alias); 30 May 2002 17:23:17 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17265
+Received: (qmail 17059 invoked from network); 30 May 2002 17:23:16 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: zsh: Strange feature with 'jobs' commmand 
+In-reply-to: "Oliver Kiddle"'s message of "Thu, 30 May 2002 17:13:17 BST."
+             <E17DSY9-0002br-00@bimbo.logica.co.uk> 
+Date: Thu, 30 May 2002 18:22:47 +0100
+Message-ID: <18526.1022779367@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+Oliver Kiddle wrote:
+> I was puzzling as to why this allows jobs|less to work but not
+> (jobs) or cat <(jobs) when I realised that if I have two background
+> jobs, (jobs) will print the second job only. So perhaps this isn't quite
+> right yet? I don't really understand it though so I'm not sure why.
+> Hopefully something trivial because it'd be nice to have this working.
+> 
+> And, a minor point is that the clone module didn't compile - just the
+> missing new parameter to clearjobtab.
+
+also i screwed up counting the number of jobs in the table to copy.
+
+bart was right.
+
+mark 2.  i almost sent the code that configures the radio for the
+latest version of our chip instead, maybe you would have liked that better.
+
+also tries, fairly naively but apparently successfully, to preserve `+'
+and `-' markings.
+
+i think we could safely abort bin_fg earlier in other cases where there
+is no job control.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.41
+diff -u -r1.41 exec.c
+--- Src/exec.c	6 May 2002 14:46:11 -0000	1.41
++++ Src/exec.c	30 May 2002 17:20:28 -0000
+@@ -2507,13 +2507,13 @@
+ static void
+ entersubsh(int how, int cl, int fake)
+ {
+-    int sig;
++    int sig, monitor;
+ 
+     if (cl != 2)
+ 	for (sig = 0; sig < VSIGCOUNT; sig++)
+ 	    if (!(sigtrapped[sig] & ZSIG_FUNC))
+ 		unsettrap(sig);
+-    if (unset(MONITOR)) {
++    if (!(monitor = isset(MONITOR))) {
+ 	if (how & Z_ASYNC) {
+ 	    settrap(SIGINT, NULL);
+ 	    settrap(SIGQUIT, NULL);
+@@ -2569,7 +2569,7 @@
+     opts[MONITOR] = opts[USEZLE] = 0;
+     zleactive = 0;
+     if (cl)
+-	clearjobtab();
++	clearjobtab(monitor);
+     times(&shtms);
+     forklevel = locallevel;
+ }
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.15
+diff -u -r1.15 jobs.c
+--- Src/jobs.c	21 Dec 2001 16:33:39 -0000	1.15
++++ Src/jobs.c	30 May 2002 17:20:28 -0000
+@@ -55,6 +55,12 @@
+ /**/
+ mod_export struct job jobtab[MAXJOB];
+ 
++/* If we have entered a subshell, the original shell's job table. */
++static struct job *oldjobtab;
++
++/* The size of that. */
++static int oldmaxjob;
++
+ /* shell timings */
+  
+ /**/
+@@ -612,13 +618,18 @@
+ printjob(Job jn, int lng, int synch)
+ {
+     Process pn;
+-    int job = jn - jobtab, len = 9, sig, sflag = 0, llen;
++    int job, len = 9, sig, sflag = 0, llen;
+     int conted = 0, lineleng = columns, skip = 0, doputnl = 0;
+     FILE *fout = (synch == 2) ? stdout : shout;
+ 
+     if (jn->stat & STAT_NOPRINT)
+ 	return;
+ 
++    if (jn < jobtab || jn >= jobtab + MAXJOB)
++	job = jn - oldjobtab;
++    else
++	job = jn - jobtab;
++
+     if (lng < 0) {
+ 	conted = 1;
+ 	lng = 0;
+@@ -655,11 +666,14 @@
+ 	}
+     }
+ 
+-/* print if necessary */
++/* print if necessary: ignore option state on explicit call to `jobs'. */
+ 
+-    if (interact && jobbing && ((jn->stat & STAT_STOPPED) || sflag ||
+-				job != thisjob)) {
++    if (synch == 2 || 
++	(interact && jobbing &&
++	 ((jn->stat & STAT_STOPPED) || sflag || job != thisjob))) {
+ 	int len2, fline = 1;
++	/* use special format for current job, except in `jobs' */
++	int thisfmt = job == thisjob && synch != 2;
+ 	Process qn;
+ 
+ 	if (!synch)
+@@ -667,7 +681,7 @@
+ 	if (doputnl && !synch)
+ 	    putc('\n', fout);
+ 	for (pn = jn->procs; pn;) {
+-	    len2 = ((job == thisjob) ? 5 : 10) + len;	/* 2 spaces */
++	    len2 = (thisfmt ? 5 : 10) + len;	/* 2 spaces */
+ 	    if (lng & 3)
+ 		qn = pn->next;
+ 	    else
+@@ -678,10 +692,10 @@
+ 			break;
+ 		    len2 += strlen(qn->text) + 2;
+ 		}
+-	    if (job != thisjob) {
++	    if (!thisfmt) {
+ 		if (fline)
+ 		    fprintf(fout, "[%ld]  %c ",
+-			    (long)(jn - jobtab),
++			    (long)job,
+ 			    (job == curjob) ? '+'
+ 			    : (job == prevjob) ? '-' : ' ');
+ 		else
+@@ -956,13 +970,32 @@
+ 
+ /**/
+ mod_export void
+-clearjobtab(void)
++clearjobtab(int monitor)
+ {
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++)
+-	if (jobtab[i].ty)
++    for (i = 1; i < MAXJOB; i++) {
++	if (jobtab[i].ty) {
+ 	    zfree(jobtab[i].ty, sizeof(struct ttyinfo));
++	    jobtab[i].ty = NULL;
++	}
++	if (monitor) {
++	    /*
++	     * See if there is a jobtable worth saving.
++	     * We never free the saved version; it only happens
++	     * once for each subshell of a shell with job control,
++	     * so doesn't create a leak.
++	     */
++	    if (jobtab[i].stat)
++		oldmaxjob = i+1;
++	}
++    }
++
++    if (monitor && oldmaxjob) {
++	int sz = oldmaxjob * sizeof(struct job);
++	oldjobtab = (struct job *)zalloc(sz);
++	memcpy(oldjobtab, jobtab, sz);
++    }
+ 
+     memset(jobtab, 0, sizeof(jobtab)); /* zero out table */
+ }
+@@ -1253,7 +1286,8 @@
+     if (unset(NOTIFY))
+ 	scanjobs();
+ 
+-    setcurjob();
++    if (func != BIN_JOBS || isset(MONITOR) || !oldmaxjob)
++	setcurjob();
+ 
+     if (func == BIN_JOBS)
+         /* If you immediately type "exit" after "jobs", this      *
+@@ -1274,13 +1308,24 @@
+ 	    firstjob = curjob;
+ 	} else if (func == BIN_JOBS) {
+ 	    /* List jobs. */
+-	    for (job = 0; job != MAXJOB; job++)
+-		if (job != thisjob && jobtab[job].stat) {
++	    struct job *jobptr;
++	    int maxjob, ignorejob;
++	    if (unset(MONITOR) && oldmaxjob) {
++		jobptr = oldjobtab;
++		maxjob = oldmaxjob;
++		ignorejob = 0;
++	    } else {
++		jobptr = jobtab;
++		maxjob = MAXJOB;
++		ignorejob = thisjob;
++	    }
++	    for (job = 0; job != maxjob; job++, jobptr++)
++		if (job != ignorejob && jobptr->stat) {
+ 		    if ((!ops['r'] && !ops['s']) ||
+ 			(ops['r'] && ops['s']) ||
+-			(ops['r'] && !(jobtab[job].stat & STAT_STOPPED)) ||
+-			(ops['s'] && jobtab[job].stat & STAT_STOPPED))
+-			printjob(job + jobtab, lng, 2);
++			(ops['r'] && !(jobptr->stat & STAT_STOPPED)) ||
++			(ops['s'] && jobptr->stat & STAT_STOPPED))
++			printjob(jobptr, lng, 2);
+ 		}
+ 	    unqueue_signals();
+ 	    return 0;
+Index: Src/Modules/clone.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/clone.c,v
+retrieving revision 1.1.1.7
+diff -u -r1.1.1.7 clone.c
+--- Src/Modules/clone.c	16 Dec 1999 14:26:36 -0000	1.1.1.7
++++ Src/Modules/clone.c	30 May 2002 17:20:28 -0000
+@@ -53,7 +53,7 @@
+     }
+     pid = fork();
+     if (!pid) {
+-	clearjobtab();
++	clearjobtab(0);
+ 	ppid = getppid();
+ 	mypid = getpid();
+ #ifdef HAVE_SETSID
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

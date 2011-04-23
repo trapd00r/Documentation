@@ -1,0 +1,1451 @@
+From zsh-workers-return-8840-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Dec 01 15:03:22 1999
+Return-Path: <zsh-workers-return-8840-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15868 invoked from network); 1 Dec 1999 15:03:15 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 1 Dec 1999 15:03:15 -0000
+Received: (qmail 1785 invoked by alias); 1 Dec 1999 15:01:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8840
+Received: (qmail 1649 invoked from network); 1 Dec 1999 15:01:32 -0000
+Date: Wed, 1 Dec 1999 16:01:30 +0100 (MET)
+Message-Id: <199912011501.QAA15289@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: completion grouping
+
+
+This is probably not yet convenient enough (meaning: please tell me
+your opinions), but most of this patch will stay valid even if we
+change the configuration side.
+
+
+>From a user's point of view:
+
+There is now really a one-to-one correspondence between tags and
+groups. The `matches' tag with its `group' style is gone. The
+replacement is the `group-name' style, tested for all tags. The value
+of this style gives the string to use as the name of the group for
+that tag. The empty string as the value makes the code us the tag as
+the group name. I.e., to get the old behaviour (`true' for the `group'
+style):
+
+  compstyle '*' group-name ''
+
+But it also allows you to put only some of the matches in separate
+groups (to have them stick out in the listing), and, of course, to
+explicitly put different types of matches in the same group.
+
+The second new style is `group-order' which can be used to say in
+which order the groups should be listed. The strings in its value are
+taken as group names and these groups are then guaranteed to be shown
+in the order in which their names are given in the style. E.g.:
+
+  compstyle '*:-command-' group-order builtins functions commands
+
+ensures that builtins, shell functions and external commands are the
+first ones in the list (if grouping is done at all, if there are
+matches for them, etc.) -- in separate groups, of course.
+
+So. Mass definitions for ordering and the like is probably a bit
+clumsy with this interface, but internally it's nicely small (only the 
+changes in _tags and _description in the patch below). What do you
+think? Is it ok? If not, any suggestions?
+
+
+For function writers:
+
+To ensure that the tag name can be used as the group name I had to
+make _description accept another argument -- the tag. I've made that
+the first argument so that _description, _wanted and _requested now
+all get the same arguments in the same order (that also meant to
+change the latter two to accpet the -[JV] options as their first
+argument, not after the tag name -- but I think this is cleaner
+anyway). Changing the calls to _description is responsible for most of 
+the size of the patch, btw.
+
+And that's everything that has changed for function writers. All the
+naming, grouping and ordering stuff is done automatically by
+_description and _tags. You only have to make sure that they are
+called directly or indirectly, but that's the same as before this
+patch.
+
+
+The hunk in compcore.c just makes compadd faster when only a group is
+defined (not really necessary, maybe, but _tags does it the hard way --
+makes me almost think that maybe I should add a builtin for defining
+multiple groups in computil; we'll see).
+
+There were also some remnants of the `description' style in the docs
+and the style guide.
+
+Bye
+ Sven
+
+diff -u oldsrc/Zle/compcore.c Src/Zle/compcore.c
+--- oldsrc/Zle/compcore.c	Wed Dec  1 10:48:48 1999
++++ Src/Zle/compcore.c	Wed Dec  1 15:13:59 1999
+@@ -1498,6 +1498,25 @@
+     LinkList aparl = NULL, oparl = NULL, dparl = NULL;
+     Brinfo bp, bpl = brbeg, obpl, bsl = brend, obsl;
+ 
++    if (!*argv) {
++	SWITCHHEAPS(compheap) {
++	    HEAPALLOC {
++		/* Select the group in which to store the matches. */
++		gflags = (((dat->aflags & CAF_NOSORT ) ? CGF_NOSORT  : 0) |
++			  ((dat->aflags & CAF_UNIQALL) ? CGF_UNIQALL : 0) |
++			  ((dat->aflags & CAF_UNIQCON) ? CGF_UNIQCON : 0));
++		if (dat->group) {
++		    endcmgroup(NULL);
++		    begcmgroup(dat->group, gflags);
++		} else {
++		    endcmgroup(NULL);
++		    begcmgroup("default", 0);
++		}
++	    } LASTALLOC;
++	} SWITCHBACKHEAPS;
++
++	return 1;
++    }
+     for (bp = brbeg; bp; bp = bp->next)
+ 	bp->curpos = ((dat->aflags & CAF_QUOTE) ? bp->pos : bp->qpos);
+     for (bp = brend; bp; bp = bp->next)
+diff -u olddoc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- olddoc/Zsh/compsys.yo	Wed Dec  1 13:07:16 1999
++++ Doc/Zsh/compsys.yo	Wed Dec  1 15:46:43 1999
+@@ -473,7 +473,7 @@
+ which form should be used. To make all such functions always use the
+ verbose form one can simply call
+ 
+-example(compstyle '*' description yes)
++example(compstyle '*' verbose yes)
+ 
+ in one of the startup files like tt(.zshrc) (after the call to the
+ tt(compinit) function). This definition simply means that the
+@@ -486,7 +486,7 @@
+ calling the tt(ps) command). To make this builtin list the matches
+ only as numbers one could call:
+ 
+-example(compstyle '*::kill:*' description no)
++example(compstyle '*::kill:*' verbose no)
+ 
+ And if one wants to see the command lines for processes but not the
+ job texts one could use the fact that the tag name is appended to the
+@@ -494,7 +494,7 @@
+ call use (remember that the function for the tt(kill) builtin command
+ uses the tags tt(jobs) and tt(processes)): 
+ 
+-example(compstyle '*::kill:*:jobs' description no)
++example(compstyle '*::kill:*:jobs' verbose no)
+ 
+ As said above, the patterns given to the tt(compstyle) function are
+ tested in the order in which they were given. But that isn't
+@@ -634,9 +634,6 @@
+ item(tt(maps))(
+ for map names (e.g. YP maps)
+ )
+-item(tt(matches))(
+-used to look up the tt(group) style
+-)
+ item(tt(messages))(
+ used to look up the tt(format) style for messages
+ )
+@@ -809,11 +806,6 @@
+ after the first ambiguous pathname component even when menucompletion
+ is used.
+ )
+-item(tt(verbose))(
+-This is used in several contexts to decide if only a simple or a
+-verbose list of matches should be generated. For example some commands 
+-show descriptions for option names if this style is true.
+-)
+ item(tt(disable-stat))(
+ This is used with the tt(cvs) tag by the function completing for the
+ tt(cvs) command to decide if the tt(stat) module should be used to
+@@ -848,10 +840,47 @@
+ substitution (see the tt(substitute) style) or the original string
+ from the line.
+ )
+-item(tt(group))(
+-This is used with the tt(matches) tag. If it is `true', matches of
+-different types will be put in different groups, so that they are
+-listed separately and not mixed when using menu completion.
++item(tt(group-name))(
++The completion system can put different types of matches in different
++groups which are then displayed separately in the list of possible
++completions. This style can be use to give the names for these groups
++for particular tags. For example, in command position the completion
++system generates names of builtin and external commands, names of
++aliases and shell functions and reserved words as possible
++completions. To have the external commands and shell functions listed
++separately, one can set:
++
++example(compstyle '*:-command-:commands' group-name commands
++compstyle '*:-command-:functions' group-name functions)
++
++This also means that if the same name is used for different types of
++matches, then those matches will be displayed together in the same
++group.
++
++If the name given is the empty string, then the name of the tag for
++the matches will be used as the name of the group. So, to have all
++different types of matches displayed separately, one can just set:
++
++example(compstyle '*' group-name '')
++
++All matches for which no group name is defined will be put in a group
++named `tt(-default-)'.
++)
++item(tt(group-order))(
++This style is to be used together with the tt(group-name) style. Once
++different types of matches are put into different groups, this style
++can be used to define in which order these groups should appear in the 
++list. The strings in the value are taken as group names and the named
++groups will be shown in the order in which their names appear in the
++value. All groups whose names are not given in the value of this style 
++will appear in the order defined by the function generating the
++matches.
++
++For example, to have names of builtin commands, shell functions and
++external commands appear in this order when completing in command
++position one would set:
++
++example(compstyle '*:-command-' group-order builtins functions commands)
+ )
+ item(tt(groups))(
+ A style holding the names of the groups that should be completed. If
+@@ -1149,6 +1178,11 @@
+ people's accounts. Finally, this may also used by some commands with
+ the tt(accounts) tag.
+ )
++item(tt(verbose))(
++This is used in several contexts to decide if only a simple or a
++verbose list of matches should be generated. For example some commands 
++show descriptions for option names if this style is true.
++)
+ item(tt(word))(
+ To find out if listing should be performed on its own, the tt(_list)
+ completer normally compares the contents of the line with the contents
+@@ -1549,25 +1583,27 @@
+ from being tried simply by setting this parameter to any value.
+ )
+ item(tt(_description))(
+-This function gets two arguments: the name of an array and a
++This function gets two or three arguments: a group name,
++the name of an array and a
+ string. It tests if the style tt(format) for the tt(descriptions) tag is
+ set and if it is, it stores some options in the array that can then be 
+ given to the tt(compadd) builtin command to make the
+ value of the tt(format) style for the tt(descriptions) tag (with the
+-sequence `tt(%d)' replaced by the string given as the second argument)
++sequence `tt(%d)' replaced by the string given as the last argument)
+ be displayed above the matches added. These options also will make
+-sure that the matches are placed in a separate group (the second
+-argument is used as the name of the group) if the style tt(group) for
+-the tt(matches) tag is set to a non-empty string. Normally a sorted
++sure that the matches are placed in a separate group if the style
++tt(group) for the tt(matches) tag is set to `true'. The first argument 
++will be used as the name of the group and should in most cases be the
++name of a tag. Normally a sorted
+ group will be used for this (with the `tt(-J)' option), but if a
+ option starting with `tt(-V)' or `tt(-J)' is given, that option will
+ be included in the array, so that it is possible to make the group
+-unsorted by given the option `tt(-V)', `tt(-V1)', or `tt(-V2)'.
++unsorted by giving the option `tt(-V)', `tt(-V1)', or `tt(-V2)'.
+ 
+ In most cases, this function will be used like this:
+ 
+ example(local expl
+-_description expl file
++_description expl file  # same as `files expl file'
+ compadd "$expl[@]" - "$files[@]")
+ )
+ item(tt(_message))(
+@@ -1621,8 +1657,10 @@
+ non-zero otherwise).
+ 
+ If more than one argument is given, tt(_requested) calls the
+-tt(_description) function with all arguments except the first
+-one. This is often useful to do both the testing of the tag and
++tt(_description) function with all arguments and if the first argument 
++is a option string starting with tt(-J) or tt(-V), the argument after
++it is taken as the name of the tag.
++This is often useful to do both the testing of the tag and
+ getting the description for the matches one is about to add at
+ once. E.g.:
+ 
+@@ -1640,8 +1678,8 @@
+ then it should be tested if the tag representing those matches is
+ requested by the user. This function makes that easier.
+ 
+-Like tt(_requested) it gets a tag and arguments for tt(_description)
+-as arguments. With the tag it calls tt(_tags) and if that returns zero 
++Like tt(_requested) it gets arguments as for tt(_description).
++With the tag it calls tt(_tags) and if that returns zero 
+ (i.e. the tag is requested by the user) it calls tt(_description). So, 
+ if you want to offer only one tag and immediatly want to use the
+ description built, you can just do:
+--- Etc/completion-style-guide.old	Wed Dec  1 13:40:54 1999
++++ Etc/completion-style-guide	Wed Dec  1 15:37:30 1999
+@@ -63,13 +63,13 @@
+ requested by the user in the current context. If you will add only one 
+ type of matches, this is very simple. You can use the function `_tags' 
+ or the function `_wanted' for this. `_tags' is normally used to offer
+-multiple types of matche by giving the tags for them as arguments. But 
+-it any case its return value is zero only if at least one of these
++multiple types of matches by giving the tags for them as arguments. But 
++in any case its return value is zero only if at least one of these
+ types is requested by the user, so you can just do:
+ 
+   _tags names || return 1
+ 
+-  _description expl 'name'
++  _description names expl 'name'
+   compadd "$expl[@]" - alice bob
+ 
+ Since this sequence of command is used so often, the `_wanted'
+@@ -83,7 +83,7 @@
+ Note that you can also give the `-J' and `-V' options with the
+ optional `1' or `2' following them supported by `_description':
+ 
+-  _wanted names -V2 expl 'name' && compadd ...
++  _wanted -V2 names expl 'name' && compadd ...
+ 
+ The more complicated case is where you can offer multiple types of
+ matches. In this case the user should be able to say which types he
+@@ -97,7 +97,7 @@
+ 
+   while _tags; do
+     if _requested friends; then
+-      _description expl friend
++      _description friends expl friend
+       compad "$expl[@]" alice bob && ret=0
+     fi
+     _requested users && _users && ret=0
+@@ -192,10 +192,10 @@
+ 
+ Basically styles map names to a bunch of strings (the `value'). In
+ many cases you want to treat the value as a boolean, so let's start
+-with that. To test if, for example, the style `description' is set for 
++with that. To test if, for example, the style `verbose' is set for 
+ the tag `options' in the context you are currently in, you can just do:
+ 
+-  if _style options description; then
++  if _style options verbose; then
+     # yes, it is set...
+   fi
+ 
+@@ -240,9 +240,9 @@
+ chance to call `_style'.
+ 
+ Some random comments about style names. Use the ones already in use if 
+-possible. Especially, use the `description' style if you can add
++possible. Especially, use the `verbose' style if you can add
+ matches in a simple and a verbose way. Use the verbose form only if
+-the `description' style is `true' for the current context. Also, if
++the `verbose' style is `true' for the current context. Also, if
+ the matches you want to add have a common prefix which is somehow
+ special, use the `prefix-needed' and `prefix-hidden' styles. The first 
+ one says if the user has to give the prefix on the line to make these
+@@ -280,20 +280,20 @@
+ 
+   local expl
+ 
+-  _description expl <descr>
++  _description tag expl <descr>
+   compadd "$expl@]" - <matches ...>
+ 
+ Note that this function also accepts `-V' und `-J', optionally (in the 
+ same word) followed by `1' or `2' to describe the type of group you
+ want to use. For example:
+ 
+-  _description expl '...'
++  _description tag expl '...'
+   compadd "$expl[@]" -V1 foo - ...    # THIS IS WRONG!!!
+ 
+ is *not* the right way to use a unsorted group. Instead do the
+ simpler:
+ 
+-  _description -V1 expl '...'
++  _description -V1 tag expl '...'
+   compadd "$expl[@]" - ...
+ 
+ and everything will work fine.
+@@ -303,16 +303,16 @@
+ `compadd'. But in almost all cases you should then add them using
+ different tags anyway, so, see above.
+ 
+-And since often a tag directly corresponds to a group of matches,
+-you'll often be using the tags function that allow you to give the
++And since a tag directly corresponds to a group of matches, you'll
++often be using the tags function that allow you to give the
+ explanation to the same function that is used to test if the tags are
+ requested (again: see above). Just as a reminder:
+ 
+-  _wanted <tag> [ -V[1,2] | -J[1,2] ] expl <descr>
++  _wanted [ -V[1,2] | -J[1,2] ] <tag> expl <descr>
+ 
+ and
+ 
+-  _requested <tag> [ -V[1,2] | -J[1,2] ] expl <descr>
++  _requested [ -V[1,2] | -J[1,2] ] <tag> expl <descr>
+ 
+ is all you need to make your function work correctly with both tags
+ and description at the same time.
+diff -u -r oldcompletion/Base/_arguments Completion/Base/_arguments
+--- oldcompletion/Base/_arguments	Mon Nov 29 10:10:52 1999
++++ Completion/Base/_arguments	Wed Dec  1 13:43:40 1999
+@@ -194,7 +194,7 @@
+   while true; do
+     while _tags; do
+       if [[ -n "$matched" ]] || _requested arguments; then
+-        _description expl "$descr"
++        _description arguments expl "$descr"
+ 
+         if [[ "$action" = -\>* ]]; then
+           comparguments -W line opt_args
+@@ -268,7 +268,7 @@
+ 	
+         if comparguments -s single; then
+ 
+-          _description expl option
++          _description options expl option
+ 
+           if [[ "$single" = direct ]]; then
+ 	    compadd "$expl[@]" -QS '' - "${PREFIX}${SUFFIX}"
+diff -u -r oldcompletion/Base/_brace_parameter Completion/Base/_brace_parameter
+--- oldcompletion/Base/_brace_parameter	Mon Nov 29 10:10:52 1999
++++ Completion/Base/_brace_parameter	Wed Dec  1 13:44:46 1999
+@@ -1,29 +1,3 @@
+ #compdef -brace-parameter-
+ 
+ _tags parameters && _parameters -e
+-
+-
+-# Without the `-e' option, we would use the following (see the file
+-# Core/_parameters for more enlightenment).
+-
+-# local lp ls n q
+-
+-# if [[ "$SUFFIX" = *\}* ]]; then
+-#   ISUFFIX="${SUFFIX#*\}}$ISUFFIX"
+-#   SUFFIX="${SUFFIX%%\}*}"
+-#   suf=()
+-# elif [[ "$LBUFFER" = *\$\{[^}]#\$\{[^}]#$PREFIX ||
+-#         "$compstate[insert]" = *menu* ]]; then
+-#   suf=(-b '')
+-# else
+-#   suf=(-b ' ')
+-# fi
+-
+-# lp="$LBUFFER[1,-${#PREFIX}-1]"
+-# ls="$RBUFFER[${#SUFFIX}+1,-1]"
+-# n=${(M)#ls##\"#}
+-# q=${(M)lp%%\"#}
+-
+-# [[ n -gt 0 ]] && suf=''
+-
+-# _parameters "$suf[@]" -Qs "${q[1,-n-1]}" -r '-:?#%+=[/}'
+diff -u -r oldcompletion/Base/_describe Completion/Base/_describe
+--- oldcompletion/Base/_describe	Mon Nov 29 10:10:52 1999
++++ Completion/Base/_describe	Wed Dec  1 13:43:41 1999
+@@ -18,7 +18,7 @@
+ 
+ _style "$_type" verbose && _showd=yes
+ 
+-_description _expl "$1"
++_description "$_type" _expl "$1"
+ shift
+ 
+ if [[ -n "$_showd" ]]; then
+diff -u -r oldcompletion/Base/_first Completion/Base/_first
+--- oldcompletion/Base/_first	Mon Nov 29 10:10:52 1999
++++ Completion/Base/_first	Wed Dec  1 13:43:41 1999
+@@ -34,7 +34,7 @@
+ # completion of words from the history by adding two commas at the end 
+ # and hitting TAB.
+ #
+-#     if [[ "$PREFIX" = *,, ]]; then
++#     if [[ "$PREFIX" = *,, ]] && _tags history-words; then
+ #       local max i=1 expl
+ #     
+ #       PREFIX="$PREFIX[1,-2]"
+@@ -51,9 +51,9 @@
+ #       # twenty words, and so on...
+ #       while [[ i -le max ]]; do
+ #         if _style history-words sort; then
+-#           _description expl "history ($n)"
++#           _description history-words expl "history ($n)"
+ #         else
+-#           _description -V expl "history ($n)"
++#           _description -V history-words expl "history ($n)"
+ #         fi
+ #         if compadd "$expl[@]" -Q - \
+ #                "${(@)${(@)historywords:#[\$'\"]*}[1,i*10]}"; then
+diff -u -r oldcompletion/Base/_jobs Completion/Base/_jobs
+--- oldcompletion/Base/_jobs	Mon Nov 29 10:10:52 1999
++++ Completion/Base/_jobs	Wed Dec  1 13:43:41 1999
+@@ -11,15 +11,15 @@
+ if [[ "$1" = -r ]]; then
+   jids=( "${(@k)jobstates[(R)running*]}" )
+   shift
+-  _description expl 'running job'
++  _description jobs expl 'running job'
+ elif [[ "$1" = -s ]]; then
+   jids=( "${(@k)jobstates[(R)running*]}" )
+   shift
+-  _description expl 'suspended job'
++  _description jobs expl 'suspended job'
+ else
+   [[ "$1" = - ]] && shift
+   jids=( "${(@k)jobtexts}" )
+-  _description expl job
++  _description jobs expl job
+ fi
+ 
+ if [[ -n "$desc" ]]; then
+diff -u -r oldcompletion/Base/_subscript Completion/Base/_subscript
+--- oldcompletion/Base/_subscript	Mon Nov 29 10:10:53 1999
++++ Completion/Base/_subscript	Wed Dec  1 14:05:55 1999
+@@ -19,7 +19,7 @@
+   _tags indexes parameters
+ 
+   while _tags; do
+-    if _requested indexes -V expl 'array index'; then
++    if _requested -V indexes expl 'array index'; then
+       ind=( {1..${#${(P)${compstate[parameter]}}}} )
+       if _style indexes verbose; then
+         list=()
+diff -u -r oldcompletion/Base/_tilde Completion/Base/_tilde
+--- oldcompletion/Base/_tilde	Mon Nov 29 10:10:53 1999
++++ Completion/Base/_tilde	Wed Dec  1 14:06:03 1999
+@@ -21,7 +21,7 @@
+   _requested named-directories expl 'named directory' &&
+       compadd "$suf[@]" "$expl[@]" "$@" - "${(@k)nameddirs}"
+ 
+-  if _requested directory-stack -V expl 'directory stack' &&
++  if _requested -V directory-stack expl 'directory stack' &&
+      { ! _style directory-stack prefix-needed ||
+        [[ "$PREFIX" = [-+]* ]] }; then
+     if _style directory-stack verbose; then
+diff -u -r oldcompletion/Base/_values Completion/Base/_values
+--- oldcompletion/Base/_values	Mon Nov 29 10:10:53 1999
++++ Completion/Base/_values	Wed Dec  1 13:43:41 1999
+@@ -76,7 +76,7 @@
+     return 1
+   fi
+ 
+-  _description expl "$descr"
++  _description arguments expl "$descr"
+ 
+   # We add the separator character as a autoremovable suffix unless
+   # we have only one possible value left.
+diff -u -r oldcompletion/Builtins/_popd Completion/Builtins/_popd
+--- oldcompletion/Builtins/_popd	Mon Nov 29 10:10:55 1999
++++ Completion/Builtins/_popd	Wed Dec  1 14:04:33 1999
+@@ -9,7 +9,7 @@
+ 
+ local expl list lines revlines disp
+ 
+-_wanted directory-stack -V expl 'directory stack' || return 1
++_wanted -V directory-stack expl 'directory stack' || return 1
+ 
+ ! _style directory-stack prefix-needed || [[ $PREFIX = [-+]* ]] || return 1
+ 
+diff -u -r oldcompletion/Commands/_history_complete_word Completion/Commands/_history_complete_word
+--- oldcompletion/Commands/_history_complete_word	Mon Nov 29 10:10:58 1999
++++ Completion/Commands/_history_complete_word	Wed Dec  1 13:58:45 1999
+@@ -69,9 +69,9 @@
+ _history_complete_word_gen_matches () {
+   if _style history-words list; then
+     if _style history-words sort; then
+-      _description expl 'history word'
++      _description history-words expl 'history word'
+     else
+-      _description -V expl 'history word'
++      _description -V history-words expl 'history word'
+     fi
+   else
+     if _style history-words sort; then
+diff -u -r oldcompletion/Core/_alternative Completion/Core/_alternative
+--- oldcompletion/Core/_alternative	Mon Nov 29 10:11:00 1999
++++ Completion/Core/_alternative	Wed Dec  1 13:43:41 1999
+@@ -25,7 +25,7 @@
+       descr="${${def#*:}%%:*}"
+       action="${def#*:*:}"
+ 
+-      _description expl "$descr"
++      _description "${def%%:*}" expl "$descr"
+ 
+       if [[ "$action" = \ # ]]; then
+ 
+diff -u -r oldcompletion/Core/_description Completion/Core/_description
+--- oldcompletion/Core/_description	Mon Nov 29 10:10:59 1999
++++ Completion/Core/_description	Wed Dec  1 14:49:29 1999
+@@ -1,27 +1,33 @@
+ #autoload
+ 
+-local gropt=-J format
++local gropt format gname
+ 
+-if [[ "$1" = -[VJ]* ]]; then
+-  gropt="$1"
++gropt=(-J)
++
++if [[ "$1" = -[VJ] ]]; then
++  gropt=("$1")
++  shift
++elif [[ "$1" = -[VJ] ]]; then
++  gropt=("-${1[3,-1]}" "${1[1,2]}")
+   shift
+ fi
+ 
+-_lastdescr=( "$_lastdescr[@]" "$2" )
++_lastdescr=( "$_lastdescr[@]" "$3" )
+ 
+ _style -s descriptions format format
++_style -s "$1" group-name gname && [[ -z "$gname" ]] && gname="$1"
+ 
+-if _style matches group; then
++if [[ -n "$gname" ]]; then
+   if [[ -n "$format" ]]; then
+-    eval "$1=($gropt ${(q)2} -X ${(q)format//\\%d/$2})"
++    eval "$2=($gropt ${(q)gname} -X ${(q)format//\\%d/$3})"
+   else
+-    eval "$1=($gropt ${(q)2})"
++    eval "$2=($gropt ${(q)gname})"
+   fi
+ else
+   if [[ -n "$format" ]]; then
+-    eval "$1=(-X ${(q)format//\\%d/$2})"
++    eval "$2=(-J -default- -X ${(q)format//\\%d/$3})"
+   else
+-    eval "$1=()"
++    eval "$2=(-J -default-)"
+   fi
+ fi
+ 
+diff -u -r oldcompletion/Core/_files Completion/Core/_files
+--- oldcompletion/Core/_files	Mon Nov 29 10:10:59 1999
++++ Completion/Core/_files	Wed Dec  1 13:43:42 1999
+@@ -1,17 +1,24 @@
+ #autoload
+ 
+-local opts opt type=file
++local opts opt type=file group
+ 
+ opts=()
++group=()
+ while getopts "P:S:qr:R:W:F:J:V:X:f/g:M:" opt; do
+   case "$opt" in
+   /)    [[ "$type" = file       ]] && type=dir       ;;
+   g)    [[ "$type" = (file|dir) ]] && type="$OPTARG" ;;
+   q)    opts=("$opts[@]" -q               )          ;;
++  [JV]) group=(          "-$opt" "$OPTARG")          ;;
+   [^f]) opts=("$opts[@]" "-$opt" "$OPTARG")          ;;
+   esac
+ done
+ 
++if [[ "$group[2]" = files ]]; then
++  opts=("$opts[@]" "$group[@]")
++  group=()
++fi
++
+ case "$type" in
+ file) _tags all-files                           ;;
+ dir)  _tags directories all-files               ;;
+@@ -20,15 +27,19 @@
+ 
+ while _tags; do
+   if _requested all-files; then
++    (( $#group )) && group[2]=all-files
+     _path_files "$opts[@]" -f
+     return
+   elif _requested directories; then
+     if _requested globbed-files; then
++      (( $#group )) && group[2]=globbed-files
+       _path_files "$opts[@]" -/g "$type" && return 0
+     else
++      (( $#group )) && group[2]=directories
+       _path_files "$opts[@]" -/ && return 0
+     fi
+   elif _requested globbed-files; then
++    (( $#group )) && group[2]=globbed-files
+     _path_files "$opts[@]" -g "$type" && return 0
+   fi
+ done
+diff -u -r oldcompletion/Core/_parameters Completion/Core/_parameters
+--- oldcompletion/Core/_parameters	Mon Nov 29 10:11:00 1999
++++ Completion/Core/_parameters	Wed Dec  1 13:43:42 1999
+@@ -10,79 +10,3 @@
+ pars=( ${(k)parameters[(R)^*local*]} )
+ 
+ compadd "$expl[@]" "$@" - $pars
+-
+-
+-# The `-e' option does everything for parameter expansions of us. If
+-# we wouldn't have it, we would use something like:
+-
+-# If the first argument is `-s' or `-b' auto_param_slash will be tested
+-# and slashes will be added to parameters containing a directory. `-s' is
+-# for parameter expansions without braces and `-b' is for expansions with
+-# braces. A `-' as the first argument is ignored and in all cases all
+-# other arguments will be given to `compadd'.
+-
+-# setopt localoptions extendedglob
+-
+-# local pars expl slash suf
+-
+-# if [[ "$1" = -s ]]; then
+-#   slash=normal
+-#   suf="$2"
+-#   shift 2
+-# elif [[ "$1" = -b ]]; then
+-#   slash=brace
+-#   suf="$2"
+-#   shift 2
+-# elif [[ "$1" = - ]]; then
+-#   shift
+-# fi
+-
+-# _description expl parameter
+-
+-# if [[ -n "$slash" && -o autoparamslash ]]; then
+-#   local i dirs nodirs ret=1
+-
+-#   dirs=()
+-#   nodirs=()
+-
+-#   if zmodload -e parameter; then
+-#     setopt localoptions extendedglob
+-#     nodirs=( ${(k)parameters[(R)undefined]} )
+-#     pars=( ${(k)parameters[(R)^*(local|undefined)*]} )
+-#   else
+-#     nodirs=( ${${(M)${(f)"$(typeset +)"}:#undefined *}##* } )
+-#     pars=( ${${${(f)"$(typeset +)"}:#*(local|undefined) *}##* } )
+-#   fi
+-
+-#   for i in $pars; do
+-#     if [[ -d "${(P)i}" ]]; then
+-#       dirs=( $dirs $i )
+-#     else
+-#       nodirs=( $nodirs $i )
+-#     fi
+-#   done
+-
+-#   if [[ "$slash" = normal ]]; then
+-#     compadd -S "/${suf%% #}" -r ' [/:' "$expl[@]" "$@" - $dirs && ret=0
+-#     compadd -S "$suf" -r ' [:' "$expl[@]" "$@" - $nodirs && ret=0
+-#   elif [[ "$slash" = brace ]]; then
+-#     compadd -S "}/${suf%% #}" -r '-:?#%+=[/}' "$expl[@]" "$@" - $dirs && ret=0
+-#     compadd -S "}$suf" -r '-:?#%+=[/}' "$expl[@]" "$@" - $nodirs && ret=0
+-#   fi
+-
+-#   return ret
+-# else
+-#   if zmodload -e parameter; then
+-#     pars=( ${(k)parameters[(R)^*local*]} )
+-#   else
+-#     pars=( ${${${(f)"$(typeset +)"}:#*local *}##* } )
+-#   fi
+-
+-#   if [[ "$slash" = normal ]]; then
+-#     compadd -S "$suf" -r ' [:' "$expl[@]" "$@" - $pars
+-#   elif [[ "$slash" = brace ]]; then
+-#     compadd -S "}$suf" -r '-:?#%+=[/}' "$expl[@]" "$@" - $pars
+-#   else
+-#     compadd "$expl[@]" "$@" - $pars
+-#   fi
+-# fi
+diff -u -r oldcompletion/Core/_path_files Completion/Core/_path_files
+--- oldcompletion/Core/_path_files	Mon Nov 29 10:11:00 1999
++++ Completion/Core/_path_files	Wed Dec  1 13:43:42 1999
+@@ -77,9 +77,9 @@
+ 
+ if (( ! ( $#group + $#expl ) )); then
+   if [[ "$sopt" = -/ ]]; then
+-    _description expl directory
++    _description directories expl directory
+   else
+-    _description expl file
++    _description files expl file
+   fi
+ fi
+ 
+diff -u -r oldcompletion/Core/_requested Completion/Core/_requested
+--- oldcompletion/Core/_requested	Mon Nov 29 10:11:00 1999
++++ Completion/Core/_requested	Wed Dec  1 13:48:09 1999
+@@ -1,9 +1,17 @@
+ #autoload
+ 
++local tag
++
++if [[ "$1" = -[VJ]* ]]; then
++  tag="$2"
++else
++  tag="$1"
++fi
++
+ comptags -C _cur_context
+ 
+-comptags -R "$1" &&
++comptags -R "$tag" &&
+     if [[ $# -gt 1 ]]; then
+-      _description "${(@)argv[2,-1]}"
++      _description "$@"
+       return 0
+     fi
+diff -u -r oldcompletion/Core/_tags Completion/Core/_tags
+--- oldcompletion/Core/_tags	Mon Nov 29 10:11:00 1999
++++ Completion/Core/_tags	Wed Dec  1 14:47:36 1999
+@@ -4,7 +4,7 @@
+ 
+   # We have arguments: the tags supported in this context.
+ 
+-  local curcontext="$curcontext"
++  local curcontext="$curcontext" order
+ 
+   if [[ "$1" = -C?* ]]; then
+     curcontext="${curcontext}:${1[3,-1]}"
+@@ -17,6 +17,20 @@
+   fi
+ 
+   [[ "$1" = -(|-) ]] && shift
++
++
++  if _style -a '' group-order order; then
++    local name
++
++    for name in "$order[@]"; do
++      compadd -J "$name"
++      compadd -V "$name"
++      compadd -J "$name" -1
++      compadd -V "$name" -1
++      compadd -J "$name" -2
++      compadd -V "$name" -2
++    done
++  fi
+ 
+   # Set and remember offered tags.
+ 
+diff -u -r oldcompletion/Core/_wanted Completion/Core/_wanted
+--- oldcompletion/Core/_wanted	Mon Nov 29 10:11:01 1999
++++ Completion/Core/_wanted	Wed Dec  1 13:47:18 1999
+@@ -1,6 +1,6 @@
+ #autoload
+ 
+-local targs
++local targs tag
+ 
+ if [[ "$1" = -C?* ]]; then
+   targs=( -C "${1[3,-1]}" )
+@@ -12,10 +12,14 @@
+   targs=()
+ fi
+ 
+-[[ "$1" = -(|-) ]] && shift
++if [[ "$1" = -[VJ]* ]]; then
++  tag="$2"
++else
++  tag="$1"
++fi
+ 
+ if [[ $# -gt 1 ]]; then
+-  _tags "$targs[@]" "$1" && _description "${(@)argv[2,-1]}"
++  _tags "$targs[@]" "$tag" && _description "$@"
+ else
+-  _tags "$targs[@]" "$1"
++  _tags "$targs[@]" "$tag"
+ fi
+diff -u -r oldcompletion/Core/compinit Completion/Core/compinit
+--- oldcompletion/Core/compinit	Mon Nov 29 10:11:00 1999
++++ Completion/Core/compinit	Wed Dec  1 14:50:41 1999
+@@ -326,6 +326,7 @@
+ 
+     \`${HOME}/.zsh-styles'
+ 
++Note that the values for the style may not be fully correct.
+ 
+ Have fun
+ 
+@@ -373,7 +374,7 @@
+ compstyle '*:options' prefix-hidden yes"
+       ;;    
+     group_matches)
+-      tmp="'*:matches' group 'yes'"
++      tmp="'*' group-name ''"
+       ;;
+     colors_path)
+       tmp="'*:colors' path ${(qq)val}"
+diff -u -r oldcompletion/Debian/_apt Completion/Debian/_apt
+--- oldcompletion/Debian/_apt	Mon Nov 29 10:11:01 1999
++++ Completion/Debian/_apt	Wed Dec  1 13:59:27 1999
+@@ -325,9 +325,9 @@
+     bool_prefix=($bool_prefix)
+ 
+     local expl_opt expl_bool expl_configfile
+-    _description expl_opt option
+-    _description expl_bool 'bool value'
+-    _description expl_configfile 'config file'
++    _description options expl_opt option
++    _description values expl_bool 'boolean value'
++    _description files expl_configfile 'config file'
+ 
+     local current_option tmp1 tmp2 tmp3
+ 
+@@ -388,8 +388,8 @@
+ 
+   _apt-get () {
+     local expl_action expl_packages
+-    _description expl_action 'action'
+-    _description expl_packages 'package'
++    _description actions expl_action 'action'
++    _description packages expl_packages 'package'
+ 
+     _apt-get_sm
+   }
+@@ -426,10 +426,10 @@
+ 
+   _apt-cache () {
+     local expl_action expl_packages expl_pkg_cache expl_src_cache
+-    _description expl_action 'action'
+-    _description expl_packages 'package'
+-    _description expl_pkg_cache 'package cache'
+-    _description expl_src_cache 'source cache'
++    _description actions expl_action 'action'
++    _description packages expl_packages 'package'
++    _description files expl_pkg_cache 'package cache'
++    _description files expl_src_cache 'source cache'
+ 
+     _apt-cache_sm
+   }
+@@ -455,8 +455,8 @@
+ 
+   _apt-cdrom () {
+     local expl_action expl_mount_point
+-    _description expl_action 'action'
+-    _description expl_mount_point 'mount point'
++    _description actions expl_action 'action'
++    _description files expl_mount_point 'mount point'
+ 
+     _apt-cdrom_sm
+   }
+@@ -481,9 +481,9 @@
+ 
+   _apt-config () {
+     local expl_action expl_shell_var expl_config_key
+-    _description expl_action 'action'
+-    _description expl_shell_var 'shell variable to assign'
+-    _description expl_config_key 'configuration key'
++    _description actions expl_action 'action'
++    _description parameters expl_shell_var 'shell variable to assign'
++    _description configuration-keys expl_config_key 'configuration key'
+ 
+     _apt-config_sm
+   }
+diff -u -r oldcompletion/Linux/_rpm Completion/Linux/_rpm
+--- oldcompletion/Linux/_rpm	Mon Nov 29 10:11:02 1999
++++ Completion/Linux/_rpm	Wed Dec  1 13:43:43 1999
+@@ -213,9 +213,9 @@
+     ;;
+   relocate)
+     if compset -P '*\='; then
+-      _description expl 'new path'
++      _description directories expl 'new path'
+     else
+-      _description expl 'old path'
++      _description directories expl 'old path'
+     fi
+ 
+     _tags directories || return 1
+diff -u -r oldcompletion/User/_bunzip2 Completion/User/_bunzip2
+--- oldcompletion/User/_bunzip2	Mon Nov 29 10:11:03 1999
++++ Completion/User/_bunzip2	Wed Dec  1 13:43:43 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'compressed file'
++_description files expl 'compressed file'
+ _files "$expl[@]" -g '*.bz2'
+diff -u -r oldcompletion/User/_bzip2 Completion/User/_bzip2
+--- oldcompletion/User/_bzip2	Mon Nov 29 10:11:03 1999
++++ Completion/User/_bzip2	Wed Dec  1 13:43:44 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'file to compress'
++_description files expl 'file to compress'
+ _files "$expl[@]" -g '*~*.bz2'
+diff -u -r oldcompletion/User/_compress Completion/User/_compress
+--- oldcompletion/User/_compress	Mon Nov 29 10:11:04 1999
++++ Completion/User/_compress	Wed Dec  1 13:43:44 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'file to compress'
++_description files expl 'file to compress'
+ _files "$expl[@]" -g '*~*.Z'
+diff -u -r oldcompletion/User/_dd Completion/User/_dd
+--- oldcompletion/User/_dd	Mon Nov 29 10:11:04 1999
++++ Completion/User/_dd	Wed Dec  1 13:43:44 1999
+@@ -10,10 +10,10 @@
+       compadd "$expl[@]" -qS, -q \
+               ascii ebcdic ibm block unblock lcase ucase swab noerror sync
+ elif compset -P 1 'if\='; then
+-  _description expl 'input file'
++  _description files expl 'input file'
+   _files "$expl[@]"
+ elif compset -P 1 'of\='; then
+-  _description expl 'output file'
++  _description files expl 'output file'
+   _files "$expl[@]"
+ else
+   _wanted values expl option &&
+diff -u -r oldcompletion/User/_dvi Completion/User/_dvi
+--- oldcompletion/User/_dvi	Mon Nov 29 10:11:05 1999
++++ Completion/User/_dvi	Wed Dec  1 13:43:44 1999
+@@ -89,7 +89,7 @@
+     "$args[@]"
+   ;;
+ *)
+-  _description expl 'DVI file'
++  _description files expl 'DVI file'
+   _files "$expl[@]" -g '*.(dvi|DVI)'
+   ;;
+ esac
+diff -u -r oldcompletion/User/_gdb Completion/User/_gdb
+--- oldcompletion/User/_gdb	Mon Nov 29 10:11:05 1999
++++ Completion/User/_gdb	Wed Dec  1 14:05:25 1999
+@@ -12,7 +12,7 @@
+ elif compset -P '-tty='; then
+   _wanted devices expl 'terminal device' && compadd "$expl[@]" - /dev/tty*
+ elif compset -P '-(exec|se)='; then
+-  _description expl executable
++  _description files expl executable
+   _files "$expl[@]" -g '*(*)'
+ elif compset -P '-(symbols|core|command)='; then
+   _files
+@@ -29,9 +29,9 @@
+   case "$prev" in
+   (-d)     _files -/ && return 0 ;;
+   (-[csx]) _files && return 0 ;;
+-  (-e)     _description expl executable
++  (-e)     _description files expl executable
+            _files "$expl[@]" -g '*(*)' && return 0 ;;
+-  (-b)     _wanted values expl -V expl 'baud rate' &&
++  (-b)     _wanted -V values expl 'baud rate' &&
+                compadd "$expl[@]" 0 50 75 110 134 150 200 300 600 1200 1800 \
+ 			          2400 4800 9600 19200 38400 57600 115200 \
+ 			          230400 && return 0 ;;
+@@ -46,7 +46,7 @@
+   if [[ $#w -gt 1 ]]; then
+     _alternative 'files:: _files' "processes:: _pids -m ${w[1]:t}"
+   else
+-    _description expl executable
++    _description files expl executable
+     _files "$expl[@]" -g '*(*)'
+   fi
+ fi
+diff -u -r oldcompletion/User/_gprof Completion/User/_gprof
+--- oldcompletion/User/_gprof	Mon Nov 29 10:11:06 1999
++++ Completion/User/_gprof	Wed Dec  1 14:00:56 1999
+@@ -41,12 +41,12 @@
+   
+     if [[ -n "$pair" ]]; then
+       if compset -P '*/'; then
+-        _description expl 'call arc to function'
++        _description functions expl 'call arc to function'
+       else
+-        _description expl 'call arc from function'
++        _description functions expl 'call arc from function'
+       fi
+     else
+-      _description expl function
++      _description functions expl function
+     fi
+     compadd "$expl[@]" -M 'r:|_=* r:|=*' - "$_gprof_funcs[@]" && ret=0
+   else
+diff -u -r oldcompletion/User/_gs Completion/User/_gs
+--- oldcompletion/User/_gs	Mon Nov 29 10:11:06 1999
++++ Completion/User/_gs	Wed Dec  1 13:43:45 1999
+@@ -39,7 +39,7 @@
+             compadd "$expl[@]" - "${(@)${=${$(gs -h)##* devices:}%%Search path:*}:#}" && ret=0
+         ;;
+       *OutputFile\=)
+-        _description expl 'output file'
++        _description files expl 'output file'
+         _files "$expl[@]" && ret=0
+         ;;
+       *)
+diff -u -r oldcompletion/User/_gunzip Completion/User/_gunzip
+--- oldcompletion/User/_gunzip	Mon Nov 29 10:11:06 1999
++++ Completion/User/_gunzip	Wed Dec  1 13:43:45 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'compressed file'
++_description files expl 'compressed file'
+ _files "$expl[@]" -g '*.[gG][z]'
+diff -u -r oldcompletion/User/_gzip Completion/User/_gzip
+--- oldcompletion/User/_gzip	Mon Nov 29 10:11:06 1999
++++ Completion/User/_gzip	Wed Dec  1 13:43:45 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'file to compress'
++_description files expl 'file to compress'
+ _files "$expl[@]" -g '*~*.[gG][zZ]'
+diff -u -r oldcompletion/User/_mh Completion/User/_mh
+--- oldcompletion/User/_mh	Mon Nov 29 10:11:07 1999
++++ Completion/User/_mh	Wed Dec  1 13:43:45 1999
+@@ -36,7 +36,7 @@
+   fi
+ 
+   # painless, or what?
+-  _description expl 'MH folder'
++  _description files expl 'MH folder'
+   _path_files "$expl[@]" -W mhpath -/
+ elif [[ "$prev" = -(editor|(whatnow|rmm|show|more)proc) ]]; then
+   _command_names -e
+@@ -50,7 +50,7 @@
+   [[ -d $mhlib ]] || { mhlib=$(mhparam mhlproc); mhlib=$mhlib:h; }
+   mhfpath=($mymhdir $mhlib)
+ 
+-  _description expl 'MH template file'
++  _description files expl 'MH template file'
+   _files "$expl[@]" -W mhfpath -g '*(.)'
+ elif [[ "$prev" = -(no|)cc ]]; then
+   _wanted -C "$prev" values expl 'CC address' &&
+diff -u -r oldcompletion/User/_mutt Completion/User/_mutt
+--- oldcompletion/User/_mutt	Mon Nov 29 10:11:07 1999
++++ Completion/User/_mutt	Wed Dec  1 13:43:45 1999
+@@ -28,10 +28,10 @@
+   _tags hosts || return 1
+ 
+   if compset -P '*@'; then
+-    _description expl 'remote host name'
++    _description hosts expl 'remote host name'
+     _hosts "$expl[@]" -q -S, && return 0
+   else
+-    _description expl 'login name'
++    _description users expl 'login name'
+     _users "$expl[@]" -q -S@ && return 0
+    fi
+  fi
+diff -u -r oldcompletion/User/_netscape Completion/User/_netscape
+--- oldcompletion/User/_netscape	Mon Nov 29 10:11:07 1999
++++ Completion/User/_netscape	Wed Dec  1 13:43:46 1999
+@@ -78,7 +78,7 @@
+             license logo memory-cache mozilla plugins && ret=0
+   else
+     if _tags prefixes; then
+-      _description expl 'URL prefix'
++      _description prefixes expl 'URL prefix'
+       compadd "$expl[@]" -S '' about: mocha: javascript:
+       _urls "$@" && ret=0
+     fi
+diff -u -r oldcompletion/User/_nslookup Completion/User/_nslookup
+--- oldcompletion/User/_nslookup	Mon Nov 29 10:11:07 1999
++++ Completion/User/_nslookup	Wed Dec  1 13:43:46 1999
+@@ -66,9 +66,9 @@
+       _message "redirection not allowed for command \`$words[1]'"
+       return 1
+     elif [[ "$compstate[redirect]" = '>' ]]; then
+-      _description expl 'write to file'
++      _description files expl 'write to file'
+     elif [[ "$compstate[redirect]" = '>>' ]]; then
+-      _description expl 'append to file'
++      _description files expl 'append to file'
+     else
+       _message "unknown redirection operator \`$compstate[redirect]'"
+       return 1
+@@ -107,7 +107,7 @@
+     return
+     ;;
+   view)
+-    _description expl 'view file'
++    _description files expl 'view file'
+     _files "$expl[@]"
+     return
+     ;;
+@@ -144,9 +144,9 @@
+   _tags hosts || return 1
+ 
+   if compset -P '*/'; then
+-    _description expl 'search list entry'
++    _description hosts expl 'search list entry'
+   else
+-    _description expl 'default domain name and first search list entry'
++    _description hosts expl 'default domain name and first search list entry'
+   fi
+   if [[ -n "$_vals_cache_multi" ]]; then
+     _hosts "$expl[@]" -qS/ -r "/\\- \\t\\n$_vals_cache_multi"
+diff -u -r oldcompletion/User/_pack Completion/User/_pack
+--- oldcompletion/User/_pack	Mon Nov 29 10:11:08 1999
++++ Completion/User/_pack	Wed Dec  1 13:43:46 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'file to compress'
++_description files expl 'file to compress'
+ _files "$expl[@]" -g '*~*.z'
+diff -u -r oldcompletion/User/_pbm Completion/User/_pbm
+--- oldcompletion/User/_pbm	Mon Nov 29 10:11:08 1999
++++ Completion/User/_pbm	Wed Dec  1 13:43:46 1999
+@@ -18,7 +18,7 @@
+   
+ if [[ $# -ne 0 || $+_in_pbm -ne 0 ]]; then
+   if (( ! $# )); then
+-    _description expl 'picture file'
++    _description files expl 'picture file'
+     set -- "$expl[@]"
+   fi
+   _files "$@" -g "$pat" || _files "$@" -g '*.(#i)p[bgp]m'
+@@ -258,7 +258,7 @@
+   
+     return ret
+   elif [[ CURRENT -eq 3 && "$words[2]" = -map ]]; then
+-    _description expl 'map file'
++    _description files expl 'map file'
+     _files "$expl[@]" -g '*.(#i)ppm'
+   else
+     _pbm
+@@ -516,9 +516,9 @@
+   _pbm && ret=0
+   
+   if (( CURRENT & 1 )); then
+-    _description expl 'new color'
++    _description colors expl 'new color'
+   else
+-    _description expl 'old color'
++    _description colors expl 'old color'
+   fi
+   
+   _x_color "$expl[@]" && ret=0
+@@ -600,7 +600,7 @@
+   
+     return ret
+   elif [[ CURRENT -eq 3 && "$words[2]" = -map ]]; then
+-    _description expl 'map file'
++    _description files expl 'map file'
+     _files "$expl[@]" -g '*.(#i)ppm'
+   else
+     _pbm
+@@ -742,7 +742,7 @@
+   fi
+   
+   if [[ -n "$expl" ]]; then
+-    _description expl "$expl"
++    _description files expl "$expl"
+     _files "$expl" -g '*.(#i)pgm'
+   fi
+   ;;
+@@ -772,7 +772,7 @@
+   _arguments '(-pgm -ppm)'-p{g,p}m ':file: _pbm'
+   ;;
+ 
+-*) 
+-  _description expl 'picture file'
++*)
++  _description files expl 'picture file'
+   _files "$expl[@]" -g "$pat" || _files "$expl[@]" -g '*.(#i)p[bgp]m'
+ esac
+diff -u -r oldcompletion/User/_pdf Completion/User/_pdf
+--- oldcompletion/User/_pdf	Mon Nov 29 10:11:08 1999
++++ Completion/User/_pdf	Wed Dec  1 13:43:47 1999
+@@ -7,5 +7,5 @@
+ # xpdf:
+ #  pdfimages pdfinfo pdftopbm pdftops pdftotext xpdf
+ 
+-_description expl 'PDF file'
++_description files expl 'PDF file'
+ _files "$expl[@]" -g '*.(#i)pdf'
+diff -u -r oldcompletion/User/_ps Completion/User/_ps
+--- oldcompletion/User/_ps	Mon Nov 29 10:11:09 1999
++++ Completion/User/_ps	Wed Dec  1 13:43:47 1999
+@@ -9,5 +9,5 @@
+ #  fixscribeps fixtpps fixwfwps fixwpps fixwwps includeres psbook psmerge
+ #  psnup psresize psselect pstops
+ 
+-_description expl 'postscript file'
++_description files expl 'postscript file'
+ _files "$expl[@]" -g '*.(#i)(ps|eps)'
+diff -u -r oldcompletion/User/_pspdf Completion/User/_pspdf
+--- oldcompletion/User/_pspdf	Mon Nov 29 10:11:09 1999
++++ Completion/User/_pspdf	Wed Dec  1 13:43:47 1999
+@@ -6,7 +6,7 @@
+ #  gs gsbj gsdj gsdj500 gslj gslp gsnd ps2ascii
+ 
+ _ps && ret=0
+-_description expl 'PDF file'
++_description files expl 'PDF file'
+ _path_files "$expl[@]" -g '*.(#i)pdf'
+ 
+ return ret
+diff -u -r oldcompletion/User/_ssh Completion/User/_ssh
+--- oldcompletion/User/_ssh	Mon Nov 29 10:11:09 1999
++++ Completion/User/_ssh	Wed Dec  1 13:43:47 1999
+@@ -57,7 +57,7 @@
+                     ret=0
+             ;;
+           *(#i)globalknownhostsfile*)
+-            _description expl 'global file with known hosts'
++            _description files expl 'global file with known hosts'
+             _files "$expl[@]" && ret=0
+             ;;
+           *(#i)hostname*)
+@@ -65,7 +65,7 @@
+                 _ssh_hosts "$expl[@]" && ret=0
+             ;;
+           *(#i)identityfile*)
+-            _description expl 'SSH identity file'
++            _description files expl 'SSH identity file'
+             _files "$expl[@]" && ret=0
+             ;;
+           *(#i)(local|remote)forward*)
+@@ -82,7 +82,7 @@
+ 	        compadd "$expl[@]" yes no ask
+             ;;
+           *(#i)userknownhostsfile*)
+-            _description expl 'user file with known hosts'
++            _description files expl 'user file with known hosts'
+             _files "$expl[@]" && ret=0
+             ;;
+           *(#i)user*)
+@@ -90,7 +90,7 @@
+                 _ssh_users "$expl[@]" && ret=0
+             ;;
+           *(#i)xauthlocation*)
+-            _description expl 'xauth program'
++            _description files expl 'xauth program'
+             _files "$expl[@]" -g '*(*)' && ret=0
+             ;;
+           esac
+diff -u -r oldcompletion/User/_strip Completion/User/_strip
+--- oldcompletion/User/_strip	Mon Nov 29 10:11:10 1999
++++ Completion/User/_strip	Wed Dec  1 13:43:47 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl executable
++_description files expl executable
+ _files "$expl[@]" -g '*(*)'
+diff -u -r oldcompletion/User/_tar_archive Completion/User/_tar_archive
+--- oldcompletion/User/_tar_archive	Mon Nov 29 10:11:10 1999
++++ Completion/User/_tar_archive	Wed Dec  1 13:43:48 1999
+@@ -11,7 +11,7 @@
+ 
+ [[ $# -eq 0 && $+_tar_cmd -ne 0 ]] && set "$_tar_cmd"
+ 
+-_description expl 'archive file'
++_description files expl 'archive file'
+ 
+ if [[ "$1" = *[tx]* ]]; then
+   if [[ "$1" = *[zZ]* ]]; then
+diff -u -r oldcompletion/User/_tex Completion/User/_tex
+--- oldcompletion/User/_tex	Mon Nov 29 10:11:10 1999
++++ Completion/User/_tex	Wed Dec  1 13:43:48 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'TeX or LaTeX file'
++_description files expl 'TeX or LaTeX file'
+ _files "$expl[@]" -g '*.(tex|TEX|texinfo|texi)'
+diff -u -r oldcompletion/User/_tiff Completion/User/_tiff
+--- oldcompletion/User/_tiff	Mon Nov 29 10:11:10 1999
++++ Completion/User/_tiff	Wed Dec  1 13:43:48 1999
+@@ -10,7 +10,7 @@
+ 
+ if [[ $# -ne 0 || $+_in_tiff -ne 0 ]]; then
+   if (( ! $# )); then
+-    _description expl 'picture file'
++    _description files expl 'picture file'
+     set -- "$expl[@]"
+   fi
+   _path_files "$@" -g "$pat" || _files "$@" -g '*.(#i)tiff'
+@@ -166,7 +166,7 @@
+     ':output file:_files -g \*.\(\#i\)tiff' && ret=0
+   ;;
+ *)
+-  _description expl 'picture file'
++  _description files expl 'picture file'
+   _files "$expl[@]" -g "$pat" && ret=0
+ esac
+ 
+diff -u -r oldcompletion/User/_uncompress Completion/User/_uncompress
+--- oldcompletion/User/_uncompress	Mon Nov 29 10:11:11 1999
++++ Completion/User/_uncompress	Wed Dec  1 13:43:48 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'compressed file'
++_description files expl 'compressed file'
+ _files "$expl[@]" -g '*.Z'
+diff -u -r oldcompletion/User/_unpack Completion/User/_unpack
+--- oldcompletion/User/_unpack	Mon Nov 29 10:11:11 1999
++++ Completion/User/_unpack	Wed Dec  1 13:43:48 1999
+@@ -2,5 +2,5 @@
+ 
+ local expl
+ 
+-_description expl 'compressed file'
++_description files expl 'compressed file'
+ _files "$expl[@]" -g '*.z'
+diff -u -r oldcompletion/User/_users_on Completion/User/_users_on
+--- oldcompletion/User/_users_on	Mon Nov 29 10:11:11 1999
++++ Completion/User/_users_on	Wed Dec  1 13:43:49 1999
+@@ -5,7 +5,7 @@
+ _tags users || return 1
+ 
+ if which users >/dev/null; then
+-  _description expl 'users logged on'
++  _description users expl 'users logged on'
+   compadd "$@" "$expl[@]" - $(users) && return 0
+ else
+   # Other methods of finding out users logged on should be added here
+diff -u -r oldcompletion/X/_x_window Completion/X/_x_window
+--- oldcompletion/X/_x_window	Mon Nov 29 10:11:14 1999
++++ Completion/X/_x_window	Wed Dec  1 13:43:49 1999
+@@ -9,11 +9,11 @@
+ if [[ "$1" = -n ]]; then
+   shift
+ 
+-  _description expl 'window name'
++  _description windows expl 'window name'
+   compadd "$@" "$expl[@]" -d list - "${(@)${(@)list#*\"}%%\"*}"
+ else
+   [[ "$1" = - ]] && shift
+ 
+-  _description expl 'window ID'
++  _description windows expl 'window ID'
+   compadd "$@" "$expl[@]" -d list - "${(@)list%% *}"
+ fi
+diff -u -r oldcompletion/X/_xmodmap Completion/X/_xmodmap
+--- oldcompletion/X/_xmodmap	Mon Nov 29 10:11:14 1999
++++ Completion/X/_xmodmap	Wed Dec  1 13:43:49 1999
+@@ -55,7 +55,7 @@
+     pointer*)
+       if compset -P '*=[ 	]#'; then
+         compset -P '*[ 	]'
+-        _description expl 'button code'
++        _description values expl 'button code'
+         compadd "$expl[@]" -qS ' ' 1 2 3 4 5 default
+         return
+       else
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,310 @@
+From zsh-workers-request@math.gatech.edu  Sat Jul 15 06:54:22 1995
+Received: from gatech.edu (gatech.edu [130.207.244.244]) by werple.mira.net.au (8.6.12/8.6.9) with SMTP id GAA03607 for <mason@werple.mira.net.au>; Sat, 15 Jul 1995 06:54:19 +1000
+Received: from math (math.skiles.gatech.edu) by gatech.edu with SMTP id AA04259
+  (5.65c/Gatech-10.0-IDA for <mason@werple.mira.net.au>); Fri, 14 Jul 1995 16:53:19 -0400
+Received: by math (5.x/SMI-SVR4)
+	id AA06250; Fri, 14 Jul 1995 10:11:34 -0400
+Resent-Date: Fri, 14 Jul 1995 16:10:37 +0100 (MET DST)
+Old-Return-Path: <hzoli@cs.elte.hu>
+From: hzoli@cs.elte.hu (Zoltan Hidvegi)
+Message-Id: <9507141410.AA06571@turan.elte.hu>
+Subject: Some glob.c cleanups
+To: zsh-workers@math.gatech.edu (zsh-workers)
+Date: Fri, 14 Jul 1995 16:10:37 +0100 (MET DST)
+X-Mailer: ELM [version 2.4 PL21]
+Content-Type: text
+Resent-Message-Id: <"89G_v.0.WX1.Lid1m"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/202
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+The patch below contains some little cleanups for glob.c. I moved
+fwskipparens() from zle_tricky.c to utils.c, and made it global function. I
+use it in two places in glob.c. This allowed me to remove a kludge labelled
+goto.
+
+The other change is more visible: in parsecomp zsh allocated a 2*PATH_MAX
+buffer from the heap each time it parsed a glob pattern. This buffer was used
+to store part of the pattern, which is usually much shorter than
+2*PATH_MAX. This sometimes lead to very large memory usage. Also on some
+machines or on all machines with ZSH_MEM, this larege allocated heap area was
+not given back to the system after it was not needed, probably because the
+memory fragmented in a way that prevented this. Also frequent calls to
+malloc() slowd down zsh. I changed parsecomp to use a 2*PATH_MAX long local
+variable, and use dupstring after the necessary string was calculated.
+
+The old code used alloc() which fills the requested area with zeros, but the
+code did not used this fact so I do not initialize the local variable
+here. This may also speed up things a little bit.
+
+On linux, before the patch:
+ktud% foo=(a{,}{,}{,}{,}{,}{,}{,}{,}{,}{,})
+ktud% ps aux $$
+USER       PID %CPU %MEM SIZE  RSS TTY STAT START   TIME COMMAND
+hzoli     7230  2.8  3.7  472  576 pp1 S    15:26   0:00 zsh -f
+ktud% : ${foo%?}
+ktud% ps aux $$
+USER       PID %CPU %MEM SIZE  RSS TTY STAT START   TIME COMMAND
+hzoli     7230  3.9 21.7 3180 3288 pp1 S    15:26   0:01 zsh -f
+
+And after the patch:
+ktud% foo=(a{,}{,}{,}{,}{,}{,}{,}{,}{,}{,})
+ktud% ps aux $$
+USER       PID %CPU %MEM SIZE  RSS TTY STAT START   TIME COMMAND
+hzoli     7281  3.7  3.8  472  580 pp1 S    15:30   0:00 ./zsh -f
+ktud% : ${foo%?}
+ktud% ps aux $$
+USER       PID %CPU %MEM SIZE  RSS TTY STAT START   TIME COMMAND
+hzoli     7281  2.1  3.9  488  596 pp1 S    15:30   0:00 ./zsh -f
+
+The difference is 2692k. On Solaris 2.3 this difference is `only' 674k but you
+get similar result to linux if ZSH_MEM was defined. The reason for the 2692k is
+that the heap is allocated in chunks which are a few bytes less than
+8192. 2*PATH_MAX is usually 2048 bytes, so only three such area fits into one
+chunk. That means that the memory required here is 2048*1024*4/3 which is
+2730k.
+
+Cheers,
+
+   Zoltan
+
+*** 1.8	1995/07/07 17:01:35
+--- Src/glob.c	1995/07/14 13:09:36
+***************
+*** 1785,1802 ****
+  {
+      Comp c1;
+      Complist p1;
+  
+!     if (pptr[0] == Star && pptr[1] == Star) {
+  	/* Match any number of directories. */
+! 	int follow = 0;
+  
+! 	if (pptr[2] == '/')
+! 	    pptr += 3;
+! 	else if (pptr[2] == Star && pptr[3] == '/') {
+! 	    pptr += 4;
+! 	    follow = 1;		/* with three stars, follow symbolic links */
+! 	} else
+! 	    goto kludge;	/* not the end of the path component. */
+  
+  	/* Now get the next path component if there is one. */
+  	p1 = (Complist) alloc(sizeof *p1);
+--- 1785,1799 ----
+  {
+      Comp c1;
+      Complist p1;
++     char *str;
+  
+!     if (pptr[0] == Star && pptr[1] == Star &&
+!         (pptr[2] == '/' || (pptr[2] == Star && pptr[3] == '/'))) {
+  	/* Match any number of directories. */
+! 	int follow;
+  
+! 	/* with three stars, follow symbolic links */
+! 	pptr += 3 + (follow = pptr[2] == Star);
+  
+  	/* Now get the next path component if there is one. */
+  	p1 = (Complist) alloc(sizeof *p1);
+***************
+*** 1812,1830 ****
+  	p1->follow = follow;
+  	return p1;
+      }
+!     if (*pptr == Inpar) {
+  	/* parse repeated directories (ordinary groups are
+  	 * handled by parsecompsw()) */
+- 	char *str;
+- 	int pars = 1;
+- 
+- 	for (str = pptr + 1; *str && pars; str++)
+- 	    if (*str == Inpar)
+- 		pars++;
+- 	    else if (*str == Outpar)
+- 		pars--;
+- 	if (str[0] != Pound || str[-1] != Outpar || str[-2] != '/')
+- 	    goto kludge;	/* not a repeated directory */
+  	/* (dir/)# and (dir/)## code */
+  	pptr++;
+  	if (!(c1 = parsecompsw(0)))
+--- 1809,1818 ----
+  	p1->follow = follow;
+  	return p1;
+      }
+!     if (*(str = pptr) == Inpar && !fwskipparens(Inpar, Outpar, &str) &&
+!         *str == Pound && str[-2] == '/') {
+  	/* parse repeated directories (ordinary groups are
+  	 * handled by parsecompsw()) */
+  	/* (dir/)# and (dir/)## code */
+  	pptr++;
+  	if (!(c1 = parsecompsw(0)))
+***************
+*** 1845,1851 ****
+  	    return (p1->comp) ? p1 : NULL;
+  	}
+      } else {
+-       kludge:
+  	/* parse single path component */
+  	if (!(c1 = parsecompsw(1)))
+  	    return NULL;
+--- 1833,1838 ----
+***************
+*** 1871,1877 ****
+  parsecomp(void)
+  {
+      Comp c = (Comp) alloc(sizeof *c), c1, c2;
+!     char *s = c->str = (char *)alloc(PATH_MAX * 2), *ls = NULL;
+  
+      /* In case of alternatives, code coming up is stored in tail. */
+      c->next = tail;
+--- 1858,1864 ----
+  parsecomp(void)
+  {
+      Comp c = (Comp) alloc(sizeof *c), c1, c2;
+!     char cstr[PATH_MAX * 2], *s = cstr, *ls = NULL;
+  
+      /* In case of alternatives, code coming up is stored in tail. */
+      c->next = tail;
+***************
+*** 1890,1895 ****
+--- 1877,1883 ----
+  	    pptr++;
+  	    if (!(c->next = parsecomp()))
+  		return NULL;
++ 	    c->str = dupstring(cstr);
+  	    return c;
+  	}
+  	if (*pptr == Star && pptr[1] &&
+***************
+*** 1909,1930 ****
+  		return NULL;
+  	    c1->next = c2;
+  	    c->next = c1;
+  	    return c;
+  	}
+  	if (*pptr == Inpar) {
+  	    /* Found a group (...) */
+- 	    int pars = 1;
+  	    char *startp = pptr, *endp;
+  	    Comp stail = tail;
+  	    int dpnd = 0;
+  
+  	    /* Need matching close parenthesis */
+! 	    for (pptr = pptr + 1; *pptr && pars; pptr++)
+! 		if (*pptr == Inpar)
+! 		    pars++;
+! 		else if (*pptr == Outpar)
+! 		    pars--;
+! 	    if (pptr[-1] != Outpar) {
+  		errflag = 1;
+  		return NULL;
+  	    }
+--- 1897,1913 ----
+  		return NULL;
+  	    c1->next = c2;
+  	    c->next = c1;
++ 	    c->str = dupstring(cstr);
+  	    return c;
+  	}
+  	if (*pptr == Inpar) {
+  	    /* Found a group (...) */
+  	    char *startp = pptr, *endp;
+  	    Comp stail = tail;
+  	    int dpnd = 0;
+  
+  	    /* Need matching close parenthesis */
+! 	    if (fwskipparens(Inpar, Outpar, &pptr)) {
+  		errflag = 1;
+  		return NULL;
+  	    }
+***************
+*** 1955,1960 ****
+--- 1938,1944 ----
+  	    c->next->next = dpnd ? c1 : (Comp) alloc(sizeof *c);
+  	    pptr = endp;
+  	    tail = stail;
++ 	    c->str = dupstring(cstr);
+  	    return c;
+  	}
+  	if (*pptr == Pound) {
+***************
+*** 1978,1983 ****
+--- 1962,1968 ----
+  	    if (!c2->next)
+  		return NULL;
+  	    *ls++ = '\0';
++ 	    c->str = dupstring(cstr);
+  	    return c;
+  	}
+  	ls = s;			/* whatever we just parsed */
+***************
+*** 2011,2016 ****
+--- 1996,2002 ----
+      if (*pptr == '/' || !*pptr)
+  	c->stat |= C_LAST;
+      *s++ = '\0';
++     c->str = dupstring(cstr);
+      return c;
+  }
+  
+*** 1.12	1995/07/11 15:09:08
+--- Src/utils.c	1995/07/14 13:09:36
+***************
+*** 2689,2691 ****
+--- 2689,2711 ----
+      }
+      return (0L);
+  }
++ 
++ /* Skip over a balanced pair of parenthesis. */
++ 
++ /**/
++ int
++ fwskipparens(char inpar, char outpar, char **s)
++ {
++     int level;
++ 
++     if (**s != inpar)
++ 	return -1;
++ 
++     for (level = 1; *++*s && level;)
++ 	if (**s == inpar)
++ 	   ++level;
++ 	else if (**s == outpar)
++ 	   --level;
++ 
++    return level;
++ }
+*** 1.24	1995/07/12 14:51:48
+--- Src/zle_tricky.c	1995/07/14 13:09:37
+***************
+*** 175,199 ****
+  static int remove_at = -1;
+  
+  
+- /* Skip over a balanced pair of parenthesis. */
+- 
+- static int
+- fwskipparens(char inpar, char outpar, char **s)
+- {
+-     int level;
+- 
+-     if (**s != inpar)
+- 	return -1;
+- 
+-     for (level = 1; *++*s && level;)
+- 	if (**s == inpar)
+- 	   ++level;
+- 	else if (**s == outpar)
+- 	   --level;
+- 
+-    return level;
+- }
+- 
+  /* Find out if we have to insert a tab (instead of trying to complete). */
+  
+  /**/
+--- 175,180 ----
+

@@ -1,0 +1,188 @@
+From zsh-workers-return-13116-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Nov 04 23:30:06 2000
+Return-Path: <zsh-workers-return-13116-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3793 invoked from network); 4 Nov 2000 23:30:04 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 4 Nov 2000 23:30:04 -0000
+Received: (qmail 6392 invoked by alias); 4 Nov 2000 23:29:58 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13116
+Received: (qmail 6384 invoked from network); 4 Nov 2000 23:29:56 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1001104232950.ZM3561@candle.brasslantern.com>
+Date: Sat, 4 Nov 2000 23:29:50 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Misc. zpty tweaks, plus commentary
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+The first hunk below simply adds strerror output to a couple of warning
+messages, so one has a better idea of why things went wrong.
+
+The second hunk passes (!cmd->block) as the final argument of read_poll().
+Without this, `zpty -b foo bar; zpty -t foo' would hang until `bar' produced
+output (which it might never do).  With it, I suspect that on systems that
+don't HAVE_SELECT you can get a nonzero return from zpty -t even when some
+output is still available; but I can't test that and I don't know another
+fix for the blocking problem.
+
+The third through sixth hunks change `zpty -r' to stream to stdout when
+there is no parameter name into which the output is to be captured, rather
+than buffering all the output in memory.
+
+The fifth and seventh hunks remove some code that's been #if 0 for a while.
+
+The motivation for all this is to be able to use a program running under
+zpty as a filter, much like a coproc.  `zpty -w' already was able to stream
+into the pty (even though that's not documented); e.g. `zpty -w foo < file'
+writes the entire contents of the file to the pty (or tries to -- it might
+fail if `zpty -b' was not used to create the pty).  Now `zpty -r foo' can
+stream the output as well.  Unfortunately, it's still not possible to do
+both at once.
+
+The problem is that whenever zsh forks a builtin, it closes all descriptors
+numbered higher than 10, which includes the master pty descriptor.  So if
+you try to use `zpty -r' or `zpty -w' in a pipeline, or try to put them in
+the background, they'll get "invalid file descriptor" when attempting to
+access the pty.  I've played with "hiding" the master fd by zeroing its slot
+in fdtable[], and that does make zpty work correctly, but it also means that
+the master descriptor is still open when running other builtins, which is
+not quite so desirable.
+
+Any suggestions for the right approach to fixing this remaining problem?
+
+Index: Src/Modules/zpty.c
+===================================================================
+@@ -275,12 +275,12 @@
+ 	return 1;
+     }
+     if (get_pty(1, &master)) {
+-	zwarnnam(nam, "can't open pseudo terminal", NULL, 0);
++	zwarnnam(nam, "can't open pseudo terminal: %e", NULL, errno);
+ 	return 1;
+     }
+     if ((pid = fork()) == -1) {
++	zwarnnam(nam, "can't create pty command %s: %e", pname, errno);
+ 	close(master);
+-	zwarnnam(nam, "couldn't create pty command: %s", pname, 0);
+ 	return 1;
+     } else if (!pid) {
+ 
+@@ -438,7 +438,8 @@
+ {
+     if (cmd->read != -1)
+ 	return;
+-    if (!read_poll(cmd->fd, &cmd->read, 1) && kill(cmd->pid, 0) < 0) {
++    if (!read_poll(cmd->fd, &cmd->read, !cmd->block) &&
++	kill(cmd->pid, 0) < 0) {
+ 	cmd->fin = 1;
+ 	zclose(cmd->fd);
+     }
+@@ -447,7 +448,7 @@
+ static int
+ ptyread(char *nam, Ptycmd cmd, char **args)
+ {
+-    int blen = 256, used = 0, ret = 1;
++    int blen = 256, used = 0, seen = 0, ret = 1;
+     char *buf = (char *) zhalloc((blen = 256) + 1);
+     Patprog prog = NULL;
+ 
+@@ -465,7 +466,9 @@
+ 	    zwarnnam(nam, "bad pattern: %s", args[1], 0);
+ 	    return 1;
+ 	}
+-    }
++    } else
++	fflush(stdout);
++
+     if (cmd->read != -1) {
+ 	buf[0] = (char) cmd->read;
+ 	buf[1] = '\0';
+@@ -479,30 +482,19 @@
+ 		break;
+ 	}
+ 	if ((ret = read(cmd->fd, buf + used, 1)) == 1) {
++	    seen = 1;
+ 	    if (++used == blen) {
+-		buf = hrealloc(buf, blen, blen << 1);
+-		blen <<= 1;
++		if (!*args) {
++		    write(1, buf, used);
++		    used = 0;
++		} else {
++		    buf = hrealloc(buf, blen, blen << 1);
++		    blen <<= 1;
++		}
+ 	    }
+ 	}
+ 	buf[used] = '\0';
+ 
+-#if 0
+-	/* This once used the following test, to make sure to return
+-	 * non-zero if there are no characters to read.  That looks
+-	 * like a thinko now, because it disables non-blocking ptys. */
+-
+-	if (ret < 0 && (cmd->block
+-#ifdef EWOULDBLOCK
+-			|| errno != EWOULDBLOCK
+-#else
+-#ifdef EAGAIN
+-			|| errno != EAGAIN
+-#endif
+-#endif
+-			))
+-	    break;
+-#endif
+-
+ 	if (!prog && ret <= 0)
+ 	    break;
+     } while (!errflag && !breaks && !retflag && !contflag &&
+@@ -511,11 +503,10 @@
+ 
+     if (*args)
+ 	setsparam(*args, ztrdup(metafy(buf, used, META_HREALLOC)));
+-    else {
+-	fflush(stdout);
++    else
+ 	write(1, buf, used);
+-    }
+-    return !used;
++
++    return !seen;
+ }
+ 
+ static int
+@@ -524,21 +515,7 @@
+     int written;
+ 
+     for (; len; len -= written, s += written) {
+-	if ((written = write(cmd->fd, s, len)) < 0
+-#if 0
+-	    /* Same as above. */
+-	    &&
+-	    (cmd->block
+-#ifdef EWOULDBLOCK
+-			|| errno != EWOULDBLOCK
+-#else
+-#ifdef EAGAIN
+-			|| errno != EAGAIN
+-#endif
+-#endif
+-	     )
+-#endif
+-	    )
++	if ((written = write(cmd->fd, s, len)) < 0)
+ 	    return 1;
+ 	if (written < 0) {
+ 	    checkptycmd(cmd);
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

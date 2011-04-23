@@ -1,0 +1,170 @@
+From zsh-workers-return-8373-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Oct 22 10:17:30 1999
+Return-Path: <zsh-workers-return-8373-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29270 invoked from network); 22 Oct 1999 10:17:29 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 22 Oct 1999 10:17:29 -0000
+Received: (qmail 19148 invoked by alias); 22 Oct 1999 10:17:17 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8373
+Received: (qmail 19138 invoked from network); 22 Oct 1999 10:17:15 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <991022101652.ZM16895@candle.brasslantern.com>
+Date: Fri, 22 Oct 1999 10:16:52 +0000
+In-Reply-To: <199910220640.IAA01123@beta.informatik.hu-berlin.de>
+Comments: In reply to Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+        "Re: PATCH: predict-on (Re: Completeinword and ambiguous completions)" (Oct 22,  8:40am)
+References: <199910220640.IAA01123@beta.informatik.hu-berlin.de>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>,
+        zsh-workers@sunsite.auc.dk
+Subject: Re: PATCH: predict-on (Re: Completeinword and ambiguous completions)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Oct 22,  8:40am, Sven Wischnowsky wrote:
+} Subject: Re: PATCH: predict-on (Re: Completeinword and ambiguous completio
+}
+} Bart Schaefer wrote:
+} 
+} > On Oct 21,  9:10am, Sven Wischnowsky wrote:
+} > } Subject: Re: Completeinword and ambiguous completions
+} > }
+} > }   compmatchers=('' 'r:|=*')
+} > } 
+} > } Is that good enough?
+} > 
+} > It seems to work some, but not all, of the time.  For example:
+} > 
+} > zagzig<4> setopt promptt
+} > 
+} > If the cursor is on the second `t' there are two possible completions
+} > (promptsubst and promptpercent).  So when the cursor is on the `m' I
+} > expect TAB to move it to the second `t'.  Instead I get a feep.
+} 
+} Ugh. The completion code doesn't try to do that at all, right.
+} 
+} You can try the (probably expensive):
+} 
+}   compmatchers=('r:|?=* r:|=*')
+} 
+} of course. This works for me at least with your example.
+
+No, that's far too aggressive.  If I drop that into predict-on, I can't
+type anything -- it erases the whole line and makes me start over every
+character or two, or else I get weird stuff like this:
+
+zagzig<6> seto          
+_bash_completions        kpsetool                 setmetamode            
+_history_complete_word   netscape-communicator    setopt                 
+_set_options             restoretextmode          setsysfont             
+_setopt                  savetextmode             setup_compinit         
+_unset_options           setclock                 unsetopt               
+_unsetopt                setconsole               xsetmode               
+_user_at_host            setfont                  xsetpointer            
+_x_selection_timeout     setkeycodes              xsetroot               
+
+If I hack up insert-and-predict to reset compmatchers locally, then it
+works again until I get to this point with cursor on the "o":
+
+zagzig<6> setopt
+
+If I now press TAB, I get
+
+zagzig<4> setopt        
+_set_options     _unset_options   setopt           unsetopt       
+_setopt          _unsetopt        setup_compinit                  
+
+with the cursor moved back to the "s".  I never want the cursor to move
+backwards.
+
+(setup_compinit is a function I use to force compinit to read functions
+out of the current zsh build tree rather than out of the install.)
+
+} Another way
+} would be to try completion again and again while moving the
+} cursor. But that would even be more expensive.
+
+It's also not what I want.  What I want to do is described precisely by:
+
+(0) Assume no global compmatchers.
+(1) Generate the possible matches at the current cursor position as
+    if for expand-or-complete-prefix, i.e. ignoring what follows.
+(2) Compute the common prefix of those matches.
+(3) If the common prefix matches what follows on the line, move the
+    cursor to the end of the common prefix, else no change.
+(4) Recompute matches at this (new?) position as if for completeinword.
+(5) If exactly one, insert it and put the cursor at the end of it.
+(5) Else if none, move the cursor back to the original position.
+(6) Otherwise (and if autolist) list the matches from (4).
+
+I don't care about any other possible completions between the start
+position and the end of the common prefix, and don't want to consider
+them as possible matches.
+
+} > Maybe the following will explain why I'm interested in this.  I want to
+} > press TAB in the middle of a predictivly-inserted line to jump ahead to
+} > the next spot where I might want to edit.
+} 
+} Almost-DWIM?
+
+Yes.  Even without the stuff I'm asking about above, this works very
+nicely -- I like it MUCH better than incremental-complete-word, because
+it's modeless:  I never have to accept a completion and then accept the
+line -- I can accept the line immediately at any time, or hit TAB to go
+through the normal completion process on the current word, or just keep
+typing to have the completion incrementally change for me.
+
+Here's a follow-on patch to fix a logic-error in the last one and to
+back out compmatchers (at least for now):
+
+Index: Functions/Zle/predict-on
+===================================================================
+@@ -25,19 +25,17 @@
+ # error message.
+ 
+ predict-on() {
+-    setopt localoptions nounset noksharrays
++    setopt localoptions unset noksharrays
+     zle -N self-insert insert-and-predict
+     zle -N magic-space insert-and-predict
+     zle -N backward-delete-char delete-backward-and-predict
+-    [[ $compmatchers[2] != 'r:|=*' ]] &&
+-      compmatchers=('' 'r:|=*' $compmatchers)
++    zle -N delete-char-or-list delete-no-predict
+ }
+ predict-off() {
+-    setopt localoptions nounset noksharrays
++    setopt localoptions unset noksharrays
+     zle -A .self-insert self-insert
+     zle -A .magic-space magic-space
+     zle -A .backward-delete-char backward-delete-char
+-    [[ $compmatchers[2] != 'r:|=*' ]] || shift 2 compmatchers
+ }
+ insert-and-predict () {
+   emulate -L zsh
+@@ -75,11 +73,14 @@
+       zle .history-beginning-search-forward || RBUFFER=""
+       return 0
+     else
+-      # Depending on preference, you might call "predict-off" here,
+-      # and also set up forward deletions to turn off prediction.
++      # Depending on preference, you might call "predict-off" here.
+       LBUFFER="$LBUFFER[1,-2]"
+     fi
+   fi
++}
++delete-no-predict() {
++  predict-off
++  zle .$WIDGET "$@"
+ }
+ 
+ [[ -o kshautoload ]] || predict-on "$@"
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

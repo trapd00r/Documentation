@@ -1,0 +1,168 @@
+From zsh-workers-return-23054-mason-zsh=primenet.com.au@sunsite.dk Fri Dec 15 12:06:43 2006
+Return-Path: <zsh-workers-return-23054-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9004 invoked from network); 15 Dec 2006 12:06:34 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.7 (2006-10-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.7
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 15 Dec 2006 12:06:34 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 63287 invoked from network); 15 Dec 2006 12:06:22 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 15 Dec 2006 12:06:22 -0000
+Received: (qmail 16515 invoked by alias); 15 Dec 2006 12:06:16 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23054
+Received: (qmail 16506 invoked from network); 15 Dec 2006 12:06:15 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 15 Dec 2006 12:06:15 -0000
+Received: (qmail 62602 invoked from network); 15 Dec 2006 12:06:15 -0000
+Received: from cluster-c.mailcontrol.com (168.143.177.190)
+  by a.mx.sunsite.dk with SMTP; 15 Dec 2006 12:06:11 -0000
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly17c.srv.mailcontrol.com (MailControl) with ESMTP id kBFC5Mq2026959
+	for <zsh-workers@sunsite.dk>; Fri, 15 Dec 2006 12:06:02 GMT
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.1830);
+	 Fri, 15 Dec 2006 12:05:59 +0000
+Date: Fri, 15 Dec 2006 12:05:57 +0000
+From: Peter Stephenson <pws@csr.com>
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: Is wait not interruptable?
+Message-Id: <20061215120557.dc06f65b.pws@csr.com>
+In-Reply-To: <pdy988306240807c1a821013f89@[192.168.1.2]>
+References: <pdy988306240807c1a821013f89@[192.168.1.2]>
+Organization: Cambridge Silicon Radio
+X-Mailer: Sylpheed version 2.2.10 (GTK+ 2.10.4; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 15 Dec 2006 12:05:59.0545 (UTC) FILETIME=[622D5690:01C72041]
+X-Scanned-By: MailControl A-07-06-00 (www.mailcontrol.com) on 10.67.0.127
+
+Dave Yost <Dave@Yost.com> wrote:
+> This program isn't working as I would expect:
+> 
+> #!/bin/zsh
+> 
+> (sleep 3 ; echo A) &
+> proc1=$!
+> (sleep 4 ; echo B) &
+> proc2=$!
+> trap 'echo kill $proc2 $proc1 ; kill $proc2 $proc1' INT
+> wait $proc1
+> kill $proc2
+> #ps
+> 
+> 316 Z% wait-kill-test
+> ^Ckill 4099 4098
+>
+> The ^C was typed 1 second after the command was 
+> started, and the first sleep plodded along to completion for its full 
+> 3 seconds.
+
+There are two things here, I think.  Unfortunately I'm not a signal expert;
+we could do with one to maintain this part of the code.  Bart will probably
+be able to shed some more light on the following.
+
+The first is that the subshell itself (the stuff in parentheses) doesn't
+get killed because it's waiting for the child process.  This seems to be a
+feature of SIGTERM.  If you "setopt trapsasync" or send a different signal
+such as SIGHUP it does get killed.  I'm not really sure why SIGTERM is
+different.
+
+The second is that even if the subshell gets killed, the sleep processes
+themselves don't.  This seems to be because (a) the NOHUP option is on by
+default (b) even with "setopt hup" we (i.e. in this case the subshell that
+is exiting after the first problem is worked around) don't send HUP to
+processes when exiting unless the exiting shell is interactive.
+
+I make no warranty that any of the behaviour I've found is correct, since
+signal handling confuses me.
+
+I *think* the patch below fixes (b) by sending SIGHUP to our own process
+group when exiting from a non-interactive shell, but I'll take advice on
+this.  (I can at least then get the test program to work with "setopt hup
+trapsasync".)  The manual isn't clear over whether this is supposed to
+happen non-interactively, though it would probably be fair to assume that
+if HUP is set in a non-interactive shell you'd expect the SIGHUP to be
+sent.  I don't know if I should signal_ignore(SIGHUP) before killpg(0,
+SIGHUP) but it didn't seem to be necessary.
+
+The Src/jobs.c hunk is a separate thing I noticed and will commit anyway:
+the error message for "kill -" (no option or signal) is confusing.
+
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.171
+diff -u -r1.171 builtin.c
+--- Src/builtin.c	10 Dec 2006 23:27:03 -0000	1.171
++++ Src/builtin.c	15 Dec 2006 11:44:38 -0000
+@@ -4423,10 +4423,9 @@
+      */
+     errflag = 0;
+ 
+-    if (isset(MONITOR)) {
+-	/* send SIGHUP to any jobs left running  */
+-	killrunjobs(from_where == 1);
+-    }
++    /* send SIGHUP to any jobs left running  */
++    killrunjobs(from_where == 1);
++
+     if (isset(RCS) && interact) {
+ 	if (!nohistsave) {
+ 	    int writeflags = HFILE_USE_OPTIONS;
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.50
+diff -u -r1.50 jobs.c
+--- Src/jobs.c	6 Nov 2006 12:49:21 -0000	1.50
++++ Src/jobs.c	15 Dec 2006 11:44:38 -0000
+@@ -2027,6 +2027,10 @@
+ 		    return 1;
+ 		} else
+ 		    signame = *argv;
++		if (!*signame) {
++		    zwarnnam(nam, "-: signal name expected");
++		    return 1;
++		}
+ 		signame = casemodify(signame, CASMOD_UPPER);
+ 		if (!strncmp(signame, "SIG", 3))
+ 		    signame+=3;
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.41
+diff -u -r1.41 signals.c
+--- Src/signals.c	30 May 2006 22:35:03 -0000	1.41
++++ Src/signals.c	15 Dec 2006 11:44:38 -0000
+@@ -636,9 +636,15 @@
+ killrunjobs(int from_signal)
+ {
+     int i, killed = 0;
+- 
++
+     if (unset(HUP))
+         return;
++
++    if (!isset(MONITOR))
++    {
++	killpg(0, SIGHUP);
++	return;
++    }
+     for (i = 1; i <= maxjob; i++)
+         if ((from_signal || i != thisjob) && (jobtab[i].stat & STAT_LOCKED) &&
+             !(jobtab[i].stat & STAT_NOPRINT) &&
+
+
+
+
+To access the latest news from CSR copy this link into a web browser:  http://www.csr.com/email_sig.php
+

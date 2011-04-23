@@ -1,0 +1,185 @@
+From zsh-workers-return-17361-mason-zsh=primenet.com.au@sunsite.dk Mon Jun 24 17:32:59 2002
+Return-Path: <zsh-workers-return-17361-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15935 invoked from network); 24 Jun 2002 17:32:47 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 24 Jun 2002 17:32:47 -0000
+Received: (qmail 266 invoked by alias); 24 Jun 2002 17:32:40 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17361
+Received: (qmail 254 invoked from network); 24 Jun 2002 17:32:39 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: zle history entry paranoia
+Date: Mon, 24 Jun 2002 18:32:10 +0100
+Message-ID: <2323.1024939930@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+I just had a crash after `fc -R' and then trying to search back in the
+history because zle lost the plot somehow.  The crash was because a
+quietgethist returned NULL; I presume the current zle history line was
+not at the end at that point and there was no such line in the new
+history.
+
+This makes it safer by checking the return values of some
+quietgethist's in zle_hist.c.  It's got the chunk for
+accept-line-and-down-history embedded in it since that coincidentally
+hits the same code and I haven't committed it yet.
+
+Possibly it should reset the history line after fc -R, anyway, but that
+requires an extra hook between the main shell and zle.
+
+Index: Src/Zle/zle_hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_hist.c,v
+retrieving revision 1.7
+diff -u -r1.7 zle_hist.c
+--- Src/Zle/zle_hist.c	5 Mar 2002 16:33:19 -0000	1.7
++++ Src/Zle/zle_hist.c	24 Jun 2002 17:25:44 -0000
+@@ -48,7 +48,7 @@
+ remember_edits(void)
+ {
+     Histent ent = quietgethist(histline);
+-    if (metadiffer(ZLETEXT(ent), (char *) line, ll)) {
++    if (ent && metadiffer(ZLETEXT(ent), (char *) line, ll)) {
+ 	zsfree(ent->zle_text);
+ 	ent->zle_text = metafy((char *) line, ll, META_DUP);
+     }
+@@ -248,13 +248,13 @@
+ int
+ acceptlineanddownhistory(char **args)
+ {
+-    Histent he;
++    Histent he = quietgethist(histline);
+ 
+-    if (!(he = movehistent(quietgethist(histline), 1, HIST_FOREIGN)))
+-	return 1;
+-    zpushnode(bufstack, ztrdup(he->text));
++    if (he && (he = movehistent(he, 1, HIST_FOREIGN))) {
++	zpushnode(bufstack, ztrdup(he->text));
++	stackhist = he->histnum;
++    }
+     done = 1;
+-    stackhist = he->histnum;
+     return 0;
+ }
+ 
+@@ -301,7 +301,8 @@
+ 	str = srch_str;
+ 	hp = histpos;
+     }
+-    he = quietgethist(histline);
++    if (!(he = quietgethist(histline)))
++	return 1;
+     while ((he = movehistent(he, -1, hist_skip_flags))) {
+ 	if (isset(HISTFINDNODUPS) && he->flags & HIST_DUP)
+ 	    continue;
+@@ -349,7 +350,8 @@
+ 	str = srch_str;
+ 	hp = histpos;
+     }
+-    he = quietgethist(histline);
++    if (!(he = quietgethist(histline)))
++	return 1;
+     while ((he = movehistent(he, 1, hist_skip_flags))) {
+ 	if (isset(HISTFINDNODUPS) && he->flags & HIST_DUP)
+ 	    continue;
+@@ -578,7 +580,9 @@
+ int
+ zle_goto_hist(int ev, int n, int skipdups)
+ {
+-    Histent he = movehistent(quietgethist(ev), n, hist_skip_flags);
++    Histent he = quietgethist(ev);
++    if (!he || !(he = movehistent(he, n, hist_skip_flags)))
++	return 1;
+     if (skipdups && n) {
+ 	n = n < 0? -1 : 1;
+ 	while (he && !metadiffer(ZLETEXT(he), (char *) line, ll))
+@@ -752,11 +756,14 @@
+     int odir = dir, sens = zmult == 1 ? 3 : 1;
+     int hl = histline, savekeys = -1, feep = 0;
+     Thingy cmd;
+-    char *okeymap = ztrdup(curkeymapname);
++    char *okeymap;
+     static char *previous_search = NULL;
+     static int previous_search_len = 0;
+     Histent he;
+ 
++    if (!(he = quietgethist(hl)))
++	return;
++
+     clearlist = 1;
+ 
+     if (*args) {
+@@ -770,7 +777,7 @@
+     strcpy(ibuf, ISEARCH_PROMPT);
+     memcpy(ibuf + NORM_PROMPT_POS, (dir == 1) ? "fwd" : "bck", 3);
+     remember_edits();
+-    he = quietgethist(hl);
++    okeymap = ztrdup(curkeymapname);
+     s = ZLETEXT(he);
+     selectkeymap("main", 1);
+     pos = metalen(s, cs);
+@@ -1014,9 +1021,9 @@
+ int
+ infernexthistory(char **args)
+ {
+-    Histent he;
++    Histent he = quietgethist(histline);
+ 
+-    if (!(he = infernexthist(quietgethist(histline), args)))
++    if (!he || !(he = infernexthist(he, args)))
+ 	return 1;
+     zle_setline(he);
+     return 0;
+@@ -1200,7 +1207,8 @@
+ 	visrchsense = -visrchsense;
+     }
+     t0 = strlen(visrchstr);
+-    he = quietgethist(histline);
++    if (!(he = quietgethist(histline)))
++	return 1;
+     while ((he = movehistent(he, visrchsense, hist_skip_flags))) {
+ 	if (isset(HISTFINDNODUPS) && he->flags & HIST_DUP)
+ 	    continue;
+@@ -1248,7 +1256,8 @@
+ 	zmult = n;
+ 	return ret;
+     }
+-    he = quietgethist(histline);
++    if (!(he = quietgethist(histline)))
++	return 1;
+     while ((he = movehistent(he, -1, hist_skip_flags))) {
+ 	if (isset(HISTFINDNODUPS) && he->flags & HIST_DUP)
+ 	    continue;
+@@ -1284,7 +1293,8 @@
+ 	zmult = n;
+ 	return ret;
+     }
+-    he = quietgethist(histline);
++    if (!(he = quietgethist(histline)))
++	return 1;
+     while ((he = movehistent(he, 1, hist_skip_flags))) {
+ 	if (isset(HISTFINDNODUPS) && he->flags & HIST_DUP)
+ 	    continue;
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

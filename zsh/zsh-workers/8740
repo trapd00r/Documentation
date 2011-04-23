@@ -1,0 +1,132 @@
+From zsh-workers-return-8740-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Nov 22 23:04:46 1999
+Return-Path: <zsh-workers-return-8740-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29090 invoked from network); 22 Nov 1999 23:04:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 22 Nov 1999 23:04:44 -0000
+Received: (qmail 23477 invoked by alias); 22 Nov 1999 23:04:40 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8740
+Received: (qmail 23470 invoked from network); 22 Nov 1999 23:04:39 -0000
+Subject: Re: 3.1.6-pws-9 details
+In-Reply-To: <3839BE76.8383A69E@supanet.com> from Peter Stephenson at "Nov 22, 1999 10: 6:46 pm"
+To: pws@supanet.com (Peter Stephenson)
+Date: Mon, 22 Nov 1999 23:04:33 +0000 (GMT)
+Cc: zsh-workers@sunsite.auc.dk
+X-Mailer: ELM [version 2.4ME+ PL48 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Message-Id: <E11q2Vd-0001DY-00@crucigera.fysh.org>
+From: Zefram <zefram@fysh.org>
+
+Peter Stephenson wrote:
+>By the way, the main difficulty with generating the AIX .export files
+>automatically is that at the point where they're missed, which is
+>where they're being imported into a dynamic library, you don't know
+>which file they're supposed to come from (e.g. is a symbol to be
+>resolved from zsh itself or from zle.so?)  This makes it hard.
+
+Perhaps I should explain the way I planned to handle this but never
+got round to, which was why I never merged the .export patches into
+the baseline.
+
+First of all, I was going to have cpp conditionals propagate into the .pro
+files, so that there would only be prototypes there for functions that
+are actually being compiled.  I see this has now been done.
+
+makepro.awk makes it very easy to automatically generate a list of all the
+symbols defined by an object file.  It does actually see all the names --
+it has to to do the conditional renaming of module boot/cleanup functions,
+and it parses the declarator enough to generate the right prototype.
+Generating a plain list of these names as a side effect would be trivial.
+(Btw, I have this idea that we could separate the local and external
+declarations into separate files, rather than doing preprocessor trickery
+with the .pro files.  A system to do that would make getting the symbol
+lists out as well much easier.)
+
+So makepro.awk *could* generate simple export lists.  But we can
+go further.  makepro.awk knows which file it is processing, and could
+equally well be told which module it's in.  I had a vision of it adding
+into the external prototypes file lines of the form "#define symbol
+zsh_modulename_symbol" for each symbol.  This would mean:
+
+* No more name clashes with the local libraries (we have several renamed
+  variables, some renamed via macros).
+
+* No possibility of a name clash between unrelated modules -- every
+  imported symbol is effectively tagged with the name of the module it
+  is to be imported from.
+
+* That means greater scope for independently written modules.  (Ask me
+  about my ideas for hierarchical module names sometime.)
+
+The only downside is that it makes using a debugger trickier, but I
+think the solving of namespace problems is well worth it.
+
+And it goes further still.  I had a vague thought that on systems where
+symbols in modules are not available to other modules, such as SunOS,
+we could effectively do symbol tables by hand.  The basic plan is that
+module X contains a massive struct -- a struct type unique to that
+module -- that contains pointers to all the functions in the module.
+You'd have, for example,
+
+	struct symtab_for_module_zle {
+		void (*sym_resetvideo) _((void));
+		void (*sym_zrefresh) _((void));
+		void (*sym_moveto) _((int, int));
+		int (*sym_redisplay) _((char **));
+		...
+	};
+
+in the .mdh file, and
+
+	struct symtab_for_module_zle symtab_for_module_zle = {
+		zsh_zle_resetvideo,
+		zsh_zle_zrefresh,
+		zsh_zle_moveto,
+		zsh_zle_redisplay,
+		...
+	};
+
+in an automatically generated .c file that ultimately got linked into
+the module.  When the module gets loaded, a pointer to its symbol table
+structure gets added to the module metadata structure.  Any module Y
+that needs to use module X's symbols will have an automatically generated
+local variable:
+
+	struct symtab_for_module_zle *symtab_zle;
+
+which during module boot gets initialised by looking up the symbol table
+in the module metadata structures.  Lastly we need modified .pro files,
+so that instead of seeing "#define zrefresh zsh_zle_zrefresh" and a
+prototype it would see "#define zrefresh (*symtab_zle->sym_zrefresh)".
+Thus all calls to functions in the unavailable module would go via the
+explicit symbol table.  This would mean an extra pointer dereference
+on each cross-module function call, so it should only be used where
+really necessary -- don't use this mechanism to call functions in the
+main executable -- but it makes interdependent modules possible on
+systems where at the moment we end up having to compile modules into
+the executable.
+
+More!  The last thing I wanted to do: I wanted to distinguish between
+"symbols that need to be visible to other object files in this module"
+and "symbols that need to be exported to other modules".  I envision a
+pseudo-keyword "mod_export" (deliberately slightly unwieldy), which would
+be #defined to nothing in zsh.h, but would act as a cue for makepro.awk
+to treat it differently.  Only mod_exported symbols would get a place
+in the .export files or the symbol table structure described above.
+On other systems, other modules would simply not get the #define for
+non-mod_exported symbols, thus avoiding polluting their namespace,
+and ensuring that accidental uses of a non-mod_exported symbol would
+be caught.
+
+That's pretty much everything I had planned to do with symbol tables.
+I'm afraid I still don't have time to actually implement any of it,
+so anyone else feel free to go ahead.  Any comments, anyone?
+
+-zefram
+

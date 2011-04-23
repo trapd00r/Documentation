@@ -1,0 +1,286 @@
+From zsh-workers-return-27284-mason-zsh=primenet.com.au@sunsite.dk Tue Sep 22 09:00:54 2009
+Return-Path: <zsh-workers-return-27284-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25389 invoked from network); 22 Sep 2009 09:00:50 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received: from new-brage.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.254.104)
+  by ns1.primenet.com.au with SMTP; 22 Sep 2009 09:00:50 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 46482 invoked from network); 22 Sep 2009 09:00:40 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 22 Sep 2009 09:00:40 -0000
+Received: (qmail 28236 invoked by alias); 22 Sep 2009 09:00:37 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 27284
+Received: (qmail 28222 invoked from network); 22 Sep 2009 09:00:37 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 22 Sep 2009 09:00:37 -0000
+Received: from cluster-d.mailcontrol.com (cluster-d.mailcontrol.com [85.115.60.190])
+	by bifrost.dotsrc.org (Postfix) with ESMTPS id A3E9F801E2BF
+	for <zsh-workers@sunsite.dk>; Tue, 22 Sep 2009 11:00:29 +0200 (CEST)
+Received: from cameurexb01.EUROPE.ROOT.PRI ([193.128.72.68])
+	by rly46d.srv.mailcontrol.com (MailControl) with ESMTP id n8M90P4T000793
+	for <zsh-workers@sunsite.dk>; Tue, 22 Sep 2009 10:00:26 +0100
+Received: from news01 ([10.99.50.25]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.3959);
+	 Tue, 22 Sep 2009 10:00:25 +0100
+Date: Tue, 22 Sep 2009 10:00:19 +0100
+From: Peter Stephenson <pws@csr.com>
+To: zsh-workers@sunsite.dk
+Subject: Re: latest from CVS segfaults when FD ulimit is set too low
+Message-ID: <20090922100019.3c302758@news01>
+In-Reply-To: <20090921214528.7c7b412c@pws-pc>
+References: <87iqfgwplu.fsf@meyering.net>
+	<20090921214528.7c7b412c@pws-pc>
+Organization: CSR
+X-Mailer: Claws Mail 3.5.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 22 Sep 2009 09:00:25.0298 (UTC) FILETIME=[1FB11320:01CA3B63]
+X-Scanned-By: MailControl A-06-00-00 (www.mailcontrol.com) on 10.68.0.156
+X-Virus-Scanned: ClamAV 0.94.2/9821/Tue Sep 22 01:48:15 2009 on bifrost
+X-Virus-Status: Clean
+
+> Index: Src/utils.c
+> ===================================================================
+> RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+> retrieving revision 1.229
+> diff -u -r1.229 utils.c
+> --- Src/utils.c	9 Jul 2009 20:20:53 -0000	1.229
+> +++ Src/utils.c	21 Sep 2009 20:41:49 -0000
+> @@ -1631,7 +1631,8 @@
+>  #else
+>  	int fe = movefd(dup(fd));
+>  #endif
+> -	zclose(fd);
+> +	if (fe != -1)
+> +	    zclose(fd);
+>  	fd = fe;
+>      }
+>      if(fd != -1) {
+
+Here are some more thoughts on movefd().
+
+I don't think it's safe to leave the unmoved fd open, after all, in too
+many places that will leak.  In some places we need the original fd, but in
+those places if the move fails the code will fail catastrophically---for
+example in zle and completion we attempt to move fd 0 temporarily and then
+move it back; if that failed we shouldn't attempt the operation.  I haven't
+done that much surgery, so I've restored the original zclose() here for now.
+
+I've found a few places that could handle a failed fd move better.  I've
+tried to make the error handling match what's in the function already (if
+any: load_dump_file() appears not to have any), but it's tricky to get
+exactly right.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.171
+diff -u -r1.171 exec.c
+--- Src/exec.c	21 Sep 2009 20:49:30 -0000	1.171
++++ Src/exec.c	22 Sep 2009 08:54:47 -0000
+@@ -1958,14 +1958,19 @@
+     if (varid) {
+ 	/* fd will be over 10, don't touch mfds */
+ 	fd1 = movefd(fd2);
+-	fdtable[fd1] = FDT_EXTERNAL;
+-	setiparam(varid, (zlong)fd1);
+-	/*
+-	 * If setting the parameter failed, close the fd else
+-	 * it will leak.
+-	 */
+-	if (errflag)
+-	    zclose(fd1);
++	if (fd1 == -1) {
++	    zerr("cannot moved fd %d: %e", fd2, errno);
++	    return;
++	} else {
++	    fdtable[fd1] = FDT_EXTERNAL;
++	    setiparam(varid, (zlong)fd1);
++	    /*
++	     * If setting the parameter failed, close the fd else
++	     * it will leak.
++	     */
++	    if (errflag)
++		zclose(fd1);
++	}
+     } else if (!mfds[fd1] || unset(MULTIOS)) {
+ 	if(!mfds[fd1]) {		/* starting a new multio */
+ 	    mfds[fd1] = (struct multio *) zhalloc(sizeof(struct multio));
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.81
+diff -u -r1.81 parse.c
+--- Src/parse.c	17 Jul 2009 20:32:34 -0000	1.81
++++ Src/parse.c	22 Sep 2009 08:54:47 -0000
+@@ -3095,6 +3095,8 @@
+ 	return;
+ 
+     fd = movefd(fd);
++    if (fd == -1)
++	return;
+ 
+     if ((addr = (Wordcode) mmap(NULL, mlen, PROT_READ, MAP_SHARED, fd, off)) ==
+ 	((Wordcode) -1)) {
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.230
+diff -u -r1.230 utils.c
+--- Src/utils.c	21 Sep 2009 20:49:30 -0000	1.230
++++ Src/utils.c	22 Sep 2009 08:54:47 -0000
+@@ -1631,8 +1631,13 @@
+ #else
+ 	int fe = movefd(dup(fd));
+ #endif
+-	if (fe != -1)
+-	    zclose(fd);
++	/*
++	 * To close or not to close if fe is -1?
++	 * If it is -1, we haven't moved the fd, so if we close
++	 * it we lose it; but we're probably not going to be able
++	 * to use it in situ anyway.  So probably better to avoid a leak.
++	 */
++	zclose(fd);
+ 	fd = fe;
+     }
+     if(fd != -1) {
+@@ -1647,22 +1652,30 @@
+     return fd;
+ }
+ 
+-/* Move fd x to y.  If x == -1, fd y is closed. */
++/*
++ * Move fd x to y.  If x == -1, fd y is closed.
++ * Return 0 for success, -1 for failure.
++ */
+ 
+ /**/
+-mod_export void
++mod_export int
+ redup(int x, int y)
+ {
++    int ret = 0;
++
+     if(x < 0)
+ 	zclose(y);
+     else if (x != y) {
+ 	while (y >= fdtable_size)
+ 	    fdtable = zrealloc(fdtable, (fdtable_size *= 2)*sizeof(*fdtable));
+-	dup2(x, y);
++	if (dup2(x, y) == -1)
++	    ret = -1;
+ 	if ((fdtable[y] = fdtable[x]) && y > max_zsh_fd)
+ 	    max_zsh_fd = y;
+ 	zclose(x);
+     }
++
++    return ret;
+ }
+ 
+ /* Close the given fd, and clear it from fdtable. */
+Index: Src/Modules/socket.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/socket.c,v
+retrieving revision 1.11
+diff -u -r1.11 socket.c
+--- Src/Modules/socket.c	6 Jul 2007 21:52:40 -0000	1.11
++++ Src/Modules/socket.c	22 Sep 2009 08:54:47 -0000
+@@ -120,13 +120,19 @@
+ 	}
+ 
+ 	if (targetfd) {
+-	    redup(sfd, targetfd);
+-	    sfd = targetfd;
++	    if (redup(sfd, targetfd) == -1)
++		sfd = -1;
++	    else
++		sfd = targetfd;
+ 	}
+ 	else {
+ 	    /* move the fd since no one will want to read from it */
+ 	    sfd = movefd(sfd);
+ 	}
++	if (sfd == -1) {
++	    zerrnam(nam, "cannot duplicate fd %d: %e", sfd, errno);
++	    return 1;
++	}
+ 
+ 	setiparam("REPLY", sfd);
+ 
+Index: Src/Modules/tcp.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/tcp.c,v
+retrieving revision 1.49
+diff -u -r1.49 tcp.c
+--- Src/Modules/tcp.c	6 Nov 2008 01:35:12 -0000	1.49
++++ Src/Modules/tcp.c	22 Sep 2009 08:54:47 -0000
+@@ -446,14 +446,22 @@
+ 	}
+ 
+ 	if (targetfd) {
+-	    redup(sess->fd,targetfd);
+-	    sess->fd = targetfd;
++	    if (redup(sess->fd,targetfd) == -1)
++		sess->fd = -1;
++	    else
++		sess->fd = targetfd;
+ 	}
+ 	else {
+ 	    /* move the fd since no one will want to read from it */
+ 	    sess->fd = movefd(sess->fd);
+ 	}
+ 
++	if (sess->fd == -1) {
++	    zwarnnam(nam, "cannot duplicate fd %d: %e", sess->fd, errno);
++	    tcp_close(sess);
++	    return 1;
++	}
++
+ 	setiparam("REPLY", sess->fd);
+ 
+ 	if (verbose)
+Index: Src/Modules/zpty.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/zpty.c,v
+retrieving revision 1.41
+diff -u -r1.41 zpty.c
+--- Src/Modules/zpty.c	13 Jan 2009 12:09:26 -0000	1.41
++++ Src/Modules/zpty.c	22 Sep 2009 08:54:47 -0000
+@@ -401,6 +401,12 @@
+ 	zexit(lastval, 0);
+     }
+     master = movefd(master);
++    if (master == -1) {
++	zerrnam(nam, "cannot duplicate fd %d: %e", master, errno);
++	scriptname = oscriptname;
++	ineval = oineval;
++	return 1;
++    }
+ 
+     p = (Ptycmd) zalloc(sizeof(*p));
+ 
+@@ -423,6 +429,7 @@
+ 
+     scriptname = oscriptname;
+     ineval = oineval;
++
+     return 0;
+ }
+ 
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

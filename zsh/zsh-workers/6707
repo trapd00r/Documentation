@@ -1,0 +1,115 @@
+From zsh-workers-return-6707-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jun 18 08:55:38 1999
+Return-Path: <zsh-workers-return-6707-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6940 invoked from network); 18 Jun 1999 08:55:36 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Jun 1999 08:55:36 -0000
+Received: (qmail 6151 invoked by alias); 18 Jun 1999 08:55:17 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6707
+Received: (qmail 6144 invoked from network); 18 Jun 1999 08:55:16 -0000
+Date: Fri, 18 Jun 1999 10:55:09 +0200 (MET DST)
+Message-Id: <199906180855.KAA12796@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Thu, 17 Jun 1999 11:23:16 +0200
+	(MET DST)
+Subject: Re: pws-22: killing the ZSH loops problem
+
+
+I wrote:
+
+> Bart Schaefer wrote:
+> 
+> > One possibility is to not permit job control of individual external jobs
+> > run within a shell construct; that is, force ^Z to stop the entire shell
+> > loop and restart it.  As has been mentioned before, this is easy in other
+> > shells because they typically fork off the tails of pipelines whereas zsh
+> > always forks off the heads -- but some of the new list_pipe code that was
+> > added recently may give us the necessary hooks to manage it.  Given that,
+> > we can stop using new pgrps for subjobs of a shell construct, and then
+> > zsh can get the terminal signals directly again.
+> 
+> I think, this is the way to go. I'll have a look at it, but probably not
+> before the weekend.
+
+I was to hasty to agree with this...
+
+Unless I'm missing something obvious, we can't simply execute
+processes in a loop (or other shell construct) in the same pgrp as the 
+shell. Sure, this would give us the SIGINT, but it would also give us
+the SIGSTOP -- suspending the shell.
+
+So the patch below at least makes loops suspendable as a whole, even
+if they are not part of a pipeline (it was strange that we could do it 
+for `foo | while ...' but not for `while ...'). For the ^C'ing of such 
+loops I don't see a good solution any more -- other than this: with the
+patch you can ^Z the loop, fg it and then you can ^C it if the next
+external command has been started, because then the sub-shell created
+when the loop was suspended gets the SIGINT, too, and terminates.
+
+(Btw. `foo | while ...' can be ^C'ed because we have the `foo' to find 
+that out. This means that we could make normal loops be ^C'able by
+forking of a sub-shell for every loop and let the sub-shell do
+nothing. Then ^C would SIGINT the sub-shell and the parent shell would 
+be notified about this -- but this is really ugly isn't it? Or should
+we? But that would be an extra fork on every shell construct...)
+
+And another `btw.': comparison with bash shows that it has the same
+problem ^C'ing such commands in loops and behaves like zsh. But it
+can't even correctly stop such loops.
+
+
+Bye
+ Sven
+
+diff -u oos/exec.c Src/exec.c
+--- oos/exec.c	Fri Jun 18 08:50:07 1999
++++ Src/exec.c	Fri Jun 18 08:50:23 1999
+@@ -919,7 +919,7 @@
+ 	    }
+ 
+ 	    for (; !nowait;) {
+-		if (list_pipe_child) {
++		if (list_pipe_child || pline_level) {
+ 		    jn->stat |= STAT_NOPRINT;
+ 		    makerunning(jn);
+ 		}
+@@ -930,8 +930,8 @@
+ 		    jn->stat & STAT_DONE &&
+ 		    lastval2 & 0200)
+ 		    killpg(mypgrp, lastval2 & ~0200);
+-		if ((list_pipe || last1) && !list_pipe_child &&
+-		    jn->stat & STAT_STOPPED) {
++		if ((list_pipe || last1 || pline_level) &&
++		    !list_pipe_child && jn->stat & STAT_STOPPED) {
+ 		    pid_t pid;
+ 		    int synch[2];
+ 
+@@ -961,7 +961,8 @@
+ 			jobtab[list_pipe_job].stat |= STAT_SUPERJOB;
+ 			jn->stat |= STAT_SUBJOB | STAT_NOPRINT;
+ 			jn->other = pid;
+-			killpg(jobtab[list_pipe_job].gleader, SIGSTOP);
++			if (list_pipe || last1)
++			    killpg(jobtab[list_pipe_job].gleader, SIGSTOP);
+ 			break;
+ 		    }
+ 		    else {
+@@ -988,7 +989,8 @@
+ 		jn->stat |= STAT_NOPRINT;
+ 		killjb(jobtab + pj, lastval & ~0200);
+ 	    }
+-	    if (list_pipe_child || (list_pipe && (jn->stat & STAT_DONE)))
++	    if (list_pipe_child || ((list_pipe || pline_level) &&
++				    (jn->stat & STAT_DONE)))
+ 		deletejob(jn);
+ 	    thisjob = pj;
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

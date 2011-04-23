@@ -1,0 +1,169 @@
+From zsh-workers-return-11171-mason-zsh=primenet.com.au@sunsite.auc.dk Fri May 05 07:25:36 2000
+Return-Path: <zsh-workers-return-11171-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3382 invoked from network); 5 May 2000 07:25:34 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 May 2000 07:25:34 -0000
+Received: (qmail 19049 invoked by alias); 5 May 2000 07:25:26 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11171
+Received: (qmail 19033 invoked from network); 5 May 2000 07:25:26 -0000
+Date: Fri, 5 May 2000 00:25:23 -0700 (PDT)
+From: Wayne Davison <wayne@clari.net>
+To: Zsh Workers <zsh-workers@sunsite.auc.dk>
+Subject: PATCH: History bug with "print -s"
+In-Reply-To: <1000504173903.ZM28133@candle.brasslantern.com>
+Message-ID: <Pine.GSO.4.21.0005050005350.18195-100000@house.clari.net>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+Appended is a patch that should fix the funkiness associated with
+running "print -s" while zle is active.  I've done some very basic
+testing, and it appears to work fine.
+
+However, if "print -s" is supposed to make the line immediately
+available for history browsing (before pressing return), that is not
+happening.  I can check into this next, but I don't have time to do
+that right now.
+
+The following diff is based on an unpatched 3.1.7-pre-2.
+
+..wayne..
+
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/builtin.c
+@@ -2777,7 +2777,7 @@
+ 	int nwords = 0, nlen, iwords;
+ 	char **pargs = args;
+ 
+-	ent = prepnexthistent(++curhist);
++	ent = prepnexthistent();
+ 	while (*pargs++)
+ 	    nwords++;
+ 	if ((ent->nwords = nwords)) {
+Index: Src/hist.c
+@@ -704,6 +704,36 @@
+ {
+ }
+ 
++/* these functions handle adding/removing curline to/from the hist_ring */
++
++static void
++linkcurline(void)
++{
++    if (!hist_ring)
++	hist_ring = curline.up = curline.down = &curline;
++    else {
++	curline.up = hist_ring;
++	curline.down = hist_ring->down;
++	hist_ring->down = hist_ring->down->up = &curline;
++	hist_ring = &curline;
++    }
++    curline.histnum = ++curhist;
++}
++
++static void
++unlinkcurline(void)
++{
++    curline.up->down = curline.down;
++    curline.down->up = curline.up;
++    if (hist_ring == &curline) {
++	if (!histlinect)
++	    hist_ring = NULL;
++	else
++	    hist_ring = curline.up;
++    }
++    curhist--;
++}
++
+ /* initialize the history mechanism */
+ 
+ /**/
+@@ -745,15 +775,7 @@
+     if (interact && isset(SHINSTDIN) && !strin) {
+ 	histactive = HA_ACTIVE;
+ 	attachtty(mypgrp);
+-	if (!hist_ring)
+-	    hist_ring = curline.up = curline.down = &curline;
+-	else {
+-	    curline.up = hist_ring;
+-	    curline.down = hist_ring->down;
+-	    hist_ring->down = hist_ring->down->up = &curline;
+-	    hist_ring = &curline;
+-	}
+-	curline.histnum = ++curhist;
++	linkcurline();
+ 	defev = addhistnum(curhist, -1, HIST_FOREIGN);
+     } else
+ 	histactive = HA_ACTIVE | HA_NOINC;
+@@ -883,9 +905,13 @@
+ 
+ /**/
+ Histent
+-prepnexthistent(int histnum)
++prepnexthistent(void)
+ {
+     Histent he;
++    int curline_in_ring = hist_ring == &curline;
++
++    if (curline_in_ring)
++	unlinkcurline();
+ 
+     if (histlinect < histsiz) {
+ 	he = (Histent)zcalloc(sizeof *he);
+@@ -920,8 +946,10 @@
+ 	}
+ 	freehistdata(hist_ring = he, 0);
+     }
+-    hist_ring->histnum = histnum;
+-    return hist_ring;
++    he->histnum = ++curhist;
++    if (curline_in_ring)
++	linkcurline();
++    return he;
+ }
+ 
+ /* say we're done using the history mechanism */
+@@ -937,17 +965,8 @@
+ 	  "BUG: chline is NULL in hend()");
+     if (histdone & HISTFLAG_SETTY)
+ 	settyinfo(&shttyinfo);
+-    if (!(histactive & HA_NOINC)) {
+-	curline.up->down = curline.down;
+-	curline.down->up = curline.up;
+-	if (hist_ring == &curline) {
+-	    if (!histlinect)
+-		hist_ring = NULL;
+-	    else
+-		hist_ring = curline.up;
+-	}
+-	curhist--;
+-    }
++    if (!(histactive & HA_NOINC))
++	unlinkcurline();
+     if (histactive & (HA_NOSTORE|HA_NOINC)) {
+ 	zfree(chline, hlinesz);
+ 	zfree(chwords, chwordlen*sizeof(short));
+@@ -1023,7 +1042,7 @@
+ 	    freehistdata(he, 0);
+ 	} else {
+ 	    keepflags = 0;
+-	    he = prepnexthistent(++curhist);
++	    he = prepnexthistent();
+ 	}
+ 
+ 	he->text = ztrdup(chline);
+@@ -1777,7 +1796,7 @@
+ 		lasthist.stim = stim;
+ 	    }
+ 
+-	    he = prepnexthistent(++curhist);
++	    he = prepnexthistent();
+ 	    he->text = ztrdup(pt);
+ 	    he->flags = newflags;
+ 	    if ((he->stim = stim) == 0)
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

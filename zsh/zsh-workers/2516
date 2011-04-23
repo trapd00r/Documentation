@@ -1,0 +1,165 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Mon Dec 02 13:16:10 1996
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 19772 invoked from network); 2 Dec 1996 13:16:07 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 2 Dec 1996 13:16:07 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA14840; Mon, 2 Dec 1996 07:58:06 -0500 (EST)
+Resent-Date: Mon, 2 Dec 1996 07:58:06 -0500 (EST)
+From: Zefram <zefram@dcs.warwick.ac.uk>
+Message-Id: <17029.199612021258@bookbind.dcs.warwick.ac.uk>
+Subject: a plan for ZLE extendability
+To: zsh-workers@math.gatech.edu (Z Shell workers mailing list)
+Date: Mon, 2 Dec 1996 12:58:29 +0000 (GMT)
+X-Loop: zefram@dcs.warwick.ac.uk
+X-Stardate: [-31]8512.70
+X-US-Congress: Moronic fuckers
+Content-Type: text
+Resent-Message-ID: <"WNS-71.0.od3.U9jeo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2516
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+There is a need for ZLE to be extendable without having to write a
+binary module.  Any system of extension has to allow
+
+1. execution of arbitrary zsh commands from within ZLE
+
+2. execution of arbitrary ZLE commands from within zsh commands
+
+3. arbitrary modification of the ZLE buffer and minibuffer from within
+   zsh commands
+
+To this end, I have devised the following system.
+
+It will be possible for the user to register a shell function as a
+ZLE command.  (Internally, this can be done using a slightly modified
+addzlefunction().)  This would look like
+
+zle -f new-zle-command shell_function
+
+and the shell_function argument could default to being the same as
+the ZLE command name.  Such a ZLE function could be similarly deleted
+(using deletezlefunction()).  These added ZLE functions can, of course, be
+bound to keys, and executed in all the ways normal ZLE functions can be.
+This meets the first requirement.
+
+The third requirement (modification of buffers) can be met most generally
+by adding a special parameter -- perhaps $ZLE_BUFFER -- that can be
+assigned to.  $ZLE_MINIBUFFER would also be required.  To control
+the cursor position, $ZLE_BUFFER could be split into two parameters,
+representing the parts of the buffer before and after the cursor.
+An alternative technique would be a numeric special parameter containing
+the cursor offset.  Both methods could be used, even intermixed.
+Obviously, these parameters could only be special while ZLE is active.
+
+For the second requirement, execution of ZLE commands from zsh, a
+more complex solution is required, to handle repeat counts and other
+additional arguments.  I envisage a system in which ZLE maintains a
+stack of what (for the want of a better name) I shall call "thingies".
+A thingy is normally a string, but for efficiency we might want to handle
+ZLE function names specially.
+
+(Btw, it's easier to think of the thingy stack as a queue, but with
+thingies being added at the head of the queue rather than the tail.)
+There is a fundamental ZLE operation to pop a thingy off the stack and
+execute it as a ZLE function.  This would be the normal way to execute
+ZLE functions:
+
+zle up-line-or-history vi-first-non-blank
+
+would push the specified thingies onto the stack in reverse order,
+and then execute until they had all been popped off.  An option would
+be required to push a thingy without executing:
+
+zle -p "this is also a thingy!"
+
+Another option to zle would execute the top thingy from the stack:
+
+zle -p pound-insert
+zle -x
+
+Arguments to ZLE functions are passed as thingies on the stack:
+
+zle vi-replace-chars "%"
+
+vi-replace-chars internally reads the next thingy on the stack and
+pops it off, so this command line would execute only one command,
+after which the "%" would no longer be on the stack to be executed.
+User-written ZLE functions could do these things explicitly:
+
+function replace-buffer {
+  ZLE_BUFFER=$zle_stack[1]
+  zle -s
+  ZLE_CURSORPOS=0
+}
+
+(The stack should probably be a read-only special parameter, but arbitrary
+modification *could* be permitted in the interests of permissivity.
+In any case, modification via the zle builtin would be more efficient.)
+
+A few new ZLE functions are required to do input.  For example,
+vi-replace-chars internally calls vigetkey(), which in this scheme would
+become a ZLE function vi-get-key.  This function would read a key, in the
+vi way, and push it onto the stack as a thingy.  To allow functions to
+either read arguments that way or use arguments that were pre-existing
+on the stack, vi-get-key and so on would only actually perform input if
+the stack is currently empty.  Thus a limited version of vi-replace-chars
+could be written thus:
+
+function my-replace-char {
+  zle vi-get-key
+  if [[ -z "$zle_stack[1]" ]]; then
+    zle undefined-key # feep
+  else
+    ZLE_BUFFER2=$zle_stack[1]${ZLE_BUFFER2#?}
+  fi
+  zle -s
+}
+
+Another important input function would be get-key-cmd (getkeycmd()), which
+reads a key sequence and pushes the corresponding function name from the
+current keymap.  The main loop of ZLE would be equivalent to the commands
+
+while (( ! $ZLE_ACCEPTED )); do
+  zle get-key-cmd
+  zle -x
+done
+
+($ZLE_ACCEPTED should be another (modifiable) special parameter.
+The current repeat count and vi buffer selection should be similarly
+available.)  There is a need to be able to perform actual input even
+when the stack is non-empty.  Probably the neatest way to do this is to
+have a special thingy that (when at the top of the stack) will cause
+the input functions to perform input anyway.  However, making this
+thingy distinct from all other possible thingies could be difficult.
+Ignoring that difficulty, I'll spell this thingy as "@":
+
+function my-execute-command {
+  zle -p @
+  zle get-key-cmd
+  zle -x
+  zle -s
+}
+
+Another possible way to handle this would be to have the special thingy
+`hide' any thingies below it, not just for the input functions.  It would
+be pushed by a special option to zle, and popped by another option
+(possibly the same one that executes the top thingy).  The main loop
+would pop any such thingies left on the stack by unruly user-written
+functions, possibly issuing a warning.
+
+The "send string" functionality can be handled in one of two ways.
+The first possibility is to treat it as it is now, as a special case
+in getkeycmd().  The second possibility, that I generally prefer, is to
+make it into a normal ZLE function, taking an argument, and allow keys
+to be mapped to any sequence of thingies.
+
+Comments are welcome.  I have three or four patches planned on which this
+system would depend, so it'll be a little while before I get around to
+implementing it.
+
+-zefram
+

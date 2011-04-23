@@ -1,0 +1,196 @@
+From zsh-workers-request@math.gatech.edu Wed Nov 04 14:17:25 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23673 invoked from network); 4 Nov 1998 14:17:23 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 4 Nov 1998 14:17:23 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id JAA17533;
+	Wed, 4 Nov 1998 09:11:05 -0500 (EST)
+Resent-Date: Wed, 4 Nov 1998 09:11:05 -0500 (EST)
+Date: Wed, 4 Nov 1998 15:09:02 +0100 (MET)
+Message-Id: <199811041409.PAA30361@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@math.gatech.edu
+In-reply-to: Peter Stephenson's message of Wed, 04 Nov 1998 12:06:13 +0100
+Subject: Re: PATCH: completion or'ing and grouping
+Resent-Message-ID: <"yMRTJ3.0.uH4.v16Gs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4534
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+
+Peter Stephenson wrote:
+
+> The next thing I've noticed so far with this
+> patch, before I try the next one, is that when attempting an ambiguous
+> completion at the bottom of the screen the cursor moves up a line,
+> even if there isn't anything to be displayed.  It seems to be pretty
+> much independent of completion options, happening any time there's more
+> than one possibility for completion.
+>
+
+This was caused by the code that prints explanation strings even if no 
+listing is shown. It incorrectly called thraszle() even if no
+explanation strings were printed.
+ 
+> 
+> The next is that with these options:
+> 
+> noalwayslastprompt    off
+> noautolist            on
+> noautomenu            on
+> nolistambiguous       off
+> menucomplete          off
+> 
+> % mkdir tmp
+> % cd tmp
+> % touch foo.{a,b,c}
+> % compctl -D -f
+> % echo foo.<TAB><TAB><TAB><TAB>  ->  foo.xx
+>        ^^^^typed by hand, but it doesn't seem to matter
+> 
+> so I get two spurious xx's with the cursors after them.
+> 
+
+The problem was the short-circuiting in makecomplist(). With it the
+code to insert the unambiguous string in do_ambiguous() could be
+called with ainfo pointing to invalidated heap memory when nothing on
+the line changed (btw. I didn't encounter the problem with the `xx'
+but I'm using various mem-debug options and for me the whole of *ainfo 
+was garbled).
+
+Both things should be fixed by the patch below.
+
+Bye
+ Sven
+
+diff -c os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+*** os/Zle/zle_tricky.c	Wed Nov  4 15:07:25 1998
+--- Src/Zle/zle_tricky.c	Wed Nov  4 15:02:35 1998
+***************
+*** 2930,2935 ****
+--- 2930,2937 ----
+      HEAPALLOC {
+  	pushheap();
+  
++ 	ainfo = fainfo = NULL;
++ 
+  	/* Make sure we have the completion list and compctl. */
+  	if (makecomplist(s, incmd)) {
+  	    /* Error condition: feeeeeeeeeeeeep(). */
+***************
+*** 2945,2950 ****
+--- 2947,2953 ----
+  	    if (nmatches > 1)
+  		/* There are more than one match. */
+  		do_ambiguous();
++ 
+  	    else if (nmatches == 1) {
+  		/* Only one match. */
+  		do_single(amatches->matches[0]);
+***************
+*** 2956,2985 ****
+  	if (!showinglist && validlist && nmatches != 1) {
+  	    Cmgroup g = amatches;
+  	    Cexpl *e;
+! 	    int up = 0;
+  
+  	    if (!nmatches)
+  		feep();
+- 	    trashzle();
+- 
+- 	    clearflag = (isset(USEZLE) && !termflags &&
+- 			 (isset(ALWAYSLASTPROMPT) && zmult == 1)) ||
+- 			(unset(ALWAYSLASTPROMPT) && zmult != 1);
+  
+  	    while (g) {
+  		if ((e = g->expls))
+  		    while (*e) {
+! 			if ((*e)->count)
+  			    up += printfmt((*e)->str, (*e)->count, 1);
+  			e++;
+  		    }
+  		g = g->next;
+  	    }
+! 	    if (clearflag && up + nlnct < lines)
+! 		tcmultout(TCUP, TCMULTUP, up + nlnct);
+! 	    else
+! 		putc('\n', shout);
+! 	    fflush(shout);
+  	}
+        compend:
+  	ll = strlen((char *)line);
+--- 2959,2994 ----
+  	if (!showinglist && validlist && nmatches != 1) {
+  	    Cmgroup g = amatches;
+  	    Cexpl *e;
+! 	    int up = 0, tr = 1;
+  
+  	    if (!nmatches)
+  		feep();
+  
+  	    while (g) {
+  		if ((e = g->expls))
+  		    while (*e) {
+! 			if ((*e)->count) {
+! 			    if (tr) {
+! 				trashzle();
+! 				tr = 0;
+! 			    }
+  			    up += printfmt((*e)->str, (*e)->count, 1);
++ 			}
+  			e++;
+  		    }
+  		g = g->next;
+  	    }
+! 	    if (!tr) {
+! 		clearflag = ((isset(USEZLE) && !termflags &&
+! 			      (isset(ALWAYSLASTPROMPT) && zmult == 1)) ||
+! 			     (unset(ALWAYSLASTPROMPT) && zmult != 1));
+! 
+! 		if (clearflag && up + nlnct < lines)
+! 		    tcmultout(TCUP, TCMULTUP, up + nlnct);
+! 		else
+! 		    putc('\n', shout);
+! 		fflush(shout);
+! 	    }
+  	}
+        compend:
+  	ll = strlen((char *)line);
+***************
+*** 4768,4774 ****
+      /* If we have to insert the first match, call do_single().  This is *
+       * how REC_EXACT takes effect.  We effectively turn the ambiguous   *
+       * completion into an unambiguous one.                              */
+!     if (ainfo->exact == 1 && isset(RECEXACT) &&
+  	(usemenu == 0 || unset(AUTOMENU))) {
+  	do_single(ainfo->exactm);
+  	invalidatelist();
+--- 4777,4783 ----
+      /* If we have to insert the first match, call do_single().  This is *
+       * how REC_EXACT takes effect.  We effectively turn the ambiguous   *
+       * completion into an unambiguous one.                              */
+!     if (ainfo && ainfo->exact == 1 && isset(RECEXACT) &&
+  	(usemenu == 0 || unset(AUTOMENU))) {
+  	do_single(ainfo->exactm);
+  	invalidatelist();
+***************
+*** 4791,4796 ****
+--- 4800,4808 ----
+  	int ics = cs, ocs, pl = 0, l, lp, ls;
+  	char *ps;
+  	Cline lc;
++ 
++ 	if (!ainfo)
++ 	    return;
+  
+  	fixsuffix();
+  
+
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

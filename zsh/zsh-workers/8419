@@ -1,0 +1,139 @@
+From zsh-workers-return-8419-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Oct 25 20:33:31 1999
+Return-Path: <zsh-workers-return-8419-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 729 invoked from network); 25 Oct 1999 20:33:30 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Oct 1999 20:33:30 -0000
+Received: (qmail 23569 invoked by alias); 25 Oct 1999 20:33:25 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8419
+Received: (qmail 23562 invoked from network); 25 Oct 1999 20:33:24 -0000
+Date: Mon, 25 Oct 1999 13:32:33 -0700 (PDT)
+From: Bart Schaefer <schaefer@brasslantern.com>
+Reply-To: Bart Schaefer <schaefer@brasslantern.com>
+To: Oliver Kiddle <opk@u.genie.co.uk>
+cc: zsh-workers@sunsite.auc.dk
+Subject: Re: PATCH: 3.1.6-bart-7: Self-loading auto-functions
+In-Reply-To: <381497ED.EEBF94E9@u.genie.co.uk>
+Message-ID: <Pine.LNX.4.20.9910251200460.14171-100000@aztec.zanshin.com>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+Sender: Bart Schaefer <schaefer@zanshin.com>
+
+On Mon, 25 Oct 1999, Oliver Kiddle wrote:
+
+> Bart Schaefer wrote:
+> 
+> > purposes of making `eval $(functions)' work was equally annoying.  Further,
+> > it might be useful to differentiate an actual autoloaded function from one
+> > that merely calls "autoload -X".
+> 
+> Also, does it differentiate at all between an autoloaded function that
+> was autoloaded with -U at all.
+
+Yes.  The example in my previous message was incomplete; the output for an
+"unaliased" and execution-traced function actually looks like this:
+
+foo() {
+        # undefined
+        # traced
+        builtin autoload -XUt
+}
+
+> The autoload -X seems like it could be interesting from the perspective
+> of using it intentionally in a function so that it does some extra stuff
+> the first time it is executed.
+
+Yes.  One interesting application is to have it fiddle around with the
+positional parameters ("shift" or "set" or assign to argv) before loading
+itself.  Another would be to have it fiddle with $fpath, particularly with
+a local copy of $fpath!
+
+Note that the old definition of the function does continue executing after
+"autoload -X".  So you can have functions that do extra stuff AFTER the
+first time they're executed, too.
+
+> or to force it to reload every time it is run (though I don't think
+> that can be done without infinite recursion or reloading after
+> running).
+
+"Force it to reload every time it is run" is just this:
+
+    foo() {
+	local +h PATH=$PATH
+	path=($fpath $path)
+	. foo "$@"
+    }
+
+(You have to use the scalar PATH so that you can assign to it and mark it
+local at the same time.  Otherwise you end up with an empty path.  More on
+this below.  Note that external commands run from foo get the original
+$PATH in their environment, because locals are not exported!  This may
+change for ksh emulation if someone gets around to it.)
+
+> Actually, it'd be useful to have an option to autoload (-f for force
+> maybe) which does the unfunction first.
+
+Adding options to autoload is messy because "typeset -fu" is supposed to
+be the same as "functions -u" is supposed to be the same as "autoload".
+I chose -X because it's NOT a valid option to "typeset" (and in this case
+I deliberately wanted to require that the command name be "autoload").
+
+Anyway, I considered making "autoload +X" always reload the function, but
+decided against it.  Perhaps a better approach would be an option to
+"unfunction" to implicitly autoload the just-removed function ... but
+as "unfunction" is "unhash -f" (and so is "unset -f"), that's nearly as
+bad.
+
+> Do these changes allow you to now declare local functions (which was
+> what started this all off).
+
+Yes, the changes to the parameter module make "typeset +h functions" work.
+
+> From what I can gather, the +h option saves the value of the
+> parameter, clears it and it is restored when returning.
+
+"local +h" saves the current value and creates a new parameter with the
+same special properties as the original.  Since the original is a view on
+the functions hash table, so is the new parameter.  The new parameter is
+not explicitly cleared; that happens to $path because of the way creating
+a new path parameter is defined, but it's not true in general.
+
+(Probably we should try harder to make +h act consistently across all the
+special paramters.)
+
+"local -h" on the other hand, creates a new parameter that has no special
+properties at all.  So it will have an empty value.
+
+The issue is the "restored when returning" part:  For any local parameter
+(with or without -h/+h), the original special parameter is assigned-to
+from the saved copy; which for $functions triggers the special assign-
+through-to-the-hash-table property of the parameter, so all the function
+definitions are recreated.
+
+> Does this mean that after typeset +h functions, all existing functions
+> are lost until you return?
+
+No.
+
+zagzig<1> zmodload parameter
+zagzig<2> foo() { typeset +h functions; echo $#functions }
+zagzig<3> foo
+63
+zagzig<4> 
+
+> How efficiently would this work - saving and restoring all the functions
+> might not be very efficient.
+
+I wouldn't want to make frequent use of it in its present state.  There's
+probably something that could be done to avoid recreating definitions that
+haven't changed.
+
+A better idea might be to write a localfunctions module.  Now that modules
+can define wrappers to be called around every user-defined function scope,
+it should be possible.  In fact, the only thing the module would need to
+define is the wrapper.
+

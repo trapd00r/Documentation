@@ -1,0 +1,189 @@
+From zsh-workers-return-17239-mason-zsh=primenet.com.au@sunsite.dk Tue May 28 08:32:08 2002
+Return-Path: <zsh-workers-return-17239-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12137 invoked from network); 28 May 2002 08:31:44 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 28 May 2002 08:31:44 -0000
+Received: (qmail 2637 invoked by alias); 28 May 2002 08:31:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17239
+Received: (qmail 2622 invoked from network); 28 May 2002 08:31:30 -0000
+From: Sven Wischnowsky <wischnow@berkom.de>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+Message-ID: <15603.16487.588260.866988@wischnow.berkom.de>
+Date: Tue, 28 May 2002 10:31:35 +0200
+To: zsh-workers@sunsite.dk
+Subject: Menu selection
+X-Mailer: VM 7.03 under 21.5 (patch 5) "beets" XEmacs Lucid
+
+
+Hi
+
+I can't find the message now, but Bart said that searching in menu
+selection would be nice to have. This patch doesn't do that, but...
+
+I had been thinking about that, too, and, if it's going to be
+incremental searching -- which it should -- it's not entirely trivial
+to implement. The patch below (not committed and not to be committed
+in its current form) is not intended to be a replacement for a patch
+that implements searching in menu selection, but I think it's a nice
+little patch (when improved to its final form).
+
+It makes completion be re-tried after every selfinsert-key. This is a
+bit like incremental searchin, only that the whole completion list
+changes to include only the set of possible matches. As always, undo
+can be used to go back to previous lists. For easier testing, the
+patch makes every selfinsert-key show this behaviour unconditionally.
+In a final patch I think there should be a key to toggle between this
+behaviour and the usual one (leaving menu selection, inserting the
+character into the line). And probably a way to set the default
+behaviour (i.e. when menu selection is first entered).
+
+Also, the behaviour of send-break (^G) after one has inserted some
+more characters is arguable. Currently it leaves the additional
+characters on the line. Maybe the line should go back to the state
+when menu selection was entered. Or maybe a undo should remove all
+characters added during menu selection.
+
+And the output in the status line is a bit ugly. I think there should
+be some visual feedback, though.
+
+Anyway, what does everybody think? And do you have any suggestions
+for the things I mentioned or any other ideas?
+
+
+Bye
+  Sven
+
+diff -ur -r ../oz/Src/Zle/complist.c ./Src/Zle/complist.c
+--- ../oz/Src/Zle/complist.c	Sun May 26 19:55:10 2002
++++ ./Src/Zle/complist.c	Mon May 27 22:59:51 2002
+@@ -1711,8 +1711,11 @@
+     Cmgroup amatches, pmatches, lastmatches, lastlmatches;
+     char *origline;
+     int origcs, origll;
++    char *status;
+ };
+ 
++#define MAX_STATUS 128
++
+ static int
+ domenuselect(Hookdef dummy, Chdata dat)
+ {
+@@ -1725,7 +1728,9 @@
+     int space, lbeg = 0, step = 1, wrap, pl = nlnct, broken = 0, first = 1;
+     int nolist = 0;
+     char *s;
++    char status[MAX_STATUS];
+ 
++    status[0] = '\0';
+     queue_signals();
+     if (fdat || (dummy && (!(s = getsparam("MENUSELECT")) ||
+ 			   (dat && dat->num < atoi(s))))) {
+@@ -1822,7 +1827,16 @@
+         if (first && !listshown && isset(LISTBEEP))
+             zbeep();
+         first = 0;
++        if (status[0]) {
++            statusline = status;
++            statusll = strlen(status);
++        } else {
++            statusline = NULL;
++            statusll = 0;
++        }
+         zrefresh();
++        statusline = NULL;
++        statusll = 0;
+         inselect = 1;
+         if (noselect) {
+             broken = 1;
+@@ -1865,7 +1879,9 @@
+ 	} else if (cmd == Th(z_acceptline)) {
+ 	    acc = 1;
+ 	    break;
+-	} else if (cmd == Th(z_acceptandinfernexthistory)) {
++	} else if (cmd == Th(z_acceptandinfernexthistory) ||
++                   cmd == Th(z_selfinsert) ||
++                   cmd == Th(z_selfinsertunmeta)) {
+ 	    Menustack s = (Menustack) zhalloc(sizeof(*s));
+ 
+ 	    s->prev = u;
+@@ -1888,6 +1904,7 @@
+ 	    s->origline = origline;
+ 	    s->origcs = origcs;
+ 	    s->origll = origll;
++            s->status = dupstring(status);
+ 	    menucmp = menuacc = hasoldlist = 0;
+ 	    minfo.cur = NULL;
+ 	    fixsuffix();
+@@ -1897,9 +1914,45 @@
+ 	    invalidate_list();
+ 	    iforcemenu = 1;
+ 	    comprecursive = 1;
++            if (cmd != Th(z_acceptandinfernexthistory)) {
++                int l = strlen(origline);
++
++                cs = 0;
++                foredel(ll);
++                spaceinline(l);
++                strncpy((char *) line, origline, l);
++                cs = origcs;
++
++                if (cmd == Th(z_selfinsert))
++                    selfinsert(zlenoargs);
++                else
++                    selfinsertunmeta(zlenoargs);
++            }
+ 	    menucomplete(zlenoargs);
+ 	    iforcemenu = 0;
+ 
++            if (cmd != Th(z_acceptandinfernexthistory)) {
++                int pl = strlen(compprefix), sl = strlen(compsuffix);
++                int max = (columns < MAX_STATUS ? columns : MAX_STATUS) - 14;
++
++                if (max > 12) {
++                    int h = (max - 2) >> 1;
++
++                    strcpy(status, "interactive: ");
++                    if (pl > h - 3) {
++                        strcat(status, "...");
++                        strcat(status, compprefix + pl - h - 3);
++                    } else
++                        strcat(status, compprefix);
++
++                    strcat(status, "[]");
++                    if (sl > h - 3) {
++                        strncat(status, compsuffix, h - 3);
++                        strcat(status, "...");
++                    } else
++                        strcat(status, compsuffix);
++                }
++            }
+ 	    if (dat->num < 1 || !minfo.cur || !*(minfo.cur)) {
+ 		nolist = 1;
+ 		if (dat->nmesg || nmessages) {
+@@ -1949,6 +2002,7 @@
+ 	    s->origline = origline;
+ 	    s->origcs = origcs;
+ 	    s->origll = origll;
++            s->status = dupstring(status);
+ 	    accept_last();
+ 	    handleundo();
+ 	    comprecursive = 1;
+@@ -2013,6 +2067,7 @@
+ 	    origline = u->origline;
+ 	    origcs = u->origcs;
+ 	    origll = u->origll;
++            strcpy(status, u->status);
+ 
+ 	    u = u->prev;
+ 	    clearlist = 1;
+
+-- 
+Sven Wischnowsky                          wischnow@berkom.de
+

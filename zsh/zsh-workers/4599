@@ -1,0 +1,269 @@
+From zsh-workers-request@math.gatech.edu Wed Nov 11 14:33:36 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7279 invoked from network); 11 Nov 1998 14:33:27 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 11 Nov 1998 14:33:27 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id JAA25920;
+	Wed, 11 Nov 1998 09:14:00 -0500 (EST)
+Resent-Date: Wed, 11 Nov 1998 09:14:00 -0500 (EST)
+Message-Id: <9811111358.AA51361@ibmth.df.unipi.it>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: PATCH: 3.1.5 - sample associative array implementation 
+In-Reply-To: ""Bart Schaefer""'s message of "Tue, 10 Nov 1998 22:44:40 NFT."
+             <981110224440.ZM29013@candle.brasslantern.com> 
+Date: Wed, 11 Nov 1998 14:58:45 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"iJ3Og1.0.xK6.ekPIs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4599
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+"Bart Schaefer" wrote:
+> zsh% typeset -H assoc	# create associative (`H'ashed) array `assoc'
+> 
+> zsh% assoc[bread]=butter
+> zsh% assoc[toast]=jam
+> zsh% echo $assoc
+> butter jam
+> zsh% echo $assoc[bread]
+> butter
+> 
+> However, there are some caveats:  (1) You can't assign to multiple elements
+> of an associative array in a single expression; you must always use the
+> subscript syntax.
+
+This can probably be fixed in a perl-like fasion by adapting
+setarrvalue(), which should be reasonably painless, though I haven't
+looked at the details yet.  One question is whether
+  hash=(key1 val1 key2 val2)
+replaces the array entirely, or just adds/replaces those elements.  In
+the former case it's difficult to think of a way of replacing multiple
+elements at once; maybe another new typeset flag.
+
+> (2) The text inside the [] is not subject to arithmetic
+> evaluation as it is with regular arrays.
+
+This is obviously correct, it's really the same issue as the syntax.
+
+> (3) $assoc, $assoc[@], $assoc[*]
+> all produce strings, not arrays.  (4) because of (3), subscript modifiers
+> such as $assoc[(r)but*] (which should produce "butter") produce the whole
+> string.
+
+The patch below fixes this by judicious use of v->isarr and making more
+places where whole hashes can be returned as if they were arrays.  The
+Value now caches the whole array to prevent this having to be done
+more than once.  (Value's are short-lived, only for the length of one
+substitution.)
+
+> (5) $assoc[bread,3] produces "but" (the first 3 characters of the
+> value) which I think is because getarg() doesn't return soon enough; it
+> really ought to either ignore or gripe about what comes after the comma.
+
+I haven't touched this.
+
+> This patch is not very "ready for prime time" and should be worked over by
+> someone more familiar than I am with the parameter manipulation code.  In
+> particular, I'm afraid there may be some memory leaks in the code to form
+> arrays from the values.
+
+I put in a MUSTUSEHEAP to check for this.  It hasn't printed a message
+so far.  One problem may be in the use of getaparam() from various
+builtins; at present that's not very useful for hashes.  A single
+HEAPALLOC could (presumably) cure the problem.
+
+In fact, it's not absolutely clear to me this is an appropriate use
+for getaparam(), whose return value is used to test whether things can
+be shifted, etc.  It might be better to make a separate gethparam();
+at the moment, that would only be needed in zle_tricky.c if you want
+to use the values of hashes for completion, and later it may be needed
+in typeset etc.
+
+> Further, the syntax for referring to associative
+> array elements should probably not be the same as that for regular arrays
+> (perhaps $assoc[[bread]], for example, which now is a math error) but I
+> didn't want to delve into the parsing.
+
+It's a question of whether it's more convenient having a minimal
+re-write, as now, or whether the fiddling to get the new syntax to
+work is simple enough.  The double brackets are probably the easiest
+to make work, but even so there could be a profusion of new tests.
+
+> You'll note there's a hunk of
+> text.c where I had no idea what to do.
+
+This goes along with what to do about assigning whole hashes; it'll
+probably end up looking the same as for ordinary arrays at this point.
+
+> Lastly, "typeset -H" is messily
+> implemented because I didn't want to renumber gobs of flags in zsh.h.
+
+typeset is messily implemented anyway, because it's extremely hard to
+cover all the cases of what to do when a parameter of a different type
+or local level already exists (do we use it or hide it, do we convert
+the existing value, etc.)
+
+> An
+> associative array is then nothing more than a struct param that refers to
+> a hash table of other struct param.
+> 
+> When an associative array element is referenced, it's hash table slot is
+> created and initially marked PM_UNSET.
+
+This means (post patch):
+
+% typeset -H hash
+% hash[one]=eins
+% print $hash[two]
+
+% print -l "$hash[@]"
+one
+                       <- $hash[two] was created unset
+% 
+
+Is this really correct?  It's not normal for a non-existent shell
+parameter to spring into existence when it's used, unlike Perl.
+
+Another thing:  there's no way of getting the keys of the hash.
+Something like $hash[(k)*] would be OK, except that * and @ don't seem
+to work with flags at the moment.
+
+
+*** Src/params.c.bart	Wed Nov 11 09:38:31 1998
+--- Src/params.c	Wed Nov 11 14:00:15 1998
+***************
+*** 323,328 ****
+--- 323,329 ----
+  char **
+  paramvalarr(HashTable ht)
+  {
++     MUSTUSEHEAP("paramvalarr");
+      numparamvals = 0;
+      if (ht)
+  	scanhashtable(ht, 0, 0, 0, scancountparams, 0);
+***************
+*** 335,340 ****
+--- 336,358 ----
+      return paramvals;
+  }
+  
++ /* Return the full array (no indexing) referred to by a Value. *
++  * The array value is cached for the lifetime of the Value.    */
++ 
++ /**/
++ static char **
++ getvaluearr(Value v)
++ {
++     if (v->arr)
++ 	return v->arr;
++     else if (PM_TYPE(v->pm->flags) == PM_ARRAY)
++ 	return v->arr = v->pm->gets.afn(v->pm);
++     else if (PM_TYPE(v->pm->flags) == PM_HASHED)
++ 	return v->arr = paramvalarr(v->pm->gets.hfn(v->pm));
++     else
++ 	return NULL;
++ }
++ 
+  /* Set up parameter hash table.  This will add predefined  *
+   * parameter entries as well as setting up parameter table *
+   * entries for environment variables we inherit.           */
+***************
+*** 965,971 ****
+  	if (!pm || (pm->flags & PM_UNSET))
+  	    return NULL;
+  	v = (Value) hcalloc(sizeof *v);
+! 	if (PM_TYPE(pm->flags) == PM_ARRAY)
+  	    v->isarr = isvarat ? -1 : 1;
+  	v->pm = pm;
+  	v->inv = 0;
+--- 983,989 ----
+  	if (!pm || (pm->flags & PM_UNSET))
+  	    return NULL;
+  	v = (Value) hcalloc(sizeof *v);
+! 	if (PM_TYPE(pm->flags) & (PM_ARRAY|PM_HASHED))
+  	    v->isarr = isvarat ? -1 : 1;
+  	v->pm = pm;
+  	v->inv = 0;
+***************
+*** 1013,1022 ****
+  
+  	switch(PM_TYPE(v->pm->flags)) {
+  	case PM_HASHED:
+- 	    ss = paramvalarr(v->pm->gets.hfn(v->pm));	/* XXX Leaky? */
+- 	    LASTALLOC_RETURN sepjoin(ss, NULL);
+  	case PM_ARRAY:
+! 	    ss = v->pm->gets.afn(v->pm);
+  	    if (v->isarr)
+  		s = sepjoin(ss, NULL);
+  	    else {
+--- 1031,1038 ----
+  
+  	switch(PM_TYPE(v->pm->flags)) {
+  	case PM_HASHED:
+  	case PM_ARRAY:
+! 	    ss = getvaluearr(v);
+  	    if (v->isarr)
+  		s = sepjoin(ss, NULL);
+  	    else {
+***************
+*** 1070,1076 ****
+  	s[0] = dupstring(buf);
+  	return s;
+      }
+!     s = v->pm->gets.afn(v->pm);
+      if (v->a == 0 && v->b == -1)
+  	return s;
+      if (v->a < 0)
+--- 1086,1092 ----
+  	s[0] = dupstring(buf);
+  	return s;
+      }
+!     s = getvaluearr(v);
+      if (v->a == 0 && v->b == -1)
+  	return s;
+      if (v->a < 0)
+***************
+*** 1305,1316 ****
+  {
+      Value v;
+  
+!     if (!idigit(*s) && (v = getvalue(&s, 0))) {
+! 	if (PM_TYPE(v->pm->flags) == PM_ARRAY)
+! 	    return v->pm->gets.afn(v->pm);
+! 	else if (PM_TYPE(v->pm->flags) == PM_HASHED)
+! 	    return paramvalarr(v->pm->gets.hfn(v->pm));	/* XXX Leaky? */
+!     }
+      return NULL;
+  }
+  
+--- 1321,1328 ----
+  {
+      Value v;
+  
+!     if (!idigit(*s) && (v = getvalue(&s, 0)))
+! 	return getvaluearr(v);
+      return NULL;
+  }
+  
+*** Src/zsh.h.bart	Wed Nov 11 11:36:32 1998
+--- Src/zsh.h	Wed Nov 11 11:36:59 1998
+***************
+*** 538,543 ****
+--- 538,544 ----
+      int inv;		/* should we return the index ?        */
+      int a;		/* first element of array slice, or -1 */
+      int b;		/* last element of array slice, or -1  */
++     char **arr;		/* cache for hash turned into array */
+  };
+  
+  /* structure for foo=bar assignments */
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarotti 2, 56100 Pisa, Italy
+

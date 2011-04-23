@@ -1,0 +1,159 @@
+From zsh-workers-return-7980-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Sep 21 10:37:09 1999
+Return-Path: <zsh-workers-return-7980-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18449 invoked from network); 21 Sep 1999 10:37:07 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Sep 1999 10:37:07 -0000
+Received: (qmail 14199 invoked by alias); 21 Sep 1999 10:36:56 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7980
+Received: (qmail 14192 invoked from network); 21 Sep 1999 10:36:55 -0000
+Message-Id: <9909211001.AA27659@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: completion groups (was: Re: PATCH: _cd) 
+In-Reply-To: "Sven Wischnowsky"'s message of "Mon, 20 Sep 1999 15:35:54 DFT."
+             <199909201335.PAA07280@beta.informatik.hu-berlin.de> 
+Date: Tue, 21 Sep 1999 12:01:22 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Sven Wischnowsky wrote:
+> Anyway, with that every well-behaved completion function (especially
+> those that add different types of matches) would do something like:
+> 
+>   if _requested foo; then
+>     ...
+>   fi
+> 
+> The biggest problem I see with this (and for which I don't have a good 
+> solution yet) is how we choose the tags. If every function that adds
+> different types of matches uses tags roughly describing the type this
+> would obviously result in a plethora of tags and users would have to
+> keep monstrous lists of tags they want to see.
+
+Here's something I thought about last night, which should be fairly
+powerful and flexible.  I'll give you the verbose version first, but it can
+be shortened, as described later.  It doesn't really solve the tags
+problem, but, by making both the priority of the completion (i.e. when it
+gets added to the list, if it does) and the position where the completion
+occurred separate, maybe it makes it a bit less important.
+
+The idea is that _requested gets both a tag, which is a generic type, and a
+locator, which gives the context in the form <_func>[-><state>],
+e.g. _rpm->query or just _dvi for a simple case.  It gets called as
+  _requested <varname> <tag> <_func>[-><state>]
+where the <varname> gives the name of a variable which is a assigned a
+priority string, usually just a number, and it can be configured by
+  _comprequested[<tag>]='<statepattern>=<priority>:...'
+and the priorities so assigned get used by an _arguments-like function,
+_priority.  (In the less verbose version this all gets combined into one
+function, apart from user configuration.)
+
+A concrete example might be more useful.  Let's consider a simplified
+_dvi.  Three tags are involved: `glob', meaning complete the specific glob
+pattern for the file, here `*.dvi', `path', meaning complete a directory
+path, and `anyfile', meaning complete any old file (name chosen to
+differentiate it from cases where completing any old file, rather than some
+globbed version, is likely to be the default, which would be called
+`file', but in principle they can be the same).  So _dvi looks like this:
+
+
+#compdef dvips ...
+
+local globpri pathpri anyfilepri
+# Get the priorities from _comprequested or defaults.
+_requested globpri glob _dvi
+# sets $globpri to the priority for a glob in _dvi
+_requested pathpri path _dvi
+_requested anyfilepri anyfile _dvi
+# etc.
+
+# Now use the assigned priorities.  _priority gets arguments like
+# _arguments, except that the first is a number giving the priority.
+# All priority 1 completions are tried first and simultaneously;
+# if there none, priority 2 is tried, and so on.  priority 0
+# means don't try this at all.  Some convention (e.g. >=100) could give
+# `alternative' priority.
+_priority "${globpri}:.dvi file:_path_files -g '*.dvi'" \
+          "${pathpri}:directory:_path_files -/" \
+          "${anyfilepri}:any file:_path_files" && return
+# Here, we would handle any state stuff, i.e. an action `->state', just
+# like for arguments.  This would make it necessary to loop over the
+# _priority call, since you wouldn't know whether there were matches at the
+# current priority until after the state was handled, and hence some
+# hidden variable, global to the completion system but which could be
+# made local in _main_complete, such as $_comppri is necessary.  I haven't
+# worked through this enough to know when you need to reset it; I suppose
+# it's a bit like _compskip.
+#
+# _arguments handling can easily be combined with priorities, either
+# by using separate functions, or by getting _arguments to produce
+# some '->pstate' and calling _priority with the locator '_dvi->pstate'.
+
+
+Here's how to configure the priorities, maybe via a function comprequest,
+just like compconf.  _comprequested is an assoc array:
+
+
+_comprequested[glob]='*=1'
+# Always try specific glob patterns with first priority.  (Probably
+# 1 needs to be a global default for priorities, but maybe defaults can
+# be done better than that.)
+
+_comprequested[path]='_dvi=2:_tex=0:*=1'
+# The default (last pattern, always matches) is to show paths along with
+# other first priority stuff.  However, we've decided that for _dvi
+# we only want paths if there are no *.dvi files.  For some reason,
+# we've decided that _tex should never complete paths (presumably
+# unless there is already a / in it --- that's a different question).
+
+_comprequested[anyfile]='_tar->tarfile=2:*=0'
+# Here, we've decided that we don't usually want to complete any old file
+# if the other stuff fails.  However, in the fictitous state
+# `->tarfile' for the _tar completer, we've decided we want to complete any
+# file if the first priority failed.
+
+
+It would be simple to extend _priority arguments so that they can contain
+more than one set of priority/description/action sets each.  The use of
+that is you can then go mad and do:
+
+_comprequested[glob]='_dvi=2\:DVI files\:*.DVI\:1:...'
+
+which has the effect of adding a priority 2 entry for *.DVI files ahead of
+the normal entry for *.dvi files, which gets priority 1.  You probably
+wouldn't want to do such jiggery pokery very often, but maybe it's cleaner
+than altering the function.
+
+The less verbose version is just simply to do the _requested stuff in
+_priority (which could then be called _requested instead), so its arguments
+would look something like:
+
+_requested "glob/_dvi:.dvi file:_path_files -g '*.dvi'" \
+           "path/_dvi:directory:_path_files -/" \
+           "anyfile/_dvi:any file:_path_files" \
+	   "3:last resort:_anything_you_like"
+
+(or is `_dvi/glob' more natural?) where the last example shows there's no
+conflict with having fixed priorities as well as key-driven ones.  This
+would be neater; I simply described my first idea first to show how it
+breaks down.
+
+
+There are various problems.  First, it slows down the whole thing even more
+with yet another round of processing, but that's what you get from allowing
+increased complexity.  Second, it's still hard to thing up appropriate tags
+for widely disparate completions, though as long as you know what to put
+in _comprequested I don't think it directly affects the usability.  In
+fact, pretty much the same issue occurs with both tags and locators;
+they're really an arbitrary way of grouping similar things which occur in
+different completions that allow you to choose the configuration reasonably
+naturally.
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

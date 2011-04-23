@@ -1,0 +1,638 @@
+From zsh-workers-request@math.gatech.edu Wed Aug 19 09:09:07 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15300 invoked from network); 19 Aug 1998 09:09:02 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 19 Aug 1998 09:09:02 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id EAA28955;
+	Wed, 19 Aug 1998 04:59:40 -0400 (EDT)
+Resent-Date: Wed, 19 Aug 1998 04:59:40 -0400 (EDT)
+Date: Wed, 19 Aug 1998 11:01:59 +0200 (MET DST)
+Message-Id: <199808190901.LAA12623@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@math.gatech.edu
+Subject: completion groups revisited (with PATCH)
+Resent-Message-ID: <"3uDtg2.0.M47.yFfsr"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4326
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+
+Hi
+
+When implementing the group-flags for compctl (-J and -V) I first
+played with an idea which looked a bit too oversized, but maybe it is
+better than the current solution, the patch below implements it.
+
+The idea is to make -J and -V take an extra argument, the name of the
+group. Different flag lists with the same `-J <name>' or `-V <name>'
+have their matches put in the same group. E.g., with:
+
+compctl -tc -x 's[-]' -J options -k '(display name)' -tc -- '*/X11/*'
+compctl -J files -f -k '(-frob)' -x 's[-]' -J options -k '(132 title)' -tx -- xterm
+
+doing `xterm -<TAB>' will give you:
+
+  132       display   name      title
+  -frob
+
+with the first for matches in the same group and `-frob' in a
+different one.
+
+This also shows why I want a grouping mechanism that is powerful
+enough to make groups span across different compctls (in the example,
+the `options' come from different compctls).
+
+Doing this with named groups is a bit more powerful than the previous
+implementation, it is slightly more complicated internally, but, most
+importantly, much more user-friendly.
+
+The patch also cleans up two other things: if a group gets the same
+explanation string more than once, the string will appear only once in 
+the listing (with the count being the sum of all occurrences, of
+course). The second fix is that compctl.c still had a test for the
+cases where `-l' was not usable (it couldn't be combined with other
+flags). Due to the way `-l' is handled now, we can remove this
+restriction now.
+
+One last comment about the patch: it mainly moved some code from some
+places to other places which diff couldn't recognise, so it looks
+bigger than it is.
+
+Bye
+ Sven
+
+diff -c old/Src/Zle/comp.h Src/Zle/comp.h
+*** old/Src/Zle/comp.h	Fri Jul 24 15:11:17 1998
+--- Src/Zle/comp.h	Wed Aug 19 09:18:57 1998
+***************
+*** 106,111 ****
+--- 106,112 ----
+      char *withd;		/* for -w (with directory                  */
+      char *hpat;			/* for -H (history pattern)                */
+      int hnum;			/* for -H (number of events to search)     */
++     char *gname;		/* for -J and -V (group name)              */
+      Compctl ext;		/* for -x (first of the compctls after -x) */
+      Compcond cond;		/* for -x (condition for this compctl)     */
+      Compctl xor;		/* for + (next of the xor'ed compctls)     */
+***************
+*** 147,157 ****
+  
+  /* objects to complete (mask2) */
+  #define CC_NOSORT	(1<<0)
+! #define CC_NEWGRP	(1<<1)
+! #define CC_XORCONT	(1<<2)
+! #define CC_CCCONT	(1<<3)
+! #define CC_PATCONT	(1<<4)
+! #define CC_DEFCONT	(1<<5)
+  
+  typedef struct cexpl *Cexpl;
+  typedef struct cmgroup *Cmgroup;
+--- 148,157 ----
+  
+  /* objects to complete (mask2) */
+  #define CC_NOSORT	(1<<0)
+! #define CC_XORCONT	(1<<1)
+! #define CC_CCCONT	(1<<2)
+! #define CC_PATCONT	(1<<3)
+! #define CC_DEFCONT	(1<<4)
+  
+  typedef struct cexpl *Cexpl;
+  typedef struct cmgroup *Cmgroup;
+***************
+*** 167,172 ****
+--- 167,173 ----
+  /* This describes a group of matches. */
+  
+  struct cmgroup {
++     char *name;			/* the name of this group */
+      Cmgroup prev;		/* previous on the list */
+      Cmgroup next;		/* next one in list */
+      int flags;			/* see CGF_* below */
+***************
+*** 178,183 ****
+--- 179,188 ----
+      Cexpl *expls;		/* explanation strings */
+      int ccount;			/* number of compctls used */
+      Compctl *ccs;		/* the compctls used */
++     LinkList lexpls;		/* list of explanation string while building */
++     LinkList lmatches;		/* list of matches */
++     LinkList lfmatches;		/* list of matches without fignore */
++     LinkList lallccs;		/* list of used compctls */
+  };
+  
+  
+diff -c old/Src/Zle/comp1.c Src/Zle/comp1.c
+*** old/Src/Zle/comp1.c	Fri Aug  7 08:46:15 1998
+--- Src/Zle/comp1.c	Wed Aug 19 09:38:11 1998
+***************
+*** 120,125 ****
+--- 120,126 ----
+      zsfree(cc->prefix);
+      zsfree(cc->suffix);
+      zsfree(cc->hpat);
++     zsfree(cc->gname);
+      zsfree(cc->subcmd);
+      if (cc->cond)
+  	freecompcond(cc->cond);
+diff -c old/Src/Zle/compctl.c Src/Zle/compctl.c
+*** old/Src/Zle/compctl.c	Fri Aug  7 09:07:53 1998
+--- Src/Zle/compctl.c	Wed Aug 19 10:32:02 1998
+***************
+*** 179,190 ****
+  	    case '/':
+  		cct.mask |= CC_DIRS;
+  		break;
+- 	    case 'J':
+- 		cct.mask2 |= CC_NEWGRP;
+- 		break;
+- 	    case 'V':
+- 		cct.mask2 |= (CC_NEWGRP | CC_NOSORT);
+- 		break;
+  	    case 't':
+  		{
+  		    char *p;
+--- 179,184 ----
+***************
+*** 354,359 ****
+--- 348,380 ----
+  		    *argv = "" - 1;
+  		}
+  		break;
++ 	    case 'J':
++ 		if ((*argv)[1]) {
++ 		    cct.gname = (*argv) + 1;
++ 		    *argv = "" - 1;
++ 		} else if (!argv[1]) {
++ 		    zwarnnam(name, "group name expected after -%c", NULL,
++ 			    **argv);
++ 		    return 1;
++ 		} else {
++ 		    cct.gname = *++argv;
++ 		    *argv = "" - 1;
++ 		}
++ 		break;
++ 	    case 'V':
++ 		if ((*argv)[1]) {
++ 		    cct.gname = (*argv) + 1;
++ 		    *argv = "" - 1;
++ 		} else if (!argv[1]) {
++ 		    zwarnnam(name, "group name expected after -%c", NULL,
++ 			    **argv);
++ 		    return 1;
++ 		} else {
++ 		    cct.gname = *++argv;
++ 		    *argv = "" - 1;
++ 		}
++ 		cct.mask2 |= CC_NOSORT;
++ 		break;
+  	    case 'H':
+  		if ((*argv)[1])
+  		    cct.hnum = atoi((*argv) + 1);
+***************
+*** 754,766 ****
+      /* Copy over the details from the values in cct to those in *ccptr */
+      Compctl cc;
+  
+-     if (cct->subcmd && (cct->keyvar || cct->glob || cct->str ||
+- 			cct->func || cct->explain || cct->ylist ||
+- 			cct->prefix)) {
+- 	zwarnnam(name, "illegal combination of options", NULL, 0);
+- 	return 1;
+-     }
+- 
+      /* Handle assignment of new default or command completion */
+      if (reass && !(cclist & COMP_LIST)) {
+  	/* if not listing */
+--- 775,780 ----
+***************
+*** 800,805 ****
+--- 814,820 ----
+      zsfree(cc->subcmd);
+      zsfree(cc->withd);
+      zsfree(cc->hpat);
++     zsfree(cc->gname);
+      
+      /* and copy over the new stuff, (permanently) allocating
+       * space for strings.
+***************
+*** 816,821 ****
+--- 831,837 ----
+      cc->suffix = ztrdup(cct->suffix);
+      cc->subcmd = ztrdup(cct->subcmd);
+      cc->withd = ztrdup(cct->withd);
++     cc->gname = ztrdup(cct->gname);
+      cc->hpat = ztrdup(cct->hpat);
+      cc->hnum = cct->hnum;
+  
+***************
+*** 975,981 ****
+      }
+  
+      /* loop through flags w/o args that are set, printing them if so */
+!     if ((flags & t) || (flags2 & CC_NEWGRP)) {
+  	printf(" -");
+  	if ((flags & (CC_ALREG | CC_ALGLOB)) == (CC_ALREG | CC_ALGLOB))
+  	    putchar('a'), flags &= ~(CC_ALREG | CC_ALGLOB);
+--- 991,997 ----
+      }
+  
+      /* loop through flags w/o args that are set, printing them if so */
+!     if (flags & t) {
+  	printf(" -");
+  	if ((flags & (CC_ALREG | CC_ALGLOB)) == (CC_ALREG | CC_ALGLOB))
+  	    putchar('a'), flags &= ~(CC_ALREG | CC_ALGLOB);
+***************
+*** 986,995 ****
+  	    flags >>= 1;
+  	    t >>= 1;
+  	}
+- 	if (flags2 & CC_NOSORT)
+- 	    putchar('V');
+- 	else if (flags2 & CC_NEWGRP)
+- 	    putchar('J');
+      }
+      if (flags2 & (CC_XORCONT | CC_CCCONT | CC_PATCONT | CC_DEFCONT)) {
+  	printf(" -t");
+--- 1002,1007 ----
+***************
+*** 1003,1008 ****
+--- 1015,1024 ----
+  	    putchar('x');
+      }
+      /* now flags with arguments */
++     if (flags2 & CC_NOSORT)
++ 	printif(cc->gname, 'V');
++     else
++ 	printif(cc->gname, 'J');
+      printif(cc->keyvar, 'k');
+      printif(cc->func, 'K');
+      printif(cc->explain, (cc->mask & CC_EXPANDEXPL) ? 'Y' : 'X');
+diff -c old/Src/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+*** old/Src/Zle/zle_tricky.c	Fri Aug  7 09:07:53 1998
+--- Src/Zle/zle_tricky.c	Wed Aug 19 10:30:49 1998
+***************
+*** 2057,2063 ****
+      lastambig = 0;
+      amatches = 0;
+      mnum = 0;
+!     begcmgroup(0);
+  
+      ccused = newlinklist();
+      ccstack = newlinklist();
+--- 2057,2063 ----
+      lastambig = 0;
+      amatches = 0;
+      mnum = 0;
+!     begcmgroup("default", 0);
+  
+      ccused = newlinklist();
+      ccstack = newlinklist();
+***************
+*** 2493,2501 ****
+      curcc = cc;
+  
+      mflags = 0;
+!     if (cc->ylist || (cc->mask2 & CC_NEWGRP)) {
+  	endcmgroup(NULL);
+! 	begcmgroup(cc->mask2 & CC_NOSORT);
+      }
+      if (cc->mask & CC_REMOVE)
+  	mflags |= CMF_REMOVE;
+--- 2493,2501 ----
+      curcc = cc;
+  
+      mflags = 0;
+!     if (cc->ylist || cc->gname) {
+  	endcmgroup(NULL);
+! 	begcmgroup((cc->ylist ? NULL : cc->gname), cc->mask2 & CC_NOSORT);
+      }
+      if (cc->mask & CC_REMOVE)
+  	mflags |= CMF_REMOVE;
+***************
+*** 2506,2512 ****
+  	expl->count = 0;
+      }
+      else
+! 	expl = 0;
+      /* compadd is the number of characters we have to ignore at the  *
+       * beginning of the word.                                        */
+      if (compadd) {
+--- 2506,2512 ----
+  	expl->count = 0;
+      }
+      else
+! 	expl = NULL;
+      /* compadd is the number of characters we have to ignore at the  *
+       * beginning of the word.                                        */
+      if (compadd) {
+***************
+*** 3244,3256 ****
+  		untokenize(tt);
+  	    }
+  	    expl->str = tt;
+! 	    addlinknode(expls, expl);
+  	}
+  	if (uv && (yaptr = get_user_var(uv)))
+  	    endcmgroup(yaptr);
+  	else
+  	    endcmgroup(NULL);
+! 	begcmgroup(0);
+      }
+      else if ((tt = cc->explain)) {
+  	if (cc->mask & CC_EXPANDEXPL && !parsestr(tt = dupstring(tt))) {
+--- 3244,3256 ----
+  		untokenize(tt);
+  	    }
+  	    expl->str = tt;
+! 	    addexpl();
+  	}
+  	if (uv && (yaptr = get_user_var(uv)))
+  	    endcmgroup(yaptr);
+  	else
+  	    endcmgroup(NULL);
+! 	begcmgroup("default", 0);
+      }
+      else if ((tt = cc->explain)) {
+  	if (cc->mask & CC_EXPANDEXPL && !parsestr(tt = dupstring(tt))) {
+***************
+*** 3258,3264 ****
+  	    untokenize(tt);
+  	}
+  	expl->str = tt;
+! 	addlinknode(expls, expl);
+      }
+      if (cc->subcmd) {
+  	/* Handle -l sub-completion. */
+--- 3258,3264 ----
+  	    untokenize(tt);
+  	}
+  	expl->str = tt;
+! 	addexpl();
+      }
+      if (cc->subcmd) {
+  	/* Handle -l sub-completion. */
+***************
+*** 3497,3555 ****
+  
+  /**/
+  static void
+! begcmgroup(int nu)
+  {
+!     expls = newlinklist();
+!     matches = newlinklist();
+!     fmatches = newlinklist();
+  
+!     allccs = (nu ? NULL : newlinklist());
+  
+      mgroup = (Cmgroup) halloc(sizeof(struct cmgroup));
+      mgroup->flags = mgroup->lcount = mgroup->mcount = 0;
+!     mgroup->matches = 0;
+!     mgroup->ylist = 0;
+!     mgroup->expls = 0;
+  
+!     mgroup->next = 0;
+  }
+  
+! /* This ends the current group of matches. The argument is the optional *
+!  * array of strings to display. */
+  
+  /**/
+  static void
+  endcmgroup(char **ylist)
+  {
+!     int n, nl;
+  
+!     if (empty(matches)) {
+! 	/* We have no matches, try ignoring fignore. */
+! 	matches = fmatches;
+! 	if (!firstm) {
+! 	    firstm = ffirstm;
+! 	    prelen = fprelen;
+! 	    prerest = fprerest;
+! 	    suflen = fsuflen;
+! 	}
+! 	if (!exactm)
+! 	    exactm = fexactm;
+!     }
+!     mgroup->matches = makearray(matches,
+! 				((mgroup->flags & CGF_NOSORT) ? 0 : 2), &n, &nl);
+!     mgroup->mcount = n;
+!     mgroup->lcount = n - nl;
+!     if (ylist) {
+! 	mgroup->ylist = ylist;
+! 	mgroup->lcount = arrlen(ylist);
+!     }
+!     mgroup->expls = (Cexpl *) makearray(expls, 0, &(mgroup->ecount), NULL);
+  
+!     mgroup->ccount = 0;
+!     mgroup->ccs = NULL;
+  
+!     mgroup->next = amatches;
+!     amatches = mgroup;
+  }
+  
+  /* This duplicates one match. */
+--- 3497,3566 ----
+  
+  /**/
+  static void
+! begcmgroup(char *n, int nu)
+  {
+!     if (n) {
+! 	Cmgroup p = amatches;
+  
+! 	while (p) {
+! 	    if (p->name && ((nu && !p->lallccs) || (!nu && p->lallccs)) &&
+! 		!strcmp(n, p->name)) {
+! 		mgroup = p;
+! 
+! 		expls = p->lexpls;
+! 		matches = p->lmatches;
+! 		fmatches = p->lfmatches;
+! 		allccs = p->lallccs;
+  
++ 		return;
++ 	    }
++ 	    p = p->next;
++ 	}
++     }
+      mgroup = (Cmgroup) halloc(sizeof(struct cmgroup));
++     mgroup->name = n;
+      mgroup->flags = mgroup->lcount = mgroup->mcount = 0;
+!     mgroup->matches = NULL;
+!     mgroup->ylist = NULL;
+!     mgroup->expls = NULL;
+! 
+!     mgroup->lexpls = expls = newlinklist();
+!     mgroup->lmatches = matches = newlinklist();
+!     mgroup->lfmatches = fmatches = newlinklist();
+! 
+!     mgroup->lallccs = allccs = (nu ? NULL : newlinklist());
+  
+!     mgroup->next = amatches;
+!     amatches = mgroup;
+  }
+  
+! /* End the current group for now. */
+  
+  /**/
+  static void
+  endcmgroup(char **ylist)
+  {
+!     mgroup->ylist = ylist;
+! }
+  
+! /* Add an explanation string to the current group, joining duplicates. */
+  
+! /**/
+! static void
+! addexpl(void)
+! {
+!     LinkNode n;
+!     Cexpl e;
+  
+!     for (n = firstnode(expls); n; incnode(n)) {
+! 	e = (Cexpl) getdata(n);
+! 	if (!strcmp(expl->str, e->str)) {
+! 	    e->count += expl->count;
+! 
+! 	    return;
+! 	}
+!     }
+!     addlinknode(expls, expl);
+  }
+  
+  /* This duplicates one match. */
+***************
+*** 3585,3595 ****
+      Cmatch *p, *q;
+      Cexpl *ep, *eq, e, o;
+      Compctl *cp, *cq;
+  
+!     amatches = lmatches = 0;
+      nmatches = smatches = 0;
+  
+      while (g) {
+  	nmatches += g->mcount;
+  	smatches += g->lcount;
+  
+--- 3596,3635 ----
+      Cmatch *p, *q;
+      Cexpl *ep, *eq, e, o;
+      Compctl *cp, *cq;
++     int nn, nl;
+  
+!     amatches = lmatches = NULL;
+      nmatches = smatches = 0;
+  
++     if (!firstm) {
++ 	firstm = ffirstm;
++ 	prelen = fprelen;
++ 	prerest = fprerest;
++ 	suflen = fsuflen;
++     }
++     if (!exactm)
++ 	exactm = fexactm;
++ 
+      while (g) {
++ 	HEAPALLOC {
++ 	    if (empty(g->lmatches))
++ 		/* We have no matches, try ignoring fignore. */
++ 		g->lmatches = g->lfmatches;
++ 
++ 	    g->matches = makearray(g->lmatches,
++ 				   ((g->flags & CGF_NOSORT) ? 0 : 2),
++ 				   &nn, &nl);
++ 	    g->mcount = nn;
++ 	    g->lcount = nn - nl;
++ 	    if (g->ylist) 
++ 		g->lcount = arrlen(g->ylist);
++ 
++ 	    g->expls = (Cexpl *) makearray(g->lexpls, 0, &(g->ecount), NULL);
++ 
++ 	    g->ccount = 0;
++ 	    g->ccs = NULL;
++ 	} LASTALLOC;
++ 
+  	nmatches += g->mcount;
+  	smatches += g->lcount;
+  
+diff -c old/Doc/Zsh/compctl.yo Doc/Zsh/compctl.yo
+*** old/Doc/Zsh/compctl.yo	Fri Aug  7 09:07:53 1998
+--- Doc/Zsh/compctl.yo	Wed Aug 19 10:39:47 1998
+***************
+*** 110,116 ****
+  texinode(Option Flags)(Alternative Completion)(Command Flags)(Programmable Completion)
+  sect(Option Flags)
+  startlist()
+! list([ tt(-fcFBdeaRGovNAIOPZEnbjrzu/JV) ])
+  list([ tt(-k) var(array) ] [ tt(-g) var(globstring) ] \
+    [ tt(-s) var(subststring) ])
+  list([ tt(-K) var(function) ] [ tt(-H) var(num pattern) ])
+--- 110,116 ----
+  texinode(Option Flags)(Alternative Completion)(Command Flags)(Programmable Completion)
+  sect(Option Flags)
+  startlist()
+! list([ tt(-fcFBdeaRGovNAIOPZEnbjrzu/) ])
+  list([ tt(-k) var(array) ] [ tt(-g) var(globstring) ] \
+    [ tt(-s) var(subststring) ])
+  list([ tt(-K) var(function) ] [ tt(-H) var(num pattern) ])
+***************
+*** 118,124 ****
+  list([ tt(-W) var(file-prefix) ])
+  list([ tt(-q) ] [ tt(-X) var(explanation) ] [ tt(-Y) var(explanation) ])
+  list([ tt(-y) var(func-or-var) ] [ tt(-l) var(cmd) ] [ tt(-U) ])
+! list([ tt(-t) var(continue) ])
+  endlist()
+  
+  The remaining var(options) specify the type of command arguments
+--- 118,124 ----
+  list([ tt(-W) var(file-prefix) ])
+  list([ tt(-q) ] [ tt(-X) var(explanation) ] [ tt(-Y) var(explanation) ])
+  list([ tt(-y) var(func-or-var) ] [ tt(-l) var(cmd) ] [ tt(-U) ])
+! list([ tt(-t) var(continue) ] [ tt(-J) var(name) ] [ tt(-V) var(name) ])
+  endlist()
+  
+  The remaining var(options) specify the type of command arguments
+***************
+*** 411,422 ****
+  the tt(-K) or tt(-y) options, allowing them to set variables.
+  )
+  item(tt(-J))(
+! This opens a new group of matches. This means, that from now on, all
+! matches produced will be sorted and listed separately and menucompletion
+! will offer these matches after all previous matches have been shown.
+  )
+  item(tt(-V))(
+! Like tt(-J), but the newly opened group will not be sorted.
+  )
+  item(tt(-t) var(continue))(
+  The var(continue)-string contains a set of characters that specify if 
+--- 411,428 ----
+  the tt(-K) or tt(-y) options, allowing them to set variables.
+  )
+  item(tt(-J))(
+! This gives the name of the group the matches should be placed in. Groups
+! are listed and sorted separately. Also, menucompletion will offer the matches
+! in the groups in the order, in which the groups were defined. If no group
+! name is explicitly given, the matches are stored in a group named var(default).
+! The first time a group name is encountered, a group with that name is created.
+! After that all matches with the same group name are stored in that group.
+  )
+  item(tt(-V))(
+! Like tt(-J), but the matches in the group will not be sorted in the listing and
+! with menucompletion. These unsorted groups are in a different name space than
+! the sorted ones. I.e. it is possible to have a sorted and a unsorted group
+! with the same name and the matches in those groups will not be mixed.
+  )
+  item(tt(-t) var(continue))(
+  The var(continue)-string contains a set of characters that specify if 
+
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

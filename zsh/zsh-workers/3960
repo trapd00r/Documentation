@@ -1,0 +1,334 @@
+From zsh-workers-request@math.gatech.edu Sat May 09 22:54:37 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22824 invoked from network); 9 May 1998 22:54:33 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 9 May 1998 22:54:33 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id SAA01110;
+	Sat, 9 May 1998 18:41:41 -0400 (EDT)
+Resent-Date: Sat, 9 May 1998 18:41:41 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199805092217.RAA02878@hzoli.home>
+Subject: PATCH: misc glob fixes
+To: zsh-workers@math.gatech.edu (Zsh hacking and development)
+Date: Sat, 9 May 1998 17:17:07 -0500 (CDT)
+X-Mailer: ELM [version 2.4ME+ PL31 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"MeElU.0.HH.akDLr"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3960
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+This patch fixes several glob problems.
+
+First, many systems ignore trailing slashes on filenames.  As a result */
+will match all files instead of just directories as required by common
+sense and the POSIX standard.  The solution is to stat/lstat/access
+`filename/.' instead of `filename/'.
+
+The next problem was introduced by patch 3285 which fixes the (-T) and
+(-M) qualifier behavior.  The problem is the these will give no maches
+found on a dangling symlink.
+
+A somewhat related promlem occurs when the T or M qualifier is applied
+together with some other mode qualifier.  For example *(T-/) will not
+match symbolic links to directories.  That's because T will add the @ to
+the ent of the symlink to mark it and the stat will be done on this
+modified name.
+
+The patch combines exists and getfullpatch into
+statfullpath(const char *s, struct stat *st, int l).
+This combines the current glob directory with the filename s.  l is a
+flag to follow symlinks.  If st is NULL access is used instead of stat.
+That's the same as before: exists used access.  access is faster on
+certain filesystems.  Also some filesystems do not allow stat on a file,
+although access returns success on the file.  If I remember correctly
+this is true for AFS when the file is in a directory which is listable
+but not readable.  * will work in such directories, but *(T) will give no
+match, since if the lstat fails, it assumes that the file does not
+exists.  This may be considered a bug, but it is really because AFS does
+not follow the usual Unix semantics, so I do not think it should be
+fixed.
+
+All of these are already in 3.0.5
+
+Zoli
+
+
+*** Src/glob.c.orig	Sat May  9 15:06:05 1998
+--- Src/glob.c	Sat May  9 16:32:32 1998
+*************** static char *pptr;		/* current place in 
+*** 128,142 ****
+  static Comp tail;
+  static int first;		/* are leading dots special? */
+  
+- /**/
+- static int
+- exists(char *s)
+- {
+-     char *us = unmeta(s);
+- 
+-     return access(us, F_OK) == 0 || readlink(us,NULL,0) == 0;
+- }
+- 
+  /* Add a component to pathbuf: This keeps track of how    *
+   * far we are into a file name, since each path component *
+   * must be matched separately.                            */
+--- 128,133 ----
+*************** addpath(char *s)
+*** 153,172 ****
+      pathbuf[pathpos] = '\0';
+  }
+  
+! /* return full path for s, which has path as *
+!  * already added to pathbuf                  */
+  
+  /**/
+! static char *
+! getfullpath(char *s)
+  {
+!     static char buf[PATH_MAX];
+  
+!     DPUTS(strlen(s) + pathpos - pathbufcwd >= PATH_MAX,
+! 	  "BUG: getfullpath(): pathname too long");
+      strcpy(buf, pathbuf + pathbufcwd);
+      strcpy(buf + pathpos - pathbufcwd, s);
+!     return buf;
+  }
+  
+  /* add a match to the list */
+--- 144,174 ----
+      pathbuf[pathpos] = '\0';
+  }
+  
+! /* stat the filename s appended to pathbuf.  l should be true for lstat,    *
+!  * false for stat.  If st is NULL, the file is only chechked for existance. *
+!  * s == "" is treated as s == ".".  This is necessary since on most systems *
+!  * foo/ can be used to reference a non-directory foo.  Returns nonzero if   *
+!  * the file does not exists.                                                */
+  
+  /**/
+! static int
+! statfullpath(const char *s, struct stat *st, int l)
+  {
+!     char buf[PATH_MAX];
+  
+!     DPUTS(strlen(s) + !*s + pathpos - pathbufcwd >= PATH_MAX,
+! 	  "BUG: statfullpath(): pathname too long");
+      strcpy(buf, pathbuf + pathbufcwd);
+      strcpy(buf + pathpos - pathbufcwd, s);
+!     if (!*s) {
+! 	buf[pathpos - pathbufcwd] = '.';
+! 	buf[pathpos - pathbufcwd + 1] = '\0';
+! 	l = 0;
+!     }
+!     unmetafy(buf, NULL);
+!     if (!st)
+! 	return access(buf, F_OK) && (!l || readlink(buf, NULL, 0));
+!     return l ? lstat(buf, st) : stat(buf, st);
+  }
+  
+  /* add a match to the list */
+*************** static void
+*** 176,245 ****
+  insert(char *s, int checked)
+  {
+      struct stat buf, buf2, *bp;
+      int statted = 0;
+  
+      if (gf_listtypes || gf_markdirs) {
+  	/* Add the type marker to the end of the filename */
+  	checked = statted = 1;
+! 	if (gf_follow ? stat(unmetafy(getfullpath(s), NULL), &buf)
+! 	    : lstat(unmetafy(getfullpath(s), NULL), &buf))
+  	    return;
+! 	if (gf_listtypes || S_ISDIR(buf.st_mode)) {
+! 	    char *t;
+  	    int ll = strlen(s);
+  
+! 	    t = (char *)ncalloc(ll + 2);
+! 	    strcpy(t, s);
+! 	    t[ll] = file_type(buf.st_mode);
+! 	    t[ll + 1] = '\0';
+! 	    s = t;
+  	}
+      }
+      if (qualct || qualorct) {
+  	/* Go through the qualifiers, rejecting the file if appropriate */
+  	struct qual *qo, *qn;
+- 	int t = 0;		/* reject file unless t is set */
+  
+! 	if (!statted && lstat(unmetafy(getfullpath(s), NULL), &buf))
+  	    return;
+! 	statted = 0;
+! 	for (qo = quals; qo && !t; qo = qo->or) {
+! 	    t = 1;
+! 	    for (qn = qo; t && qn && qn->func; qn = qn->next) {
+! 		range = qn->range;
+! 		amc = qn->amc;
+! 		units = qn->units;
+! 		if ((qn->sense & 2) && !statted) {
+! 		    /* If (sense & 2), we're following links */
+! 		    if (!S_ISLNK(buf.st_mode) ||
+! 			stat(unmetafy(getfullpath(s), NULL), &buf2))
+! 			memcpy(&buf2, &buf, sizeof(buf));
+! 		    statted = 1;
+! 		}
+! 		bp = (qn->sense & 2) ? &buf2 : &buf;
+! 		/* Reject the file if the function returned zero *
+! 		 * and the sense was positive (sense == 0), or   *
+! 		 * vice versa.                                   */
+! 		if (!(!!((qn->func) (bp, qn->data)) ^
+! 		      (qn->sense & 1))) {
+! 		    t = 0;
+! 		    break;
+! 		}
+  	    }
+  	}
+! 	if (!t)
+! 	    return;
+!     } else if (!checked && !exists(getfullpath(s)))
+  	return;
+  
+!     s = dyncat(pathbuf, s);
+      if (colonmod) {
+  	/* Handle the remainder of the qualifer:  e.g. (:r:s/foo/bar/). */
+! 	char *cm2 = colonmod;
+! 
+! 	modify(&s, &cm2);
+      }
+!     *matchptr++ = s;
+      if (++matchct == matchsz) {
+  	matchbuf = (char **)realloc((char *)matchbuf,
+  				    sizeof(char **) * (matchsz *= 2));
+--- 178,248 ----
+  insert(char *s, int checked)
+  {
+      struct stat buf, buf2, *bp;
++     char *news = s;
+      int statted = 0;
+  
+      if (gf_listtypes || gf_markdirs) {
+  	/* Add the type marker to the end of the filename */
++ 	mode_t mode;
+  	checked = statted = 1;
+! 	if (statfullpath(s, &buf, 1))
+  	    return;
+! 	mode = buf.st_mode;
+! 	if (gf_follow) {
+! 	    if (!S_ISLNK(mode) || statfullpath(s, &buf2, 0))
+! 		memcpy(&buf2, &buf, sizeof(buf));
+! 	    statted = 2;
+! 	    mode = buf2.st_mode;
+! 	}
+! 	if (gf_listtypes || S_ISDIR(mode)) {
+  	    int ll = strlen(s);
+  
+! 	    news = (char *)ncalloc(ll + 2);
+! 	    strcpy(news, s);
+! 	    news[ll] = file_type(mode);
+! 	    news[ll + 1] = '\0';
+  	}
+      }
+      if (qualct || qualorct) {
+  	/* Go through the qualifiers, rejecting the file if appropriate */
+  	struct qual *qo, *qn;
+  
+! 	if (!statted && statfullpath(s, &buf, 1))
+  	    return;
+! 	qo = quals;
+! 	for (qn = qo; qn && qn->func;) {
+! 	    range = qn->range;
+! 	    amc = qn->amc;
+! 	    units = qn->units;
+! 	    if ((qn->sense & 2) && statted != 2) {
+! 		/* If (sense & 2), we're following links */
+! 		if (!S_ISLNK(buf.st_mode) || statfullpath(s, &buf2, 0))
+! 		    memcpy(&buf2, &buf, sizeof(buf));
+! 		statted = 2;
+  	    }
++ 	    bp = (qn->sense & 2) ? &buf2 : &buf;
++ 	    /* Reject the file if the function returned zero *
++ 	     * and the sense was positive (sense&1 == 0), or *
++ 	     * vice versa.                                   */
++ 	    if ((!((qn->func) (bp, qn->data)) ^ qn->sense) & 1) {
++ 		/* Try next alternative, or return if there are no more */
++ 		if (!(qo = qo->or))
++ 		    return;
++ 		qn = qo;
++ 		continue;
++ 	    }
++ 	    qn = qn->next;
+  	}
+!     } else if (!checked && statfullpath(s, NULL, 1))
+  	return;
+  
+!     news = dyncat(pathbuf, news);
+      if (colonmod) {
+  	/* Handle the remainder of the qualifer:  e.g. (:r:s/foo/bar/). */
+! 	s = colonmod;
+! 	modify(&news, &s);
+      }
+!     *matchptr++ = news;
+      if (++matchct == matchsz) {
+  	matchbuf = (char **)realloc((char *)matchbuf,
+  				    sizeof(char **) * (matchsz *= 2));
+*************** scanner(Complist q)
+*** 315,321 ****
+  	/* It's a straight string to the end of the path section. */
+  	int l = strlen(c->str);
+  
+! 	if (l + pathpos - pathbufcwd >= PATH_MAX) {
+  	    int err;
+  
+  	    if (l >= PATH_MAX)
+--- 318,324 ----
+  	/* It's a straight string to the end of the path section. */
+  	int l = strlen(c->str);
+  
+! 	if (l + !l + pathpos - pathbufcwd >= PATH_MAX) {
+  	    int err;
+  
+  	    if (l >= PATH_MAX)
+*************** scanner(Complist q)
+*** 335,341 ****
+  
+  	    if (!errflag && !(q->closure && !strcmp(c->str, "."))) {
+  		addpath(c->str);
+! 		if (!closure || exists(pathbuf))
+  		    scanner((q->closure) ? q : q->next);
+  		pathbuf[pathpos = oppos] = '\0';
+  	    }
+--- 338,344 ----
+  
+  	    if (!errflag && !(q->closure && !strcmp(c->str, "."))) {
+  		addpath(c->str);
+! 		if (!closure || statfullpath("", NULL, 1))
+  		    scanner((q->closure) ? q : q->next);
+  		pathbuf[pathpos = oppos] = '\0';
+  	    }
+*************** scanner(Complist q)
+*** 391,399 ****
+  			/* if matching multiple directories */
+  			struct stat buf;
+  
+! 			if ((q->follow ?
+! 			     stat(unmeta(getfullpath(fn)), &buf) :
+! 			     lstat(unmeta(getfullpath(fn)), &buf)) == -1) {
+  			    if (errno != ENOENT && errno != EINTR &&
+  				errno != ENOTDIR && !errflag) {
+  				zerr("%e: %s", fn, errno);
+--- 394,400 ----
+  			/* if matching multiple directories */
+  			struct stat buf;
+  
+! 			if (statfullpath(fn, &buf, !q->follow)) {
+  			    if (errno != ENOENT && errno != EINTR &&
+  				errno != ENOTDIR && !errflag) {
+  				zerr("%e: %s", fn, errno);
+

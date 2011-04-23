@@ -1,0 +1,216 @@
+From zsh-workers-return-10135-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Mar 14 15:00:24 2000
+Return-Path: <zsh-workers-return-10135-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7101 invoked from network); 14 Mar 2000 15:00:19 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Mar 2000 15:00:19 -0000
+Received: (qmail 14648 invoked by alias); 14 Mar 2000 15:00:01 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10135
+Received: (qmail 14618 invoked from network); 14 Mar 2000 15:00:00 -0000
+Date: Tue, 14 Mar 2000 15:59:59 +0100 (MET)
+Message-Id: <200003141459.PAA09515@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Oliver Kiddle's message of Tue, 14 Mar 2000 13:21:55 +0000
+Subject: PATCH: Re: Saving the zle display stuff
+
+
+Oliver Kiddle wrote:
+
+> ...
+> 
+> An alternative which might be worth thinking about is to allow all lines
+> in _arguments to specify a list of options with which they are mutually
+> exclusive. So in the vase of _zpty, I would use:
+>   '(-r)*::args:_normal'
+> as the last line.
+
+Ah, right. That's nice. And not too hard to implement either, see
+below.
+
+Maybe we should change or enhance that to allow numbers (disallowing
+individual normal arguments) and `*' (disallowing rest-arguments)
+after a certain option. The patch tries to implement that, too.
+
+> ...
+> 
+> I seem to have some fairly long option exclusion lists in some of my
+> completions so it might also be worth thinking if there are any better
+> ways of doing the completion when there are separate forms of the
+> command. I experimented with a few things like using two calls to
+> _arguments without much success.
+
+Yep. Any suggestions? ;-)
+
+Bye
+ Sven
+
+diff -ru ../z.old/Doc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- ../z.old/Doc/Zsh/compsys.yo	Tue Mar 14 11:41:20 2000
++++ Doc/Zsh/compsys.yo	Tue Mar 14 15:58:54 2000
+@@ -2339,15 +2339,6 @@
+ If the option may be given more than once, a star
+ (`tt(*)') has to be added in front of the var(opt-spec).
+ 
+-An var(opt-spec) may also contain a list of other option names with
+-which the option described is mutually exclusive. Such a list is given 
+-in parentheses at the beginning, as in `tt((-two -three)-one:...)'. In 
+-this example, the options `tt(-two)' and `tt(-three)' will not be
+-offered as possible completions if the option `tt(-one)' is on the
+-line. Also, the list may contain a single colon as one of its elements 
+-to specify that the descriptions for normal (non-option-) arguments
+-should not be used if the option described is on the line.
+-
+ Finally, the var(opt-spec) may contain a explanation string. This is
+ given in brackets at the end, as in `tt(-q[query operation])'. The
+ tt(verbose) style is used to decide if these
+@@ -2359,6 +2350,18 @@
+ first argument.
+ )
+ enditem()
++
++Every var(spec) may also contain a list of option names and argument
++numbers with which the option or argument described is mutually
++exclusive. Such a list is given in parentheses at the beginning, as in
++`tt((-two -three 1)-one:...)' or `tt((-foo):...)'. In the first
++example, the options `tt(-two)' and `tt(-three)' and the first
++argument will not be offered as possible completions if the option
++`tt(-one)' is on the line. Also, the list may contain a single star as
++one of its elements to specify that the description for the rest
++arguments should not be used and it may contain a colon to specify
++that the descriptions for all normal (non-option-) arguments should
++not be used.
+ 
+ In each of the cases above, the var(action) says how the possible
+ completions should be generated. In cases where only one of a fixed
+diff -ru ../z.old/Src/Zle/computil.c Src/Zle/computil.c
+--- ../z.old/Src/Zle/computil.c	Tue Mar 14 11:41:14 2000
++++ Src/Zle/computil.c	Tue Mar 14 15:51:20 2000
+@@ -329,11 +329,13 @@
+ struct caarg {
+     Caarg next;
+     char *descr;		/* description */
++    char **xor;			/* if this, then not ... */
+     char *action;		/* what to do for it */
+     int type;			/* CAA_* below */
+     char *end;			/* end-pattern for ::<pat>:... */
+     char *opt;			/* option name if for an option */
+     int num;			/* it's the num'th argument */
++    int active;			/* still allowed on command line */
+ };
+ 
+ #define CAA_NORMAL 1
+@@ -375,6 +377,8 @@
+     for (; a; a = n) {
+ 	n = a->next;
+ 	zsfree(a->descr);
++	if (a->xor)
++	    freearray(a->xor);
+ 	zsfree(a->action);
+ 	zsfree(a->end);
+ 	zsfree(a->opt);
+@@ -457,6 +461,7 @@
+ 
+     ret->next = NULL;
+     ret->descr = ret->action = ret->end = NULL;
++    ret->xor = NULL;
+     ret->num = num;
+     ret->type = type;
+     ret->opt = ztrdup(oname);
+@@ -806,6 +811,7 @@
+ 		    type = CAA_RARGS;
+ 	    }
+ 	    ret->rest = parse_caarg(0, type, -1, NULL, &p);
++	    ret->rest->xor = xor;
+ 	} else {
+ 	    /* It's a normal argument definition. */
+ 
+@@ -835,6 +841,7 @@
+ 		p++;
+ 	    }
+ 	    arg = parse_caarg(0, type, anum - 1, NULL, &p);
++	    arg->xor = xor;
+ 
+ 	    /* Sort the new definition into the existing list. */
+ 
+@@ -970,10 +977,10 @@
+ 	while (a && a->num < n)
+ 	    a = a->next;
+ 
+-	if (a && a->num == n)
++	if (a && a->num == n && a->active)
+ 	    return a;
+ 
+-	return d->rest;
++	return (d->rest && d->rest->active ? d->rest : NULL);
+     }
+     return NULL;
+ }
+@@ -989,7 +996,19 @@
+ 	for (; *xor; xor++) {
+ 	    if (xor[0][0] == ':' && !xor[0][1])
+ 		d->argsactive = 0;
+-	    else if ((opt = ca_get_opt(d, *xor, 1, NULL)))
++	    else if (xor[0][0] == '*' && !xor[0][1]) {
++		if (d->rest)
++		    d->rest->active = 0;
++	    } else if (xor[0][0] >= '0' && xor[0][0] <= '9') {
++		int n = atoi(xor[0]);
++		Caarg a = d->args;
++
++		while (a && a->num < n)
++		    a = a->next;
++
++		if (a && a->num == n)
++		    a->active = 0;
++	    } else if ((opt = ca_get_opt(d, *xor, 1, NULL)))
+ 		opt->active = 0;
+ 	}
+     }
+@@ -1019,7 +1038,7 @@
+     Caarg adef, ddef;
+     Caopt ptr, wasopt;
+     struct castate state;
+-    char *line, *pe;
++    char *line, *pe, **argxor = NULL;
+     int cur, doff;
+     Patprog endpat = NULL;
+ 
+@@ -1041,6 +1060,10 @@
+     for (ptr = d->opts; ptr; ptr = ptr->next)
+ 	ptr->active = 1;
+     d->argsactive = 1;
++    if (d->rest)
++	d->rest->active = 1;
++    for (adef = d->args; adef; adef = adef->next)
++	adef->active = 1;
+ 
+     /* Default values for the state. */
+ 
+@@ -1072,6 +1095,8 @@
+ 	ddef = adef = NULL;
+ 	doff = state.singles = 0;
+ 
++	ca_inactive(d, argxor);
++
+ 	/* We've a definition for an argument, skip to the next. */
+ 
+ 	if (state.def) {
+@@ -1201,6 +1226,9 @@
+ 		break;
+ 	    }
+ 	    zaddlinknode(state.args, ztrdup(line));
++
++	    if (state.def)
++		argxor = state.def->xor;
+ 
+ 	    if (state.def && state.def->type != CAA_NORMAL &&
+ 		state.def->type != CAA_OPT && state.inarg) {
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,289 @@
+From zsh-workers-return-6009-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Apr 12 11:42:26 1999
+Return-Path: <zsh-workers-return-6009-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17440 invoked from network); 12 Apr 1999 11:42:24 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Apr 1999 11:42:24 -0000
+Received: (qmail 28157 invoked by alias); 12 Apr 1999 11:42:14 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6009
+Received: (qmail 28150 invoked from network); 12 Apr 1999 11:42:13 -0000
+Date: Mon, 12 Apr 1999 12:49:44 +0200 (MET DST)
+Message-Id: <199904121049.MAA27509@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: Execution performance
+
+
+I've been playing a bit with `gprof' last week, trying to find out how 
+the new style completion code could be made faster. It seems that
+there are two (main) problems: the heap allocation done by the
+execution code (especially by the functions in loop.c which copy a
+whole list structure) and (for some of the completion functions) the
+matching code, especially when many expressions like `${...#...}' are
+used.
+
+I haven't looked further into the first (more interesting) problem and 
+I don't think I'll find time enough for to do so. Something like
+moving the dup'ing down the call chain into those functions where it
+is really needed and changing some functions to not modify the data
+might be worth thinking about.
+
+But I have had a look at the second problem. The patch below plays
+with this a bit, trying to improve some common cases:
+
+ 1) Using `${...#...' and `${...%...}' on arrays called `getmatch()'
+    for each of the elements. There, the pattern was parsed and the
+    matching done. Since the structs for patterns are reusable, this
+    could be improved by adding a function `getmatcharr()' that parses 
+    the pattern only once and then walks through the whole array.
+ 2) The second change is that what I expect to be the most common
+    patterns are handled specially. Namely, this is done for `<str>',
+    (where `<str>' stands for a string without pattern characters),
+    `*<str>', and `<str>*'.
+    The special casing is done only for `getmatch()', i.e. the
+    `${...#...}' and `${...%...}' parameter substitutions, I'm not
+    really sure that I like that, maybe it should be moved deeper into 
+    the matching code itself. But then, this would require heap
+    allocation again.
+
+All in all, I'm not sure if this patch should go into an official
+version. If somebody decides against it, I could produce a patch that
+does at least the optimisation 1), which is a good thing, I think.
+
+
+Bye
+ Sven
+
+diff -u os/glob.c Src/glob.c
+--- os/glob.c	Mon Apr 12 11:09:24 1999
++++ Src/glob.c	Mon Apr 12 11:33:14 1999
+@@ -2264,6 +2264,138 @@
+     return ret;
+ }
+ 
++/* The following functions are used to do the matching for things like
++ * ${...#...} with simple patterns like `<str>', `*<str>', and `<str>*'.
++ * The first function checks if we have such a pattern. */
++
++static int
++quickpat(char **patp, char **endp, char *ecp)
++{
++    char *p = *patp;
++    int t = 0;
++
++    *endp = NULL;
++    remnulargs(p);
++
++    if (*p == Star)
++	*patp = ++p, t = 1;
++
++    for (; *p; p++)
++	if (*p == Star && !p[1]) {
++	    *ecp = *p;
++	    *endp = p;
++	    *p = '\0';
++	    return (t ? -1 : 2);
++	} else if (itok(*p))
++	    return -1;
++
++    return t;
++}
++
++/* The following functions are like their counterparts without the
++ * `quick' prefix below. */
++
++static int
++quickgetmatch(char **sp, char *pat, int fl)
++{
++    char *ep, ec;
++    int ptyp, ret;
++
++    if ((fl & SUB_SUBSTR) || (ptyp = quickpat(&pat, &ep, &ec)) < 0)
++	return -1;
++
++    ret = iquickgetmatch(sp, pat, ptyp, fl);
++
++    if (ep)
++	*ep = ec;
++
++    return ret;
++}
++
++static int
++quickgetmatcharr(char ***ap, char *pat, int fl)
++{
++    char *ep, ec, **arr = *ap, **pp;
++    int ptyp;
++
++    if ((fl & SUB_SUBSTR) || (ptyp = quickpat(&pat, &ep, &ec)) < 0)
++	return -1;
++
++    *ap = pp = ncalloc(sizeof(char *) * (arrlen(arr) + 1));
++    while ((*pp = *arr++)) {
++	if (iquickgetmatch(pp, pat, ptyp, fl))
++	    pp++;
++    }
++    if (ep)
++	*ep = ec;
++
++    return 1;
++}
++
++/**/
++static int
++iquickgetmatch(char **sp, char *pat, int ptyp, int fl)
++{
++    int plen, b, e, matched = 0, slen, f = (fl & (SUB_END | SUB_LONG));
++    char *s = *sp, *p;
++
++    plen = strlen(pat);
++    slen = strlen(s);
++
++    if (!plen) {
++	if (ptyp && (fl & (SUB_LONG | SUB_ALL)))
++	    b = 0, e = slen;
++	else if (fl & SUB_ALL) {
++	    b = e = 0;
++	    matched = !slen;
++	} else if (f & SUB_END)
++	    b = e = slen;
++	else
++	    b = e = 0;
++	matched = 1;
++    } else if (fl & SUB_ALL) {
++	matched = ((ptyp ? (ptyp == 1 ? strsfx(pat, s) : strpfx(pat, s)) :
++		    !strcmp(pat, s)));
++	b = 0, e = slen;
++    } else if (!ptyp || (ptyp == 2 && !(f & SUB_END)) ||
++	(ptyp == 1 && (f & SUB_END))) {
++	if ((matched = ((f & SUB_END) ? strsfx(pat, s) : strpfx(pat, s)))) {
++	    if (ptyp && (f & SUB_LONG))
++		b = 0, e = slen;
++	    else
++		b = ((f & SUB_END) ? slen - plen : 0), e = b + plen;
++	}
++    } else if ((ptyp == 1 && !f) ||
++	       (ptyp == 2 && f == (SUB_END | SUB_LONG))) {
++	if ((matched = !!(p = (plen == 1 ? strchr(s, *pat) :
++			       strstr(s, pat))))) {
++	    if (f & SUB_END)
++		b = (p - s), e = slen;
++	    else
++		b = 0, e = (p - s) + plen;
++	}
++    } else if (slen >= plen) {
++	if (plen == 1)
++	    matched = !!(p = strrchr(s, *pat));
++	else
++	    for (p = s + slen - plen; !matched && p >= s; p--)
++		matched = !strncmp(p, pat, plen);
++	if (f & SUB_END)
++	    b = (p - s), e = slen;
++	else
++	    b = 0, e = (p - s) + plen;
++    }
++    if (fl & SUB_ALL) {
++	*sp = get_match_ret(s, 0, (matched ? slen : 0), fl, NULL);
++	if (!**sp &&  (((fl & SUB_MATCH) && !matched) ||
++		       ((fl & SUB_REST) && matched)))
++	    return 0;
++    } else if (matched)
++	*sp = get_match_ret(s, b, e, fl, NULL);
++
++    return 1;
++}
++
+ /*
+  * This is called from paramsubst to get the match for ${foo#bar} etc.
+  * fl is a set of the SUB_* flags defined in zsh.h
+@@ -2275,6 +2407,9 @@
+  * n is now ignored unless we are looking for a substring, in
+  * which case the n'th match from the start is counted such that
+  * there is no more than one match from each position.
++ *
++ * The first two functions are wrappers around igetmatch() which does
++ * the real matching. They are used for strings and arrays respectively.
+  */
+ 
+ /**/
+@@ -2282,16 +2417,51 @@
+ getmatch(char **sp, char *pat, int fl, int n, char *replstr)
+ {
+     Comp c;
+-    char *s = *sp, *t, *start, sav;
+-    int i, l = strlen(*sp), matched;
+ 
+     MUSTUSEHEAP("getmatch");	/* presumably covered by prefork() test */
+-    repllist = NULL;
++
++    if (!replstr && quickgetmatch(sp, pat, fl) >= 0)
++	return 1;
++
+     c = parsereg(pat);
+     if (!c) {
+ 	zerr("bad pattern: %s", pat, 0);
+ 	return 1;
+     }
++    return igetmatch(sp, c, fl, n, replstr);
++}
++
++/**/
++void
++getmatcharr(char ***ap, char *pat, int fl, int n, char *replstr)
++{
++    MUSTUSEHEAP("getmatch");	/* presumably covered by prefork() test */
++
++    if (replstr || quickgetmatcharr(ap, pat, fl) < 0) {
++	char **arr = *ap, **pp;
++	Comp c;
++
++	c = parsereg(pat);
++	if (!c) {
++	    zerr("bad pattern: %s", pat, 0);
++	    return;
++	}
++	*ap = pp = ncalloc(sizeof(char *) * (arrlen(arr) + 1));
++	while ((*pp = *arr++))
++	    if (igetmatch(pp, c, fl, n, replstr))
++		pp++;
++    }
++}
++
++/**/
++static int
++igetmatch(char **sp, Comp c, int fl, int n, char *replstr)
++{
++    char *s = *sp, *t, *start, sav;
++    int i, l = strlen(*sp), matched;
++
++    repllist = NULL;
++
+     if (fl & SUB_ALL) {
+ 	i = domatch(s, c, 0);
+ 	*sp = get_match_ret(*sp, 0, i ? l : 0, fl, i ? replstr : 0);
+diff -u os/subst.c Src/subst.c
+--- os/subst.c	Mon Apr 12 11:09:26 1999
++++ Src/subst.c	Mon Apr 12 11:10:33 1999
+@@ -1364,13 +1364,7 @@
+ 	    singsub(&s);
+ 
+ 	    if (!vunset && isarr) {
+-		char **ap = aval;
+-		char **pp = aval = (char **)ncalloc(sizeof(char *) * (arrlen(aval) + 1));
+-
+-		while ((*pp = *ap++)) {
+-		    if (getmatch(pp, s, flags, flnum, replstr))
+-			pp++;
+-		}
++		getmatcharr(&aval, s, flags, flnum, replstr);
+ 		copied = 1;
+ 	    } else {
+ 		if (vunset)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

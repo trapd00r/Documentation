@@ -1,0 +1,310 @@
+From zsh-workers-return-5955-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Mar 26 10:18:10 1999
+Return-Path: <zsh-workers-return-5955-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27394 invoked from network); 26 Mar 1999 10:18:08 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 26 Mar 1999 10:18:08 -0000
+Received: (qmail 8655 invoked by alias); 26 Mar 1999 10:17:50 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5955
+Received: (qmail 8648 invoked from network); 26 Mar 1999 10:17:48 -0000
+Date: Fri, 26 Mar 1999 11:17:46 +0100 (MET)
+Message-Id: <199903261017.LAA26170@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: compstate
+
+
+Ok, here are the things I wanted to add to compstate.
+
+- `list_max'    - this is used like the LISTMAX parameter, with the
+                  same possible values
+- `last_prompt' - used like ALWAYS_LAST_PROMPT
+- `to_end'      - interface to ALWAYS_TO_END, but it allows more
+                  control over when the cursor is moved to the end
+
+That's it. Things I don't plan to put into compstate:
+
+- Control over when to beep (I think this isn't that important, right?).
+- I once suggested this, but don't like it any more: a key that would
+  be used when the widget is called via `compctl -i foo', saying if
+  and where the completion code should continue. In most cases using
+  `compctl -i foo -tn + -tc' or something like that should be enough.
+  And then I think widgets should not care about from where they were
+  called and when one uses a widget via `-i' one should know better
+  where to continue than the one who wrote the widget.
+
+Bye
+ Sven
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Fri Mar 26 09:13:06 1999
++++ Src/Zle/comp.h	Fri Mar 26 09:45:20 1999
+@@ -298,7 +298,10 @@
+ #define CP_PATINSERT  (1 << 23)
+ #define CP_UNAMBIG    (1 << 24)
+ #define CP_UNAMBIGC   (1 << 25)
++#define CP_LISTMAX    (1 << 26)
++#define CP_LASTPROMPT (1 << 27)
++#define CP_TOEND      (1 << 28)
+ 
+-#define CP_NUM              26
++#define CP_NUM              29
+ 
+ #define CP_ALLMASK    ((1 << CP_NUM) - 1)
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Fri Mar 26 09:13:06 1999
++++ Src/Zle/comp1.c	Fri Mar 26 09:44:39 1999
+@@ -103,7 +103,8 @@
+ long compcurrent,
+      compnmatches,
+      compmatcher,
+-     compmatchertot;
++     compmatchertot,
++     complistmax;
+ 
+ /**/
+ char **compwords,
+@@ -124,7 +125,9 @@
+      *compexact,
+      *compexactstr,
+      *comppatmatch,
+-     *comppatinsert;
++     *comppatinsert,
++     *complastprompt,
++     *comptoend;
+ 
+ /**/
+ Param *comppms;
+@@ -439,7 +442,7 @@
+ 	compcontext = compparameter = compredirect = compquote =
+ 	compquoting = comprestore = complist = compinsert =
+ 	compexact = compexactstr = comppatmatch = comppatinsert =
+-	compforcelist = NULL;
++	compforcelist = complastprompt = comptoend = NULL;
+     makecompparamsptr = NULL;
+     comp_setunsetptr = NULL;
+     return 0;
+@@ -487,6 +490,8 @@
+     zsfree(compexactstr);
+     zsfree(comppatmatch);
+     zsfree(comppatinsert);
++    zsfree(complastprompt);
++    zsfree(comptoend);
+     return 0;
+ }
+ 
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Fri Mar 26 09:13:06 1999
++++ Src/Zle/compctl.c	Fri Mar 26 09:47:01 1999
+@@ -2152,7 +2152,11 @@
+     { "pattern_match", PM_SCALAR, VAL(comppatmatch), NULL, NULL },
+     { "pattern_insert", PM_SCALAR, VAL(comppatinsert), NULL, NULL },
+     { "unambiguous", PM_SCALAR | PM_READONLY, NULL, NULL, VAL(get_unambig) },
+-    { "unambiguous_cursor", PM_INTEGER | PM_READONLY, NULL, NULL, VAL(get_unambig_curs) },
++    { "unambiguous_cursor", PM_INTEGER | PM_READONLY, NULL, NULL,
++      VAL(get_unambig_curs) },
++    { "list_max", PM_INTEGER, VAL(complistmax), NULL, NULL },
++    { "last_prompt", PM_SCALAR, VAL(complastprompt), NULL, NULL },
++    { "to_end", PM_SCALAR, VAL(comptoend), NULL, NULL },
+     { NULL, 0, NULL, NULL, NULL }
+ };
+ 
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Fri Mar 26 09:13:07 1999
++++ Src/Zle/zle_tricky.c	Fri Mar 26 10:56:39 1999
+@@ -78,6 +78,12 @@
+ 
+ static int usemenu, useglob, useexact, useline, uselist;
+ 
++/* This is used to decide when the cursor should be moved to the end of    *
++ * the inserted word: 0 - never, 1 - only when a single match is inserted, *
++ * 2 - when a full match is inserted (single or menu), 3 - always.         */
++
++static int movetoend;
++
+ /* != 0 if we are in the middle of a menu completion */
+ 
+ static int menucmp;
+@@ -650,7 +656,13 @@
+ 	int n = 0, br = 1;
+ 
+ 	if (*b == Inbrace) {
+-	    /* If this is a ${...}, ignore the possible (...) flags. */
++	    char *tb = b;
++
++	    /* If this is a ${...}, see if we are before the '}'. */
++	    if (!skipparens(Inbrace, Outbrace, &tb))
++		return NULL;
++
++	    /* Ignore the possible (...) flags. */
+ 	    b++, br++;
+ 	    n = skipparens(Inpar, Outpar, &b);
+ 	}
+@@ -4014,6 +4026,12 @@
+ 	zsfree(compforcelist);
+ 	compforcelist = ztrdup("");
+ 	haspattern = 0;
++	complistmax = getiparam("LISTMAX");
++	zsfree(complastprompt);
++	complastprompt = ztrdup(((isset(ALWAYSLASTPROMPT) && zmult == 1) ||
++				(unset(ALWAYSLASTPROMPT) && zmult != 1)) ?
++				"yes" : "");
++	movetoend = ((cs == we || isset(ALWAYSTOEND)) ? 2 : 1);
+ 
+ 	/* Make sure we have the completion list and compctl. */
+ 	if (makecomplist(s, incmd, lst)) {
+@@ -4069,9 +4087,8 @@
+ 		g = g->next;
+ 	    }
+ 	    if (!tr) {
+-		clearflag = ((isset(USEZLE) && !termflags &&
+-			      (isset(ALWAYSLASTPROMPT) && zmult == 1)) ||
+-			     (unset(ALWAYSLASTPROMPT) && zmult != 1));
++		clearflag = (isset(USEZLE) && !termflags &&
++			      complastprompt && *complastprompt);
+ 
+ 		if (clearflag && up + nlnct < lines)
+ 		    tcmultout(TCUP, TCMULTUP, up + nlnct);
+@@ -4109,6 +4126,8 @@
+ 
+ 	set = -1 & ~(CP_PARAMETER | CP_REDIRECT | CP_QUOTE | CP_QUOTING |
+ 		     CP_EXACTSTR | CP_FORCELIST | (useglob ? 0 : CP_PATMATCH));
++	if (!*complastprompt)
++	    set &= ~CP_LASTPROMPT;
+ 	zsfree(compcontext);
+ 	zsfree(compparameter);
+ 	zsfree(compredirect);
+@@ -4260,6 +4279,11 @@
+ 	    compexact = ztrdup("");
+ 	    set &= ~CP_EXACT;
+ 	}
++	zsfree(comptoend);
++	if (movetoend == 1)
++	    comptoend = ztrdup("single");
++	else
++	    comptoend = ztrdup("match");
+ 	incompfunc = 1;
+ 	startparamscope();
+ 	makecompparamsptr();
+@@ -4298,6 +4322,15 @@
+ 	    useline = usemenu = 0;
+ 	useexact = (compexact && !strcmp(compexact, "accept"));
+ 
++	if (!comptoend || !*comptoend)
++	    movetoend = 0;
++	else if (!strcmp(comptoend, "single"))
++	    movetoend = 1;
++	else if (!strcmp(comptoend, "always"))
++	    movetoend = 3;
++	else
++	    movetoend = 2;
++
+ 	zfree(comppms, CP_NUM * sizeof(Param));
+ 	comppms = ocpms;
+     }
+@@ -6653,6 +6686,10 @@
+ 	fromcomp = ((isset(AUTOMENU) ? FC_LINE : 0) |
+ 		    ((atend && cs != lastend) ? FC_INWORD : 0));
+ 
++	/* Probably move the cursor to then end. */
++	if (movetoend == 3)
++	    cs = lastend;
++
+ 	/* If the LIST_AMBIGUOUS option (meaning roughly `show a list only *
+ 	 * if the completion is completely ambiguous') is set, and some    *
+ 	 * prefix was inserted, return now, bypassing the list-displaying  *
+@@ -6721,8 +6758,7 @@
+ 	/* We are currently not in a menu-completion, *
+ 	 * so set the position variables.             */
+ 	menupos = wb;
+-	/* previously:	menuwe = (cs == we) || isset(ALWAYSTOEND); */
+-	menuwe = isset(ALWAYSTOEND);
++	menuwe = (movetoend >= 2 || (movetoend = 1 && !menucmp));
+ 	menuend = we;
+     }
+     /* If we are already in a menu-completion or if we have done a *
+@@ -6972,7 +7008,6 @@
+     Cexpl *e;
+     int nlines = 0, ncols, nlist = 0, longest = 1, pnl = 0;
+     int of = isset(LISTTYPES), opl = 0;
+-    int listmax = getiparam("LISTMAX");
+ 
+ #ifdef DEBUG
+     /* Sanity check */
+@@ -6987,8 +7022,7 @@
+     showinglist = 0;
+ 
+     clearflag = (isset(USEZLE) && !termflags &&
+-		 (isset(ALWAYSLASTPROMPT) && zmult == 1)) ||
+-	(unset(ALWAYSLASTPROMPT) && zmult != 1);
++		 complastprompt && *complastprompt);
+ 
+     for (g = amatches; g; g = g->next) {
+ 	char **pp = g->ylist;
+@@ -7067,7 +7101,8 @@
+     }
+ 
+     /* Maybe we have to ask if the user wants to see the list. */
+-    if ((listmax && nlist > listmax) || (!listmax && nlines >= lines)) {
++    if ((complistmax && nlist > complistmax) ||
++	(!complistmax && nlines >= lines)) {
+ 	int qup;
+ 	zsetterm();
+ 	qup = printfmt("zsh: do you wish to see all %n possibilities? ", nlist, 1);
+diff -u od/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- od/Zsh/compwid.yo	Thu Mar 25 15:31:08 1999
++++ Doc/Zsh/compwid.yo	Fri Mar 26 11:09:04 1999
+@@ -186,6 +186,18 @@
+ list. Setting tt(force_list) to an non-empty string makes the list be
+ shown even if there is only one match.
+ )
++item(tt(list_max))(
++Initially this is set to the value of the tt(LISTMAX) parameter.
++Completion widgets may set it to any other numeric value and the value 
++stored at when the widget finishes will be used in the same way the
++value of tt(LISTMAX) is used.
++)
++item(tt(last_prompt))(
++If this is set to an non-empty string, the completion code will move
++the cursor back to the previous prompt after the list of completions
++has been displayed. Initially this is set depending on the setting of
++the tt(ALWAYS_LAST_PROMPT) option.
++)
+ item(tt(insert))(
+ This will be unset by the completon code if the contents of the
+ command line will not be changed. It is set to tt(unambiguous),
+@@ -193,6 +205,26 @@
+ inserted or if the first match will be inserted and menu completion
+ will be started (due to tt(MENU_COMPLETE) or tt(AUTO_MENU) being set), 
+ respectively.
++)
++item(tt(to_end))(
++On entry to the completion widget this is set to tt(single) if the
++cursor would be moved to the end of the word only if completion
++generated only one match and that is inserted into the line. Depending 
++on the original position of the cursor and the setting of the option
++tt(ALWAYS_TO_END) this may also be set to the string tt(match) if the
++cursor would be moved to the end if a whole match would be inserted
++(either if there is only one match or if menucompletion is used).
++
++The value of this key after the completion widget exits will be used
++to determin when the cursor will be moved to the end of the string
++inserted into the line. If it is unset or set to the empty string, the 
++cursor will never be moved to the end. If it is set to tt(single), it
++will be moved to the end only if completion generated only one
++match. A value of tt(always) says to move the cursor always to the end 
++(even with normal completion when an unambiguous string is inserted),
++and any other value says to move the cursor to the end when a full
++match is inserted (a single match or the first match when using
++menucompletion).
+ )
+ item(tt(exact))(
+ This is set to tt(accept) if an exact match would be accepted by the
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

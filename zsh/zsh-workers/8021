@@ -1,0 +1,267 @@
+From zsh-workers-return-8021-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Sep 23 09:40:45 1999
+Return-Path: <zsh-workers-return-8021-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 755 invoked from network); 23 Sep 1999 09:40:43 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Sep 1999 09:40:43 -0000
+Received: (qmail 12665 invoked by alias); 23 Sep 1999 09:40:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8021
+Received: (qmail 12658 invoked from network); 23 Sep 1999 09:40:26 -0000
+Date: Thu, 23 Sep 1999 11:40:25 +0200 (MET DST)
+Message-Id: <199909230940.LAA23812@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: cursor in menu-select
+
+
+I still wasn't really satisfied with the way the cursor was placed in
+menu-selection when it was moved from one group to another, so I
+hacked this. It should make it behave more like the line-movement
+functions in emacs, for example. I.e. it keep track of a columns where 
+it would like to be. So if you have display list like `rpm -<TAB>'
+(with description) and you move into the columns (in the second to
+n'th columne), move back into the matches that are listed one per line 
+and then again into the columns, you'll get back to the column where
+you were before (as long as you only use cursor up/down).
+
+Bye
+ Sven
+
+diff -u os/Zle/complist.c Src/Zle/complist.c
+--- os/Zle/complist.c	Thu Sep 23 10:38:46 1999
++++ Src/Zle/complist.c	Thu Sep 23 11:36:14 1999
+@@ -314,7 +314,7 @@
+ 
+ /* Information about the list shown. */
+ 
+-static int noselect, mselect, inselect, mcol, mline, mcols, mlines;
++static int noselect, mselect, inselect, mcol, mline, mcols, mlines, mmlen;
+ static Cmatch **mtab, **mmtabp;
+ static Cmgroup *mgtab, *mgtabp;
+ static struct listcols mcolors;
+@@ -342,16 +342,20 @@
+     m = *mp;
+     if (m->disp && (m->flags & CMF_DISPLINE)) {
+ 	if (mselect >= 0) {
+-	    int mm = (mcols * ml) + (mcols >> 1);
++	    int mm = (mcols * ml), i;
+ 
+-	    mtab[mm] = mp;
+-	    mgtab[mm] = g;
++	    for (i = mcols; i--; ) {
++		mtab[mm + i] = mp;
++		mgtab[mm + i] = g;
++	    }
+ 	}
+ 	if (m->gnum == mselect) {
+-	    int mm = (mcols * ml) + (mcols >> 1);
++	    int mm = (mcols * ml);
+ 	    mline = ml;
++	    mcol = 0;
+ 	    mmtabp = mtab + mm;
+ 	    mgtabp = mgtab + mm;
++	    mmlen = mcols;
+ 	    cc = COL_MA;
+ 	} else
+ 	    cc = COL_NO;
+@@ -371,13 +375,14 @@
+ 		mx += g->widths[i];
+ 	} else
+ 	    mx = mc * g->width;
+-	mx += (width >> 1);
+ 
+ 	if (mselect >= 0) {
+-	    int mm = mcols * ml;
++	    int mm = mcols * ml, i;
+ 
+-	    mtab[mx + mm] = mp;
+-	    mgtab[mx + mm] = g;
++	    for (i = (width ? width : mcols); i--; ) {
++		mtab[mx + mm + i] = mp;
++		mgtab[mx + mm + i] = g;
++	    }
+ 	}
+ 	if (m->gnum == mselect) {
+ 	    int mm = mcols * ml;
+@@ -386,6 +391,7 @@
+ 	    mline = ml;
+ 	    mmtabp = mtab + mx + mm;
+ 	    mgtabp = mgtab + mx + mm;
++	    mmlen = width;
+ 	    zcputs(&mcolors, COL_MA);
+ 	} else if (buf)
+ 	    putcolstr(&mcolors, path, buf->st_mode);
+@@ -482,15 +488,15 @@
+ }
+ 
+ static int
+-adjust_mcol(Cmatch ***tabp, Cmgroup **grp)
++adjust_mcol(int wish, Cmatch ***tabp, Cmgroup **grp)
+ {
+     Cmatch **tab = *tabp;
+     int p, n, c;
+ 
+     tab -= mcol;
+ 
+-    for (p = mcol; p >= 0 && !tab[p]; p--);
+-    for (n = mcol; n < mcols && !tab[n]; n++);
++    for (p = wish; p >= 0 && !tab[p]; p--);
++    for (n = wish; n < mcols && !tab[n]; n++);
+     if (n == mcols)
+ 	n = -1;
+ 
+@@ -532,7 +538,7 @@
+     Cmgroup *pg;
+     Thingy cmd;
+     Menustack u = NULL;
+-    int i = 0, acc = 0;
++    int i = 0, acc = 0, wishcol = 0, setwish = 0;
+     char *s;
+ 
+     if (fdat || (dummy && (!(s = getsparam("SELECTMIN")) ||
+@@ -565,6 +571,17 @@
+ 	p = mmtabp;
+ 	pg = mgtabp;
+ 	minfo.cur = *p;
++	minfo.group = *pg;
++	if (setwish)
++	    wishcol = mcol;
++	else if (mcol > wishcol) {
++	    while (mcol > 0 && p[-1] == minfo.cur)
++		mcol--, p--, pg--;
++	} else if (mcol < wishcol) {
++	    while (mcol < mcols - 1 && p[1] == minfo.cur)
++		mcol++, p++, pg++;
++	}
++	setwish = 0;
+ 
+     getk:
+ 
+@@ -600,6 +617,7 @@
+ 	    }
+ 	    clearlist = listshown = 1;
+ 	    mselect = (*(minfo.cur))->gnum;
++	    setwish = 1;
+ 	    continue;
+ 	} else if (cmd == Th(z_acceptandhold) ||
+ 		 cmd == Th(z_acceptandmenucomplete)) {
+@@ -617,6 +635,7 @@
+ 	    acceptlast();
+ 	    do_menucmp(0);
+ 	    mselect = (*(minfo.cur))->gnum;
++	    setwish = 1;
+ 	    continue;
+ 	} else if (cmd == Th(z_undo)) {
+ 	    int l;
+@@ -645,6 +664,7 @@
+ 	    brend = ztrdup(u->brend);
+ 	    u = u->prev;
+ 	    clearlist = 1;
++	    setwish = 1;
+ 	} else if (cmd == Th(z_redisplay)) {
+ 	    redisplay(zlenoargs);
+ 	    continue;
+@@ -663,7 +683,7 @@
+ 		    mline++;
+ 		    p += mcols;
+ 		}
+-		if (adjust_mcol(&p, NULL))
++		if (adjust_mcol(wishcol, &p, NULL))
+ 		    continue;
+ 	    } while (!*p);
+ 	} else if (cmd == Th(z_uphistory) ||
+@@ -678,10 +698,13 @@
+ 		    mline--;
+ 		    p -= mcols;
+ 		}
+-		if (adjust_mcol(&p, NULL))
++		if (adjust_mcol(wishcol, &p, NULL))
+ 		    continue;
+ 	    } while (!*p);
+ 	} else if (cmd == Th(z_forwardchar) || cmd == Th(z_viforwardchar)) {
++	    int omcol = mcol;
++	    Cmatch *op = *p;
++
+ 	    do {
+ 		if (mcol == mcols - 1) {
+ 		    p -= mcol;
+@@ -690,8 +713,12 @@
+ 		    mcol++;
+ 		    p++;
+ 		}
+-	    } while (!*p);
++	    } while (!*p || (mcol != omcol && *p == op));
++	    wishcol = mcol;
+ 	} else if (cmd == Th(z_backwardchar) || cmd == Th(z_vibackwardchar)) {
++	    int omcol = mcol;
++	    Cmatch *op = *p;
++
+ 	    do {
+ 		if (!mcol) {
+ 		    mcol = mcols - 1;
+@@ -700,7 +727,8 @@
+ 		    mcol--;
+ 		    p--;
+ 		}
+-	    } while (!*p);
++	    } while (!*p || (mcol != omcol && *p == op));
++	    wishcol = mcol;
+ 	} else if (cmd == Th(z_beginningofbufferorhistory) ||
+ 		   cmd == Th(z_beginningofline) ||
+ 		   cmd == Th(z_beginningoflinehist) ||
+@@ -711,6 +739,7 @@
+ 		mcol++;
+ 		p++;
+ 	    }
++	    wishcol = 0;
+ 	} else if (cmd == Th(z_endofbufferorhistory) ||
+ 		   cmd == Th(z_endofline) ||
+ 		   cmd == Th(z_endoflinehist) ||
+@@ -721,6 +750,7 @@
+ 		mcol--;
+ 		p--;
+ 	    }
++	    wishcol = mcols - 1;
+ 	} else if (cmd == Th(z_forwardword) ||
+ 		   cmd == Th(z_emacsforwardword) ||
+ 		   cmd == Th(z_viforwardword) ||
+@@ -738,7 +768,7 @@
+ 		    p += mcols;
+ 		    pg += mcols;
+ 		}
+-		if (adjust_mcol(&p, &pg))
++		if (adjust_mcol(wishcol, &p, &pg))
+ 		    continue;
+ 	    } while (ol != mline && (*pg == g || !*pg));
+ 	} else if (cmd == Th(z_backwardword) ||
+@@ -757,7 +787,7 @@
+ 		    p -= mcols;
+ 		    pg -= mcols;
+ 		}
+-		if (adjust_mcol(&p, &pg))
++		if (adjust_mcol(wishcol, &p, &pg))
+ 		    continue;
+ 	    } while (ol != mline && (*pg == g || !*pg));
+ 	} else if (cmd == Th(z_completeword) ||
+@@ -773,11 +803,13 @@
+ 		   !strcmp(cmd->nam, "menu-expand-or-complete")) {
+ 	    do_menucmp(0);
+ 	    mselect = (*(minfo.cur))->gnum;
++	    setwish = 1;
+ 	    continue;
+ 	} else if (cmd == Th(z_reversemenucomplete) ||
+ 		   !strcmp(cmd->nam, "reverse-menu-complete")) {
+ 	    reversemenucomplete(zlenoargs);
+ 	    mselect = (*(minfo.cur))->gnum;
++	    setwish = 1;
+ 	    continue;
+ 	} else {
+ 	    ungetkeycmd();
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

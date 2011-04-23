@@ -1,0 +1,202 @@
+From zsh-workers-return-11467-mason-zsh=primenet.com.au@sunsite.auc.dk Fri May 19 12:03:52 2000
+Return-Path: <zsh-workers-return-11467-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11372 invoked from network); 19 May 2000 12:03:51 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 May 2000 12:03:51 -0000
+Received: (qmail 4295 invoked by alias); 19 May 2000 12:02:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11467
+Received: (qmail 4288 invoked from network); 19 May 2000 12:02:32 -0000
+Date: Fri, 19 May 2000 13:02:01 +0100
+From: Peter Stephenson <pws@cambridgesiliconradio.com>
+Subject: PATCH: output base for math evals
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Message-id: <0FUT00JIN2RCPB@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+Here's a feature I've wanted for ages, but it never occurred to me before
+how to do it.  It's reasonably self contained and doesn't affect any
+currently valid syntax, but even so if anyone objects either on the grounds
+that it should go in later or that it's fundamentally silly I'll leave it
+out.
+
+The (formerly invalid) syntax [#<base>], e.g. [#16], specifies an output
+base in a math expression.  It has no precedence and hence is ignored for
+syntactic purposes.  For example,
+
+% print $(( [#16] 255 + 14 ))
+16#10D
+
+See the manual entry for further details --- note that it doesn't affect
+the way existing numeric parameters are handled, only scalars and
+parameters implicitly typed by the expression itself.
+
+Note that it also has the effect of converting floating point numbers
+(again, explicitly typed parameters are not affected and the conversion is
+only performed on output):
+
+% print $(( [#16] 2.5 + 24.5 ))
+16#1B
+
+This seemed logical, but it's the one point where I had doubts on the
+natural way of doing things.
+
+(This is inspired by the fact that my boss insists on defining numbers in
+decimal in header files but the debugger insists on outputting everything
+in hex.)
+
+Index: Doc/Zsh/arith.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/arith.yo,v
+retrieving revision 1.2
+diff -u -r1.2 arith.yo
+--- Doc/Zsh/arith.yo	2000/05/14 22:08:41	1.2
++++ Doc/Zsh/arith.yo	2000/05/19 11:50:30
+@@ -43,6 +43,28 @@
+ base 10 is used.  For backwards compatibility the form
+ `tt([)var(base)tt(])var(n)' is also accepted.
+ 
++It is also possible to specify a base to be used for output in the form
++`tt([#)var(base)tt(])', for example `tt([#16])'.  This is used when
++outputting arithmetical substitutions or when assigning to scalar
++parameters, but an explicitly defined integer or floating point parameter
++will not be affected.  If an integer variable is implicitly defined by an
++arithmetic expression, any base specified in this way will be set as the
++variable's output arithmetic base as if the option `tt(-i) var(base)' to
++the tt(typeset) builtin had been used.  The expression has no precedence
++and if it occurs more than once in a mathematical expression, the last
++encountered is used.  For clarity it is recommended that it appear at the
++beginning of an expression.  As an example:
++
++example(typeset -i 16 y
++print $(( [#8] x = 32, y = 32 ))
++print $x $y)
++
++outputs first `tt(8#40)', the rightmost value in the given output base, and
++then `tt(8#40 16#20)', because tt(y) has been explicitly declared to
++have output base 16, while tt(x) (assuming it does not already exist) is
++implicitly typed by the arithmetic evaluation, where it acquires the output
++base 8.
++
+ Floating point constants are recognized by the presence of a decimal point
+ or an exponent.  The decimal point may be the first character of the
+ constant, but the exponent character tt(e) or tt(E) may not, as it will be
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.4
+diff -u -r1.4 math.c
+--- Src/math.c	2000/05/15 18:48:21	1.4
++++ Src/math.c	2000/05/19 11:50:30
+@@ -186,6 +186,8 @@
+ /* 50 */  LR|OP_OPF, RL|OP_E2, LR|OP_OPF
+ };
+ 
++/**/
++int outputradix;
+ 
+ /**/
+ static int
+@@ -340,12 +342,22 @@
+ 	    return EOI;
+ 	case '[':
+ 	    {
+-		int base = zstrtol(ptr, &ptr, 10);
++		int base, setradix = 0;
++		if (*ptr == '#') {
++		    ptr++;
++		    setradix = 1;
++		}
++		base = zstrtol(ptr, &ptr, 10);
+ 
+ 		if (*ptr == ']')
+ 		    ptr++;
+-		yyval.u.l = zstrtol(ptr, &ptr, lastbase = base);
+-		return NUM;
++		if (setradix)
++		    outputradix = base;
++		else {
++		    yyval.u.l = zstrtol(ptr, &ptr, lastbase = base);
++		    return NUM;
++		}
++		break;
+ 	    }
+ 	case ' ':
+ 	case '\t':
+@@ -934,6 +946,7 @@
+     char *junk;
+     mnumber x;
+     int xmtok = mtok;
++    outputradix = 0;
+ 
+     if (!*s) {
+ 	x.type = MN_INTEGER;
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.9
+diff -u -r1.9 params.c
+--- Src/params.c	2000/05/10 23:54:26	1.9
++++ Src/params.c	2000/05/19 11:50:31
+@@ -1577,9 +1577,11 @@
+     switch (PM_TYPE(v->pm->flags)) {
+     case PM_SCALAR:
+     case PM_ARRAY:
+-	if (val.type & MN_INTEGER)
+-	    convbase(p = buf, val.u.l, 0);
+-	else
++	if ((val.type & MN_INTEGER) || outputradix) {
++	    if (!(val.type & MN_INTEGER))
++		val.u.l = (zlong) val.u.d;
++	    convbase(p = buf, val.u.l, outputradix);
++	} else
+ 	    p = convfloat(val.u.d, 0, 0, NULL);
+ 	setstrvalue(v, ztrdup(p));
+ 	break;
+@@ -1909,9 +1911,10 @@
+ 	pm = createparam(t, (val.type & MN_INTEGER) ? PM_INTEGER
+ 			 : PM_FFLOAT);
+ 	DPUTS(!pm, "BUG: parameter not created");
+-	if (val.type & MN_INTEGER)
++	if (val.type & MN_INTEGER) {
++	    pm->ct = outputradix;
+ 	    pm->u.val = val.u.l;
+-	else
++	} else
+ 	    pm->u.dval = val.u.d;
+ 	return pm;
+     }
+Index: Src/subst.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/subst.c,v
+retrieving revision 1.5
+diff -u -r1.5 subst.c
+--- Src/subst.c	2000/05/15 14:59:01	1.5
++++ Src/subst.c	2000/05/19 11:50:31
+@@ -1964,10 +1964,13 @@
+ 
+     singsub(&a);
+     v = matheval(a);
+-    if (v.type & MN_FLOAT)
++    if ((v.type & MN_FLOAT) && !outputradix)
+ 	b = convfloat(v.u.d, 0, 0, NULL);
+-    else
+-	convbase(buf, v.u.l, 0);
++    else {
++	if (v.type & MN_FLOAT)
++	    v.u.l = (zlong) v.u.d;
++	convbase(buf, v.u.l, outputradix);
++    }
+     t = *bptr = (char *) hcalloc(strlen(*bptr) + strlen(b) + 
+ 				 strlen(rest) + 1);
+     t--;
+
+-- 
+Peter Stephenson <pws@cambridgesiliconradio.com>
+Cambridge Silicon Radio, Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+

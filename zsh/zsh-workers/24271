@@ -1,0 +1,209 @@
+From zsh-workers-return-24271-mason-zsh=primenet.com.au@sunsite.dk Sun Dec 16 22:18:45 2007
+Return-Path: <zsh-workers-return-24271-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22029 invoked from network); 16 Dec 2007 22:18:37 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.3 (2007-08-08) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.3
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 16 Dec 2007 22:18:37 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 98830 invoked from network); 16 Dec 2007 22:18:32 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 16 Dec 2007 22:18:32 -0000
+Received: (qmail 7759 invoked by alias); 16 Dec 2007 22:18:28 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 24271
+Received: (qmail 7743 invoked from network); 16 Dec 2007 22:18:28 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 16 Dec 2007 22:18:28 -0000
+Received: from virusfilter.dotsrc.org (bifrost [127.0.0.1])
+	by spamfilter.dotsrc.org (Postfix) with ESMTP id A79908058F54
+	for <zsh-workers@sunsite.dk>; Sun, 16 Dec 2007 23:15:27 +0100 (CET)
+Received: from mtaout03-winn.ispmail.ntl.com (mtaout03-winn.ispmail.ntl.com [81.103.221.49])
+	by bifrost.dotsrc.org (Postfix) with ESMTP
+	for <zsh-workers@sunsite.dk>; Sun, 16 Dec 2007 23:15:27 +0100 (CET)
+Received: from aamtaout03-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout03-winn.ispmail.ntl.com with ESMTP
+          id <20071216221912.HTVH11141.mtaout03-winn.ispmail.ntl.com@aamtaout03-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Sun, 16 Dec 2007 22:19:12 +0000
+Received: from pws-pc ([82.6.96.116]) by aamtaout03-winn.ispmail.ntl.com
+          with SMTP
+          id <20071216221941.HKLF26699.aamtaout03-winn.ispmail.ntl.com@pws-pc>
+          for <zsh-workers@sunsite.dk>; Sun, 16 Dec 2007 22:19:41 +0000
+Date: Sun, 16 Dec 2007 22:16:36 +0000
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk
+Subject: Re: Misc. substitution things
+Message-Id: <20071216221636.429560a2.p.w.stephenson@ntlworld.com>
+In-Reply-To: <071216130254.ZM2526@torch.brasslantern.com>
+References: <071216130254.ZM2526@torch.brasslantern.com>
+X-Mailer: Sylpheed 2.4.7 (GTK+ 2.12.1; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Virus-Scanned: ClamAV using ClamSMTP
+
+On Sun, 16 Dec 2007 13:02:54 -0800
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> This seems like a bug:
+> 
+> zsh% print $(( x + "45" ))
+> dquote> 
+> 
+> It appears that (( and the first double-quote are taken as a matching
+> pair of quotes.
+
+I think it's more subtle, but better error checking when we resolve math
+and command substitution seems to keep everything happy, including the
+new tests.  The new error cases are partly paranoia because I don't
+quite understand the way dquote_parse() is written.
+
+> Less importantly, even after 24264 (of which I conceptually approve)
+> there is some ambiguity with the (P) flag and subscripting.
+
+I'm not sure there's anything there I feel like changing.  It doesn't
+look like anything is more broken, only differently strange.
+
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.41
+diff -u -r1.41 lex.c
+--- Src/lex.c	23 Aug 2007 22:04:25 -0000	1.41
++++ Src/lex.c	16 Dec 2007 22:12:54 -0000
+@@ -548,6 +548,11 @@
+ 		else\
+ 		    parend = inbufct;} }
+ 
++/*
++ * Return 1 for math, 0 for a command, 2 for an error.  If it couldn't be
++ * parsed as math, but there was no gross error, it's a command.
++ */
++
+ static int
+ cmd_or_math(int cs_type)
+ {
+@@ -558,14 +563,19 @@
+     c = dquote_parse(')', 0);
+     cmdpop();
+     *bptr = '\0';
+-    if (c)
+-	return 1;
+-    c = hgetc();
+-    if (c == ')')
+-	return 1;
+-    hungetc(c);
+-    lexstop = 0;
+-    c = ')';
++    if (!c) {
++	/* Successfully parsed, see if it was math */
++	c = hgetc();
++	if (c == ')')
++	    return 1; /* yes */
++	hungetc(c);
++	lexstop = 0;
++	c = ')';
++    } else if (lexstop) {
++	/* we haven't got anything to unget */
++	return 2;
++    }
++    /* else unsuccessful: unget the whole thing */
+     hungetc(c);
+     lexstop = 0;
+     while (len > oldlen) {
+@@ -576,18 +586,25 @@
+     return 0;
+ }
+ 
++
++/*
++ * Parse either a $(( ... )) or a $(...)
++ * Return 0 on success, 1 on failure.
++ */
+ static int
+ cmd_or_math_sub(void)
+ {
+-    int c = hgetc();
++    int c = hgetc(), ret;
+ 
+     if (c == '(') {
+ 	add(Inpar);
+ 	add('(');
+-	if (cmd_or_math(CS_MATHSUBST)) {
++	if ((ret = cmd_or_math(CS_MATHSUBST)) == 1) {
+ 	    add(')');
+ 	    return 0;
+ 	}
++	if (ret == 2)
++	    return 1;
+ 	bptr -= 2;
+ 	len -= 2;
+     } else {
+@@ -781,7 +798,16 @@
+ 	    if (incmdpos) {
+ 		len = 0;
+ 		bptr = tokstr = (char *) hcalloc(bsiz = 32);
+-		return cmd_or_math(CS_MATH) ? DINPAR : INPAR;
++		switch (cmd_or_math(CS_MATH)) {
++		case 1:
++		    return DINPAR;
++
++		case 0:
++		    return INPAR;
++
++		default:
++		    return LEXERR;
++		}
+ 	    }
+ 	} else if (d == ')')
+ 	    return INOUTPAR;
+@@ -1328,6 +1354,9 @@
+     return peek;
+ }
+ 
++
++/* Return non-zero for error (character to unget), else zero */
++
+ /**/
+ static int
+ dquote_parse(char endchar, int sub)
+@@ -1466,6 +1495,10 @@
+ 	 * to hungetc() a character on an error.  However, I don't
+ 	 * understand what that actually gets us, and we can't guarantee
+ 	 * it's a character anyway, because of the previous test.
++	 *
++	 * We use the same feature in cmd_or_math we we actually do
++	 * need to unget if we decide it's really a command substitution.
++	 * We try to handle the other case by testing for lexstop.
+ 	 */
+ 	err = c;
+     }
+Index: Test/C01arith.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/C01arith.ztst,v
+retrieving revision 1.13
+diff -u -r1.13 C01arith.ztst
+--- Test/C01arith.ztst	18 Jun 2007 13:39:56 -0000	1.13
++++ Test/C01arith.ztst	16 Dec 2007 22:12:54 -0000
+@@ -153,3 +153,12 @@
+   print $(( 37#z ))
+ 1:bases beyond 36 don't work
+ ?(eval):1: invalid base: 37
++
++  print $(( 3 + "fail" ))
++1:parse failure in arithmetic
++?(eval):1: bad math expression: operand expected at `"fail" '
++
++  alias 3=echo
++  print $(( 3 + "OK"); echo "Worked")
++0:not a parse failure because not arithmetic
++>+ OK Worked
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

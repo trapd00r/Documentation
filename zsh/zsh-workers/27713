@@ -1,0 +1,948 @@
+From zsh-workers-return-27713-mason-zsh=primenet.com.au@zsh.org Mon Feb 15 23:57:55 2010
+Return-Path: <zsh-workers-return-27713-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8313 invoked by alias); 15 Feb 2010 23:57:55 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27713
+Received: (qmail 20192 invoked from network); 15 Feb 2010 23:57:50 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00,SPF_HELO_PASS
+	autolearn=ham version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at bewatermyfriend.org does not designate permitted sender hosts)
+From: Frank Terbeck <ft@bewatermyfriend.org>
+To: zsh-workers@zsh.org
+Subject: PATCH: (3/3) vcs_info: Introduce the concept of hooks
+Date: Tue, 16 Feb 2010 00:52:15 +0100
+Message-Id: <1266277935-18165-4-git-send-email-ft@bewatermyfriend.org>
+X-Mailer: git-send-email 1.7.0
+In-Reply-To: <1266277935-18165-1-git-send-email-ft@bewatermyfriend.org>
+References: <1266277935-18165-1-git-send-email-ft@bewatermyfriend.org>
+X-Df-Sender: 430444
+
+This introduces the basic system, documentation updates and a number
+of hooks:
+    set-message
+    set-branch-format
+    set-hgrev-format
+    gen-hg-bookmark-string
+    gen-mq-patch-string
+    gen-stgit-patch-string
+    gen-stgit-unapplied-string
+    set-stgit-format
+---
+ Doc/Zsh/contrib.yo                                |  281 ++++++++++++++++++++-
+ Functions/VCS_Info/Backends/VCS_INFO_get_data_bzr |    9 +-
+ Functions/VCS_Info/Backends/VCS_INFO_get_data_git |   65 +++---
+ Functions/VCS_Info/Backends/VCS_INFO_get_data_hg  |  102 +++++---
+ Functions/VCS_Info/Backends/VCS_INFO_get_data_p4  |   15 +-
+ Functions/VCS_Info/Backends/VCS_INFO_get_data_svk |    9 +-
+ Functions/VCS_Info/Backends/VCS_INFO_get_data_svn |    9 +-
+ Functions/VCS_Info/VCS_INFO_formats               |   83 +++++--
+ Functions/VCS_Info/VCS_INFO_hook                  |   42 +++
+ Functions/VCS_Info/vcs_info                       |    1 +
+ 10 files changed, 505 insertions(+), 111 deletions(-)
+ create mode 100644 Functions/VCS_Info/VCS_INFO_hook
+
+diff --git a/Doc/Zsh/contrib.yo b/Doc/Zsh/contrib.yo
+index 6d8d93f..e77fc13 100644
+--- a/Doc/Zsh/contrib.yo
++++ b/Doc/Zsh/contrib.yo
+@@ -324,7 +324,7 @@ cindex(version control utility)
+ In a lot of cases, it is nice to automatically retrieve information from
+ version control systems (VCSs), such as subversion, CVS or git, to be able
+ to provide it to the user; possibly in the user's prompt. So that you can
+-instantly tell on which branch you are currently on,  for example.
++instantly tell which branch you are currently on, for example.
+ 
+ In order to do that, you may use the tt(vcs_info) function.
+ 
+@@ -419,7 +419,8 @@ example(:vcs_info:<vcs-string>:<user-context>:<repo-root-name>)
+ startitem()
+ item(tt(<vcs-string>))(
+ is one of: git, git-svn, git-p4, hg, darcs, bzr,
+-cdv, mtn, svn, cvs, svk, tla or p4.
++cdv, mtn, svn, cvs, svk, tla or p4. When hooks are active the hooks name
++is added after a `+'. (See tt(Hooks in vcs_info) below.)
+ )
+ item(tt(<user-context>))(
+ is a freely configurable string, assignable by
+@@ -542,7 +543,7 @@ Note, that the actions taken if this style is enabled are potentially expensive
+ (read: they take time, depending on how big the current repository is).
+ Therefore, it is disabled by default. In order to use this style with
+ the tt(hg) backend you must also use the var(get-revision) style to avoid
+-having to start the interpretrer more than once.
++having to start the interpreter more than once.
+ )
+ kindex(stagedstr)
+ item(tt(stagedstr))(
+@@ -602,11 +603,16 @@ If set to true, vcs_info goes the extra mile to figure out the revision of
+ a repository's work tree (currently for the tt(git) and tt(hg) backends,
+ where this kind of information is not always vital). For tt(git), the
+ hash value of the currently checked out commit is available via the tt(%i)
+-expansion. With tt(hg), the local revision number is available via tt(%i),
+-the corresponding global hash is available via tt(%m), and bookmarks are
+-available via tt(%k).
++expansion. With tt(hg), the local revision number and the corresponding
++global hash are available via tt(%i); in addition, the topmost
++applied tt(mq) patch and bookmarks are available via tt(%m).
+ If this style is set in the tt(hg) context, the backend supports the
+-branchformat style.
++var(branchformat) style.
++)
++kindex(get-bookmarks)
++item(tt(get-bookmarks))(
++If set to true, the tt(hg) backend will try to get a list of current
++bookmarks. They will be available in via the `tt(%m)' replacement.
+ )
+ kindex(use-prompt-escapes)
+ item(tt(use-prompt-escapes))(
+@@ -614,6 +620,16 @@ Determines if we assume that the assembled
+ string from var(vcs_info) includes prompt escapes. (Used by
+ tt(vcs_info_lastmsg).)
+ )
++kindex(debug)
++item(tt(debug))(
++Enable debugging output, to track possible problems. Currently this style
++is only used by tt(vcs_info)'s hooks system.
++)
++kindex(hooks)
++item(tt(hooks))(
++A list style, that defines hook-function names. See tt(Hooks in vcs_info)
++below for details.
++)
+ enditem()
+ 
+ The default values for these styles in all contexts are:
+@@ -636,7 +652,10 @@ sitem(tt(command))((empty string))
+ sitem(tt(use-server))(false)
+ sitem(tt(use-simple))(false)
+ sitem(tt(get-revision))(false)
++sitem(tt(get-bookmarks))(false)
+ sitem(tt(use-prompt-escapes))(true)
++sitem(tt(debug))(false)
++sitem(tt(hooks))((empty list))
+ endsitem()
+ 
+ In normal tt(formats) and tt(actionformats), the following replacements are
+@@ -661,8 +680,9 @@ var(/foo/bar/reposXY/beer/tasty), tt(%S) is var(beer/tasty).)
+ sitem(tt(%m))(A "misc" replacement. It is at the discretion of the backend
+ to decide what this replacement expands to. It is currently used by
+ the tt(hg) and tt(git) backends. The tt(hg) backend replaces tt(%m) with the
+-topmost Mq patch applied (qtop) and the tt(git) backend replaces it
+-with the string from the var(stgitformat) style.)
++topmost tt(mq) patch applied (qtop) and a list of any current bookmarks. The
++tt(git) backend replaces it with the string from the var(stgitformat)
++style.)
+ endsitem()
+ 
+ In tt(branchformat) these replacements are done:
+@@ -670,7 +690,6 @@ In tt(branchformat) these replacements are done:
+ startsitem()
+ sitem(tt(%b))(the branch name)
+ sitem(tt(%r))(the current revision number or the var(hgrevformat) style for tt(hg))
+-sitem(tt(%k))(any current bookmarks for tt(hg))
+ endsitem()
+ 
+ In tt(stgitformat) these replacements are done:
+@@ -752,6 +771,168 @@ enditem()
+ 
+ All variables named VCS_INFO_* are for internal use only.
+ 
++subsect(Hooks in vcs_info)
++
++Hooks are places in tt(vcs_info) where you can run your own code. That
++code can communicate with the code that called it and through that,
++change the system's behaviour.
++
++For configuration, hooks change the style context:
++example(:vcs_info:<vcs-string>+<hook-name>:<user-context>:<repo-root-name>)
++
++To register functions to a hook, you need to list them in the tt(hooks)
++style in the appropriate context.
++
++Example:
++example(zstyle ':vcs_info:*+foo:*' hooks bar baz)
++
++This registers functions to the hook `foo' for all backends. In order to
++avoid namespace problems, all registered function names are prepended by
++a `+vi-', so the actual functions called for the `foo' hook are
++`tt(+vi-bar)' and `tt(+vi-baz)'.
++
++If something seems weird, you can enable the `debug' boolean style in
++the proper context and the hook-calling code will print what it tried
++to execute and whether the function in question existed.
++
++When you register more than one function to a hook, all functions are
++executed one after another until one function returns non-zero or until
++all functions have been called.
++
++There are a number of variables, that are special in hook contexts:
++
++startitem()
++item(tt(ret))(
++The return value, that the hooks system will return to the caller. The
++default is an integer `zero'. If and how a changed tt(ret) value changes
++the execution of the caller depends on the specific hook. See the hook's
++documentation below for details.
++)
++item(tt(hook_com))(
++An associated array, which is used for bidirectional communication from
++the caller to hook functions. The used keys depend on the specific hook.
++)
++item(tt(context))(
++The active context of the hook. Functions that wish to change this
++variable should make it local scope first.
++)
++enditem()
++
++Finally, the full list of currently available hooks:
++
++startitem()
++item(tt(gen-hg-bookmark-string))(
++Called in the Mercurial backend (the tt(get-revision) and tt(get-bookmarks)
++styles must be active) when a bookmark string is generated.
++
++This hook gets the names of the Mercurial bookmarks, that
++tt(vcs_info) collected from `hg'.
++
++When setting tt(ret) to non-zero, the string in
++tt(${hook_com[hg-bookmark-string]}) will be used as the
++`tt(misc1)' replacement in the variables set by tt(vcs_info).
++)
++item(tt(gen-mq-patch-string))(
++Called in the Mercurial backend when a mq-patch string is generated. That
++only happens if a tt(.hg/patches) directory exists in the repository.
++
++This hook gets the names of all applied mq patches which tt(vcs_info)
++collected so far in the opposite order, which mean that the first argument
++is the top-most patch and so forth.
++
++When setting tt(ret) to non-zero, the string in
++tt(${hook_com[hg-mqpatch-string]}) will be used as the
++`tt(misc0)' replacement in the variables set by tt(vcs_info).
++)
++item(tt(gen-stgit-patch-string))(
++Called in the git backend when a stgit-patch string is generated. That
++only happens if stgit is in use in the repository.
++
++This hook gets the names of all applied stgit patches which tt(vcs_info)
++collected so far in the opposite order, which mean that the first argument
++is the top-most patch and so forth.
++
++When setting tt(ret) to non-zero, the string in
++tt(${hook_com[stgit-patch-string]}) will be used as the
++`tt(misc0)' replacement in the variables set by tt(vcs_info).
++)
++item(tt(gen-stgit-unapplied-string))(
++Called in the git backend when a stgit-unapplied string is generated. That
++only happens if stgit is in use in the repository.
++
++This hook gets the names of all unapplied stgit patches which tt(vcs_info)
++collected so far.
++
++When setting tt(ret) to non-zero, the string in
++tt(${hook_com[stgit-unapplied-string]}) will be used as the
++`tt(misc0)' replacement in the variables set by tt(vcs_info).
++)
++item(tt(set-branch-format))(
++Called before a `tt(branchformat)' is set. The only argument to the
++hook is the format that is configured at this point.
++
++The `tt(hook_com)' keys considered are `tt(branch)' and `tt(revision)'.
++They are set to the values figured out so far by tt(vcs_info) and any
++change will be used directly when the actual replacement is done.
++
++If tt(ret) is set to to non-zero, the string in
++tt(${hook_com[branch-replace]}) will be used unchanged as the
++`tt(%b)' replacement in the variables set by tt(vcs_info).
++)
++item(tt(set-hgrev-format))(
++Called before a `tt(hgrevformat)' is set. The only argument to the
++hook is the format that is configured at this point.
++
++The `tt(hook_com)' keys considered are `tt(hash)' and `tt(localref)'.
++They are set to the values figured out so far by tt(vcs_info) and any
++change will be used directly when the actual replacement is done.
++
++If tt(ret) is set to to non-zero, the string in
++tt(${hook_com[rev-replace]}) will be used unchanged as the
++`tt(%i)' replacement in the variables set by tt(vcs_info).
++)
++item(tt(set-message))(
++Called each time before a `tt(vcs_info_msg_N_)' message is set.
++It takes two arguments; the first being the `N' in the message
++variable name, the second is the currently configured format or
++actionformat.
++
++There are a number of `tt(hook_com)' keys, that are used here:
++`tt(action)', `tt(branch)', `tt(base)', `tt(base-name)', `tt(subdir)',
++`tt(staged)', `tt(unstaged)', `tt(revision)', `tt(misc)', `tt(vcs)'
++and one `tt(miscN)' entry for each backend-specific data field (tt(N)
++starting at zero). They are set to the values figured out so far by
++tt(vcs_info) and any change will be used directly when the actual
++replacement is done.
++
++Since this hook is triggered multiple times (once for each configured
++format or actionformat), each of the `tt(hook_com)' keys mentioned
++above (except for the tt(miscN) entries) has an `tt(_orig)' counterpart,
++so even if you changed a value to your liking you can still get the
++original value in the next run. Changing the `tt(_orig)' values is
++probably not a good idea.
++
++If tt(ret) is set to to non-zero, the string in
++tt(${hook_com[message]}) will be used unchanged as the message by
++tt(vcs_info).
++)
++item(tt(set-stgit-format))(
++Called before a `tt(stgitformat)' is set. The only argument to the
++hook is the format that is configured at this point.
++
++The `tt(hook_com)' keys considered are `tt(patch)' and `tt(unapplied)'.
++They are set to the values figured out so far by tt(vcs_info) and any
++change will be used directly when the actual replacement is done.
++
++If tt(ret) is set to to non-zero, the string in
++tt(${hook_com[stgit-replace]}) will be used unchanged as the
++`tt(misc0)' replacement in the variables set by tt(vcs_info).
++)
++enditem()
++
++If all of this sounds rather confusing, take a look at the tt(Examples)
++section below. It contains some explanatory code.
++
+ subsect(Examples)
+ 
+ Don't use tt(vcs_info) at all (even though it's in your prompt):
+@@ -784,6 +965,86 @@ example(alias vcsi='vcs_info command; vcs_info_lastmsg')
+ This way, you can even define different formats for output via
+ tt(vcs_info_lastmsg) in the ':vcs_info:*:command:*' namespace.
+ 
++Now as promised, some code that uses hooks:
++say, you'd like to replace the string `svn' by `subversion' in
++tt(vcs_info)'s tt(%s) format-replacement.
++
++First, we will tell tt(vcs_info) to call a function when populating
++the message variables with the gathered information:
++example(zstyle ':vcs_info:*+set-message:*' hooks svn2subversion)
++
++Nothing happens. Which is reasonable, since there we didn't define
++the actual function yet. To see what the hooks subsystem is trying to
++do, enable the `tt(debug)' style:
++example(zstyle ':vcs_info:*+*:*' debug true)
++
++That should give you an idea what is going on. Specifically, the function
++that we are looking for is `tt(+vi-svn2subversion)'. Note, the `tt(+vi-)'
++prefix. So, everything is in order, just as documented. When you are done
++checking out the debugging output, disable it again:
++example(zstyle ':vcs_info:*+*:*' debug false)
++
++Now, let's define the function:
++example(
++function +vi-svn2subversion+LPAR()RPAR() {
++    [[ ${hook_com[vcs_orig]} == svn ]] && hook_com[vcs]=subversion
++})
++
++Simple enough. And it could have even been simpler, if only we had
++registered our function in a less generic context. If we do it only in
++the `tt(svn)' backend's context, we don't need to test which the active
++backend is:
++example(zstyle ':vcs_info:svn+set-message:*' hooks svn2subversion)
++example(
++function +vi-svn2subversion+LPAR()RPAR() {
++    hook_com[vcs]=subversion
++})
++
++And finally a little more elaborate example, that uses a hook to create
++a customised bookmark string for the tt(hg) backend.
++
++Again, we start off by registering a function:
++example(zstyle ':vcs_info:hg+gen-hg-bookmark-string:*' hooks hgbookmarks)
++
++And then we define the `tt(+vi-hgbookmarks) function:
++example(
++function +vi-hgbookmarks+LPAR()RPAR() {
++    # The default is to connect all bookmark names by
++    # semicolons. This mixes things up a little.
++    # Imagine, there's one type of bookmarks that is
++    # special to you. Say, because it's *your* work.
++    # Those bookmarks look always like this: "sh/*"
++    # (because your initials are sh, for example).
++    # This makes the bookmarks string use only those
++    # bookmarks. If there's more than one, it
++    # concatenates them using commas.
++    local s i)
++example(
++    # The bookmarks returned by `hg' are available in
++    # the functions positional parameters.
++    (( $# == 0 )) && return 0
++    for i in "$@"; do
++        if [[ $i == sh/* ]]; then
++            [[ -n $s ]] && s=$s,
++            s=${s}$i
++        fi
++    done)
++example(
++    # Now, the communication with the code that calls
++    # the hook functions is done via the hook_com[]
++    # hash. The key, at which the `gen-hg-bookmark-string'
++    # hook looks at is `hg-bookmark-string'. So:
++    hook_com[hg-bookmark-string]=$s)
++example(
++    # And to signal, that we want to use the sting we
++    # just generated, set the special variable `ret' to
++    # something other than the default zero:
++    ret=1
++    return 0
++})
++
++This concludes our guided tour through zsh's tt(vcs_info).
++
+ 
+ texinode(Prompt Themes)(ZLE Functions)(Version Control Information)(User Contributions)
+ sect(Prompt Themes)
+diff --git a/Functions/VCS_Info/Backends/VCS_INFO_get_data_bzr b/Functions/VCS_Info/Backends/VCS_INFO_get_data_bzr
+index e85de31..5d4deaa 100644
+--- a/Functions/VCS_Info/Backends/VCS_INFO_get_data_bzr
++++ b/Functions/VCS_Info/Backends/VCS_INFO_get_data_bzr
+@@ -5,6 +5,7 @@
+ setopt localoptions noksharrays extendedglob NO_shwordsplit
+ local bzrbase bzrbr
+ local -a bzrinfo
++local -xA hook_com
+ 
+ if zstyle -t ":vcs_info:${vcs}:${usercontext}:${rrn}" "use-simple" ; then
+     bzrbase=${vcs_comm[basedir]}
+@@ -21,6 +22,12 @@ fi
+ 
+ rrn=${bzrbase:t}
+ zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" branchformat bzrbr || bzrbr="%b:%r"
+-zformat -f bzrbr "${bzrbr}" "b:${bzrinfo[2]}" "r:${bzrinfo[1]}"
++hook_com=( branch "${bzrinfo[2]}" revision "${bzrinfo[1]}" )
++if VCS_INFO_hook 'set-branch-format' "${bzrbr}"; then
++    zformat -f bzrbr "${bzrbr}" "b:${hook_com[branch]}" "r:${hook_com[revision]}"
++else
++    bzrbr=${hook_com[branch-replace]}
++fi
++hook_com=()
+ VCS_INFO_formats '' "${bzrbr}" "${bzrbase}" '' '' "${bzrinfo[1]}" ''
+ return 0
+diff --git a/Functions/VCS_Info/Backends/VCS_INFO_get_data_git b/Functions/VCS_Info/Backends/VCS_INFO_get_data_git
+index bf7c479..4018b5d 100644
+--- a/Functions/VCS_Info/Backends/VCS_INFO_get_data_git
++++ b/Functions/VCS_Info/Backends/VCS_INFO_get_data_git
+@@ -4,6 +4,8 @@
+ 
+ setopt localoptions extendedglob NO_shwordsplit
+ local gitdir gitbase gitbranch gitaction gitunstaged gitstaged gitsha1 gitmisc
++local stgitpatch stgitunapplied
++local -xA hook_com
+ 
+ VCS_INFO_git_getaction () {
+     local gitaction='' gitdir=$1
+@@ -97,36 +99,6 @@ VCS_INFO_git_getbranch () {
+     return 0
+ }
+ 
+-VCS_INFO_git_get_stgit_top_patch () {
+-    local patchdir=$1
+-
+-    if [[ -d "$patchdir" ]]; then
+-        local -a patches
+-        patches=(${(f)"$(< "${patchdir}/applied")"})
+-        printf '%s' $patches[-1]
+-        return 0
+-    fi
+-
+-    return 1
+-}
+-
+-VCS_INFO_git_get_stgit_unapplied() {
+-    local patchdir=$1
+-
+-    if [[ -d "$patchdir" ]]; then
+-        local -a patches
+-        patches=(${(f)"$(< "${patchdir}/unapplied")"})
+-        if [[ -z $patches[@] ]]; then
+-            printf 0
+-        else
+-            printf '%d' $#patches
+-        fi
+-        return 0
+-    fi
+-
+-    return 1
+-}
+-
+ gitdir=${vcs_comm[gitdir]}
+ gitbranch="$(VCS_INFO_git_getbranch ${gitdir})"
+ if zstyle -t ":vcs_info:${vcs}:${usercontext}:${rrn}" get-revision && \
+@@ -160,14 +132,37 @@ rrn=${gitbase:t}
+ 
+ local patchdir=${gitdir}/patches/${gitbranch}
+ if [[ -d $patchdir ]] ; then
+-    stgitpatch=$(VCS_INFO_git_get_stgit_top_patch "${patchdir}")
+-    stgitunapplied=$(VCS_INFO_git_get_stgit_unapplied "${patchdir}")
++    local -a stgit_applied stgit_unapplied
+ 
+-    stgitpatch=${stgitpatch:-"no patch applied"}
++    stgit_applied=(${(f)"$(< "${patchdir}/applied")"})
++    stgit_applied=( ${(Oa)stgit_applied} )
++    stgit_unapplied=(${(f)"$(< "${patchdir}/unapplied")"})
++    stgit_unapplied=( ${(oa)stgit_applied} )
++
++    if VCS_INFO_hook 'gen-stgit-patch-string' "${stgit_applied[@]}"; then
++        if (( ${#stgit_applied} )); then
++            stgitpatch=${stgit_applied[1]}
++        else
++            stgitpatch="no patch applied"
++        fi
++    else
++        stgitpatch=${hook_com[stgit-patch-string]}
++    fi
++    if VCS_INFO_hook 'gen-stgit-unapplied-string' "${stgit_unapplied[@]}"; then
++        stgitunapplied=${#stgit_unapplied}
++    else
++        stgitunapplied=${hook_com[stgit-unapplied-string]}
++    fi
+ 
+     zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" stgitformat stgitmsg || stgitmsg=" %p (%c)"
+-    zformat -f stgitmsg "${stgitmsg}" "p:${stgitpatch}" "c:${stgitunapplied}"
+-    gitmisc=${stgitmsg}
++    hook_com=( patch "${stgitpatch}" unapplied "${stgitunapplied}" )
++    if VCS_INFO_hook 'set-stgit-format' "${stgitformat}"; then
++        zformat -f stgitmsg "${stgitmsg}" "p:${hook_com[patch]}" "c:${hook_com[unapplied]}"
++        gitmisc=${stgitmsg}
++    else
++        gitmisc=${hook_com[stgit-replace]}
++    fi
++    hook_com=()
+ else
+     gitmisc=''
+ fi
+diff --git a/Functions/VCS_Info/Backends/VCS_INFO_get_data_hg b/Functions/VCS_Info/Backends/VCS_INFO_get_data_hg
+index 7c854b2..1c103a5 100644
+--- a/Functions/VCS_Info/Backends/VCS_INFO_get_data_hg
++++ b/Functions/VCS_Info/Backends/VCS_INFO_get_data_hg
+@@ -3,22 +3,11 @@
+ ## Distributed under the same BSD-ish license as zsh itself.
+ 
+ setopt localoptions NO_shwordsplit
+-local file hgbranch hgbranch_name hgbase hglhash hgshash hglrev hgmisc \
+-    r_branch hgchanges revformat bookmarks r_bmhash r_bmname hgbm
+-
+-VCS_INFO_hg_get_mq_top_patch () {
+-    local patchdir=$1
+-
+-    if [[ -e "${patchdir}/status" ]]; then
+-        local -a patches
+-        patches=(${(f)"$(< "${patchdir}/status")"})
+-        printf "%s" "${patches[-1]/[^:]*:/}"
+-        return 0
+-    fi
+-
+-    return 1
+-}
+-
++local file hgbranch hgbranch_name hgbase hghash hglrev hgmqstring \
++    r_branch hgchanges revformat bookmarks r_bmhash r_bmname hgbmstring
++local -i getbookmarks
++local -a hgbm mqpatches hgmisc_args
++local -xA hook_com
+ 
+ hgbase=${vcs_comm[basedir]}
+ rrn=${hgbase:t}
+@@ -30,21 +19,21 @@ else
+     hgbranch_name="default"
+ fi
+ 
+-hglhash=''
++hghash=''
+ hglrev=''
+-hgbm=''
++hgbm=()
+ bookmarks="${hgbase}/.hg/bookmarks"
+-
+ if zstyle -t ":vcs_info:${vcs}:${usercontext}:${rrn}" get-revision ; then
+     # Calling the 'hg' program is quite a bit too slow for prompts.
+     # If there's a way around that, I'd be interested.
+     # Disabled by default anyway, so no harm done.
++    local HGRCPATH
+ 
+     if zstyle -t ":vcs_info:${vcs}:${usercontext}:${rrn}" \
+             "check-for-changes" ; then
+ 
+-        HGRCPATH="/dev/null" ${vcs_comm[cmd]} id -i -n -b \
+-        | read -r hgshash hglrev r_branch
++        HGRCPATH="/dev/null" ${vcs_comm[cmd]} id --debug -i -n -b \
++        | read -r hghash hglrev r_branch
+ 
+         # Are there uncommitted-changes?
+         if [[ $hglrev[-1] == + ]] ; then
+@@ -53,26 +42,49 @@ if zstyle -t ":vcs_info:${vcs}:${usercontext}:${rrn}" get-revision ; then
+ 
+         # Remove uncommitted-changes marker, if any
+         hglrev=${hglrev/+/}
+-        hgshash=${hgshash/+/}
++        hghash=${hghash/+/}
+     else
+         HGRCPATH="/dev/null" ${vcs_comm[cmd]} \
+-        parents --template="{node} {node|short} {rev} {branches}\n" \
+-        | read -r hglhash hgshash hglrev r_branch
++        parents --template="{node} {rev} {branches}\n" \
++        | read -r hghash hglrev r_branch
+     fi
+ 
+-    if [[ -r "${bookmarks}" ]] ; then
++    if zstyle -t ":vcs_info:${vcs}:${usercontext}:${rrn}" "get-bookmarks" \
++            && getbookmarks=1 || getbookmarks=0
++
++    if (( getbookmarks )) && [[ -r "${bookmarks}" ]] ; then
+         while read -r r_bmhash r_bmname ; do
+-            if [[ $hglhash == $r_bmhash || $r_bmhash == $hgshash* ]] ; then
+-                hgbm="$r_bmname;${hgbm}"
++            if [[ $hghash == $r_bmhash ]] ; then
++                hgbm=( "$r_bmname" ${hgbm} )
+             fi
+         done < ${bookmarks}
+     fi
+ 
+     if [[ -n ${hglrev} ]] ; then
+         zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" hgrevformat revformat || revformat="%r:%h"
+-        zformat -f hglrev "${revformat}" "r:${hglrev}" "h:${hglhash}"
++        hook_com=( localrev "${hglrev}" "hash" "${hghash}" )
++        if VCS_INFO_hook 'set-hgrev-format' "${revformat}"; then
++            zformat -f hglrev "${revformat}" "r:${hook_com[localrev]}" "h:${hook_com[hash]}"
++        else
++            hglrev=${hook_com[rev-replace]}
++        fi
++        hook_com=()
++        if (( getbookmarks )) ; then
++            if VCS_INFO_hook 'gen-hg-bookmark-string' "${hgbm[@]}"; then
++                hgbmstring=${(j.;.)hgbm}
++            else
++                hgbmstring=${hook_com[hg-bookmark-string]}
++            fi
++            hook_com=()
++        fi
+         zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" branchformat hgbranch || hgbranch="%b:%r"
+-        zformat -f hgbranch "${hgbranch}" "b:${hgbranch_name}" "r:${hglrev}" "k:${hgbm}"
++        hook_com=( branch "${hgbranch_name}" revision "${hglrev}" )
++        if VCS_INFO_hook 'set-branch-format' "${hgbranch}"; then
++            zformat -f hgbranch "${hgbranch}" "b:${hook_com[branch]}" "r:${hook_com[revision]}"
++        else
++            hgbranch=${hook_com[branch-replace]}
++        fi
++        hook_com=()
+     fi
+ else
+     hgbranch="${hgbranch_name}"
+@@ -81,12 +93,36 @@ fi
+ local patchdir=${hgbase}/.hg/patches/
+ 
+ if [[ -d $patchdir ]] ; then
+-    hgmisc=$(VCS_INFO_hg_get_mq_top_patch "${patchdir}")
++    local -a mqpatches
++    if [[ -e "${patchdir}/status" ]]; then
++        mqpatches=( ${${(f)"$(< "${patchdir}/status")"}/(#s)[a-f0-9]##:/} )
++        mqpatches=( ${(Oa)mqpatches} )
++    else
++        mqpatches=( )
++    fi
+ 
+-    hgmisc=${hgmisc:-"no patch applied"}
++    if VCS_INFO_hook 'gen-mq-patch-string' "${mqpatches[@]}"; then
++        if (( ${#mqpatches} )); then
++            hgmqstring=${mqpatches[1]}
++        else
++            hgmqstring="no patch applied"
++        fi
++    else
++        hgbmstring=${hook_com[hg-mqpatch-string]}
++    fi
++    hook_com=()
+ else
+-    hgmisc=''
++    hgmqstring=''
+ fi
+ 
+-VCS_INFO_formats '' "${hgbranch}" "${hgbase}" '' "${hgchanges}" "${hglrev}" "${hgmisc}"
++if [[ -z "${hgmqstring}" ]] && [[ -z "${hgbmstring}" ]]; then
++    hgmisc_args=( '' ) # make sure there's at least *one* misc argument
++elif [[ -z "${hgmqstring}" ]]; then
++    hgmisc_args=( "${hgmqstring}" )
++elif [[ -z "${hgbmstring}" ]]; then
++    hgmisc_args=( "${hgbmstring}" )
++else
++    hgmisc_args=( "${hgmqstring}" "${hgbmstring}" )
++fi
++VCS_INFO_formats '' "${hgbranch}" "${hgbase}" '' "${hgchanges}" "${hglrev}" "${hgmisc_args[@]}"
+ return 0
+diff --git a/Functions/VCS_Info/Backends/VCS_INFO_get_data_p4 b/Functions/VCS_Info/Backends/VCS_INFO_get_data_p4
+index e4bbb06..430cfa6 100644
+--- a/Functions/VCS_Info/Backends/VCS_INFO_get_data_p4
++++ b/Functions/VCS_Info/Backends/VCS_INFO_get_data_p4
+@@ -6,6 +6,7 @@
+ setopt localoptions extendedglob
+ local p4base a b
+ local -A p4info
++local -xA hook_com
+ 
+ ${vcs_comm[cmd]} info | while IFS=: read a b; do p4info[${a// /_}]="${b## #}"; done
+ p4base=${vcs_comm[basedir]}
+@@ -16,9 +17,13 @@ local p4branch change
+ # here down is synced as the revision.
+ # I suppose the following might be slow on a tortuous client view.
+ change="${${$(${vcs_comm[cmd]} changes -m 1 ...\#have)##Change }%% *}"
+-zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" branchformat p4branch ||
+-p4branch="%b:%r"
+-zformat -f p4branch "${p4branch}" "b:${p4info[Client_name]}" \
+-"r:$change"
+-
++zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" branchformat p4branch || p4branch="%b:%r"
++hook_com=( branch "${p4info[Client_name]}" revision "${change}" )
++if VCS_INFO_hook 'set-branch-format' "${p4branch}"; then
++    zformat -f p4branch "${p4branch}" "b:${hook_com[branch]}" "r:${hook_com[revision]}"
++else
++    p4branch=${hook_com[branch-replace]}
++fi
++hook_com=()
+ VCS_INFO_formats '' "${p4branch}" "${p4base}" '' '' "$change" ''
++return 0
+diff --git a/Functions/VCS_Info/Backends/VCS_INFO_get_data_svk b/Functions/VCS_Info/Backends/VCS_INFO_get_data_svk
+index 3df9a73..6107a14 100644
+--- a/Functions/VCS_Info/Backends/VCS_INFO_get_data_svk
++++ b/Functions/VCS_Info/Backends/VCS_INFO_get_data_svk
+@@ -4,10 +4,17 @@
+ 
+ setopt localoptions NO_shwordsplit
+ local svkbranch svkbase
++local -xA hook_com
+ 
+ svkbase=${vcs_comm[basedir]}
+ rrn=${svkbase:t}
+ zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" branchformat svkbranch || svkbranch="%b:%r"
+-zformat -f svkbranch "${svkbranch}" "b:${vcs_comm[branch]}" "r:${vcs_comm[revision]}"
++hook_com=( branch "${vcs_comm[branch]}" revision "${vcs_comm[revision]}" )
++if VCS_INFO_hook 'set-branch-format' "${svkbranch}"; then
++    zformat -f svkbranch "${svkbranch}" "b:${hook_com[branch]}" "r:${hook_com[revision]}"
++else
++    svkbranch=${hook_com[branch-replace]}
++fi
++hook_com=()
+ VCS_INFO_formats '' "${svkbranch}" "${svkbase}" '' '' "${vcs_comm[revision]}" ''
+ return 0
+diff --git a/Functions/VCS_Info/Backends/VCS_INFO_get_data_svn b/Functions/VCS_Info/Backends/VCS_INFO_get_data_svn
+index 75da22b..b1cb730 100644
+--- a/Functions/VCS_Info/Backends/VCS_INFO_get_data_svn
++++ b/Functions/VCS_Info/Backends/VCS_INFO_get_data_svn
+@@ -7,6 +7,7 @@
+ setopt localoptions noksharrays extendedglob NO_shwordsplit
+ local svnbase svnbranch a b rrn
+ local -A svninfo parentinfo
++local -xA hook_com
+ 
+ svnbase=".";
+ svninfo=()
+@@ -23,6 +24,12 @@ svnbase="$(VCS_INFO_realpath ${svnbase})"
+ 
+ rrn=${svnbase:t}
+ zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" branchformat svnbranch || svnbranch="%b:%r"
+-zformat -f svnbranch "${svnbranch}" "b:${svninfo[URL]##*/}" "r:${svninfo[Revision]}"
++hook_com=( branch "${svninfo[URL]##*/}" revision "${svninfo[Revision]}" )
++if VCS_INFO_hook 'set-branch-format' "${svnbranch}"; then
++    zformat -f svnbranch "${svnbranch}" "b:${hook_com[branch]}" "r:${hook_com[revision]}"
++else
++    svnbranch=${hook_com[branch-replace]}
++fi
++hook_com=()
+ VCS_INFO_formats '' "${svnbranch}" "${svnbase}" '' '' "${svninfo[Revision]}" ''
+ return 0
+diff --git a/Functions/VCS_Info/VCS_INFO_formats b/Functions/VCS_Info/VCS_INFO_formats
+index 35b3b96..db7a8dd 100644
+--- a/Functions/VCS_Info/VCS_INFO_formats
++++ b/Functions/VCS_Info/VCS_INFO_formats
+@@ -3,7 +3,39 @@
+ ## Distributed under the same BSD-ish license as zsh itself.
+ 
+ setopt localoptions noksharrays NO_shwordsplit
+-local action=$1 branch=$2 base=$3 staged=$4 unstaged=$5 rev=$6 misc=$7
++local msg tmp
++local -i i
++local -xA hook_com
++# The _origs are needed because hooks can change values and there would
++# be no way to get the originals back for later hooks (a hook is run for
++# each message, that's being created).
++hook_com=(
++    action        "$1"
++    action_orig   "$1"
++    branch        "$2"
++    branch_orig   "$2"
++    base          "$3"
++    base_orig     "$3"
++    staged        "$4"
++    staged_orig   "$4"
++    unstaged      "$5"
++    unstaged_orig "$5"
++    revision      "$6"
++    revision_orig "$6"
++    vcs           "${vcs}"
++    vcs_orig      "${vcs}"
++)
++shift 6
++i=0
++for tmp in "$@"; do
++    hook_com[misc$((i++))]="${tmp}"
++done
++hook_com[misc]=${(j:,:)argv}
++hook_com[misc_orig]=${hook_com[misc]}
++hook_com[base-name]="${${hook_com[base]}:t}"
++hook_com[base-name_orig]="${hook_com[base_name]}"
++hook_com[subdir]="$(VCS_INFO_reposub ${hook_com[base]})"
++hook_com[subdir_orig]="${hook_com[subdir]}"
+ 
+ ## description:
+ #   action:   a string that signals a certain non-default condition in the
+@@ -13,18 +45,15 @@ local action=$1 branch=$2 base=$3 staged=$4 unstaged=$5 rev=$6 misc=$7
+ #   base:     the full name of the repository's root directory.
+ #   staged:   non-empty if the repository contains staged changes.
+ #   unstaged: non-empty if the repository contains unstaged changes.
+-#   rev:      an identifier of the currently checked out revision.
+-#   misc:     a string that may contain anything the author likes.
++#   revision: an identifier of the currently checked out revision.
++#   misc0..N: a set of strings that may contain anything the author likes.
+ #             the backends should document what they put in it and when.
+ #
+ # If an argument has no valid value for a given backend, an empty value
+ # should be provided. eg:
+ #   VCS_INFO_formats '' "${foobranch}" "${foobase}" '' '' '' "${foomisc}"
+ 
+-local msg
+-local -i i j
+-
+-if [[ -n ${action} ]] ; then
++if [[ -n ${hook_com[action]} ]] ; then
+     zstyle -a ":vcs_info:${vcs}:${usercontext}:${rrn}" actionformats msgs
+     (( ${#msgs} < 1 )) && msgs[1]=' (%s)-[%b|%a]-'
+ else
+@@ -32,29 +61,33 @@ else
+     (( ${#msgs} < 1 )) && msgs[1]=' (%s)-[%b]-'
+ fi
+ 
+-if [[ -n ${staged} ]] ; then
+-    zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" stagedstr staged
+-    [[ -z ${staged} ]] && staged='S'
++if [[ -n ${hook_com[staged]} ]] ; then
++    zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" stagedstr tmp
++    [[ -z ${tmp} ]] && hook_com[staged]='S' || hook_com[staged]=${tmp}
+ fi
+ 
+-if [[ -n ${unstaged} ]] ; then
+-    zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" unstagedstr unstaged
+-    [[ -z ${unstaged} ]] && unstaged='U'
++if [[ -n ${hook_com[unstaged]} ]] ; then
++    zstyle -s ":vcs_info:${vcs}:${usercontext}:${rrn}" unstagedstr tmp
++    [[ -z ${tmp} ]] && hook_com[unstaged]='U' || hook_com[unstaged]=${tmp}
+ fi
+ 
+ (( ${#msgs} > maxexports )) && msgs[$(( maxexports + 1 )),-1]=()
+ for i in {1..${#msgs}} ; do
+-    zformat -f msg ${msgs[$i]}                      \
+-                    a:${action}                     \
+-                    b:${branch}                     \
+-                    c:${staged}                     \
+-                    i:${rev}                        \
+-                    m:${misc}                       \
+-                    r:${base:t}                     \
+-                    s:${vcs}                        \
+-                    u:${unstaged}                   \
+-                    R:${base}                       \
+-                    S:"$(VCS_INFO_reposub ${base})"
+-    msgs[$i]=${msg}
++    if VCS_INFO_hook "set-message" $(( $i - 1 )) "${msgs[$i]}"; then
++        zformat -f msg ${msgs[$i]}                      \
++                        a:${hook_com[action]}           \
++                        b:${hook_com[branch]}           \
++                        c:${hook_com[staged]}           \
++                        i:${hook_com[revision]}         \
++                        m:${hook_com[misc]}             \
++                        r:${hook_com[base-name]}        \
++                        s:${hook_com[vcs]}              \
++                        u:${hook_com[unstaged]}         \
++                        R:${hook_com[base]}             \
++                        S:${hook_com[subdir]}
++        msgs[$i]=${msg}
++    else
++        msgs[$i]=${hook_com[message]}
++    fi
+ done
+ return 0
+diff --git a/Functions/VCS_Info/VCS_INFO_hook b/Functions/VCS_Info/VCS_INFO_hook
+new file mode 100644
+index 0000000..71845d8
+--- /dev/null
++++ b/Functions/VCS_Info/VCS_INFO_hook
+@@ -0,0 +1,42 @@
++### vim:ft=zsh:foldmethod=marker
++## Written by Frank Terbeck <ft@bewatermyfriend.org>
++## Distributed under the same BSD-ish license as zsh itself.
++
++local hook func
++local -x context hook_name
++local -xi ret
++local -a hooks
++local -i debug
++
++ret=0
++hook_name="$1"
++shift
++context=":vcs_info:${vcs}+${hook_name}:${usercontext}:${rrn}"
++
++zstyle -t "${context}" debug && debug=1 || debug=0
++if (( debug )); then
++    printf 'VCS_INFO_hook: running hook: "%s"\n' "${hook_name}"
++    printf 'VCS_INFO_hook: current context: "%s"\n' "${context}"
++fi
++
++zstyle -a "${context}" hooks hooks || return 0
++# protect some internal variables in hooks
++typeset -r vcs rrn usercontext maxexports msgs vcs_comm
++for hook in ${hooks} ; do
++    func="+vi-${hook}"
++    if (( ${+functions[$func]} == 0 )); then
++        (( debug )) && printf '  + Unknown function: "%s"\n' "${func}"
++        continue
++    fi
++    (( debug )) && printf '  + Running function: "%s"\n' "${func}"
++    ${func} "$@"
++    case $? in
++        (0)
++            ;;
++        (*)
++            break
++            ;;
++    esac
++done
++typeset +r vcs rrn usercontext maxexports msgs vcs_comm
++return $ret
+diff --git a/Functions/VCS_Info/vcs_info b/Functions/VCS_Info/vcs_info
+index 4344d0b..906d984 100644
+--- a/Functions/VCS_Info/vcs_info
++++ b/Functions/VCS_Info/vcs_info
+@@ -18,6 +18,7 @@ static_functions=(
+     VCS_INFO_check_com
+     VCS_INFO_formats
+     VCS_INFO_get_cmd
++    VCS_INFO_hook
+     VCS_INFO_maxexports
+     VCS_INFO_nvcsformats
+     VCS_INFO_realpath
+-- 
+1.7.0
+

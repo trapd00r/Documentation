@@ -1,0 +1,136 @@
+From zsh-workers-return-19907-mason-zsh=primenet.com.au@sunsite.dk Mon May 10 16:20:18 2004
+Return-Path: <zsh-workers-return-19907-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13942 invoked from network); 10 May 2004 16:20:17 -0000
+Received: from thor.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.86)
+  by ns1.primenet.com.au with SMTP; 10 May 2004 16:20:17 -0000
+Received: (qmail 26285 invoked from network); 10 May 2004 16:19:58 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 10 May 2004 16:19:58 -0000
+Received: (qmail 10504 invoked by alias); 10 May 2004 16:19:48 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19907
+Received: (qmail 10495 invoked from network); 10 May 2004 16:19:47 -0000
+Received: from thor.dotsrc.org (HELO a.mx.sunsite.dk) (qmailr@130.225.247.86)
+  by sunsite.dk with SMTP; 10 May 2004 16:19:44 -0000
+Received: (qmail 25681 invoked from network); 10 May 2004 16:19:44 -0000
+Received: from lhuumrelay3.lnd.ops.eu.uu.net (62.189.58.19)
+  by a.mx.sunsite.dk with SMTP; 10 May 2004 16:19:42 -0000
+Received: from MAILSWEEPER01.csr.com (mailhost1.csr.com [62.189.183.235])
+	by lhuumrelay3.lnd.ops.eu.uu.net (8.11.0/8.11.0) with ESMTP id i4AGJEv21323
+	for <zsh-workers@sunsite.dk>; Mon, 10 May 2004 16:19:14 GMT
+Received: from EXCHANGE02.csr.com (unverified [192.168.137.45]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T697c5530b2c0a88d01858@MAILSWEEPER01.csr.com>;
+ Mon, 10 May 2004 17:18:43 +0100
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Mon, 10 May 2004 17:20:46 +0100
+To: zsh-workers@sunsite.dk
+cc: 245678-submitter@bugs.debian.org
+Subject: Re: Bug#245678: zsh: built-in rm -rf fills up the memory 
+In-reply-to: "Bart Schaefer"'s message of "Sun, 09 May 2004 16:51:03 PDT."
+             <Pine.LNX.4.44.0405091647230.29962-100000@toltec.zanshin.com> 
+Date: Mon, 10 May 2004 17:19:13 +0100
+Message-ID: <28310.1084205953@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 10 May 2004 16:20:46.0867 (UTC) FILETIME=[C01CCE30:01C436AA]
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: **
+X-Spam-Status: No, hits=2.3 required=6.0 tests=BAYES_70 autolearn=no 
+	version=2.63
+X-Spam-Hits: 2.3
+
+Bart Schaefer wrote:
+> } [ h->used + (new - old) > HEAP_ARENA_SIZE ]
+> } 63432 + (63504 - 63432) > 16360
+> 
+> Aha!  Note that h->used > HEAP_ARENA_SIZE all by itself!
+> 
+> Comparing to HEAP_ARENA_SIZE is likely wrong, it should compare to the 
+> maximum of either HEAP_ARENA_SIZE or the previously-mmapped page size.
+
+This is all ghastly even by zsh standards.
+
+I thought what you thought, until... Look at zhalloc(), where either we
+allocate n bytes normally, or we mmap an equivalent chunk of memory.
+Neither of those explicitly use HEAP_ARENA_SIZE, which was used to get n
+in the first place.
+
+We are probably wasting space since the only thing we record for later
+use is the original size asked for (`size') as the used size; we don't
+record the number we've ended up with (`n'), goodness knows why.
+
+For USE_MMAP, we do record n in h->size, but this is only used for
+munmap, not for everything else --- it's obviously an afterthought.
+(That's why it's zero when USE_MMAP isn't defined.)  The smart thing to
+do would be always record it and use it for subsequent calculation
+instead of all the jiggery pokery with rounding things to boundaries in
+obscure ways.  This is basically your conclusion, however I think it's
+just unfinished business rather than a programming error.
+
+However, I don't think that's actually the source of the problem.
+Closer to the point is this:
+
+#ifndef USE_MMAP
+	if (old > HEAP_ARENA_SIZE || new > HEAP_ARENA_SIZE) {
+	    size_t n = HEAP_ARENA_SIZE > new ? HEAPSIZE : new + sizeof(*h);
+
+	    if (ph)
+		ph->next = h = (Heap) realloc(h, n);
+	    else
+		heaps = h = (Heap) realloc(h, n);
+	}
+	h->used = new;
+	unqueue_signals();
+	return arena(h);
+#endif
+
+Without USE_MMAP, this takes care of making sure the heap is the right
+size when it's larger than normal.  Those tests would be triggering in
+the case we're looking at.  As they're not, we're dropping through to
+the zhalloc() below every time.
+
+What we should do is the equivalent of realloc as an #else of the code
+above --- mmap a larger chunk, unmap the old one, and return the new
+one.
+
+However, I don't think even *that* is the basic problem.  I think this:
+
+    old = (old + H_ISIZE - 1) & ~(H_ISIZE - 1);
+    new = (new + H_ISIZE - 1) & ~(H_ISIZE - 1);
+
+is wrong --- it should be the heap size here, not H_ISIZE which is
+simply sizeof(union mem_align), which is probably only 4 or 8 words.  We
+only need to reallocate to heap size boundaries, i.e. 16384 possibly
+minus something or other.  We've got away with it before because the
+realloc() quoted above isn't too fussed, an hrealloc() isn't used that
+often.  So actually Clint's original proposal is close to the mark.
+
+I hope.
+
+I might be tempted by proposed solutions involving the complete removal
+of hrealloc.
+
+Please don't use sentences containing `why' and ending with `?' or I'll
+start to whimper.  Anyone fixing this could useful add comments.
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

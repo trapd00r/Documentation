@@ -1,0 +1,191 @@
+From zsh-workers-return-27106-mason-zsh=primenet.com.au@sunsite.dk Thu Jul 09 14:41:49 2009
+Return-Path: <zsh-workers-return-27106-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29238 invoked from network); 9 Jul 2009 14:41:45 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received: from new-brage.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.254.104)
+  by ns1.primenet.com.au with SMTP; 9 Jul 2009 14:41:45 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 84599 invoked from network); 9 Jul 2009 14:41:39 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 9 Jul 2009 14:41:39 -0000
+Received: (qmail 8928 invoked by alias); 9 Jul 2009 14:41:31 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 27106
+Received: (qmail 8907 invoked from network); 9 Jul 2009 14:41:30 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 9 Jul 2009 14:41:30 -0000
+Received: from cluster-d.mailcontrol.com (cluster-d.mailcontrol.com [85.115.60.190])
+	by bifrost.dotsrc.org (Postfix) with ESMTPS id 5BAE980307FA
+	for <zsh-workers@sunsite.dk>; Thu,  9 Jul 2009 16:41:27 +0200 (CEST)
+Received: from cameurexb01.EUROPE.ROOT.PRI ([193.128.72.68])
+	by rly47d.srv.mailcontrol.com (MailControl) with ESMTP id n69EfPnY017805
+	for <zsh-workers@sunsite.dk>; Thu, 9 Jul 2009 15:41:25 +0100
+Received: from news01 ([10.99.50.25]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.3959);
+	 Thu, 9 Jul 2009 15:41:24 +0100
+Date: Thu, 9 Jul 2009 15:41:24 +0100
+From: Peter Stephenson <pws@csr.com>
+To: zsh-workers@sunsite.dk
+Subject: Re: bug: $? after empty command
+Message-ID: <20090709154124.2cd2a227@news01>
+In-Reply-To: <loom.20090709T130223-845@post.gmane.org>
+References: <loom.20090709T130223-845@post.gmane.org>
+Organization: CSR
+X-Mailer: Claws Mail 3.5.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 09 Jul 2009 14:41:24.0766 (UTC) FILETIME=[5580E3E0:01CA00A3]
+X-Scanned-By: MailControl A-09-20-00 (www.mailcontrol.com) on 10.68.0.157
+X-Virus-Scanned: ClamAV 0.94.2/9551/Thu Jul  9 15:22:08 2009 on bifrost
+X-Virus-Status: Clean
+
+On Thu, 9 Jul 2009 13:12:20 +0000 (UTC)
+Eric Blake <ebb9@byu.net> wrote:
+> POSIX requires that the execution of an empty command change $? to 0, as shown
+> here with bash:
+> 
+> $ zsh -c 'foo=; false; $foo; echo $?'
+> 1
+
+I'm not aware that that's deliberate shell behaviour, and indeed I
+wouldn't have expected it.  It *is* deliberate behaviour that the status is
+not reset simply by hitting return at the interactive prompt, but that's
+actually a different issue, not affected by the following.
+
+The fix for this is quite subtle because of the case
+
+  zsh -c 'false; $(exit 3); echo $?'
+
+which should print 3, but I think I've finally found a way that handles
+both.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.165
+diff -u -r1.165 exec.c
+--- Src/exec.c	15 Mar 2009 01:04:50 -0000	1.165
++++ Src/exec.c	9 Jul 2009 14:38:41 -0000
+@@ -151,6 +151,15 @@
+ /**/
+ int cmdoutval;
+ 
++/*
++ * This is set by an exiting $(...) substitution to indicate we need
++ * to retain the status.  We initialize it to zero if we think we need
++ * to reset the status for a command.
++ */
++
++/**/
++int use_cmdoutval;
++
+ /* The context in which a shell function is called, see SFC_* in zsh.h. */ 
+ 
+ /**/
+@@ -2262,6 +2271,14 @@
+      */
+     if (!args && varspc)
+ 	lastval = errflag ? errflag : cmdoutval;
++    /*
++     * If there are arguments, we should reset the status for the
++     * command before execution---unless we are using the result of a
++     * command substitution, which will be indicated by setting
++     * use_cmdoutval to 1.  We haven't kicked those off yet, so
++     * there's no race.
++     */
++    use_cmdoutval = !args;
+ 
+     for (i = 0; i < 10; i++) {
+ 	save[i] = -2;
+@@ -2478,7 +2495,12 @@
+ 		    lastval = 0;
+ 		    return;
+ 		} else {
+-		    cmdoutval = lastval;
++		    /*
++		     * No arguments.  Reset the status if there were
++		     * arguments before and no command substitution
++		     * has provided a status.
++		     */
++		    cmdoutval = use_cmdoutval ? lastval : 0;
+ 		    if (varspc)
+ 			addvars(state, varspc, 0);
+ 		    if (errflag)
+@@ -4674,6 +4696,7 @@
+     es->badcshglob = badcshglob;
+     es->cmdoutpid = cmdoutpid;
+     es->cmdoutval = cmdoutval;
++    es->use_cmdoutval = use_cmdoutval;
+     es->trap_return = trap_return;
+     es->trap_state = trap_state;
+     es->trapisfunc = trapisfunc;
+@@ -4704,6 +4727,7 @@
+     badcshglob = exstack->badcshglob;
+     cmdoutpid = exstack->cmdoutpid;
+     cmdoutval = exstack->cmdoutval;
++    use_cmdoutval = exstack->use_cmdoutval;
+     trap_return = exstack->trap_return;
+     trap_state = exstack->trap_state;
+     trapisfunc = exstack->trapisfunc;
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.54
+diff -u -r1.54 signals.c
+--- Src/signals.c	11 Feb 2009 20:42:16 -0000	1.54
++++ Src/signals.c	9 Jul 2009 14:38:41 -0000
+@@ -494,6 +494,7 @@
+ 			*procsubval = (0200 | WTERMSIG(status));
+ 		    else
+ 			*procsubval = WEXITSTATUS(status);
++		    use_cmdoutval = 1;
+ 		    get_usage();
+ 		    cont = 1;
+ 		    break;
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.158
+diff -u -r1.158 zsh.h
+--- Src/zsh.h	2 Jul 2009 13:48:36 -0000	1.158
++++ Src/zsh.h	9 Jul 2009 14:38:41 -0000
+@@ -930,6 +930,7 @@
+     int badcshglob;
+     pid_t cmdoutpid;
+     int cmdoutval;
++    int use_cmdoutval;
+     int trap_return;
+     int trap_state;
+     int trapisfunc;
+Index: Test/A01grammar.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/A01grammar.ztst,v
+retrieving revision 1.22
+diff -u -r1.22 A01grammar.ztst
+--- Test/A01grammar.ztst	6 Jul 2009 20:44:29 -0000	1.22
++++ Test/A01grammar.ztst	9 Jul 2009 14:38:41 -0000
+@@ -23,6 +23,10 @@
+   true | false
+ 1:Exit status of pipeline with builtins (false)
+ 
++  false
++  $nonexistent_variable
++0:Executing command that evaluates to empty resets status
++
+   fn() { local foo; read foo; print $foo; }
+   coproc fn
+   print -p coproc test output
+
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+

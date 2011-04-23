@@ -1,0 +1,214 @@
+From zsh-workers-return-15291-mason-zsh=primenet.com.au@sunsite.dk Fri Jul 06 18:09:27 2001
+Return-Path: <zsh-workers-return-15291-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5957 invoked from network); 6 Jul 2001 18:09:25 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 6 Jul 2001 18:09:25 -0000
+Received: (qmail 22702 invoked by alias); 6 Jul 2001 18:08:22 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15291
+Received: (qmail 22683 invoked from network); 6 Jul 2001 18:08:21 -0000
+Message-ID: <Tc0a88d015496129c8d@mailsweeper01.cambridgesiliconradio.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: 1.1: fix bug assigning to scalar in math
+Date: Fri, 06 Jul 2001 19:08:50 +0100
+From: Peter Stephenson <pws@csr.com>
+
+This is supposed to fix the bug that unconditional assignnment to a scalar
+in math mode fails if the scalar contains a string math mode doesn't like.
+
+It makes the math stack 100 words longer during each evaluation of an
+expression, so I was toying with turning the stack into a linked list
+instead of a fixed array of 100 structures.  However, that is likely to
+have an adverse effect on execution time, whereas this ought to be
+relatively benign.  So I haven't decided.
+
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.9
+diff -u -r1.9 math.c
+--- Src/math.c	2001/04/20 06:13:36	1.9
++++ Src/math.c	2001/07/06 18:04:29
+@@ -470,13 +470,14 @@
+ struct mathvalue {
+     char *lval;
+     mnumber val;
++    int getme;
+ };
+ 
+ static struct mathvalue *stack;
+ 
+ /**/
+ static void
+-push(mnumber val, char *lval)
++push(mnumber val, char *lval, int getme)
+ {
+     if (sp == STACKSZ - 1)
+ 	zerr("stack overflow", NULL, 0);
+@@ -484,8 +485,22 @@
+ 	sp++;
+     stack[sp].val = val;
+     stack[sp].lval = lval;
++    stack[sp].getme = getme;
+ }
+ 
++/**/
++static mnumber
++pop(int noget)
++{
++    struct mathvalue *mv = stack+sp;
++
++    if (mv->getme && !noget) {
++	mv->val = getnparam(mv->lval);
++	mv->getme = 0;
++    }
++    sp--;
++    return mv->val;
++}
+ 
+ /**/
+ static mnumber
+@@ -615,8 +630,8 @@
+     if (tp & (OP_A2|OP_A2IR|OP_A2IO|OP_E2|OP_E2IO)) {
+ 	/* Make sure anyone seeing this message reports it. */
+ 	DPUTS(sp < 1, "BUG: math: not enough wallabies in outback.");
+-	b = stack[sp--].val;
+-	a = stack[sp--].val;
++	b = pop(0);
++	a = pop(what == EQ);
+ 
+ 	if (tp & (OP_A2IO|OP_E2IO)) {
+ 	    /* coerce to integers */
+@@ -785,13 +800,17 @@
+ 	}
+ 	if (tp & (OP_E2|OP_E2IO)) {
+ 	    lv = stack[sp+1].lval;
+-	    push(setvar(lv,c), lv);
++	    push(setvar(lv,c), lv, 0);
+ 	} else
+-	    push(c,NULL);
++	    push(c,NULL, 0);
+ 	return;
+     }
+ 
+     spval = &stack[sp].val;
++    if (stack[sp].getme) {
++	*spval = getnparam(stack[sp].lval);
++	stack[sp].getme = 0;
++    }
+     switch (what) {
+     case NOT:
+ 	if (spval->type & MN_FLOAT) {
+@@ -837,11 +856,11 @@
+ 	break;
+     case QUEST:
+ 	DPUTS(sp < 2, "BUG: math: three shall be the number of the counting.");
+-	c = stack[sp--].val;
+-	b = stack[sp--].val;
+-	a = stack[sp--].val;
++	c = pop(0);
++	b = pop(0);
++	a = pop(0);
+ 	/* b and c can stay different types in this case. */
+-	push(((a.type & MN_FLOAT) ? a.u.d : a.u.l) ? b : c, NULL);
++	push(((a.type & MN_FLOAT) ? a.u.d : a.u.l) ? b : c, NULL, 0);
+ 	break;
+     case COLON:
+ 	zerr("':' without '?'", NULL, 0);
+@@ -872,7 +891,13 @@
+ bop(int tk)
+ {
+     mnumber *spval = &stack[sp].val;
+-    int tst = (spval->type & MN_FLOAT) ? (zlong)spval->u.d : spval->u.l; 
++    int tst;
++
++    if (stack[sp].getme) {
++	*spval = getnparam(stack[sp].lval);
++	stack[sp].getme = 0;
++    }
++    tst = (spval->type & MN_FLOAT) ? (zlong)spval->u.d : spval->u.l; 
+ 
+     switch (tk) {
+     case DAND:
+@@ -938,7 +963,15 @@
+     DPUTS(!errflag && sp,
+ 	  "BUG: math: wallabies roaming too freely in outback");
+ 
+-    ret = stack[0].val;
++    if (errflag) {
++	ret.type = MN_INTEGER;
++	ret.u.l = errflag;
++    } else {
++	if (stack[0].getme)
++	    ret = getnparam(stack[0].lval);
++	else
++	    ret = stack[0].val;
++    }
+ 
+     if (--mlevel) {
+ 	lastbase = xlastbase;
+@@ -1056,16 +1089,16 @@
+ 	    return;
+ 	switch (mtok) {
+ 	case NUM:
+-	    push(yyval, NULL);
++	    push(yyval, NULL, 0);
+ 	    break;
+ 	case ID:
+-	    push((noeval ? zero_mnumber : getnparam(yylval)), yylval);
++	    push(zero_mnumber, yylval, !noeval);
+ 	    break;
+ 	case CID:
+-	    push((noeval ? zero_mnumber : getcvar(yylval)), yylval);
++	    push((noeval ? zero_mnumber : getcvar(yylval)), yylval, 0);
+ 	    break;
+ 	case FUNC:
+-	    push((noeval ? zero_mnumber : callmathfunc(yylval)), yylval);
++	    push((noeval ? zero_mnumber : callmathfunc(yylval)), yylval, 0);
+ 	    break;
+ 	case M_INPAR:
+ 	    mathparse(TOPPREC);
+Index: Test/C01arith.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/C01arith.ztst,v
+retrieving revision 1.1
+diff -u -r1.1 C01arith.ztst
+--- Test/C01arith.ztst	2001/04/02 12:32:11	1.1
++++ Test/C01arith.ztst	2001/07/06 18:05:36
+@@ -88,3 +88,13 @@
+   print ${(t)newarray} ${#newarray} ${newarray[1]}
+ 0:setting array elements in math context
+ >array 1 2
++
++  print $(( 13 = 42 ))
++1:bad lvalue
++?ZTST_execchunk:2: lvalue required
++
++  x=/bar
++  (( x = 32 ))
++  print $x
++0:assigning to scalar which contains non-math string
++>32
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

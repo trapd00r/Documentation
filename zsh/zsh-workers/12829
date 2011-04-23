@@ -1,0 +1,285 @@
+From zsh-workers-return-12829-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Sep 18 06:42:31 2000
+Return-Path: <zsh-workers-return-12829-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6945 invoked from network); 18 Sep 2000 06:41:19 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Sep 2000 06:41:19 -0000
+Received: (qmail 10831 invoked by alias); 18 Sep 2000 06:40:42 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12829
+Received: (qmail 10824 invoked from network); 18 Sep 2000 06:40:40 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000918063956.ZM24783@candle.brasslantern.com>
+Date: Mon, 18 Sep 2000 06:39:56 +0000
+In-Reply-To: <20000918000915.B6793@dman.com>
+Comments: In reply to Clint Adams <schizo@debian.org>
+        "PATCH: PATH_MAX and mailstat, part II" (Sep 18, 12:09am)
+References: <20000917235109.A6793@dman.com>  <20000918000915.B6793@dman.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Redo a couple of PATH_MAX changes
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Sep 18, 12:09am, Clint Adams wrote:
+} Subject: PATCH: PATH_MAX and mailstat, part II
+}
+} And this makes 'dir' be dynamically allocated in mailstat.
+
+After 12828, utils.c doesn't compile when MAILDIR_SUPPORT is defined.
+It must have been issuing warnings about prototypes even before that, so
+I can't believe it's a very widely-used [*] feature, but as commited it
+has a structure-access error (->d.name should be ->d_name).
+
+[*] I mistyped that as "wisely-used" twice before getting it right.  The
+sentence would have been true either way ...
+
+The following patch does several things.
+
+* Move dyncat() and tricat() from glob.c to utils.c; they've not been
+  specific to the glob code for some years now.  (Though it may be time
+  to break utils.c up into a couple of files, or move some of the string
+  allocation functions to mem.c where ztrdup() lives.)
+
+* Use dyncat()'s trick of remembering the lengths and using strcpy()
+  [rather than strcat()] in tricat() and zhtricat().  Also use size_t
+  rather than int.
+
+* Use VARARR() in sourcehome().  No need for a malloc/free, we can find
+  the size in advance and we don't need to reallocate.
+
+* Use appstr() rather than zhtricat() in mailstat(), because it does a
+  realloc() -- we're always sticking different similar-length tails on
+  the same head, so there's no reason to allocate and copy the head
+  every time around the nested loops.
+
+I'm certain we can replace all uses of PATH_MAX with one of VARARR(),
+tricat(), zhtricat(), or ztrdup()+appstr().  The point is to analyze the
+way the buffer is used and pick the best of those alternatives, not just
+to pick one and use it everywhere.
+
+Index: Src/glob.c
+===================================================================
+@@ -1661,38 +1661,6 @@
+     return ret;
+ }
+ 
+-/* concatenate s1 and s2 in dynamically allocated buffer */
+-
+-/**/
+-mod_export char *
+-dyncat(char *s1, char *s2)
+-{
+-    /* This version always uses space from the current heap. */
+-    char *ptr;
+-    int l1 = strlen(s1);
+-
+-    ptr = (char *)zhalloc(l1 + strlen(s2) + 1);
+-    strcpy(ptr, s1);
+-    strcpy(ptr + l1, s2);
+-    return ptr;
+-}
+-
+-/* concatenate s1, s2, and s3 in dynamically allocated buffer */
+-
+-/**/
+-mod_export char *
+-tricat(char const *s1, char const *s2, char const *s3)
+-{
+-    /* This version always uses permanently-allocated space. */
+-    char *ptr;
+-
+-    ptr = (char *)zalloc(strlen(s1) + strlen(s2) + strlen(s3) + 1);
+-    strcpy(ptr, s1);
+-    strcat(ptr, s2);
+-    strcat(ptr, s3);
+-    return ptr;
+-}
+-
+ /* brace expansion */
+ 
+ /**/
+Index: Src/init.c
+===================================================================
+@@ -1020,22 +1020,18 @@
+ void
+ sourcehome(char *s)
+ {
+-    char *buf;
+     char *h;
+ 
+     if (emulation == EMULATE_SH || emulation == EMULATE_KSH ||
+ 	!(h = getsparam("ZDOTDIR")))
+ 	h = home;
+-/* Let source() complain if it's too long */
+-#if 0
+-    if (strlen(h) + strlen(s) + 1 >= PATH_MAX) {
+-	zerr("path too long: %s", s, 0);
+-	return;
++
++    {
++	/* Let source() complain if path is too long */
++	VARARR(char, buf, strlen(h) + strlen(s) + 2);
++	sprintf(buf, "%s/%s", h, s);
++	source(buf);
+     }
+-#endif
+-    buf = tricat(h, "/", s);
+-    source(buf);
+-    zsfree(buf);
+ }
+ 
+ /**/
+Index: Src/utils.c
+===================================================================
+@@ -3469,21 +3469,56 @@
+     return strcat(realloc(base, strlen(base) + strlen(append) + 1), append);
+ }
+ 
++/* concatenate s1, s2, and s3 in dynamically allocated buffer */
++
++/**/
++mod_export char *
++tricat(char const *s1, char const *s2, char const *s3)
++{
++    /* This version always uses permanently-allocated space. */
++    char *ptr;
++    size_t l1 = strlen(s1);
++    size_t l2 = strlen(s2);
++
++    ptr = (char *)zalloc(l1 + l2 + strlen(s3) + 1);
++    strcpy(ptr, s1);
++    strcpy(ptr + l1, s2);
++    strcpy(ptr + l1 + l2, s3);
++    return ptr;
++}
++
+ /**/
+ mod_export char *
+ zhtricat(char const *s1, char const *s2, char const *s3)
+ {
+     char *ptr;
++    size_t l1 = strlen(s1);
++    size_t l2 = strlen(s2);
+     
+-    ptr = (char *)zhalloc(strlen(s1) + strlen(s2) + strlen(s3) + 1);
++    ptr = (char *)zhalloc(l1 + l2 + strlen(s3) + 1);
+     strcpy(ptr, s1);
+-    strcat(ptr, s2);
+-    strcat(ptr, s3);
++    strcpy(ptr + l1, s2);
++    strcpy(ptr + l1 + l2, s3);
+     return ptr;
+ }
+ 
++/* concatenate s1 and s2 in dynamically allocated buffer */
+ 
+ /**/
++mod_export char *
++dyncat(char *s1, char *s2)
++{
++    /* This version always uses space from the current heap. */
++    char *ptr;
++    size_t l1 = strlen(s1);
++
++    ptr = (char *)zhalloc(l1 + strlen(s2) + 1);
++    strcpy(ptr, s1);
++    strcpy(ptr + l1, s2);
++    return ptr;
++}
++
++/**/
+ static int
+ upchdir(int n)
+ {
+@@ -3782,6 +3817,8 @@
+  *
+  *     This is good enough for most mail-checking applications.
+  */
++
++/**/
+ int
+ mailstat(char *path, struct stat *st)
+ {
+@@ -3789,9 +3826,10 @@
+        struct                  dirent *fn;
+        struct stat             st_ret, st_tmp;
+        static struct stat      st_new_last, st_ret_last;
+-       char                    *dir, *file;
++       char                    *dir, *file = 0;
+        int                     i;
+        time_t                  atime = 0, mtime = 0;
++       size_t                  plen = strlen(path), dlen;
+ 
+        /* First see if it's a directory. */
+        if ((i = stat(path, st)) != 0 || !S_ISDIR(st->st_mode))
+@@ -3805,17 +3843,19 @@
+        st_ret.st_mode  |= S_IFREG;
+ 
+        /* See if cur/ is present */
+-       dir = dyncat(path, "/cur");
++       dir = appstr(ztrdup(path), "/cur");
+        if (stat(dir, &st_tmp) || !S_ISDIR(st_tmp.st_mode)) return 0;
+        st_ret.st_atime = st_tmp.st_atime;
+ 
+        /* See if tmp/ is present */
+-       dir = dyncat(path, "/tmp");
++       dir[plen] = 0;
++       dir = appstr(dir, "/tmp");
+        if (stat(dir, &st_tmp) || !S_ISDIR(st_tmp.st_mode)) return 0;
+        st_ret.st_mtime = st_tmp.st_mtime;
+ 
+        /* And new/ */
+-       dir = dyncat(path, "/new");
++       dir[plen] = 0;
++       dir = appstr(dir, "/new");
+        if (stat(dir, &st_tmp) || !S_ISDIR(st_tmp.st_mode)) return 0;
+        st_ret.st_mtime = st_tmp.st_mtime;
+ 
+@@ -3831,14 +3871,23 @@
+ 
+        /* Loop over new/ and cur/ */
+        for (i = 0; i < 2; i++) {
+-	   dir = tricat(path, "/", i ? "cur" : "new");
+-	   if ((dd = opendir(dir)) == NULL)
++	   dir[plen] = 0;
++	   dir = appstr(dir, i ? "/cur" : "/new");
++	   if ((dd = opendir(dir)) == NULL) {
++	       zsfree(file);
++	       zsfree(dir);
+ 	       return 0;
++	   }
++	   dlen = strlen(dir) + 1; /* include the "/" */
+ 	   while ((fn = readdir(dd)) != NULL) {
+ 	       if (fn->d_name[0] == '.')
+ 		   continue;
+-
+-	       file = zhtricat(dir, "/", fn->d.name);
++	       if (file) {
++		   file[dlen] = 0;
++		   file = appstr(file, fn->d_name);
++	       } else {
++		   file = tricat(dir, "/", fn->d_name);
++	       }
+ 	       if (stat(file, &st_tmp) != 0)
+ 		   continue;
+ 	       st_ret.st_size += st_tmp.st_size;
+@@ -3851,6 +3900,8 @@
+ 	   }
+ 	   closedir(dd);
+        }
++       zsfree(file);
++       zsfree(dir);
+ 
+        if (atime) st_ret.st_atime = atime;
+        if (mtime) st_ret.st_mtime = mtime;
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

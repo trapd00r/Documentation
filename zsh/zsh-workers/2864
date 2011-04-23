@@ -1,0 +1,184 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Mon Feb 03 07:53:57 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 17599 invoked from network); 3 Feb 1997 07:53:55 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 3 Feb 1997 07:53:55 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id CAA27180; Mon, 3 Feb 1997 02:36:46 -0500 (EST)
+Resent-Date: Mon, 3 Feb 1997 02:36:46 -0500 (EST)
+Message-Id: <199702030738.XAA11065@bebop.clari.net>
+To: schaefer@nbn.com
+Cc: zsh-workers@math.gatech.edu
+Subject: Re: hist_strip_spaces for 3.0.3? 
+In-reply-to: schaefer's message of Sun, 02 Feb 1997 22:17:32 -0800.
+	     <970202221733.ZM5271@candle.brasslantern.com> 
+Date: Sun, 02 Feb 1997 23:38:02 -0800
+From: Wayne Davison <wayne@clari.net>
+Resent-Message-ID: <"0Ahbn2.0.ae6.AMPzo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2864
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+"Bart Schaefer" writes:
+> Has anyone redone the hist_strip_spaces patch against 3.0.3-test4?
+
+The following diff appears to work fine for me (though it goes by the
+name hist_reduce_blanks these days).
+
+..wayne..
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/globals.h
+@@ -731,6 +731,7 @@
+     {"histignoredups", 		'h',  0,    0},
+     {"histignorespace", 	'g',  0,    0},
+     {"histnostore", 		0,    0,    0},
++    {"histreduceblanks",	0,    0,    0},
+     {"histverify", 		0,    0,    0},
+     {"hup", 			0,    0,    OPT_EMULATE|OPT_ZSH},
+     {"ignorebraces", 		'I',  0,    OPT_EMULATE|OPT_SH},
+Index: Src/hist.c
+@@ -604,6 +604,53 @@
+ 	histactive = HA_NOINC;
+ }
+ 
++/* compare current line with history entry using only text in words */
++
++/**/
++int
++histcmp(Histent he)
++{
++    int kword, lword;
++    int nwords = chwordpos/2;
++
++    if (nwords != he->nwords)
++	return 1;
++
++    for (kword = 0; kword < 2*nwords; kword += 2)
++	if ((lword = chwords[kword+1]-chwords[kword])
++	    != he->words[kword+1]-he->words[kword] ||
++	    memcmp(he->text+he->words[kword], chline+chwords[kword], lword))
++	    return 1;
++
++    return 0;
++}
++
++/**/
++void
++histreduceblanks(void)
++{
++    int i, len, pos, needblank;
++
++    for (i = 0, len = 0; i < chwordpos; i += 2) {
++	len += chwords[i+1] - chwords[i]
++	     + (i > 0 && chwords[i] > chwords[i-1]);
++    }
++    if (chline[len] == '\0')
++	return;
++
++    for (i = 0, pos = 0; i < chwordpos; i += 2) {
++	len = chwords[i+1] - chwords[i];
++	needblank = (i < chwordpos-2 && chwords[i+2] > chwords[i+1]);
++	if (pos != chwords[i]) {
++	    memcpy(chline + pos, chline + chwords[i], len + needblank);
++	    chwords[i] = pos;
++	    chwords[i+1] = chwords[i] + len;
++	}
++	pos += len + needblank;
++    }
++    chline[pos] = '\0';
++}
++
+ /* say we're done using the history mechanism */
+ 
+ /**/
+@@ -611,7 +658,6 @@
+ hend(void)
+ {
+     int flag, save = 1;
+-    Histent he;
+ 
+     DPUTS(!chline, "BUG: chline is NULL in hend()");
+     if (histactive & (HA_NOSTORE|HA_NOINC)) {
+@@ -634,9 +680,7 @@
+ 		*--hptr = '\0';
+ 	    } else
+ 		save = 0;
+-	he = gethistent(curhist - 1);
+ 	if (!*chline || !strcmp(chline, "\n") ||
+-	    (isset(HISTIGNOREDUPS) && he->text && !strcmp(he->text, chline)) ||
+ 	    (isset(HISTIGNORESPACE) && spaceflag))
+ 	    save = 0;
+     }
+@@ -658,15 +702,7 @@
+ 	    zsfree(ptr);
+     }
+     if (save) {
+-	Histent curhistent = gethistent(curhist);
+-	zsfree(curhistent->text);
+-	if (curhistent->nwords)
+-	    zfree(curhistent->words, curhistent->nwords*2*sizeof(short));
+-
+-	curhistent->text = ztrdup(chline);
+-	curhistent->stim = time(NULL);
+-	curhistent->ftim = 0L;
+-	curhistent->flags = 0;
++	Histent he;
+ #ifdef DEBUG
+ 	/* debugging only */
+ 	if (chwordpos%2) {
+@@ -677,11 +713,37 @@
+ 	/* get rid of pesky \n which we've already nulled out */
+ 	if (!chline[chwords[chwordpos-2]])
+ 	    chwordpos -= 2;
+-	if ((curhistent->nwords = chwordpos/2)) {
+-	    curhistent->words =
+-		(short *)zalloc(curhistent->nwords*2*sizeof(short));
+-	    memcpy(curhistent->words, chwords,
+-		   curhistent->nwords*2*sizeof(short));
++	/* strip superfluous blanks, if desired */
++	if (isset(HISTREDUCEBLANKS))
++	    histreduceblanks();
++	if (isset(HISTIGNOREDUPS) && (he = gethistent(curhist - 1))
++	 && he->text && histcmp(he) == 0) {
++	    /* Don't duplicate history entry, but use the current rather than
++	     * the previous one, in case minor changes were made to it.
++	     */
++	    zsfree(he->text);
++	    he->text = ztrdup(chline);
++	    if (chwordpos)
++		memcpy(he->words, chwords, chwordpos * sizeof(short));
++	    he->stim = time(NULL);	/* set start time */
++	    he->ftim = 0;
++	    curhist--;
++	}
++	else {
++	    Histent curhistent = gethistent(curhist);
++	    zsfree(curhistent->text);
++	    if (curhistent->nwords)
++		zfree(curhistent->words, curhistent->nwords*2*sizeof(short));
++
++	    curhistent->text = ztrdup(chline);
++	    curhistent->stim = time(NULL);
++	    curhistent->ftim = 0L;
++	    curhistent->flags = 0;
++
++	    if ((curhistent->nwords = chwordpos/2)) {
++		curhistent->words = (short *)zalloc(chwordpos * sizeof(short));
++		memcpy(curhistent->words, chwords, chwordpos * sizeof(short));
++	    }
+ 	}
+     } else
+ 	curhist--;
+Index: Src/zsh.h
+@@ -1097,6 +1097,7 @@
+     HISTIGNOREDUPS,
+     HISTIGNORESPACE,
+     HISTNOSTORE,
++    HISTREDUCEBLANKS,
+     HISTVERIFY,
+     HUP,
+     IGNOREBRACES,
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

@@ -1,0 +1,179 @@
+From zsh-workers-return-7929-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Sep 18 20:00:13 1999
+Return-Path: <zsh-workers-return-7929-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11997 invoked from network); 18 Sep 1999 20:00:11 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Sep 1999 20:00:11 -0000
+Received: (qmail 19492 invoked by alias); 18 Sep 1999 19:59:58 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7929
+Received: (qmail 19485 invoked from network); 18 Sep 1999 19:59:54 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <990918195949.ZM6493@candle.brasslantern.com>
+Date: Sat, 18 Sep 1999 19:59:48 +0000
+In-Reply-To: <19990916173409.A17932@thelonious.new.ox.ac.uk>
+Comments: In reply to Adam Spiers <adam@thelonious.new.ox.ac.uk>
+        "Re: simulation of dabbrev-expand" (Sep 16,  5:34pm)
+References: <19990909133913.A30055@thelonious.new.ox.ac.uk> 
+	<990909171104.ZM15814@candle.brasslantern.com> 
+	<19990916173409.A17932@thelonious.new.ox.ac.uk> 
+	<19990917224455.C3509@thelonious.new.ox.ac.uk>
+In-Reply-To: <19990917224455.C3509@thelonious.new.ox.ac.uk>
+Comments: In reply to Adam Spiers <adam@thelonious.new.ox.ac.uk>
+        "Re: simulation of dabbrev-expand" (Sep 17, 10:44pm)
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk, Adam Spiers <adam@spiers.net>
+Subject: PATCH: 3.1.6-pws-4: Re: simulation of dabbrev-expand
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Sep 16,  5:34pm, Adam Spiers wrote:
+} Subject: Re: simulation of dabbrev-expand
+}
+} Bart Schaefer (schaefer@candle.brasslantern.com) wrote:
+} > On Sep 9,  1:39pm, Adam Spiers wrote:
+} > } Subject: simulation of dabbrev-expand
+} > }
+} > } It appears to always work fine when grabbing words from history added
+} > } by the current shell, but either doesn't work at all, or very
+} > } unreliably when you want to grab a word from the saved history.
+
+I'm finally able to reproduce something like this.
+
+}   % history 1 | grep ' /' | wc -l
+}       650
+}   % less /<>
+}   % less /usr/share/zsh/functions/_man
+}   zsh: do you wish to see all 51 possibilities? 
+
+I just tried >>ing the histories from five different xterms into a single
+file and then loading them all into a fresh zsh with "fc -R".  Here's what
+I get:
+
+zagzig<2996> history 1 | grep ' /' | wc -l             
+    110
+zagzig<2997> less /tmp/histdump2
+zsh: do you wish to see all 138 possibilities? 
+
+If I say "y" at this point I get a list with a lot of duplicate entries,
+but it certainly seems to span all the history.
+
+If I next setopt the complete collection of options that you quoted:
+
+}   cshjunkiehistory
+}   extendedhistory
+}   histallowclobber
+}   histexpiredupsfirst
+}   histignorealldups
+}   histignoredups
+}   histignorespace
+}   histreduceblanks
+}   histverify
+}   incappendhistory
+
+then suddenly "compgen -H" fails to search back farther than the point at
+which I executed the "setopts", and a few commands later it's searching
+only a couple of lines back.
+
+The problem is in zle_tricky.c's use of quietgethist().  With Wayne's new
+stuff, the history list may have holes in it, but makecomplistflags() is
+trying to iterate over the history by calling quietgethist() on consecutive
+integers until it returns nothing -- which happens whenever it encounters
+such a hole.
+
+I think the patch below should take care of this part, but it's possible
+that I've done more than was necessary; in particular, the hist.c hunk
+may not be needed: it might suffice to call the original quietgethist()
+before the loop in makecomplistflags().  It's also possible that calling
+up_histent() N times is the wrong thing to do:  Should the number passed
+to compgen -H specify the number of history entries searched or the range
+of history numbers searched?  I've interpreted it as the former.
+
+I haven't done an inventory looking for other such misuses of the gethist
+family of functions, but perhaps Wayne or someone else very familiar with
+them should do so.
+
+On Sep 17, 10:44pm, Adam Spiers wrote:
+} Subject: Re: simulation of dabbrev-expand
+}
+} How can I ensure that there are no duplicate words in the list of
+} matches?
+
+The completion system *should* be handling this for you, but I'm going to
+leave that bug to Sven, as I don't feel like understanding the completion
+system quite that deeply today.  (I actually seem to be having much better
+luck with that, too, after the patch below, but I'm mystified as to why.)
+
+Index: Src/hist.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/hist.c,v
+retrieving revision 1.15
+diff -u -r1.15 hist.c
+--- hist.c	1999/08/30 15:34:03	1.15
++++ hist.c	1999/09/18 19:21:49
+@@ -1435,14 +1435,21 @@
+ 
+ /**/
+ Histent
+-quietgethist(int ev)
++quietgethistent(int ev, int nearmatch)
+ {
+     if (ev == curhist && (histactive & HA_ACTIVE)) {
+ 	curline.text = chline;
+ 	curline.nwords = chwordpos/2;
+ 	curline.words = chwords;
+     }
+-    return gethistent(ev, GETHIST_EXACT);
++    return gethistent(ev, nearmatch);
++}
++
++/**/
++Histent
++quietgethist(int ev)
++{
++    return quietgethistent(ev, GETHIST_EXACT);
+ }
+ 
+ /**/
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/Zle/zle_tricky.c,v
+retrieving revision 1.157
+diff -u -r1.157 zle_tricky.c
+--- zle_tricky.c	1999/09/18 07:20:15	1.157
++++ zle_tricky.c	1999/09/18 19:32:19
+@@ -6723,8 +6723,8 @@
+ 	/* We have a pattern to take things from the history. */
+ 	Patprog pprogc = NULL;
+ 	char *e, *h, hpatsav;
+-	Histent he;
+ 	int i = addhistnum(curhist,-1,HIST_FOREIGN), n = cc->hnum;
++	Histent he = quietgethistent(i, GETHIST_UPWARD);
+ 
+ 	/* Parse the pattern, if it isn't the null string. */
+ 	if (*(cc->hpat)) {
+@@ -6738,7 +6738,7 @@
+ 	    n = -1;
+ 
+ 	/* Now search the history. */
+-	while (n-- && (he = quietgethist(i--))) {
++	while (n-- && he) {
+ 	    int iwords;
+ 	    for (iwords = 0; iwords < he->nwords; iwords++) {
+ 		h = he->text + he->words[iwords*2];
+@@ -6754,6 +6754,7 @@
+ 		if (hpatsav)
+ 		    *e = hpatsav;
+ 	    }
++	    he = up_histent(he);
+ 	}
+     }
+     if ((t = cc->mask & (CC_ARRAYS | CC_INTVARS | CC_ENVVARS | CC_SCALARS |
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

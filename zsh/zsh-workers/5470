@@ -1,0 +1,153 @@
+From zsh-workers-return-5470-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Feb 22 12:37:24 1999
+Return-Path: <zsh-workers-return-5470-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23008 invoked from network); 22 Feb 1999 12:37:22 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 22 Feb 1999 12:37:22 -0000
+Received: (qmail 11925 invoked by alias); 22 Feb 1999 12:36:55 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5470
+Received: (qmail 11917 invoked from network); 22 Feb 1999 12:36:53 -0000
+Date: Mon, 22 Feb 1999 13:36:07 +0100 (MET)
+Message-Id: <199902221236.NAA21789@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Fri, 19 Feb 1999 17:44:58 +0100
+Subject: PATCH: Re: Bug in guess what?
+
+
+Peter Stephenson wrote:
+
+> I think I've got all the patches to date (I certainly hope so), but I'm
+> still getting problems with the following completion:
+> 
+> % _foo() { [[ -string '=' ]] && complist -f; }
+> % defcomp _foo foo
+> % foo bar=^D
+> 
+> now pauses for a long time, then asks if I want to see its list of 1931
+> completions, which I don't much but they seem to be external commands
+> (except that there are 2757 of those and I get them much more quickly).
+> -class does the same.
+
+The function that does the prefix-checking got the string from the
+line tokenize so that there was no `='. Then the code went back to
+makecomplist() which continued by trying the next global list of match
+specs. Unfortunately it hadn't copied the string it originally got and 
+the one from the first attempt had now been untokenized. The function
+for condition then got the string with a `\' before the `=', matched
+the `=' and removed anything up to but not including the `=' from the
+string. Then the code that handles completion of strings that begin
+with an `=' was used which started to collect command names. After a
+`=' you get fewer since only command names and aliases are used (no
+reserved words, shell functions, builtins, and - with autocd and
+cdablevars - parameters). The slower processing is due to one call to
+findcmd() per hashtable entry in addmatch() only if that function
+finds a path to a command it is accepted (so this is another reason
+for the smaller number of matches). But since this is used when
+expanding `=foo', I think we better not change it in the completion
+code.
+
+Bye
+ Sven
+
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Mon Feb 22 12:01:26 1999
++++ Src/Zle/comp1.c	Mon Feb 22 13:05:01 1999
+@@ -52,7 +52,7 @@
+ void (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, char *, char *, char *, int, int, Cmatcher, char **));
+ 
+ /**/
+-char *(*comp_strptr) _((int*,int*));
++char *(*comp_strptr) _((int*, int*, int));
+ 
+ /**/
+ int (*getcpatptr) _((char *, int, char *, int));
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Mon Feb 22 12:01:26 1999
++++ Src/Zle/compctl.c	Mon Feb 22 13:07:22 1999
+@@ -2049,8 +2049,8 @@
+ 	    zerr("zle not loaded, zle condition not available", NULL, 0);
+ 	    return 1;
+ 	}
+-	i = getcpatptr(comp_strptr(&ipl, NULL), i, s, id);
+-	if (i != -1) {
++	i = getcpatptr(comp_strptr(&ipl, NULL, 1), i, s, id);
++	if (i != -1 && i >= ipl) {
+ 	    ignore_prefix(i - ipl);
+ 	    return 1;
+ 	}
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Mon Feb 22 12:01:28 1999
++++ Src/Zle/zle_tricky.c	Mon Feb 22 13:05:51 1999
+@@ -5011,6 +5011,7 @@
+ {
+     struct cmlist ms;
+     Cmlist m;
++    char *os = s;
+ 
+     /* We build a copy of the list of matchers to use to make sure that this
+      * works even if a shell function called from the completion code changes
+@@ -5064,6 +5065,7 @@
+ 	ccused = newlinklist();
+ 	ccstack = newlinklist();
+ 
++	s = dupstring(os);
+ 	if (compfunc)
+ 	    callcompfunc(s, compfunc);
+ 	else
+@@ -5130,7 +5132,7 @@
+ 
+ /**/
+ char *
+-comp_str(int *ipl, int *pl)
++comp_str(int *ipl, int *pl, int untok)
+ {
+     char *p = dupstring(compprefix);
+     char *s = dupstring(compsuffix);
+@@ -5138,12 +5140,14 @@
+     char *str;
+     int lp, ls, lip;
+ 
+-    ctokenize(p);
+-    remnulargs(p);
+-    ctokenize(s);
+-    remnulargs(s);
+-    ctokenize(ip);
+-    remnulargs(ip);
++    if (!untok) {
++	ctokenize(p);
++	remnulargs(p);
++	ctokenize(s);
++	remnulargs(s);
++	ctokenize(ip);
++	remnulargs(ip);
++    }
+     ls = strlen(s);
+     lip = strlen(ip);
+     lp = strlen(p);
+@@ -5167,7 +5171,7 @@
+     SWITCHHEAPS(compheap) {
+ 	HEAPALLOC {
+ 	    int ooffs = offs, lip, lp;
+-	    char *str = comp_str(&lip, &lp);
++	    char *str = comp_str(&lip, &lp, 0);
+ 
+ 	    offs = lip + lp;
+ 	    cc->refc++;
+@@ -5199,7 +5203,7 @@
+     SWITCHHEAPS(compheap) {
+ 	HEAPALLOC {
+ 	    int ooffs = offs, lip, lp;
+-	    char *str = comp_str(&lip, &lp), *t;
++	    char *str = comp_str(&lip, &lp, 0), *t;
+ 	    char *os = cmdstr, **ow = clwords, **p, **q;
+ 	    int on = clwnum, op = clwpos;
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

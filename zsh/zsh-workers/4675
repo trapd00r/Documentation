@@ -1,0 +1,92 @@
+From zsh-workers-request@math.gatech.edu Sat Nov 21 21:35:25 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13761 invoked from network); 21 Nov 1998 21:35:24 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 21 Nov 1998 21:35:24 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id QAA12852;
+	Sat, 21 Nov 1998 16:34:47 -0500 (EST)
+Resent-Date: Sat, 21 Nov 1998 16:34:47 -0500 (EST)
+From: Phil Pennock <phil@athenaeum.demon.co.uk>
+Message-Id: <199811212137.VAA00979@athenaeum.demon.co.uk>
+Subject: heap memory issues
+To: zsh-workers@math.gatech.edu (Zsh Development Workers)
+Date: Sat, 21 Nov 1998 21:37:59 +0000 (GMT)
+X-Disclaimer-1: Any views expressed in this message, where not explicitly
+X-Disclaimer-2: attributed otherwise, are mine and mine alone.  Such views
+X-Disclaimer-3: do not necessarily coincide with those of any organisation
+X-Disclaimer-4: or company with which I am or have been affiliated.
+X-Phase-of-Moon: The Moon is Waxing Crescent (6% of Full)
+X-Mailer: ELM [version 2.4ME+ PL37 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"rzxBs3.0.l83.s7pLs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4675
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Line numbers are based upon a clean 3.1.5.  All this is Src/mem.c.
+None of it delves into the ZSH_MEM allocators -- it's all heap stuff.
+
+The debugging array h_m is declared to be:
+  static int h_m[1025];
+It seems to be used for tracing the number of allocations of a given
+size; however, with an H_ISIZE == sizeof(long), [assuming 4] then
+scanning mem.c, it's 3/4 unused.  The first 1024/H_ISIZE entries and
+1024 can be filled, the rest will never change from 0.
+
+Also, for 64-bit platforms, might alignment constraints require H_ISIZE
+to be sizeof(long long), or can all of them use 32-bit alignment?  The
+halloc() and hrealloc() functions seem to rely upon H_ISIZE being a
+measure of sufficient alignment for all data-types.
+
+Take a deap breath for the logic here ...
+
+Whilst I haven't tested this, it looks upon reading as though there are
+some problems if hrealloc()ing a memory-block that is larger than
+HEAP_ARENA_SIZE.  This would only manifest itself on an allocation
+larger than about 8176 bytes (varying according to compiler whim).
+These are probably sufficiently rare to not crop up too often.
+In halloc() line 269, we have:
+  n = HEAP_ARENA_SIZE > size ? HEAPSIZE : size + sizeof(*h);
+Then in hrealloc() line 335:
+  zfree(h, HEAPSIZE);
+from a hrealloc(startofhunk, oldverybig, 0) -- the /next/ block checks
+for big sizes, just too late.  Changing this to check for
+(h->used > HEAP_ARENA_SIZE) first would, as it stands, work FOR THIS
+case.  If a previous hrealloc() has gone from greater than
+HEAP_ARENA_SIZE to less than HEAP_ARENA_SIZE then a new arena will have
+been allocated (lines 338-345), so h->used can't be less than
+HEAP_ARENA_SIZE for a big hunk, *BUT* there is the problem that the new
+arena thus allocated will be smaller than HEAP_ARENA_SIZE and the
+zfree(h, HEAPSIZE) in line 269 now frees too much memory.
+
+Um... just re-read the code if that's confusing.
+
+Hrm, lines 314-316 are:
+    DPUTS(!h, "BUG: hrealloc() called for non-heap memory.");
+    DPUTS(h->sp && arena(h) + h->sp->used > p,
+          "BUG: hrealloc() wants to realloc pushed memory");
+If the first DPUTS prints (ie, non-heap memory) then won't this
+dereference a null-pointer?  At least dputs() fflush()s stderr, so we
+see the error message before getting the core dump.  :^)
+
+Lines 318-325 handle reallocating from the middle of an arena  --
+should this do a memset() to 0xff if ZSH_MEM_DEBUG, or is that only for
+memory ranges that extend to the end of an arena?  If so, how about a
+memset() to 0xfe or something?
+
+If I'm right and these are bugs, someone more comfortable with actually
+altering the code might want to write the patches.  But first I want
+Bart to rip holes in my logic and work out my mistakes.  :^)
+
+HTH
+-- 
+--> Phil Pennock ; GAT d- s+:+ a22 C++(++++) UL++++/I+++/S+++/H+ P++@ L+++
+E-@ W(+) N>++ o !K w--- O>+ M V !PS PE Y+ PGP+ t-- 5++ X+ R !tv b++>+++ DI+ D+
+G+ e+ h* r y?
+

@@ -1,0 +1,1030 @@
+From zsh-workers-return-8911-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Dec 06 11:36:52 1999
+Return-Path: <zsh-workers-return-8911-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23640 invoked from network); 6 Dec 1999 11:36:48 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 6 Dec 1999 11:36:48 -0000
+Received: (qmail 26396 invoked by alias); 6 Dec 1999 11:36:37 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8911
+Received: (qmail 26389 invoked from network); 6 Dec 1999 11:36:35 -0000
+Date: Mon, 6 Dec 1999 12:36:33 +0100 (MET)
+Message-Id: <199912061136.MAA05884@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: more styles
+
+
+As promised, this makes some more things configurable with styles,
+mostly on a per-match or per-group basis.
+
+The new (or changed) styles:
+
+- list-packed: a boolean, if set to true for all matches of a group,
+  that group is listed packed, default taken from LIST_PACKED or the
+  value of this style for the `default' tag
+- list-rows-first: well, you know what, but also on a per-group basis
+- accept-exact: generalization of REC_EXACT; if it is set to true for
+  a tag and for that tag an exact match is added, it is accepted
+- last-prompt: this one has only changed; if it is true for *all*
+  matches, the cursor will go back (meaning that you can explicitly
+  switch it off when matches for a certain group are added)
+
+That's it for now. Note that I don't have styles for menu-behaviour or 
+list-max. For the latter, I think this is only really useful to do it
+in a globally and that would mean that the style is just an alias for
+$LISTMAX.
+
+For the menu behaviour: I haven't changed the C-code yet to allow to
+select it on a per-match or per-group basis. It's a bit messy, but
+maybe I'll do it. Without that I think it wouldn't be very useful --
+just as for $LISTMAX. I'm also not yet completely sure how to make
+this work together with menu-selection.
+
+
+Internal changes:
+
+Mostly changes to some $compstate keys:
+
+- list: may now contain the substring `force' to force listing; the
+  force_list key is gone, the replacement is something like:
+
+    compstate[list]='list force'
+
+  I decided to do this because the list key was already used as a list 
+  of keywords and now there are two new ones: `packed' and `rows'. So
+  I saw no reason why the `force' shouldn't be put into it, too.
+- list_max (and $LISTMAX): if the value is negative, the absolute
+  value is taken as the maximum number of lines to list without
+  asking (as you can see, I was thinking about using this for a
+  max-list style)
+- exact: has now a per-match effect; only if one of the matches for
+  which this key is `accept' is exact, then this match will be
+  accepted
+- last_prompt: is now tested per-match and we only go back if it is
+  set for all matches; that seemed sensible, but if yu don't agree we
+  can change it so that it goes back if it is set for at least one
+  match
+- insert: may now be set to the value `automenu-unambiguous'; this is
+  used to say that currently the code will insert only the unambiguous 
+  match, but if the completion is ambiguous, we'll start menu-
+  completion on the next attempt (i.e. it is set to this value if
+  tt(AUTO_MENU) is set and it isn't already about to start menu-
+  completion); again, this will be useful if we make this configurable 
+  with styles, because now we have a way to say that we want to start
+  auto-menu behaviour without having to change tt(AUTO_MENU)
+
+
+Finally one more comment. Now that we have the finer control for the
+grouping stuff it seems silly to have _expand and _approximate use
+their own ad-hoc mechanisms for things like this. Maybe we should
+change/remove the `original', `menu' and `prompt' styles used by
+them. I.e. they just use the tags `corrections' and `original' or
+`expansions', `all-expansion' and `original', respectively and one can 
+then say what one wants to get (and in which order) by using
+_sort_tags and the group-order style. We would probably need one or
+two extra styles then (for some of the weirder things one can do with
+the styles they use now), but I think it would still be nicer to use
+the `normal' mechanisms. We could then also add a `hidden' style used
+for all tags that says if a certain group should not be shown in the
+list (instead of special-casing that for _approximate). I would then
+also change _description to get extra arguments (character-string
+pairs) which would give us a standard way to build descriptions with
+extra `%<char>' sequences.
+
+Bye
+ Sven
+
+diff -u -r oldsrc/Zle/comp.h Src/Zle/comp.h
+--- oldsrc/Zle/comp.h	Mon Dec  6 11:26:19 1999
++++ Src/Zle/comp.h	Mon Dec  6 11:33:43 1999
+@@ -81,6 +81,8 @@
+ #define CGF_HASDL    4		/* has display strings printed on separate lines */
+ #define CGF_UNIQALL  8		/* remove all duplicates */
+ #define CGF_UNIQCON 16		/* remove consecutive duplicates */
++#define CGF_PACKED  32		/* LIST_PACKED for this group */
++#define CGF_ROWS    64		/* LIST_ROWS_FIRST for this group */
+ 
+ /* This is the struct used to hold matches. */
+ 
+@@ -107,15 +109,17 @@
+     int gnum;			/* global number */
+ };
+ 
+-#define CMF_FILE       1	/* this is a file */
+-#define CMF_REMOVE     2	/* remove the suffix */
+-#define CMF_ISPAR      4	/* is paramter expansion */
+-#define CMF_PARBR      8	/* paramter expansion with a brace */
+-#define CMF_PARNEST   16	/* nested paramter expansion */
+-#define CMF_NOLIST    32	/* should not be listed */
+-#define CMF_DISPLINE  64	/* display strings one per line */
+-#define CMF_HIDE     128	/* temporarily hide this one */
+-#define CMF_NOSPACE  256	/* don't add a space */
++#define CMF_FILE     (1<< 0)	/* this is a file */
++#define CMF_REMOVE   (1<< 1)	/* remove the suffix */
++#define CMF_ISPAR    (1<< 2)	/* is paramter expansion */
++#define CMF_PARBR    (1<< 3)	/* paramter expansion with a brace */
++#define CMF_PARNEST  (1<< 4)	/* nested paramter expansion */
++#define CMF_NOLIST   (1<< 5)	/* should not be listed */
++#define CMF_DISPLINE (1<< 6)	/* display strings one per line */
++#define CMF_HIDE     (1<< 7)	/* temporarily hide this one */
++#define CMF_NOSPACE  (1<< 8)	/* don't add a space */
++#define CMF_PACKED   (1<< 9)	/* prefer LIST_PACKED */
++#define CMF_ROWS     (1<<10)	/* prefer LIST_ROWS_FIRST */
+ 
+ /* Stuff for completion matcher control. */
+ 
+@@ -322,43 +326,41 @@
+ #define CP_RESTORE     (1 << CPN_RESTORE)
+ #define CPN_LIST       10
+ #define CP_LIST        (1 << CPN_LIST)
+-#define CPN_FORCELIST  11
+-#define CP_FORCELIST   (1 << CPN_FORCELIST)
+-#define CPN_INSERT     12
++#define CPN_INSERT     11
+ #define CP_INSERT      (1 << CPN_INSERT)
+-#define CPN_EXACT      13
++#define CPN_EXACT      12
+ #define CP_EXACT       (1 << CPN_EXACT)
+-#define CPN_EXACTSTR   14
++#define CPN_EXACTSTR   13
+ #define CP_EXACTSTR    (1 << CPN_EXACTSTR)
+-#define CPN_PATMATCH   15
++#define CPN_PATMATCH   14
+ #define CP_PATMATCH    (1 << CPN_PATMATCH)
+-#define CPN_PATINSERT  16
++#define CPN_PATINSERT  15
+ #define CP_PATINSERT   (1 << CPN_PATINSERT)
+-#define CPN_UNAMBIG    17
++#define CPN_UNAMBIG    16
+ #define CP_UNAMBIG     (1 << CPN_UNAMBIG)
+-#define CPN_UNAMBIGC   18
++#define CPN_UNAMBIGC   17
+ #define CP_UNAMBIGC    (1 << CPN_UNAMBIGC)
+-#define CPN_LISTMAX    19
++#define CPN_LISTMAX    18
+ #define CP_LISTMAX     (1 << CPN_LISTMAX)
+-#define CPN_LASTPROMPT 20
++#define CPN_LASTPROMPT 19
+ #define CP_LASTPROMPT  (1 << CPN_LASTPROMPT)
+-#define CPN_TOEND      21
++#define CPN_TOEND      20
+ #define CP_TOEND       (1 << CPN_TOEND)
+-#define CPN_OLDLIST    22
++#define CPN_OLDLIST    21
+ #define CP_OLDLIST     (1 << CPN_OLDLIST)
+-#define CPN_OLDINS     23
++#define CPN_OLDINS     22
+ #define CP_OLDINS      (1 << CPN_OLDINS)
+-#define CPN_VARED      24
++#define CPN_VARED      23
+ #define CP_VARED       (1 << CPN_VARED)
+-#define CPN_ANMATCHES  25
++#define CPN_ANMATCHES  24
+ #define CP_ANMATCHES   (1 << CPN_ANMATCHES)
+-#define CPN_LISTLINES  26
++#define CPN_LISTLINES  25
+ #define CP_LISTLINES   (1 << CPN_LISTLINES)
+-#define CPN_QUOTES     27
++#define CPN_QUOTES     26
+ #define CP_QUOTES      (1 << CPN_QUOTES)
+ 
+-#define CP_KEYPARAMS   28
+-#define CP_ALLKEYS     ((unsigned int) 0xfffffff)
++#define CP_KEYPARAMS   27
++#define CP_ALLKEYS     ((unsigned int) 0x7ffffff)
+ 
+ /* Hooks. */
+ 
+diff -u -r oldsrc/Zle/compcore.c Src/Zle/compcore.c
+--- oldsrc/Zle/compcore.c	Mon Dec  6 11:26:19 1999
++++ Src/Zle/compcore.c	Mon Dec  6 11:33:44 1999
+@@ -37,7 +37,12 @@
+ /* Flags saying what we have to do with the result. */
+ 
+ /**/
+-int useexact, useline, uselist;
++int useexact, useline, uselist, forcelist, startauto;
++
++/* Non-zero if we should go back to the last prompt. */
++
++/**/
++int dolastprompt;
+ 
+ /* Non-zero if we should keep an old list. */
+ 
+@@ -276,6 +281,8 @@
+ 	hasunqu = 0;
+ 	useline = (lst != COMP_LIST_COMPLETE);
+ 	useexact = isset(RECEXACT);
++	zsfree(compexactstr);
++	compexactstr = ztrdup("");
+ 	uselist = (useline ?
+ 		   ((isset(AUTOLIST) && !isset(BASHAUTOLIST)) ? 
+ 		    (isset(LISTAMBIGUOUS) ? 3 : 2) : 0) : 1);
+@@ -283,14 +290,19 @@
+ 	opm = comppatmatch = ztrdup(useglob ? "*" : "");
+ 	zsfree(comppatinsert);
+ 	comppatinsert = ztrdup("menu");
+-	zsfree(compforcelist);
+-	compforcelist = ztrdup("");
++	forcelist = 0;
+ 	haspattern = 0;
+ 	complistmax = getiparam("LISTMAX");
+ 	zsfree(complastprompt);
+-	complastprompt = ztrdup(((isset(ALWAYSLASTPROMPT) && zmult == 1) ||
+-				(unset(ALWAYSLASTPROMPT) && zmult != 1)) ?
++	complastprompt = ztrdup((dolastprompt =
++				 ((isset(ALWAYSLASTPROMPT) && zmult == 1) ||
++				  (unset(ALWAYSLASTPROMPT) && zmult != 1))) ?
+ 				"yes" : "");
++	zsfree(complist);
++	complist = ztrdup(isset(LISTROWSFIRST) ?
++			  (isset(LISTPACKED) ? "packed rows" : "rows") :
++			  (isset(LISTPACKED) ? "packed" : ""));
++	startauto = isset(AUTOMENU);
+ 	movetoend = ((cs == we || isset(ALWAYSTOEND)) ? 2 : 1);
+ 	showinglist = 0;
+ 	hasmatched = 0;
+@@ -360,7 +372,7 @@
+ 	    menucmp = 0;
+ 	    minfo.cur = NULL;
+ 
+-	    if (compforcelist && *compforcelist && uselist)
++	    if (forcelist)
+ 		showinglist = -2;
+ 	    else
+ 		invalidatelist();
+@@ -378,7 +390,7 @@
+ 		minfo.cur = NULL;
+ 		minfo.asked = 0;
+ 		do_single(m->matches[0]);
+-		if (compforcelist && *compforcelist) {
++		if (forcelist) {
+ 		    if (uselist)
+ 			showinglist = -2;
+ 		    else
+@@ -388,7 +400,7 @@
+ 	    }
+ 	} else {
+ 	    invalidatelist();
+-	    if (compforcelist && *compforcelist)
++	    if (forcelist)
+ 		clearlist = 1;
+ 	    cs = 0;
+ 	    foredel(ll);
+@@ -450,7 +462,7 @@
+ 
+     /* Check if we have to start a menu-completion (via automenu). */
+ 
+-    if (isset(AUTOMENU) && lastambig &&
++    if (startauto && lastambig &&
+ 	(!isset(BASHAUTOLIST) || lastambig == 2))
+ 	usemenu = 2;
+ 
+@@ -495,7 +507,7 @@
+ 	rset = CP_ALLREALS;
+ 	kset = CP_ALLKEYS &
+ 	    ~(CP_PARAMETER | CP_REDIRECT | CP_QUOTE | CP_QUOTING |
+-	      CP_EXACTSTR | CP_FORCELIST | CP_OLDLIST | CP_OLDINS |
++	      CP_EXACTSTR | CP_OLDLIST | CP_OLDINS |
+ 	      (useglob ? 0 : CP_PATMATCH));
+ 	zsfree(compvared);
+ 	if (varedarg) {
+@@ -641,11 +653,20 @@
+ 	case 2: complist = "autolist"; break;
+ 	case 3: complist = "ambiguous"; break;
+ 	}
++	if (isset(LISTPACKED))
++	    complist = dyncat(complist, " packed");
++	if (isset(LISTROWSFIRST))
++	    complist = dyncat(complist, " rows");
++
+ 	complist = ztrdup(complist);
+ 	zsfree(compinsert);
+ 	if (useline) {
+ 	    switch (usemenu) {
+-	    case 0: compinsert = "unambiguous"; break;
++	    case 0:
++		compinsert = (isset(AUTOMENU) ?
++			      "automenu-unambiguous" :
++			      "unambiguous");
++		break;
+ 	    case 1: compinsert = "menu"; break;
+ 	    case 2: compinsert = "automenu"; break;
+ 	    }
+@@ -722,13 +743,14 @@
+ 	    uselist = 3;
+ 	else
+ 	    uselist = 0;
+-
++	forcelist = (complist && strstr(complist, "force"));
+ 	onlyexpl = (complist && strstr(complist, "expl"));
+ 
+ 	if (!compinsert)
+ 	    useline = 0;
+ 	else if (!strcmp(compinsert, "unambig") ||
+-		 !strcmp(compinsert, "unambiguous"))
++		 !strcmp(compinsert, "unambiguous") ||
++		 !strcmp(compinsert, "automenu-unambiguous"))
+ 	    useline = 1, usemenu = 0;
+ 	else if (!strcmp(compinsert, "menu"))
+ 	    useline = 1, usemenu = 1;
+@@ -749,6 +771,8 @@
+ 	    insspace = (compinsert[strlen(compinsert) - 1] == ' ');
+ 	} else
+ 	    useline = usemenu = 0;
++	startauto = (compinsert &&
++		     !strcmp(compinsert, "automenu-unambiguous"));
+ 	useexact = (compexact && !strcmp(compexact, "accept"));
+ 
+ 	if (!comptoend || !*comptoend)
+@@ -1545,6 +1569,8 @@
+     qipre = ztrdup(compqiprefix ? compqiprefix : "");
+     qisuf = ztrdup(compqisuffix ? compqisuffix : "");
+ 
++    useexact = (compexact && !strcmp(compexact, "accept"));
++
+     /* Switch back to the heap that was used when the completion widget
+      * was invoked. */
+     SWITCHHEAPS(compheap) {
+@@ -2075,7 +2101,11 @@
+ 	cm->isuf = (isuf && *isuf ? isuf : NULL);
+     cm->pre = pre;
+     cm->suf = suf;
+-    cm->flags = flags;
++    cm->flags = (flags |
++		 (complist ?
++		  ((strstr(complist, "packed") ? CMF_PACKED : 0) |
++		   (strstr(complist, "rows")   ? CMF_ROWS   : 0)) : 0));
++
+     if ((*compqstack == '\\' && compqstack[1]) ||
+ 	(autoq && *compqstack && compqstack[1] == '\\'))
+ 	cm->flags |= CMF_NOSPACE;
+@@ -2117,6 +2147,8 @@
+ 
+     newmatches = 1;
+ 
++    if (!complastprompt || !*complastprompt)
++	dolastprompt = 0;
+     /* One more match for this explanation. */
+     if (curexpl) {
+ 	if (alt)
+@@ -2140,8 +2172,8 @@
+     /* Do we have an exact match? More than one? */
+     if (exact) {
+ 	if (!ai->exact) {
+-	    ai->exact = 1;
+-	    if (incompfunc) {
++	    ai->exact = useexact;
++	    if (incompfunc && (!compexactstr || !*compexactstr)) {
+ 		/* If a completion widget is active, we make the exact
+ 		 * string available in `compstate'. */
+ 
+@@ -2160,7 +2192,7 @@
+ 		comp_setunset(0, 0, CP_EXACTSTR, 0);
+ 	    }
+ 	    ai->exactm = cm;
+-	} else {
++	} else if (useexact) {
+ 	    ai->exact = 2;
+ 	    ai->exactm = NULL;
+ 	    if (incompfunc)
+diff -u -r oldsrc/Zle/complete.c Src/Zle/complete.c
+--- oldsrc/Zle/complete.c	Mon Dec  6 11:26:19 1999
++++ Src/Zle/complete.c	Mon Dec  6 11:33:44 1999
+@@ -66,7 +66,6 @@
+      *compquoting,
+      *comprestore,
+      *complist,
+-     *compforcelist,
+      *compinsert,
+      *compexact,
+      *compexactstr,
+@@ -948,7 +947,6 @@
+     { "quoting", PM_SCALAR | PM_READONLY, VAL(compquoting), NULL, NULL },
+     { "restore", PM_SCALAR, VAL(comprestore), NULL, NULL },
+     { "list", PM_SCALAR, NULL, VAL(set_complist), VAL(get_complist) },
+-    { "force_list", PM_SCALAR, VAL(compforcelist), NULL, NULL },
+     { "insert", PM_SCALAR, VAL(compinsert), NULL, NULL },
+     { "exact", PM_SCALAR, VAL(compexact), NULL, NULL },
+     { "exact_string", PM_SCALAR, VAL(compexactstr), NULL, NULL },
+@@ -1363,8 +1361,8 @@
+ 	compcontext = compparameter = compredirect = compquote =
+ 	compquoting = comprestore = complist = compinsert =
+ 	compexact = compexactstr = comppatmatch = comppatinsert =
+-	compforcelist = complastprompt = comptoend = 
+-	compoldlist = compoldins = compvared = compqstack = NULL;
++	complastprompt = comptoend = compoldlist = compoldins =
++	compvared = compqstack = NULL;
+ 
+     hascompmod = 1;
+ 
+@@ -1431,7 +1429,6 @@
+     zsfree(compquoting);
+     zsfree(comprestore);
+     zsfree(complist);
+-    zsfree(compforcelist);
+     zsfree(compinsert);
+     zsfree(compexact);
+     zsfree(compexactstr);
+diff -u -r oldsrc/Zle/compresult.c Src/Zle/compresult.c
+--- oldsrc/Zle/compresult.c	Mon Dec  6 11:26:20 1999
++++ Src/Zle/compresult.c	Mon Dec  6 11:33:44 1999
+@@ -586,7 +586,7 @@
+     /* If we have to insert the first match, call do_single().  This is *
+      * how REC_EXACT takes effect.  We effectively turn the ambiguous   *
+      * completion into an unambiguous one.                              */
+-    if (ainfo && ainfo->exact == 1 && useexact && !(fromcomp & FC_LINE)) {
++    if (ainfo && ainfo->exact == 1 && !(fromcomp & FC_LINE)) {
+ 	minfo.cur = NULL;
+ 	do_single(ainfo->exactm);
+ 	invalidatelist();
+@@ -669,7 +669,7 @@
+     if (uselist && (usemenu != 2 || (!listshown && !oldlist)) &&
+ 	((!showinglist && (!listshown || !oldlist)) ||
+ 	 (usemenu == 3 && !oldlist)) &&
+-	(smatches >= 2 || (compforcelist && *compforcelist)))
++	(smatches >= 2 || forcelist))
+ 	showinglist = -2;
+ 
+     return ret;
+@@ -1151,6 +1151,8 @@
+ 	char **pp = g->ylist;
+ 	int nl = 0, l, glong = 1, gshort = columns, ndisp = 0, totl = 0;
+ 
++	g->flags |= CGF_PACKED | CGF_ROWS;
++
+ 	if (!onlyexpl && pp) {
+ 	    /* We have an ylist, lets see, if it contains newlines. */
+ 	    hidden = 1;
+@@ -1211,6 +1213,10 @@
+ 			mlens[m->gnum] = l;
+ 		    }
+ 		    nlist++;
++		    if (!(m->flags & CMF_PACKED))
++			g->flags &= ~CGF_PACKED;
++		    if (!(m->flags & CMF_ROWS))
++			g->flags &= ~CGF_ROWS;
+ 		} else if (!(m->flags & CMF_NOLIST)) {
+ 		    l = niceztrlen(m->str);
+ 		    ndisp++;
+@@ -1221,6 +1227,10 @@
+ 		    totl += l;
+ 		    mlens[m->gnum] = l;
+ 		    nlist++;
++		    if (!(m->flags & CMF_PACKED))
++			g->flags &= ~CGF_PACKED;
++		    if (!(m->flags & CMF_ROWS))
++			g->flags &= ~CGF_ROWS;
+ 		} else
+ 		    hidden = 1;
+ 	    }
+@@ -1289,11 +1299,14 @@
+ 	    nlines += glines;
+ 	}
+     }
+-    if (!onlyexpl && isset(LISTPACKED)) {
++    if (!onlyexpl) {
+ 	char **pp;
+ 	int *ws, tlines, tline, tcols, maxlen, nth, width;
+ 
+ 	for (g = amatches; g; g = g->next) {
++	    if (!(g->flags & CGF_PACKED))
++		continue;
++
+ 	    ws = g->widths = (int *) zalloc(columns * sizeof(int));
+ 	    memset(ws, 0, columns * sizeof(int));
+ 	    tlines = g->lins;
+@@ -1308,7 +1321,7 @@
+ 		    for (i = 0; *pp; i++, pp++)
+ 			ylens[i] = strlen(*pp) + add;
+ 
+-		    if (isset(LISTROWSFIRST)) {
++		    if (g->flags & CGF_ROWS) {
+ 			int count, tcol, first, maxlines = 0, llines;
+ 
+ 			for (tcols = columns / g->shortest; tcols > g->cols;
+@@ -1366,7 +1379,7 @@
+ 		    }
+ 		}
+ 	    } else if (g->width) {
+-		if (isset(LISTROWSFIRST)) {
++		if (g->flags & CGF_ROWS) {
+ 		    int addlen, count, tcol, maxlines = 0, llines, i;
+ 		    Cmatch *first;
+ 
+@@ -1477,12 +1490,12 @@
+     trashzle();
+     showinglist = listshown = 0;
+ 
+-    clearflag = (isset(USEZLE) && !termflags &&
+-		 complastprompt && *complastprompt);
++    clearflag = (isset(USEZLE) && !termflags && dolastprompt);
+ 
+     /* Maybe we have to ask if the user wants to see the list. */
+     if ((!minfo.cur || !minfo.asked) &&
+-	((complistmax && listdat.nlist > complistmax) ||
++	((complistmax > 0 && listdat.nlist >= complistmax) ||
++	 (complistmax < 0 && listdat.nlines <= -complistmax) ||
+ 	 (!complistmax && listdat.nlines >= lines))) {
+ 	int qup;
+ 	zsetterm();
+@@ -1599,7 +1612,7 @@
+ 			    while (a--)
+ 				putc(' ', shout);
+ 			}
+-			pq += (isset(LISTROWSFIRST) ? 1 : nc);
++			pq += ((g->flags & CGF_ROWS) ? 1 : nc);
+ 			mc++;
+ 			n--;
+ 		    }
+@@ -1612,7 +1625,7 @@
+ 				tcout(TCCLEAREOD);
+ 			}
+ 		    }
+-		    pp += (isset(LISTROWSFIRST) ? g->cols : 1);
++		    pp += ((g->flags & CGF_ROWS) ? g->cols : 1);
+ 		}
+ 	    }
+ 	} else if (!listdat.onlyexpl && g->lcount) {
+@@ -1678,7 +1691,8 @@
+ 		    printed++;
+ 
+ 		    if (--n)
+-			for (j = (isset(LISTROWSFIRST) ? 1 : nc); j && *q; j--)
++			for (j = ((g->flags & CGF_ROWS) ? 1 : nc);
++			     j && *q; j--)
+ 			    q = skipnolist(q + 1);
+ 		    mc++;
+ 		}
+@@ -1696,7 +1710,8 @@
+ 			    tcout(TCCLEAREOD);
+ 		    }
+ 		    if (nl)
+-			for (j = (isset(LISTROWSFIRST) ? g->cols : 1); j && *p; j--)
++			for (j = ((g->flags & CGF_ROWS) ? g->cols : 1);
++			     j && *p; j--)
+ 			    p = skipnolist(p + 1);
+ 		}
+ 	    }
+diff -u olddoc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- olddoc/Zsh/compsys.yo	Mon Dec  6 11:26:23 1999
++++ Doc/Zsh/compsys.yo	Mon Dec  6 11:33:45 1999
+@@ -762,11 +762,13 @@
+ every other value (or if the style is not set at all for the context
+ in which it is looked up) stands for `false'.
+ 
+-em(NOTE: Maybe we should sort them differently. Or maybe we should
+-explain some of them only when explaining the completers that use
+-them.)
+-
+ startitem()
++item(tt(accept-exact))(
++This is tested for the default tag and the tags used when generating
++matches. If it is set to `true' for at least one match which is the
++same as the string on the line, this match will immediatly be
++accepted.
++)
+ item(tt(arguments))(
+ The value of this style is given to the tt(ps) command by functions
+ that call it when generating process identifiers as matches.
+@@ -933,10 +935,13 @@
+ least as long as the original string from the line.
+ )
+ item(tt(last-prompt))(
+-This is used by the main completion function tt(_main_complete) with
+-no particular context name. If it 
+-is `true', the cursor will always be moved back to the last prompt if
+-that is still visible, independent of the setting of the
++This is used to determine if thecompletion code should try to put the
++cursor back onto the previous command line after showing a completion
++listing (as for the tt(ALWAYS_LAST_PROMPT) option). Like several other 
++styles it is tested for the tt(default) tag and all tags used when
++generating matches. The cursor will be moved back to the previous line 
++if this style is `true' for all types of matches added. Note also that 
++this is independent of the numeric argument -- unlike the
+ tt(ALWAYS_LAST_PROMPT) option.
+ )
+ item(tt(list))(
+@@ -1003,6 +1008,18 @@
+ And to get the default colors (which are the same as for the GNU
+ tt(ls) command) one should set the style to an empty value.
+ )
++item(tt(list-packed))(
++Like the tt(list-colors) style, this is tested with the tt(default)
++tag and all tags used when generating matches. If it is set to `true'
++for a tag, the matches added for it will be listed as if the
++tt(LIST_PACKED) option were set for them. If it is set to `false',
++they are listed normally.
++)
++item(tt(list-rows-first))(
++This style is tested like the tt(list-packed) style and determines if
++matches are to be listed in a rows-first fashion, as for the
++tt(LIST_ROWS_FIRST) option.
++)
+ item(tt(local))(
+ This style is used by completion functions which generate URLs as
+ possible matches to add suitable matches when a URL points to a
+@@ -1041,7 +1058,7 @@
+ an empty value, the words resulting from expansion (if any) will
+ simply be inserted in the command line, replacing the original
+ string. However, if this style is set to a non-empty value, the user
+-can cycle through the expansion as in menucompletion. Unless the value
++can cycle through the expansions as in menucompletion. Unless the value
+ contains the string `tt(only)', the user will still be offered all
+ expansions at once as one of the strings to insert in the command
+ line; normally, this possibility is offered first, but if the value
+@@ -1771,6 +1788,12 @@
+ only for a boolean value, you can give a third argument which is then
+ used as a pattern and tt(_style) returns zero if the pattern matches
+ the value defined for the style.
++
++The tt(-t) and tt(-f) options can be used to test for slightly
++different interpretions of boolean values. If they are given with a
++tag and a style-name as arguments, the return value is zero only if
++the style is set and the value is equal (or, in case of then tt(-f)
++option: unequal) to one of the values mentioned above.
+ 
+ If you want to retrieve the value defined for the style, you can use
+ one of the options tt(-b) (to retrieve it as a boolean value, i.e. one 
+diff -u olddoc/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- olddoc/Zsh/compwid.yo	Mon Dec  6 11:26:23 1999
++++ Doc/Zsh/compwid.yo	Mon Dec  6 11:33:45 1999
+@@ -235,17 +235,22 @@
+ tt(list), they will always be listed; if it begins with tt(autolist)
+ or tt(ambiguous), they will be listed when the tt(AUTO_LIST) or
+ tt(LIST_AMBIGUOUS) options respectively would normally cause them to
+-be.  Finally, if the value contains the string tt(explanations), only
+-the explanation strings, if any, will be listed. It will be set
++be.
++
++If the substring tt(force) appears in the value, this makes the
++list be shown even if there is only one match. Normally, the list
++would be shown only if there are at least two matches.
++
++The value contains the substring tt(packed) if the tt(LIST_PACKED)
++option is set. If this substring is given for all matches added of a
++group, this group will show the tt(LIST_PACKED) behavior. The same is
++done for the tt(LIST_ROWS_FIRST) option with the substring tt(rows).
++
++Finally, if the value contains the string tt(explanations), only the
++explanation strings, if any, will be listed. It will be set
+ appropriately on entry to a completion widget and may be changed
+ there.
+ )
+-item(tt(force_list))(
+-If the value for the tt(list) key is tt(autolist) or tt(ambiguous), the list will
+-normally be shown only if there are at least two matches in the
+-list. Setting tt(force_list) to an non-empty string forces the list to be
+-shown even if there is only one match.
+-)
+ item(tt(list_max))(
+ Initially this is set to the value of the tt(LISTMAX) parameter.
+ It may be set to any other numeric value; when the widget exits this value
+@@ -259,18 +264,21 @@
+ special parameter.
+ )
+ item(tt(last_prompt))(
+-If this is set to an non-empty string, the completion code will move
+-the cursor back to the previous prompt after the list of completions
+-has been displayed.  Initially this is set or unset according to
+-the tt(ALWAYS_LAST_PROMPT) option.
++If this is set to an non-empty string for every match added, the
++completion code will move the cursor back to the previous prompt after
++the list of completions has been displayed.  Initially this is set or
++unset according to the tt(ALWAYS_LAST_PROMPT) option.
+ )
+ item(tt(insert))(
+ This controls the manner in which a match is inserted into the command
+ line.  On entry to the widget function, if it is unset the command line is
+ not to be changed; if set to tt(unambiguous), any prefix common to all
+-matches is to be inserted; if set to tt(menu) or tt(automenu) the usual
+-behaviour of the tt(MENU_COMPLETE) or tt(AUTO_MENU) options, respectively,
+-is to be used.
++matches is to be inserted; if set to tt(automenu-unambiguous), the
++common prefix is to be inserted and the next invocation of the
++completion code may start menu-completion (due to the tt(AUTO_MENU)
++option being set); if set to tt(menu) or tt(automenu) menu-completion
++will be started for the matches currently generated due to (in the
++latter case this will happen because the tt(AUTO_MENU) is set).
+ 
+ On exit it may be set to any of the values above (where setting it to
+ the empty string is the same as unsetting it), or to a number, in which
+diff -u olddoc/Zsh/params.yo Doc/Zsh/params.yo
+--- olddoc/Zsh/params.yo	Mon Dec  6 11:26:26 1999
++++ Doc/Zsh/params.yo	Mon Dec  6 11:33:45 1999
+@@ -591,7 +591,9 @@
+ )
+ vindex(LISTMAX)
+ item(tt(LISTMAX))(
+-In the line editor, the number of filenames to list without asking first.
++In the line editor, the number of matches to list without asking
++first. If the value is negative, the list will be shown if it spans at 
++most as many lines as given by the absolute value.
+ If set to zero, the shell asks only if the top of the listing would scroll
+ off the screen.
+ )
+diff -u -r oldcompletion/Commands/_complete_help Completion/Commands/_complete_help
+--- oldcompletion/Commands/_complete_help	Mon Dec  6 11:26:41 1999
++++ Completion/Commands/_complete_help	Mon Dec  6 11:33:46 1999
+@@ -18,8 +18,7 @@
+ tags in context \`${i}': ${help_tags[$i]}"
+   done
+ 
+-  compstate[list]=list
+-  compstate[force_list]=yes
++  compstate[list]='list force'
+   compstate[insert]=''
+ 
+   compadd -UX "$text[2,-1]" -n ''
+diff -u -r oldcompletion/Core/_approximate Completion/Core/_approximate
+--- oldcompletion/Core/_approximate	Mon Dec  6 11:26:42 1999
++++ Completion/Core/_approximate	Mon Dec  6 11:33:46 1999
+@@ -78,7 +78,7 @@
+ 
+ _correct_prompt="${cfgps//\\%e/1}"
+ 
+-_setup original corrections
++_setup corrections
+ 
+ [[ "$cfgorig" != *last* ]] && builtin compadd -V original
+ builtin compadd -J corrections
+@@ -104,12 +104,14 @@
+       else
+         expl=(-n)
+       fi
++      _setup original
+       builtin compadd "$expl[@]" -U -V original -Q - "$PREFIX$SUFFIX"
+ 
+       # If you always want to see the list of possible corrections,
+       # set `compstate[list]=list' here.
+ 
+-      compstate[force_list]=list
++      [[ "$compstate[list]" != list* ]] &&
++          compstate[list]="$compstate[list] force"
+     fi
+     compstate[matcher]="$compstate[total_matchers]"
+     unfunction compadd
+diff -u -r oldcompletion/Core/_expand Completion/Core/_expand
+--- oldcompletion/Core/_expand	Mon Dec  6 11:26:42 1999
++++ Completion/Core/_expand	Mon Dec  6 11:33:46 1999
+@@ -84,8 +84,6 @@
+ 
+ exp=( "${(@)${(@)${(@q)exp}//\\\\=/=}/#=/\\=}" )
+ 
+-_setup original expansions all-expansions
+-
+ # We have expansions, should we menucomplete them?
+ 
+ if [[ -z "$menu" ]]; then
+@@ -95,16 +93,20 @@
+   # probably also adding the original string.
+ 
+   if [[ -z "$compstate[insert]" ]]; then
++    _setup all-expansions
+     compadd -U -V all-expansions -Q - "$exp[@]"
+   else
+-    [[ -n "$orig" && "$orig" != *last* ]] &&
+-        compadd "$expl[@]" -UQ -V original - "$word"
+-
+-    compadd -UQ -V _expand - "$exp"
+-
+-    [[ -n "$orig" && "$orig" = *last* ]] &&
+-        compadd "$expl[@]" -UQ -V original - "$word"
++    if [[ -n "$orig" && "$orig" != *last* ]]; then
++      _setup original
++      compadd "$expl[@]" -UQ -V original - "$word"
++    fi
++    _setup expansions
++    compadd -UQ -V expansions - "$exp"
+ 
++    if [[ -n "$orig" && "$orig" = *last* ]]; then
++      _setup original
++      compadd "$expl[@]" -UQ -V original - "$word"
++    fi
+     compstate[insert]=menu
+   fi
+ else
+@@ -115,24 +117,29 @@
+   # Now add the expansion string, probably also adding the original
+   # and/or the string containing all expanded string.
+ 
+-  [[ -n "$orig" && "$orig" != *last* ]] &&
+-      compadd "$expl[@]" -UQ -V original - "$word"
+-
+-  [[ $#exp -ne 1 && "$menu" = *last* && "$menu" != *only* ]] &&
+-      compadd "$expl2[@]" -UQ -V all-expansions - "$exp"
+-
++  if [[ -n "$orig" && "$orig" != *last* ]]; then
++    _setup original
++    compadd "$expl[@]" -UQ -V original - "$word"
++  fi
++  if [[ $#exp -ne 1 && "$menu" = *last* && "$menu" != *only* ]]; then
++    _setup all-expansions
++    compadd "$expl2[@]" -UQ -V all-expansions - "$exp"
++  fi
++  _setup expansions
+   if [[ -z "$prompt" ]]; then
+     compadd -UQ $group expansions - "$exp[@]"
+   else
+     compadd -UQ -X "${prompt//\\%o/$word}" \
+             $group expansions - "$exp[@]"
+   fi
+-  [[ $#exp -ne 1 && "$menu" != *last* && "$menu" != *only* ]] &&
+-      compadd "$expl2[@]" -UQ -V all-expansions - "$exp"
+-
+-  [[ -n "$orig" && "$orig" = *last* ]] &&
+-      compadd "$expl[@]" -UQ -V original - "$word"
+-
++  if [[ $#exp -ne 1 && "$menu" != *last* && "$menu" != *only* ]]; then
++    _setup all-expansions
++    compadd "$expl2[@]" -UQ -V all-expansions - "$exp"
++  fi
++  if [[ -n "$orig" && "$orig" = *last* ]]; then
++    _setup original
++    compadd "$expl[@]" -UQ -V original - "$word"
++  fi
+   compstate[insert]=menu
+ fi
+ 
+diff -u -r oldcompletion/Core/_list Completion/Core/_list
+--- oldcompletion/Core/_list	Mon Dec  6 11:26:42 1999
++++ Completion/Core/_list	Mon Dec  6 11:33:46 1999
+@@ -26,8 +26,7 @@
+   # to compare the next time.
+ 
+   compstate[insert]=''
+-  compstate[list]=list
+-  compstate[force_list]=yes
++  compstate[list]='list force'
+   _list_prefix="$pre"
+   _list_suffix="$suf"
+ fi
+diff -u -r oldcompletion/Core/_main_complete Completion/Core/_main_complete
+--- oldcompletion/Core/_main_complete	Mon Dec  6 11:26:42 1999
++++ Completion/Core/_main_complete	Mon Dec  6 11:33:46 1999
+@@ -19,6 +19,9 @@
+ 
+ local comp post ret=1 _compskip _prio_num=1 _cur_context format
+ local context state line opt_args val_args curcontext="$curcontext"
++local _saved_exact="$compstate[exact]" \
++      _saved_lastprompt="$compstate[last_prompt]" \
++      _saved_list="$compstate[list]"
+ typeset -U _offered_tags _tried_tags _failed_tags _used_tags _unused_tags
+ 
+ _offered_tags=()
+@@ -82,8 +85,7 @@
+       -n "$format" && $#_lastdescr -ne 0 ]]; then
+   local str
+ 
+-  compstate[list]=list
+-  compstate[force_list]=yes
++  compstate[list]='list force'
+   compstate[insert]=''
+ 
+   case $#_lastdescr in
+@@ -94,8 +96,6 @@
+ 
+   compadd -UX "${format//\\%d/$str}" -n ''
+ fi
+-
+-_style '' last-prompt && compstate[last_prompt]=yes
+ 
+ _lastcomp=( "${(@kv)compstate}" )
+ _lastcomp[completer]="$comp"
+diff -u -r oldcompletion/Core/_message Completion/Core/_message
+--- oldcompletion/Core/_message	Mon Dec  6 11:26:43 1999
++++ Completion/Core/_message	Mon Dec  6 11:33:47 1999
+@@ -8,11 +8,10 @@
+ 
+ if [[ -n "$format" ]]; then
+   if [[ $compstate[nmatches] -eq 0 ]]; then
+-    compstate[list]=list
+-    compstate[force_list]=yes
++    compstate[list]='list force'
+     compstate[insert]=''
+     compadd -UX "${format//\\%d/$1}" -n ''
+   else
+-    compadd -X "${format//\\%d/$1}" -n '' && compstate[force_list]=yes
++    compadd -X "${format//\\%d/$1}" -n '' && compstate[list]='list force'
+   fi
+ fi
+diff -u -r oldcompletion/Core/_setup Completion/Core/_setup
+--- oldcompletion/Core/_setup	Mon Dec  6 11:26:44 1999
++++ Completion/Core/_setup	Mon Dec  6 11:38:44 1999
+@@ -1,13 +1,51 @@
+ #autoload
+ 
+-local colors i
++local val
+ 
+-for i; do
+-  if _style -a "$i" list-colors colors; then
+-    if [[ "$1" = default ]]; then
+-      ZLS_COLORS="${(j.:.)${(@)colors:gs/:/\\\:}}"
+-    else
+-      eval "ZLS_COLORS=\"(${i})\${(j.:(${i}).)\${(@)colors:gs/:/\\\:}}:\${ZLS_COLORS}\""
+-    fi
++if _style -a "$1" list-colors val; then
++  if [[ "$1" = default ]]; then
++    ZLS_COLORS="${(j.:.)${(@)val:gs/:/\\\:}}"
++  else
++    eval "ZLS_COLORS=\"(${i})\${(j.:(${i}).)\${(@)val:gs/:/\\\:}}:\${ZLS_COLORS}\""
+   fi
+-done
++fi
++
++if _style -s "$1" list-packed val; then
++  if [[ "$val" = (yes|true|1|on) ]]; then
++    compstate[list]="${compstate[list]} packed"
++  else
++    compstate[list]="${compstate[list]:gs/packed//}"
++  fi
++else
++  compstate[list]="$_saved_list"
++fi
++
++if _style -s "$1" list-rows-first val; then
++  if [[ "$val" = (yes|true|1|on) ]]; then
++    compstate[list]="${compstate[list]} rows"
++  else
++    compstate[list]="${compstate[list]:gs/rows//}"
++  fi
++else
++  compstate[list]="$_saved_list"
++fi
++
++if _style -s "$1" last-prompt val; then
++  if [[ "$val" = (yes|true|1|on) ]]; then
++    compstate[last_prompt]=yes
++  else
++    compstate[last_prompt]=''
++  fi
++else
++  compstate[last_prompt]="$_saved_lastprompt"
++fi
++
++if _style -s "$1" accept-exact val; then
++  if [[ "$val" = (yes|true|1|on) ]]; then
++    compstate[exact]=accept
++  else
++    compstate[exact]=''
++  fi
++else
++  compstate[exact]="$_saved_exact"
++fi
+diff -u -r oldcompletion/Core/_style Completion/Core/_style
+--- oldcompletion/Core/_style	Mon Dec  6 11:26:44 1999
++++ Completion/Core/_style	Mon Dec  6 11:33:47 1999
+@@ -1,21 +1,21 @@
+ #autoload
+ 
+-local val ret
++local _val _ret
+ 
+ # Should we return the value?
+ 
+ case "$1" in
+ -b)
+-  compstyles -S "$context" "$2" val
+-  ret="$?"
++  compstyles -S "${curcontext}${2:+:${2}}" "$3" _val
++  _ret="$?"
+ 
+-  if [[ "$val" = (#I)(yes|true|1|on) ]]; then
+-    eval "${3}=yes"
++  if [[ "$_val" = (yes|true|1|on) ]]; then
++    eval "${4}=yes"
+   else
+-    eval "${3}=no"
++    eval "${4}=no"
+   fi
+ 
+-  return ret;
++  return _ret
+   ;;
+ -s)
+   compstyles -S "${curcontext}${2:+:${2}}" "$3" "$4"
+@@ -33,11 +33,11 @@
+ 
+ [[ "$1" = -(|-) ]] && shift
+ 
+-if compstyles -S "${curcontext}${1:+:${1}}" "$2" val; then
++if compstyles -S "${curcontext}${1:+:${1}}" "$2" _val; then
+   if [[ $# -eq 3 ]]; then
+-    [[ "$val" = ${~3} ]]
++    [[ "$_val" = ${~3} ]]
+   else
+-    [[ "$val" = (#I)(yes|true|1|on) ]]
++    [[ "$_val" = (yes|true|1|on) ]]
+   fi
+ else
+   return 1
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

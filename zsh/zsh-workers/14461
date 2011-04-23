@@ -1,0 +1,133 @@
+From zsh-workers-return-14461-mason-zsh=primenet.com.au@sunsite.dk Wed May 23 16:53:36 2001
+Return-Path: <zsh-workers-return-14461-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25055 invoked from network); 23 May 2001 16:53:35 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 May 2001 16:53:35 -0000
+Received: (qmail 9243 invoked by alias); 23 May 2001 16:53:26 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14461
+Received: (qmail 9229 invoked from network); 23 May 2001 16:53:25 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010523165140.ZM9483@candle.brasslantern.com>
+Date: Wed, 23 May 2001 16:51:39 +0000
+In-Reply-To: <3B0A896A.26BD1352@u.genie.co.uk>
+Comments: In reply to Oliver Kiddle <opk@u.genie.co.uk>
+        "Re: Almost all tests pass under new cygwin" (May 22,  4:44pm)
+References: <000001c0e2d1$dcc3de00$21c9ca95@mow.siemens.ru> 
+	<1010522153140.ZM22170@candle.brasslantern.com> 
+	<3B0A896A.26BD1352@u.genie.co.uk>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: ZSH Workers Mailing List <zsh-workers@sunsite.dk>
+Subject: About zmodload test segfaults
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On May 22,  4:44pm, Oliver Kiddle wrote:
+} Subject: Re: Almost all tests pass under new cygwin
+}
+} It is the very last zmodload in the loop which does zmodload -i for
+} every module it found in config.modules (the `for m in $mods' loop).
+} I've gone through typing the zmodload commands manually and it is always
+} the last one which causes the segfault regardless of the order in which
+} they are loaded.
+
+I still can't figure out how *loading* the modules can cause a seg fault
+regardless of ordering, unless it's just the case that there are too many
+modules to all be loaded at once.
+
+My guess is that the failures on Solaris et al., which seem to happen at
+the module *un*loading test, have to do with shared library linkage.  It
+was wrong to simply discard all the dependencies and then unload.
+
+Here's a patch to V01zmodload to force unloading to happen in reverse
+dependency order, i.e., a module is only unloaded when nothing depends
+on it, and then its dependencies are removed so it won't prevent some
+other module from being unloaded.  If it's not possible to unload any
+module that way, the zmodunload function calls zmodload -u to generate
+the correct error message; this should happen only in case of circular
+dependencies.
+
+Please check whether this takes care of the zmodload test segfaults on
+various architectures.
+
+I wish zmodunload were suitable for use outside the test suite, but it
+could be badly confused by use of module aliasing.
+
+diff -u zsh-forge/current/Test/V01zmodload.ztst zsh-4.0/Test/V01zmodload.ztst
+--- zsh-forge/current/Test/V01zmodload.ztst	Fri May 18 09:09:10 2001
++++ zsh-4.0/Test/V01zmodload.ztst	Wed May 23 09:37:46 2001
+@@ -5,6 +5,7 @@
+ # the config.modules file.  This differs for static vs. dynamic builds.
+ 
+  mods=()
++ deps="$(zmodload -Ld)"
+  while read name modfile link auto load funcs
+  do
+    [[ $name == \#* ]] && continue
+@@ -13,6 +14,27 @@
+    mods=($mods $name)
+  done < $ZTST_testdir/../config.modules
+ 
++ zmodunload() {
++   local m n=$#
++   (( n == 0 )) && return 0
++   for m
++   do
++     if [[ -z ${(M)${(f)"$(zmodload -d)"}:#*:* $m( *|)} ]]
++     then
++       zmodload -u $m && zmodload -ud $m || return 1
++       shift
++     else
++       set $@[2,-1] $m
++     fi
++   done
++   if (( $# < n ))
++   then
++     zmodunload $*
++   else
++     zmodload -u $*
++   fi
++ }
++
+ %test
+ 
+ # This first test depends on knowing that zsh is run with +Z from the
+@@ -125,22 +147,15 @@
+  zmodload -e example
+ 1:Delete the module alias again
+ 
+-# Remove all inter-module dependencies so that we can unload in any order.
+-# Skip the two modules that are required by the test system!
++# Don't unload the two modules that are required by the test system!
+ 
+  mods[(r)zsh/main]=()
+  mods[(r)zsh/parameter]=()
+- for m in $mods
+- do
+-   zmodload -ud $m
+- done
+-0d:Remove module dependecies
+-
+-# Unload all the modules again (except the two we skipped, of course).
+-
+- zmodload -u $mods
++ zmodunload $mods
+ 0d:Unload the modules loaded by this test suite
+ 
+ %clean
+ 
+- unset name modfile link auto load funcs mods m
++ eval "$deps"
++ unset deps name modfile link auto load funcs mods
++ unfunction zmodunload
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

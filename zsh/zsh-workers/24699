@@ -1,0 +1,279 @@
+From zsh-workers-return-24699-mason-zsh=primenet.com.au@sunsite.dk Sat Mar 08 01:17:40 2008
+Return-Path: <zsh-workers-return-24699-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6078 invoked from network); 8 Mar 2008 01:17:28 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.4 (2008-01-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.4
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 8 Mar 2008 01:17:28 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 3282 invoked from network); 8 Mar 2008 01:17:22 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 8 Mar 2008 01:17:21 -0000
+Received: (qmail 2919 invoked by alias); 8 Mar 2008 01:17:18 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 24699
+Received: (qmail 2900 invoked from network); 8 Mar 2008 01:17:18 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 8 Mar 2008 01:17:18 -0000
+Received: from mtaout03-winn.ispmail.ntl.com (mtaout03-winn.ispmail.ntl.com [81.103.221.49])
+	by bifrost.dotsrc.org (Postfix) with ESMTP id 99AC4802A5EF
+	for <zsh-workers@sunsite.dk>; Sat,  8 Mar 2008 02:17:14 +0100 (CET)
+Received: from aamtaout03-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout03-winn.ispmail.ntl.com with ESMTP
+          id <20080308012009.KPVF19530.mtaout03-winn.ispmail.ntl.com@aamtaout03-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Sat, 8 Mar 2008 01:20:09 +0000
+Received: from pws-pc ([81.107.42.63]) by aamtaout03-winn.ispmail.ntl.com
+          with ESMTP
+          id <20080308012209.IPET26699.aamtaout03-winn.ispmail.ntl.com@pws-pc>
+          for <zsh-workers@sunsite.dk>; Sat, 8 Mar 2008 01:22:09 +0000
+Date: Sat, 8 Mar 2008 01:16:58 +0000
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: Zsh Hackers' List <zsh-workers@sunsite.dk>
+Subject: Re: do not interpret special characters
+Message-ID: <20080308011658.4a02a2e1@pws-pc>
+In-Reply-To: <20080306145201.0235d344@news01>
+References: <20080303084847.GA25626@fruitcom.com>
+	<20080306145201.0235d344@news01>
+X-Mailer: Claws Mail 3.3.1 (GTK+ 2.12.5; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Virus-Scanned: ClamAV 0.91.2/6166/Fri Mar  7 17:36:07 2008 on bifrost
+X-Virus-Status: Clean
+
+On Thu, 6 Mar 2008 14:52:01 +0000
+Peter Stephenson <pws@csr.com> wrote:
+> I discovered a bug looking at this:
+> 
+>   unquote=">"
+>   print -r -- ${(Q)unquote}
+> 
+> prints nothing with the latest version of the shell.  Something funny is
+> happening in string token extraction that I don't understand (there's some
+> obscure trick and there are no comments explaining what it's supposed to be
+> doing).  I'll report on this separately.
+
+It's not so much there's an obscure trick as the whole way lexical
+analysis is done is a trick, particular the hacks to get it to work for
+parameter expansion.  However, I've convinced myself that ">" was the
+only case where it wasn't handled.
+
+However however, when I added a test for this I discovered another bug:
+
+  % foo="stuff( here"
+  % print "'${(z)foo}'"
+  'stuff( here '
+            # ^ bogus space
+
+This is a variant of an old bug.  That extra space is added
+because... well, it just is.  It doesn't get removed if lexical analysis
+ended in an unexpected way.  We already handle it if there's a parse
+error, but in this case there's no error and that isn't handled.
+
+(Possibly we should flag an error.  I remember adding code to force
+"("'s to match even in the middle of shell arguments to make more
+complicated forms of glob qualifiers easier to write, which is why it's
+looking for a terminator, but obviously I didn't make it an error if
+there wasn't a matching parenthesis, presumably because there wasn't one
+before---originally, "stuff(" would have been a word and it would have
+been up to the glob code to decide if it was a bad pattern.)
+
+I think the fix for this is actually quite legit for once:  if we parsed
+a complete string, but the input pointer went past the space, it means
+we got too much and we need to back off.  (In the case of a normal shell
+argument the space would just separate words and wouldn't be treated as
+a string, so we don't normally see this.)
+
+I'm going to stop writing tests for now.
+
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.71
+diff -u -r1.71 hist.c
+--- Src/hist.c	6 Mar 2008 17:23:00 -0000	1.71
++++ Src/hist.c	8 Mar 2008 01:02:38 -0000
+@@ -2456,7 +2456,7 @@
+     int num = 0, cur = -1, got = 0, ne = noerrs;
+     int owb = wb, owe = we, oadx = addedx, ozp = zleparse, onc = nocomments;
+     int ona = noaliases, ocs = zlemetacs, oll = zlemetall;
+-    char *p;
++    char *p, *addedspaceptr;
+ 
+     if (!list)
+ 	list = newlinklist();
+@@ -2470,7 +2470,15 @@
+ 
+ 	p = (char *) zhalloc(l + 2);
+ 	memcpy(p, buf, l);
+-	p[l] = ' ';
++	/*
++	 * I'm sure this space is here for a reason, but it's
++	 * a pain in the neck:  when we get back a string that's
++	 * not finished it's very hard to tell if a space at the
++	 * end is this one or not.  We use two tricks below to
++	 * work around this.
++	 */
++	addedspaceptr = p + l;
++	*addedspaceptr = ' ';
+ 	p[l + 1] = '\0';
+ 	inpush(p, 0, NULL);
+ 	zlemetall = strlen(p) ;
+@@ -2493,7 +2501,8 @@
+ 	    p = (char *) zhalloc(hptr - chline + ll + 2);
+ 	    memcpy(p, chline, hptr - chline);
+ 	    memcpy(p + (hptr - chline), linein, ll);
+-	    p[(hptr - chline) + ll] = ' ';
++	    addedspaceptr = p + (hptr - chline) + ll;
++	    *addedspaceptr = ' ';
+ 	    p[(hptr - chline) + zlemetall] = '\0';
+ 	    inpush(p, 0, NULL);
+ 
+@@ -2506,7 +2515,8 @@
+ 	} else {
+ 	    p = (char *) zhalloc(ll + 2);
+ 	    memcpy(p, linein, ll);
+-	    p[ll] = ' ';
++	    addedspaceptr = p + ll;
++	    *addedspaceptr = ' ';
+ 	    p[zlemetall] = '\0';
+ 	    inpush(p, 0, NULL);
+ 	}
+@@ -2526,6 +2536,21 @@
+ 	    break;
+ 	if (tokstr && *tokstr) {
+ 	    untokenize((p = dupstring(tokstr)));
++	    if (ingetptr() > addedspaceptr) {
++		/*
++		 * Whoops, we've read past the space we added, probably
++		 * because we were expecting a terminator but when
++		 * it didn't turn up and shrugged our shoulders thinking
++		 * it might as well be a complete string anyway.
++		 * So remove the space.  C.f. below for the case
++		 * where the missing terminator caused a lex error.
++		 * We use the same paranoid test.
++		 */
++		int plen = strlen(p);
++		if (plen && p[plen-1] == ' ' &&
++		    (plen == 1 || p[plen-2] != Meta))
++		    p[plen-1] = '\0';
++	    }
+ 	    addlinknode(list, p);
+ 	    num++;
+ 	} else if (buf) {
+Index: Src/input.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/input.c,v
+retrieving revision 1.14
+diff -u -r1.14 input.c
+--- Src/input.c	30 May 2006 22:35:03 -0000	1.14
++++ Src/input.c	8 Mar 2008 01:02:38 -0000
+@@ -566,3 +566,15 @@
+     while (inbufflags & INP_ALIAS)
+ 	inpoptop();
+ }
++
++
++/*
++ * Get pointer to remaining string to read.
++ */
++
++/**/
++char *
++ingetptr(void)
++{
++    return inbufptr;
++}
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.44
+diff -u -r1.44 lex.c
+--- Src/lex.c	23 Feb 2008 18:34:02 -0000	1.44
++++ Src/lex.c	8 Mar 2008 01:02:39 -0000
+@@ -914,6 +914,19 @@
+     return gettokstr(c, 0);
+ }
+ 
++/*
++ * Get the remains of a token string.  This has two uses.
++ * When called from gettok(), with sub = 0, we have already identified
++ * any interesting initial character and want to get the rest of
++ * what we now know is a string.  However, the string may still include
++ * metacharacters and potentially substitutions.
++ *
++ * When called from parse_subst_string() with sub = 1, we are not
++ * fully parsing a command line, merely tokenizing a string.
++ * In this case we always add characters to the parsed string
++ * unless there is a parse error.
++ */
++
+ /**/
+ static int
+ gettokstr(int c, int sub)
+@@ -1134,7 +1147,10 @@
+ 	    if (e != '(') {
+ 		hungetc(e);
+ 		lexstop = 0;
+-		goto brk;
++		if (in_brace_param || sub)
++		    break;
++		else
++		    goto brk;
+ 	    }
+ 	    add(Outang);
+ 	    if (skipcomm()) {
+Index: Test/D04parameter.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D04parameter.ztst,v
+retrieving revision 1.30
+diff -u -r1.30 D04parameter.ztst
+--- Test/D04parameter.ztst	27 Feb 2008 15:51:27 -0000	1.30
++++ Test/D04parameter.ztst	8 Mar 2008 01:02:39 -0000
+@@ -333,6 +333,34 @@
+ 0:${(Q)...} with handling of $'...'
+ >XABY
+ 
++  # The following may look a bit random.
++  # For the split we are checking that anything that
++  # would normally be followed by a different word has
++  # an argument break after it and anything that doesn't doesn't.
++  # For the (Q) we are simply checking that nothing disappears
++  # in the parsing.
++  foo='<five> {six} (seven) >eight< }nine{ |forty-two| $many$ )ten( more'
++  array=(${(z)foo})
++  print -l ${(Q)array}
++0:${(z)...} and ${(Q)...} for some hard to parse cases
++><
++>five
++>>
++>{six}
++>(
++>seven
++>)
++>>
++>eight
++><
++>}nine{
++>|
++>forty-two
++>|
++>$many$
++>)
++>ten( more
++
+   psvar=(dog)
+   setopt promptsubst
+   foo='It shouldn'\''t $(happen) to a %1v.'
+
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

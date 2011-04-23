@@ -1,0 +1,609 @@
+From zsh-workers-return-11242-mason-zsh=primenet.com.au@sunsite.auc.dk Mon May 08 08:14:39 2000
+Return-Path: <zsh-workers-return-11242-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11638 invoked from network); 8 May 2000 08:14:32 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 May 2000 08:14:32 -0000
+Received: (qmail 5924 invoked by alias); 8 May 2000 08:14:22 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11242
+Received: (qmail 5911 invoked from network); 8 May 2000 08:14:21 -0000
+Date: Mon, 8 May 2000 10:14:17 +0200 (MET DST)
+Message-Id: <200005080814.KAA11103@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: miscellaneous
+
+
+Let me start with this...
+
+- remove the autoload for parameter $compmatchers from complete.mdd
+- make the select-prompt be copied in complist.c; this could cause
+  trouble with a-i-n-h in menu selection because it was still using
+  the then-freed memory it got when first looking up $MENUPROMPT
+- a missing `&& ret=0' in _all_labels
+- better loops over completers in _prefix and _ignored
+- use the new names of _try and _loop in _complete_help (_next_label
+  and _all_labels)
+- make $ZLS_COLORS be saved and restored in _main_complete when at the 
+  end of it we have $compstate[old_list] == keep (e.g. by using
+  _oldlist)
+- make _expand, _approximate and _correct accept a few options to
+  override the settings of their main styles; this allows us to call
+  them from other functions without having to fiddle with styles
+- make force-list be tested in _setup so that it can be set for every
+  tag used for adding matches
+- allow completion of command names in _pids
+
+
+The last one needs some more comments: with this one can give the
+prefix of a command name to, e.g., kill and hit tab to let _pids
+convert that to the pid. It does *not* allow real command name
+completion (inserting missing characters and so on), because, of
+course, in the end we still have to convert the thing to a pid. There
+is a style, `insert-ids', which can be set to control (a bit) when the 
+conversion to pids takes place. Maybe there are better ways to handle
+this, I'm open to any suggestions, as usual.
+
+Bye
+ Sven
+
+Index: Completion/Builtins/_pids
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Builtins/_pids,v
+retrieving revision 1.4
+diff -u -r1.4 _pids
+--- Completion/Builtins/_pids	2000/04/13 11:05:16	1.4
++++ Completion/Builtins/_pids	2000/05/08 08:04:42
+@@ -3,13 +3,21 @@
+ # If given the `-m <pattern>' option, this tries to complete only pids
+ # of processes whose command line match the `<pattern>'.
+ 
+-local out list expl match desc listargs args
++local out list expl match desc listargs args all nm ret=1
+ 
+ _tags processes || return 1
+ 
+ if [[ "$1" = -m ]]; then
+-  match="${2}*"
++  all=()
++  match="[[:blank:]]#${PREFIX}[0-9]#${SUFFIX}[[:blank:]]*[/[:blank:]]${2}*"
+   shift 2
++elif [[ "$PREFIX$SUFFIX" = [0-9]# ]]; then
++  all=()
++  match="[[:blank:]]#${PREFIX}[0-9]#${SUFFIX}[[:blank:]]*"
++else
++  all=(-U)
++  match="*[[:blank:]]*[/[:blank:]]$PREFIX*$SUFFIX*"
++  nm="$compstate[nmatches]"
+ fi
+ 
+ zstyle -s ":completion:${curcontext}:processes" command args
+@@ -20,9 +28,9 @@
+   zstyle -s ":completion:${curcontext}:processes-list" command listargs
+   (( $#listargs )) || listargs=( "$args[@]" )
+   if [[ "$listargs" = "$args" ]]; then
+-    list=("${(@Mr:COLUMNS-1:)${(f@)out}[2,-1]:#[ 	]#${PREFIX}[0-9]#${SUFFIX}[ 	]*${~match}}")
++    list=("${(@Mr:COLUMNS-1:)${(f@)out}[2,-1]:#${~match}}")
+   else
+-    list=("${(@Mr:COLUMNS-1:)${(f@)$(_call processes-list ps 2>/dev/null)}[2,-1]:#[ 	]#${PREFIX}[0-9]#${SUFFIX}[ 	]*${~match}}")
++    list=("${(@Mr:COLUMNS-1:)${(f@)$(_call processes-list ps 2>/dev/null)}[2,-1]:#${~match}}")
+   fi
+   desc=(-ld list)
+ else
+@@ -30,5 +38,18 @@
+ fi
+ 
+ _wanted processes expl 'process ID' \
+-    compadd "$@" "$desc[@]" - \
+-        ${${${(M)${(f)"${out}"}[2,-1]:#[ 	]#${PREFIX}[0-9]#${SUFFIX}[ 	]#*${~match}}## #}%% *}
++    compadd "$@" "$desc[@]" "$all[@]" - \
++        ${${${(M)${(f)"${out}"}[2,-1]:#${~match}}## #}%% *} && ret=0
++
++if [[ -n "$all" ]]; then
++  zstyle -s ":completion:${curcontext}:processes" insert-ids out || out=menu
++
++  case "$out" in
++  menu)   compstate[insert]=menu ;;
++  single) [[ $compstate[nmatches] -ne nm+1 ]] && compstate[insert]= ;;
++  *)      [[ ${#:-$PREFIX$SUFFIX} -gt ${#compstate[unambiguous]} ]] &&
++              compstate[insert]=menu ;;
++  esac
++fi
++
++return ret
+Index: Completion/Builtins/_zstyle
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Builtins/_zstyle,v
+retrieving revision 1.9
+diff -u -r1.9 _zstyle
+--- Completion/Builtins/_zstyle	2000/05/05 13:38:46	1.9
++++ Completion/Builtins/_zstyle	2000/05/08 08:04:42
+@@ -31,12 +31,14 @@
+   group-name		 c:
+   group-order		 c:tag
+   groups		 c:_groups
++  guarded-completer      c:completer
+   hidden		 c:bool
+   hosts			 c:_hosts
+   hosts-ports		 c:host-port
+   users-hosts-ports	 c:user-host-port
+   ignore-parents         c:ignorepar
+   ignored-patterns	 c:
++  insert-ids             c:insert-ids
+   insert-unambiguous	 c:bool
+   last-prompt		 c:bool
+   list			 c:listwhen
+@@ -243,6 +245,11 @@
+       shift 3 words
+       (( CURRENT -= 3 ))
+       _normal
++      ;;
++
++    insert-ids)
++      _wanted values expl 'when to insert process IDs' \
++          compadd - menu single longer
+       ;;
+ 
+     _*)
+Index: Completion/Commands/_complete_help
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Commands/_complete_help,v
+retrieving revision 1.5
+diff -u -r1.5 _complete_help
+--- Completion/Commands/_complete_help	2000/05/02 09:10:52	1.5
++++ Completion/Commands/_complete_help	2000/05/08 08:04:42
+@@ -9,9 +9,9 @@
+ 
+   compadd() { return 1 }
+   zstyle() {
+-    local _f="${${(@)${(@)funcstack[2,(i)_(main_complete|complete|approximate|normal)]}:#_(wanted|requested|loop|try)}% *}"
++    local _f="${${(@)${(@)funcstack[2,(i)_(main_complete|complete|approximate|normal)]}:#_(wanted|requested|all_labels|next_label)}% *}"
+ 
+-    [[ -z "$_f" ]] && _f="${${(@)funcstack[2,(i)_(main_complete|complete|approximate|normal)]}:#_(wanted|requested|loop|try)}"
++    [[ -z "$_f" ]] && _f="${${(@)funcstack[2,(i)_(main_complete|complete|approximate|normal)]}:#_(wanted|requested|all_labels|next_label)}"
+ 
+     if [[ "$help_sfuncs[$2]" != *${_f}* ||
+           "$help_styles[${2}${_f}]" != *${3}* ]]; then
+@@ -77,7 +77,7 @@
+ }
+ 
+ _help_sort_tags() {
+-  local f="${${(@)${(@)funcstack[3,(i)_(main_complete|complete|approximate|normal)]}:#_(wanted|requested|loop|try)}% *}"
++  local f="${${(@)${(@)funcstack[3,(i)_(main_complete|complete|approximate|normal)]}:#_(wanted|requested|all_labels|next_label)}% *}"
+ 
+   if [[ "$help_funcs[$curcontext]" != *${f}* ||
+         "$help_tags[${curcontext}${f}]" != *(${(j:|:)~argv})* ]]; then
+Index: Completion/Core/_all_labels
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_all_labels,v
+retrieving revision 1.3
+diff -u -r1.3 _all_labels
+--- Completion/Core/_all_labels	2000/04/25 11:00:06	1.3
++++ Completion/Core/_all_labels	2000/05/08 08:04:42
+@@ -32,7 +32,7 @@
+     _description "$gopt" "${curtag%:*}" "$2" "$descr"
+     curtag="${curtag%:*}"
+ 
+-    "$4" "${(P@)2}" "${(@)argv[5,-1]}"
++    "$4" "${(P@)2}" "${(@)argv[5,-1]}" && ret=0
+   else
+     _description "$gopt" "$curtag" "$2" "$3"
+ 
+Index: Completion/Core/_approximate
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_approximate,v
+retrieving revision 1.3
+diff -u -r1.3 _approximate
+--- Completion/Core/_approximate	2000/04/11 09:40:13	1.3
++++ Completion/Core/_approximate	2000/05/08 08:04:42
+@@ -13,7 +13,14 @@
+ local _comp_correct _correct_expl comax cfgacc redef
+ local oldcontext="${curcontext}" opm="$compstate[pattern_match]"
+ 
+-zstyle -s ":completion:${curcontext}:" max-errors cfgacc || cfgacc='2 numeric'
++if [[ "$1" = -a* ]]; then
++  cfgacc="${1[3,-1]}"
++elif [[ "$1" = -a ]]; then
++  cfgacc="$2"
++else
++  zstyle -s ":completion:${curcontext}:" max-errors cfgacc ||
++      cfgacc='2 numeric'
++fi
+ 
+ # Get the number of errors to accept.
+ 
+Index: Completion/Core/_expand
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_expand,v
+retrieving revision 1.8
+diff -u -r1.8 _expand
+--- Completion/Core/_expand	2000/05/03 11:52:00	1.8
++++ Completion/Core/_expand	2000/05/08 08:04:42
+@@ -11,8 +11,13 @@
+ 
+ [[ _matcher_num -gt 1 ]] && return 1
+ 
+-local exp word sort expr expl subd suf=" "
++local exp word sort expr expl subd suf=" " force opt
+ 
++(( $# )) &&
++    while getopts gsco opt; do
++      force="$force$opt"
++    done
++
+ if [[ "$funcstack[2]" = _prefix ]]; then
+   word="$IPREFIX$PREFIX$SUFFIX"
+ else
+@@ -21,8 +26,9 @@
+ 
+ # First, see if we should insert all *completions*.
+ 
+-if zstyle -s ":completion:${curcontext}:" completions expr &&
+-   [[ "${(e):-\$[$expr]}" -eq 1 ]]; then
++if [[ "$force" = *c* ]] ||
++   { zstyle -s ":completion:${curcontext}:" completions expr &&
++     [[ "${(e):-\$[$expr]}" -eq 1 ]] }; then
+   compstate[insert]=all
+   return 1
+ fi
+@@ -35,9 +41,10 @@
+ # changes quoted spaces, tabs, and newlines into spaces and protects
+ # this function from aborting on parse errors in the expansion.
+ 
+-if { zstyle -s ":completion:${curcontext}:" substitute expr ||
+-     { [[ "$curcontext" = expand-word:* ]] && expr=1 } } &&
+-       [[ "${(e):-\$[$expr]}" -eq 1 ]]; then
++if [[ "$force" = *s* ]] ||
++   { { zstyle -s ":completion:${curcontext}:" substitute expr ||
++       { [[ "$curcontext" = expand-word:* ]] && expr=1 } } &&
++         [[ "${(e):-\$[$expr]}" -eq 1 ]] }; then
+   exp=( ${(f)"$(print -lR - ${(e)exp//\\[ 	
+ ]/ })"} ) 2>/dev/null
+ else
+@@ -52,9 +59,10 @@
+ 
+ # Now try globbing.
+ 
+-{ zstyle -s ":completion:${curcontext}:" glob expr ||
+-  { [[ "$curcontext" = expand-word:* ]] && expr=1 } } &&
+-    [[ "${(e):-\$[$expr]}" -eq 1 ]] &&
++[[ "$force" = *g* ]] ||
++  { { zstyle -s ":completion:${curcontext}:" glob expr ||
++      { [[ "$curcontext" = expand-word:* ]] && expr=1 } } &&
++        [[ "${(e):-\$[$expr]}" -eq 1 ]] } &&
+     exp=( ${~exp} )
+ 
+ # If we don't have any expansions or only one and that is the same
+@@ -67,8 +75,10 @@
+ # With subst-globs-only we bail out if there were no glob expansions,
+ # regardless of any substitutions
+ 
+-zstyle -s ":completion:${curcontext}:" subst-globs-only expr &&
+-    [[ "${(e):-\$[$expr]}" -eq 1 && "$subd" = "$exp"(|\(N\)) ]] && return 1
++[[ "$force" = *o* ]] ||
++  { zstyle -s ":completion:${curcontext}:" subst-globs-only expr &&
++      [[ "${(e):-\$[$expr]}" -eq 1 ]] } && 
++        [[ "$subd" = "$exp"(|\(N\)) ]] && return 1
+ 
+ # Now add as matches whatever the user requested.
+ 
+Index: Completion/Core/_ignored
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_ignored,v
+retrieving revision 1.2
+diff -u -r1.2 _ignored
+--- Completion/Core/_ignored	2000/04/01 20:43:43	1.2
++++ Completion/Core/_ignored	2000/05/08 08:04:42
+@@ -2,30 +2,54 @@
+ 
+ # Use ignored matches.
+ 
+-(( $compstate[ignored] )) || return 1
++[[ _matcher_num -gt 1 || $compstate[ignored] -eq 0 ]] && return 1
+ 
+-local comp i _comp_no_ignore=yes tmp expl
++local comp _comp_no_ignore=yes tmp expl \
++      _completer _completer_num _matcher _matchers _matcher_num
+ 
+ zstyle -a ":completion:${curcontext}:" completer comp ||
+   comp=( "${(@)_completers[1,_completer_num-1][(R)_ignored(|:*),-1]}" )
+ 
+-for i in "$comp[@]"; do
+-  if [[ "$i" != _ignored ]] && "$i"; then
+-    if zstyle -s ":completion:${curcontext}:" single-ignored tmp &&
+-       [[ $compstate[old_list] != shown && $compstate[nmatches] -eq 1 ]]; then
+-      case "$tmp" in
+-      show) compstate[insert]='' compstate[list]='list force' tmp='' ;;
+-      menu)
+-        compstate[insert]=menu
+-        _description original expl original    
+-        compadd "$expl[@]" -S '' - "$PREFIX$SUFFIX"
+-        ;;
+-      *) tmp='' ;;
+-      esac
+-    fi
++_completer_num=1
+ 
+-    return 0
++for tmp in "$comp[@]"; do
++  if [[ "$tmp" = *:-* ]]; then
++    _completer="${${tmp%:*}[2,-1]//_/-}${tmp#*:}"
++    tmp="${tmp%:*}"
++  elif [[ $tmp = *:* ]]; then
++    _completer="${tmp#*:}"
++    tmp="${tmp%:*}"
++  else
++    _completer="${tmp[2,-1]//_/-}"
+   fi
++  curcontext="${curcontext/:[^:]#:/:${_completer}:}"
++
++  zstyle -a ":completion:${curcontext}:" matcher-list _matchers ||
++      _matchers=( '' )
++
++  _matcher_num=1
++  for _matcher in "$_matchers[@]"; do
++    if [[ "$tmp" != _ignored ]] && "$tmp"; then
++      if zstyle -s ":completion:${curcontext}:" single-ignored tmp &&
++         [[ $compstate[old_list] != shown &&
++            $compstate[nmatches] -eq 1 ]]; then
++        case "$tmp" in
++        show) compstate[insert]='' compstate[list]='list force' tmp='' ;;
++        menu)
++          compstate[insert]=menu
++          _description original expl original    
++          compadd "$expl[@]" -S '' - "$PREFIX$SUFFIX"
++          ;;
++        esac
++      fi
++
++      return 0
++    fi
++
++    (( _matcher_num++ ))
++  done
++
++  (( _completer_num++ ))
+ done
+ 
+ return 1
+Index: Completion/Core/_main_complete
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_main_complete,v
+retrieving revision 1.13
+diff -u -r1.13 _main_complete
+--- Completion/Core/_main_complete	2000/05/05 11:21:50	1.13
++++ Completion/Core/_main_complete	2000/05/08 08:04:42
+@@ -20,14 +20,15 @@
+ unsetopt markdirs globsubst shwordsplit nounset ksharrays
+ 
+ local func funcs ret=1 tmp _compskip format nm \
+-      _completers _completer _completer_num curtag \
++      _completers _completer _completer_num curtag _comp_force_list \
+       _matchers _matcher _matcher_num _comp_tags _comp_mesg \
+       context state line opt_args val_args curcontext="$curcontext" \
+       _last_nmatches=-1 _last_menu_style _def_menu_style _menu_style sel \
+       _saved_exact="${compstate[exact]}" \
+       _saved_lastprompt="${compstate[last_prompt]}" \
+       _saved_list="${compstate[list]}" \
+-      _saved_insert="${compstate[insert]}"
++      _saved_insert="${compstate[insert]}" \
++      _saved_colors="$ZLS_COLORS"
+ 
+ typeset -U _lastdescr _comp_ignore
+ 
+@@ -203,12 +204,11 @@
+   fi
+ fi
+ 
+-if zstyle -s ":completion:${curcontext}:" force-list tmp &&
+-   [[ "$compstate[list]" = *list* && 
+-      ( "$tmp" = always ||
+-        ( "$tmp" = [0-9]## && nm -ge tmp ) ) ]]; then
+-  compstate[list]="$compstate[list] force"
+-fi
++[[ "$_comp_force_list" = always ||
++   ( "$_comp_force_list" = ?*  && nm -ge _comp_force_list ) ]] &&
++    compstate[list]="$compstate[list] force"
++
++[[ "$compstate[old_list]" = keep ]] && ZLS_COLORS="$_saved_colors"
+ 
+ # Now call the post-functions.
+ 
+Index: Completion/Core/_prefix
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_prefix,v
+retrieving revision 1.2
+diff -u -r1.2 _prefix
+--- Completion/Core/_prefix	2000/04/01 20:43:43	1.2
++++ Completion/Core/_prefix	2000/05/08 08:04:42
+@@ -2,9 +2,10 @@
+ 
+ # Try to ignore the suffix. A bit like e-o-c-prefix.
+ 
+-[[ -n "$SUFFIX" ]] || return 1
++[[ _matcher_num -gt 1 || -z "$SUFFIX" ]] && return 1
+ 
+-local comp i
++local comp curcontext="$curcontext" tmp \
++      _completer _completer_num _matcher _matchers _matcher_num
+ 
+ zstyle -a ":completion:${curcontext}:" completer comp ||
+   comp=( "${(@)_completers[1,_completer_num-1][(R)_prefix(|:*),-1]}" )
+@@ -16,8 +17,29 @@
+ fi
+ SUFFIX=''
+ 
+-for i in "$comp[@]"; do
+-  [[ "$i" != _prefix ]] && "$i" && return 0
++_completer_num=1
++
++for tmp in "$comp[@]"; do
++  if [[ "$tmp" = *:-* ]]; then
++    _completer="${${tmp%:*}[2,-1]//_/-}${tmp#*:}"
++    tmp="${tmp%:*}"
++  elif [[ $tmp = *:* ]]; then
++    _completer="${tmp#*:}"
++    tmp="${tmp%:*}"
++  else
++    _completer="${tmp[2,-1]//_/-}"
++  fi
++  curcontext="${curcontext/:[^:]#:/:${_completer}:}"
++
++  zstyle -a ":completion:${curcontext}:" matcher-list _matchers ||
++      _matchers=( '' )
++
++  _matcher_num=1
++  for _matcher in "$_matchers[@]"; do
++    [[ "$tmp" != _prefix ]] && "$tmp" && return 0
++    (( _matcher_num++ ))
++  done
++  (( _completer_num++ ))
+ done
+ 
+ return 1
+Index: Completion/Core/_setup
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_setup,v
+retrieving revision 1.2
+diff -u -r1.2 _setup
+--- Completion/Core/_setup	2000/04/01 20:43:43	1.2
++++ Completion/Core/_setup	2000/05/08 08:04:42
+@@ -59,3 +59,10 @@
+ else
+   _last_nmatches=-1
+ fi
++
++[[ "$_comp_force_list" != always ]] &&
++  zstyle -s ":completion:${curcontext}:$1" force-list val &&
++    [[ "$val" = always ||
++       ( "$val" = [0-9]## &&
++         ( -z "$_comp_force_list" || _comp_force_list -lt val ) ) ]] &&
++    _comp_force_list="$val"
+Index: Doc/Zsh/compsys.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compsys.yo,v
+retrieving revision 1.35
+diff -u -r1.35 compsys.yo
+--- Doc/Zsh/compsys.yo	2000/05/06 07:59:53	1.35
++++ Doc/Zsh/compsys.yo	2000/05/08 08:04:43
+@@ -1038,12 +1038,16 @@
+ If the completion code would show a list of completions at all, this
+ style controls whether the list is shown even in cases when it would
+ normally not do that. For example, normally the list is only shown if
+-there are at least to different matches. By setting this style to
+-`tt(always)', the list will always even be shown, even if there is
+-only a single match which is immediately accepted. The style may also
++there are at least two different matches. By setting this style to
++`tt(always)', the list will always be shown, even if there is only a
++single match which is immediately accepted. The style may also
+ be set to a number. In this case the list will be shown if there are
+ at least that many matches, even if they would all insert the same
+ string.
++
++This style is tested for the default tag and all tags used when
++generating matches. This allows one to turn unconditional listing on
++for certain types of matches.
+ )
+ kindex(format, completion style)
+ item(tt(format))(
+@@ -1221,6 +1225,23 @@
+ tt(EXTENDED_GLOB) option is in effect, so the characters `tt(#)',
+ `tt(~)' and `tt(^)' have special meanings in the patterns.
+ )
++kindex(insert-ids, completion style)
++item(tt(insert-ids))(
++The function that completes process IDs can be given the prefix of a
++command name to complete it to that process' ID. Since the function
++even in those cases has to insert the process ID, it has to be decided 
++when the string from the line will be converted to a process ID or a
++prefix of one. If this style is set to `tt(menu)' (the default),
++menucompletion will always be entered when the string on the line is
++not a number. If  it is set to `tt(single)', the string on the line
++will be converted to  the process ID only at the very end, when there
++is only one match left  (note that in this case the completion will
++not be able to insert characters in the line because it still has to
++match the process IDs, it just doesn't insert them yet). If the value
++is any other string, menucompletion will be entered when the string on
++the line is longer than the prefix of the IDs of all matching
++processes.
++)
+ kindex(insert-unambiguous, completion style)
+ item(tt(insert-unambiguous))(
+ This is used by the tt(_match) and tt(_approximate) completer
+@@ -2088,6 +2109,10 @@
+ and the number of errors accepted in this attempt to its name. So on the
+ first try the field contains `tt(approximate-1)', on the
+ second try `tt(approximate-2)', and so on.
++
++When tt(_approximate) is called directly, the number of errors to accept
++may be given directly with the tt(-a) option. It's argument should be
++the same as the value of the tt(accept) style, all in one string.
+ )
+ findex(_correct)
+ item(tt(_correct))(
+@@ -2106,8 +2131,12 @@
+ will be, and will accept as many errors as given by the numeric
+ argument. Without a numeric argument, first correction and then
+ correcting completion will be tried, with the first one accepting two
+-errors  and the second one accepting three errors.
++errors and the second one accepting three errors.
+ 
++When tt(_correct) is called directly, the number of errors to accept
++may be given directly with the tt(-a) option. It's argument should be
++the same as the value of the tt(accept) style, all in one string.
++
+ This completer function is intended to be used without the
+ tt(_approximate) completer or, as in the example, just before
+ it. Using it after the tt(_approximate) completer is useless since
+@@ -2168,6 +2197,11 @@
+ 
+ In a different mode selected by the tt(completions) style, all
+ em(completions) generated for the string on the line are inserted.
++
++When tt(_expand) is called directly, the different modes may be
++selected with options. The tt(-c) corresponds to the tt(completions)
++style, tt(-s) to tt(substitute), tt(-g) to tt(glob) and tt(-o) to
++tt(subst-globs-only).
+ )
+ findex(_history)
+ item(tt(_history))(
+Index: Src/Zle/complete.mdd
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complete.mdd,v
+retrieving revision 1.1.1.6
+diff -u -r1.1.1.6 complete.mdd
+--- Src/Zle/complete.mdd	1999/12/16 14:26:37	1.1.1.6
++++ Src/Zle/complete.mdd	2000/05/08 08:04:43
+@@ -6,8 +6,6 @@
+ 
+ autoprefixconds="prefix suffix between after"
+ 
+-autoparams="compmatchers"
+-
+ headers="comp.h"
+ 
+ objects="complete.o compcore.o compmatch.o compresult.o"
+Index: Src/Zle/complist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complist.c,v
+retrieving revision 1.13
+diff -u -r1.13 complist.c
+--- Src/Zle/complist.c	2000/05/03 11:52:01	1.13
++++ Src/Zle/complist.c	2000/05/08 08:04:44
+@@ -1589,7 +1589,7 @@
+ 	    if ((step += lines - nlnct) < 0)
+ 		step = 1;
+     }
+-    if ((mstatus = getsparam("MENUPROMPT")) && !*mstatus)
++    if ((mstatus = dupstring(getsparam("MENUPROMPT"))) && !*mstatus)
+ 	mstatus = "%SScrolling active: current selection at %p%s";
+     mhasstat = (mstatus && *mstatus);
+     fdat = dat;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

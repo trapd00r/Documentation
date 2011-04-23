@@ -1,0 +1,221 @@
+From zsh-workers-return-15292-mason-zsh=primenet.com.au@sunsite.dk Fri Jul 06 18:27:49 2001
+Return-Path: <zsh-workers-return-15292-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6121 invoked from network); 6 Jul 2001 18:27:48 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 6 Jul 2001 18:27:48 -0000
+Received: (qmail 16043 invoked by alias); 6 Jul 2001 18:26:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15292
+Received: (qmail 16028 invoked from network); 6 Jul 2001 18:26:42 -0000
+Message-ID: <Tc0a88d01549623670a@mailsweeper01.cambridgesiliconradio.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: PATCH: 1.1: fix bug assigning to scalar in math 
+In-reply-to: "Peter Stephenson"'s message of "Fri, 06 Jul 2001 19:08:50 BST."
+             <Tc0a88d015496129c8d@mailsweeper01.cambridgesiliconradio.com> 
+Date: Fri, 06 Jul 2001 19:27:10 +0100
+From: Peter Stephenson <pws@csr.com>
+
+Peter Stephenson wrote:
+> It makes the math stack 100 words longer during each evaluation of an
+> expression, so I was toying with turning the stack into a linked list
+> instead of a fixed array of 100 structures.  However, that is likely to
+> have an adverse effect on execution time, whereas this ought to be
+> relatively benign.  So I haven't decided.
+
+Brainwave.  Use the type discriminator to flag that it's unset.  This
+replaces the previous version.
+
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.9
+diff -u -r1.9 math.c
+--- Src/math.c	2001/04/20 06:13:36	1.9
++++ Src/math.c	2001/07/06 18:24:55
+@@ -476,7 +476,7 @@
+ 
+ /**/
+ static void
+-push(mnumber val, char *lval)
++push(mnumber val, char *lval, int getme)
+ {
+     if (sp == STACKSZ - 1)
+ 	zerr("stack overflow", NULL, 0);
+@@ -484,8 +484,21 @@
+ 	sp++;
+     stack[sp].val = val;
+     stack[sp].lval = lval;
++    if (getme)
++	stack[sp].val.type = MN_UNSET;
+ }
+ 
++/**/
++static mnumber
++pop(int noget)
++{
++    struct mathvalue *mv = stack+sp;
++
++    if (mv->val.type == MN_UNSET && !noget)
++	mv->val = getnparam(mv->lval);
++    sp--;
++    return mv->val;
++}
+ 
+ /**/
+ static mnumber
+@@ -615,8 +628,8 @@
+     if (tp & (OP_A2|OP_A2IR|OP_A2IO|OP_E2|OP_E2IO)) {
+ 	/* Make sure anyone seeing this message reports it. */
+ 	DPUTS(sp < 1, "BUG: math: not enough wallabies in outback.");
+-	b = stack[sp--].val;
+-	a = stack[sp--].val;
++	b = pop(0);
++	a = pop(what == EQ);
+ 
+ 	if (tp & (OP_A2IO|OP_E2IO)) {
+ 	    /* coerce to integers */
+@@ -785,13 +798,15 @@
+ 	}
+ 	if (tp & (OP_E2|OP_E2IO)) {
+ 	    lv = stack[sp+1].lval;
+-	    push(setvar(lv,c), lv);
++	    push(setvar(lv,c), lv, 0);
+ 	} else
+-	    push(c,NULL);
++	    push(c,NULL, 0);
+ 	return;
+     }
+ 
+     spval = &stack[sp].val;
++    if (stack[sp].val.type == MN_UNSET)
++	*spval = getnparam(stack[sp].lval);
+     switch (what) {
+     case NOT:
+ 	if (spval->type & MN_FLOAT) {
+@@ -837,11 +852,11 @@
+ 	break;
+     case QUEST:
+ 	DPUTS(sp < 2, "BUG: math: three shall be the number of the counting.");
+-	c = stack[sp--].val;
+-	b = stack[sp--].val;
+-	a = stack[sp--].val;
++	c = pop(0);
++	b = pop(0);
++	a = pop(0);
+ 	/* b and c can stay different types in this case. */
+-	push(((a.type & MN_FLOAT) ? a.u.d : a.u.l) ? b : c, NULL);
++	push(((a.type & MN_FLOAT) ? a.u.d : a.u.l) ? b : c, NULL, 0);
+ 	break;
+     case COLON:
+ 	zerr("':' without '?'", NULL, 0);
+@@ -872,8 +887,12 @@
+ bop(int tk)
+ {
+     mnumber *spval = &stack[sp].val;
+-    int tst = (spval->type & MN_FLOAT) ? (zlong)spval->u.d : spval->u.l; 
++    int tst;
+ 
++    if (stack[sp].val.type == MN_UNSET)
++	*spval = getnparam(stack[sp].lval);
++    tst = (spval->type & MN_FLOAT) ? (zlong)spval->u.d : spval->u.l; 
++
+     switch (tk) {
+     case DAND:
+     case DANDEQ:
+@@ -938,7 +957,15 @@
+     DPUTS(!errflag && sp,
+ 	  "BUG: math: wallabies roaming too freely in outback");
+ 
+-    ret = stack[0].val;
++    if (errflag) {
++	ret.type = MN_INTEGER;
++	ret.u.l = errflag;
++    } else {
++	if (stack[0].val.type == MN_UNSET)
++	    ret = getnparam(stack[0].lval);
++	else
++	    ret = stack[0].val;
++    }
+ 
+     if (--mlevel) {
+ 	lastbase = xlastbase;
+@@ -1056,16 +1083,16 @@
+ 	    return;
+ 	switch (mtok) {
+ 	case NUM:
+-	    push(yyval, NULL);
++	    push(yyval, NULL, 0);
+ 	    break;
+ 	case ID:
+-	    push((noeval ? zero_mnumber : getnparam(yylval)), yylval);
++	    push(zero_mnumber, yylval, !noeval);
+ 	    break;
+ 	case CID:
+-	    push((noeval ? zero_mnumber : getcvar(yylval)), yylval);
++	    push((noeval ? zero_mnumber : getcvar(yylval)), yylval, 0);
+ 	    break;
+ 	case FUNC:
+-	    push((noeval ? zero_mnumber : callmathfunc(yylval)), yylval);
++	    push((noeval ? zero_mnumber : callmathfunc(yylval)), yylval, 0);
+ 	    break;
+ 	case M_INPAR:
+ 	    mathparse(TOPPREC);
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.32
+diff -u -r1.32 zsh.h
+--- Src/zsh.h	2001/06/27 11:22:05	1.32
++++ Src/zsh.h	2001/07/06 18:24:55
+@@ -75,6 +75,7 @@
+ 
+ #define MN_INTEGER 1		/* mnumber is integer */
+ #define MN_FLOAT   2		/* mnumber is floating point */
++#define MN_UNSET   4		/* mnumber not yet retrieved */
+ 
+ typedef struct mathfunc *MathFunc;
+ typedef mnumber (*NumMathFunc)(char *, int, mnumber *, int);
+Index: Test/C01arith.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/C01arith.ztst,v
+retrieving revision 1.1
+diff -u -r1.1 C01arith.ztst
+--- Test/C01arith.ztst	2001/04/02 12:32:11	1.1
++++ Test/C01arith.ztst	2001/07/06 18:24:55
+@@ -88,3 +88,13 @@
+   print ${(t)newarray} ${#newarray} ${newarray[1]}
+ 0:setting array elements in math context
+ >array 1 2
++
++  print $(( 13 = 42 ))
++1:bad lvalue
++?ZTST_execchunk:2: lvalue required
++
++  x=/bar
++  (( x = 32 ))
++  print $x
++0:assigning to scalar which contains non-math string
++>32
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

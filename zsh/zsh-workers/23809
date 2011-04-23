@@ -1,0 +1,173 @@
+From zsh-workers-return-23809-mason-zsh=primenet.com.au@sunsite.dk Thu Aug 30 21:41:51 2007
+Return-Path: <zsh-workers-return-23809-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5663 invoked from network); 30 Aug 2007 21:41:43 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.3 (2007-08-08) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.3
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 30 Aug 2007 21:41:43 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 52273 invoked from network); 30 Aug 2007 21:41:34 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 30 Aug 2007 21:41:34 -0000
+Received: (qmail 17282 invoked by alias); 30 Aug 2007 21:41:31 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23809
+Received: (qmail 17272 invoked from network); 30 Aug 2007 21:41:31 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 30 Aug 2007 21:41:31 -0000
+Received: (qmail 52005 invoked from network); 30 Aug 2007 21:41:31 -0000
+Received: from mtaout03-winn.ispmail.ntl.com (81.103.221.49)
+  by a.mx.sunsite.dk with SMTP; 30 Aug 2007 21:41:24 -0000
+Received: from aamtaout04-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout03-winn.ispmail.ntl.com with ESMTP
+          id <20070830214119.XXTK13.mtaout03-winn.ispmail.ntl.com@aamtaout04-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Thu, 30 Aug 2007 22:41:19 +0100
+Received: from pws-pc.ntlworld.com ([81.107.45.67])
+          by aamtaout04-winn.ispmail.ntl.com with ESMTP
+          id <20070830214119.NCCF29112.aamtaout04-winn.ispmail.ntl.com@pws-pc.ntlworld.com>
+          for <zsh-workers@sunsite.dk>; Thu, 30 Aug 2007 22:41:19 +0100
+Received: from pws-pc.ntlworld.com (pws-pc.ntlworld.com [127.0.0.1])
+	by pws-pc.ntlworld.com (8.14.1/8.13.8) with ESMTP id l7ULfCeM012007
+	for <zsh-workers@sunsite.dk>; Thu, 30 Aug 2007 22:41:12 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: expand existing $'...' in completion string
+X-Mailer: MH-E 8.0.3; nmh 1.2-20070115cvs; GNU Emacs 22.1.1
+Date: Thu, 30 Aug 2007 22:41:12 +0100
+Message-ID: <12006.1188510072@pws-pc.ntlworld.com>
+
+This is supposed to help completion of strings with unprintable/invalid
+characters by expanding existing $'...' strings that are already on the
+command line when completion starts.  You won't be surprised to hear
+this is fairly hairy; there are lots of ill-documented offsets to get
+right.  I've actually tried it out with normal characters.  For example,
+h$'\x69'$'\x73' is treated as "his" and so completes to hist.c etc.
+(The expression is unquoted and then requoted later; attempting to
+preserve the original quoting would be highly complicated and didn't
+seem worthwhile.)
+
+I've tried to cover problem cases such as where the $' expression
+isn't finished, or when the cursor is in the middle of it, by simply
+leaving the expression alone.
+
+It seemed to handle the following case:
+
+% touch A\ B
+% echo A$'\x20'<TAB>
+% echo A\ B
+
+at which point I decided it was time to leave well alone.
+
+I'm sure you'll let me know if it doesn't work.
+
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_tricky.c,v
+retrieving revision 1.87
+diff -u -r1.87 zle_tricky.c
+--- Src/Zle/zle_tricky.c	29 May 2007 17:01:09 -0000	1.87
++++ Src/Zle/zle_tricky.c	30 Aug 2007 21:30:55 -0000
+@@ -1611,7 +1611,90 @@
+     /* While building the quoted form, we also clean up the command line. */
+     for (p = s, i = wb, j = 0; *p; p++, i++) {
+ 	int skipchars;
+-	if ((*p == String || *p == Qstring) && p[1] == Snull)
++	if (*p == String && p[1] == Snull) {
++	    char *pe;
++	    for (pe = p + 2; *pe && *pe != Snull && i + (pe - p) < zlemetacs;
++		 pe++)
++		;
++	    if (!*pe) {
++		/* no terminating Snull, can't substitute */
++		skipchars = 2;
++	    } else {
++		/*
++		 * Try and substitute the $'...' expression.
++		 */
++		int len, tlen;
++		char *t = getkeystring(p + 2, &len, GETKEYS_DOLLARS_QUOTE,
++				       NULL);
++		len += 2;
++		tlen = strlen(t);
++		skipchars = len - tlen;
++		/*
++		 * If this makes the line longer, we don't attempt
++		 * to substitute it.  This is because "we" don't
++		 * really understand what the heck is going on anyway
++		 * and have blindly copied the code here from
++		 * the sections below.
++		 */
++		if (skipchars >= 0) {
++		    /* Update the completion string */
++		    memcpy(p, t, tlen);
++		    /* Update the version of the line we are operating on */
++		    ocs = zlemetacs;
++		    zlemetacs = i;
++		    if (skipchars > 0) {
++			/* Move the tail of the completion string up. */
++			char *dptr = p + tlen;
++			char *sptr = p + len;
++			while ((*dptr++ = *sptr++))
++			    ;
++			/*
++			 * If the character is before the cursor, we need to
++			 * update the offset into the completion string to the
++			 * cursor position, too.  (Use ocs since we've hacked
++			 * zlemetacs at this point.)
++			 */
++			if (i < ocs)
++			    offs -= skipchars;
++			/* Move the tail of the line up */
++			foredel(skipchars);
++			/*
++			 * Update the offset into the command line to the
++			 * cursor position if that's after the current position.
++			 */
++			if ((zlemetacs = ocs) > i)
++			    zlemetacs -= skipchars;
++			/* Always update the word end. */
++			we -= skipchars;
++		    }
++		    /*
++		     * Copy the unquoted string into place, which
++		     * now has the correct size.
++		     */
++		    memcpy(zlemetaline + i, t, tlen);
++
++		    /*
++		     * Move both the completion string pointer
++		     * and the command line offset to the end of
++		     * the chunk we've copied in (minus 1 for
++		     * the end of loop increment).  The line
++		     * and completion string chunks are now the
++		     * same length.
++		     */
++		    p += tlen - 1;
++		    i += tlen - 1;
++		    continue;
++		} else {
++		    /*
++		     * We give up if the expansion is longer the original
++		     * string.  That's because "we" don't really have the
++		     * first clue how the completion system actually works.
++		     */
++		    skipchars = 2;
++		}
++	    }
++	}
++	else if (*p == Qstring && p[1] == Snull)
+ 	    skipchars = 2;
+ 	else if (inull(*p))
+ 	    skipchars = 1;
+
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

@@ -1,0 +1,390 @@
+From zsh-workers-return-13061-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Oct 23 08:00:05 2000
+Return-Path: <zsh-workers-return-13061-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8126 invoked from network); 23 Oct 2000 08:00:04 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Oct 2000 08:00:04 -0000
+Received: (qmail 28234 invoked by alias); 23 Oct 2000 07:59:59 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13061
+Received: (qmail 28227 invoked from network); 23 Oct 2000 07:59:58 -0000
+Date: Mon, 23 Oct 2000 09:59:55 +0200 (MET DST)
+Message-Id: <200010230759.JAA21293@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Andrej Borsenkow"'s message of Fri, 20 Oct 2000 11:55:53 +0400
+Subject: RE: PATCH: ptyread eating CPU on Cygwin
+
+
+Andrej Borsenkow wrote:
+
+> > I even think about removin non-blocking ptys altogether -- and add
+> > allow `zpty -w' with a timeout, too.  Hm, the print builtin can't be
+> > given a timeout, but the -t option for it is still unused. Should we?
+> 
+> zpty -w with timeout is right stuff. I think, we better leave non-blocking
+> mode in - may be, there are some exotic cases when it may be useful. And in
+> case of non-bocking read with pattern add return code 'did not match' (it
+> cannot happen in case of blocking read without either EOF or timeout).
+> 
+> But we need better semantic for zpty -r then. Without pattern, how much
+> exactly should it read? A character at a time? A line?
+
+
+This is the patch I wrote at the weekend. I won't commit it yet
+because it contains several changes in read_poll() and I'd like to get 
+comments about them from the one(s) who wrote that. There were some
+things in it I think were really wrong, like testing `select() > 1'
+and like trying all possible tests if the first tests worked but
+returned zero.
+
+
+Other changes:
+- blocking is the default, -b selects non-blocking mode
+- -r returns one if nothing could be read and 2 if EOF was encountered
+- -t can be combined with -r to do the same as in the read builtin,
+  i.e. it doesn't allow to specify a timeout, but it first (tries to)
+  checks if input is available and doesn't try to read if there is
+  none
+- -w can be interrupted with ^C (even if the rest of the patch doesn't 
+  make it in, this will be added)
+
+I have not written the code to allow to combine -t with -w (or the
+print builtin) yet. Will that have to be as complicated as read_poll()?
+
+Bye
+ Sven
+
+diff -u -r ../oz/Doc/Zsh/mod_zpty.yo ./Doc/Zsh/mod_zpty.yo
+--- ../oz/Doc/Zsh/mod_zpty.yo	Sat Oct 21 20:35:07 2000
++++ ./Doc/Zsh/mod_zpty.yo	Sat Oct 21 23:57:41 2000
+@@ -8,7 +8,7 @@
+ xitem(tt(zpty) [ tt(-e) ] [ tt(-b) ] var(name) var(command) [ var(args ...) ])
+ xitem(tt(zpty) tt(-d) [ var(names) ... ])
+ xitem(tt(zpty) tt(-w) [ tt(-n) ] var(name) var(strings ...))
+-xitem(tt(zpty) tt(-r) var(name) [ var(param) [ var(pattern) ] ])
++xitem(tt(zpty) tt(-r) [ tt(-t) ] var(name) [ var(param) [ var(pattern) ] ])
+ xitem(tt(zpty) tt(-t) var(name))
+ item(tt(zpty) [ tt(-L) ])(
+ In the first form, the var(command) is started with the var(args) as
+@@ -18,7 +18,7 @@
+ command in later calls to tt(pty).  With the tt(-e) option given, the
+ pseudo-terminal will be set up so that input characters are echoed and 
+ with the tt(-b) option given, input and output from and to the
+-pseudo-terminal will be blocking.
++pseudo-terminal will be non-blocking.
+ 
+ The second form with the tt(-d) option is used to delete commands
+ previously started by supplying a list of their var(name)s.  If no
+@@ -34,11 +34,20 @@
+ printed to standard output.  With a var(param) argument, the string
+ read will be put in the parameter named var(param).  If the
+ var(pattern) is also given, output will be read until the whole string 
+-read matches the var(pattern).
++read matches the var(pattern).  The return value is zero if anything
++could be read (with a var(pattern), the return value will only be zero 
++if the string read matches the pattern or if the command isn't running 
++anymore and at least one character could still be read).  The return
++value is non-zero if nothing could be read and it will be two if this
++is because the command has finished.
+ 
+-The tt(-t) option can be used to test whether the command var(name) is 
+-still running.  It returns a zero value if the command is running and
+-a non-zero value otherwise.
++If the tt(-r) option is combined with the tt(-t) option, tt(zpty) will 
++test if input is available before trying to read.  If no input is
++available, tt(zpty) immediately returns the value `tt(1)'.
++
++The tt(-t) option without the tt(-r) option can be used to test
++whether the command var(name) is still running.  It returns a zero
++value if the command is running and a non-zero value otherwise.
+ 
+ The last form without any arguments is used to list the commands
+ currently defined.  If the tt(-L) option is given, this is done in the
+diff -u -r ../oz/Functions/Misc/nslookup ./Functions/Misc/nslookup
+--- ../oz/Functions/Misc/nslookup	Sat Oct 21 20:35:17 2000
++++ ./Functions/Misc/nslookup	Sat Oct 21 21:38:28 2000
+@@ -24,7 +24,7 @@
+     [[ -z "$pager" ]] && pager="${opager:-more}"
+ (( $#pmpt )) || pmpt=(-p '> ')
+ 
+-zpty -b nslookup nslookup "$@"
++zpty nslookup nslookup "$@"
+ 
+ zpty -r nslookup line '*
+ > '
+diff -u -r ../oz/Src/Modules/zpty.c ./Src/Modules/zpty.c
+--- ../oz/Src/Modules/zpty.c	Sat Oct 21 20:35:13 2000
++++ ./Src/Modules/zpty.c	Sun Oct 22 00:08:00 2000
+@@ -34,7 +34,6 @@
+  * upper bound on the number of bytes we read (even if we are give a
+  * pattern). */
+ 
+-#define READ_LEN 1024
+ #define READ_MAX (1024 * 1024)
+ 
+ typedef struct ptycmd *Ptycmd;
+@@ -46,9 +45,10 @@
+     int fd;
+     int pid;
+     int echo;
+-    int block;
++    int nblock;
+     int fin;
+     int read;
++    char *old;
+ };
+ 
+ static Ptycmd ptycmds;
+@@ -264,7 +264,7 @@
+ #endif /* __SVR4 */
+ 
+ static int
+-newptycmd(char *nam, char *pname, char **args, int echo, int block)
++newptycmd(char *nam, char *pname, char **args, int echo, int nblock)
+ {
+     Ptycmd p;
+     int master, slave, pid;
+@@ -380,14 +380,15 @@
+     p->fd = master;
+     p->pid = pid;
+     p->echo = echo;
+-    p->block = block;
++    p->nblock = nblock;
+     p->fin = 0;
+     p->read = -1;
++    p->old = NULL;
+ 
+     p->next = ptycmds;
+     ptycmds = p;
+ 
+-    if (!block)
++    if (nblock)
+ 	ptynonblock(master);
+ 
+     return 0;
+@@ -447,8 +448,8 @@
+ static int
+ ptyread(char *nam, Ptycmd cmd, char **args)
+ {
+-    int blen = 256, used = 0, ret = 1;
+-    char *buf = (char *) zhalloc((blen = 256) + 1);
++    int blen, used, ret = 1;
++    char *buf;
+     Patprog prog = NULL;
+ 
+     if (*args && args[1]) {
+@@ -466,9 +467,19 @@
+ 	    return 1;
+ 	}
+     }
++    if (cmd->old) {
++	used = strlen(cmd->old);
++	buf = (char *) zhalloc((blen = 256 + used) + 1);
++	strcpy(buf, cmd->old);
++	zsfree(cmd->old);
++	cmd->old = NULL;
++    } else {
++	used = 0;
++	buf = (char *) zhalloc((blen = 256) + 1);
++    }
+     if (cmd->read != -1) {
+-	buf[0] = (char) cmd->read;
+-	buf[1] = '\0';
++	buf[used] = (char) cmd->read;
++	buf[used + 1] = '\0';
+ 	used = 1;
+ 	cmd->read = -1;
+     }
+@@ -486,68 +497,61 @@
+ 	}
+ 	buf[used] = '\0';
+ 
+-#if 0
+-	/* This once used the following test, to make sure to return
+-	 * non-zero if there are no characters to read.  That looks
+-	 * like a thinko now, because it disables non-blocking ptys. */
++	if (!prog && (ret <= 0 || (ret == 1 && buf[used - 1] == '\n')))
++	    break;
++    } while (!errflag && !breaks && !retflag && !contflag &&
++	     used < READ_MAX && (prog ? (!ret || !pattry(prog, buf)) : 1));
+ 
+-	if (ret < 0 && (cmd->block
++    if (prog && ret < 0 &&
+ #ifdef EWOULDBLOCK
+-			|| errno != EWOULDBLOCK
++	errno == EWOULDBLOCK
+ #else
+ #ifdef EAGAIN
+-			|| errno != EAGAIN
++	errno == EAGAIN
+ #endif
+ #endif
+-			))
+-	    break;
+-#endif
+-
+-	if (!prog && ret <= 0)
+-	    break;
+-    } while (!errflag && !breaks && !retflag && !contflag &&
+-	     (prog ? (used < READ_MAX && (!ret || !pattry(prog, buf))) :
+-	      (used < READ_LEN)));
++	) {
++	cmd->old = ztrdup(buf);
++	used = 0;
+ 
++	return 1;
++    }
+     if (*args)
+ 	setsparam(*args, ztrdup(metafy(buf, used, META_HREALLOC)));
+     else {
+ 	fflush(stdout);
+ 	write(1, buf, used);
+     }
+-    return !used;
++    return (used ? 0 : cmd->fin + 1);
+ }
+ 
+ static int
+ ptywritestr(Ptycmd cmd, char *s, int len)
+ {
+-    int written;
++    int written, all = 0;
+ 
+-    for (; len; len -= written, s += written) {
+-	if ((written = write(cmd->fd, s, len)) < 0
+-#if 0
+-	    /* Same as above. */
+-	    &&
+-	    (cmd->block
++    for (; !errflag && !breaks && !retflag && !contflag && len;
++	 len -= written, s += written) {
++	if ((written = write(cmd->fd, s, len)) < 0 && cmd->nblock &&
+ #ifdef EWOULDBLOCK
+-			|| errno != EWOULDBLOCK
++	    errno == EWOULDBLOCK
+ #else
+ #ifdef EAGAIN
+-			|| errno != EAGAIN
+-#endif
++	    errno == EAGAIN
+ #endif
+-	     )
+ #endif
+ 	    )
+-	    return 1;
++	    return !all;
+ 	if (written < 0) {
+ 	    checkptycmd(cmd);
+ 	    if (cmd->fin)
+ 		break;
+ 	    written = 0;
+ 	}
++	if (written > 0)
++	    all += written;
+     }
+-    return 0;
++    return (all ? 0 : cmd->fin + 1);
+ }
+ 
+ static int
+@@ -582,8 +586,9 @@
+ bin_zpty(char *nam, char **args, char *ops, int func)
+ {
+     if ((ops['r'] && ops['w']) ||
+-	((ops['r'] || ops['w']) && (ops['d'] || ops['e'] || ops['t'] ||
++	((ops['r'] || ops['w']) && (ops['d'] || ops['e'] ||
+ 				    ops['b'] || ops['L'])) ||
++	(ops['w'] && ops['t']) ||
+ 	(ops['n'] && (ops['b'] || ops['e'] || ops['r'] || ops['t'] ||
+ 		      ops['d'] || ops['L'])) ||
+ 	(ops['d'] && (ops['b'] || ops['e'] || ops['L'] || ops['t'])) ||
+@@ -602,7 +607,10 @@
+ 	    return 1;
+ 	}
+ 	if (p->fin)
++	    return 2;
++	if (ops['t'] && p->read == -1 && !read_poll(p->fd, &p->read, 1))
+ 	    return 1;
++
+ 	return (ops['r'] ?
+ 		ptyread(nam, p, args + 1) :
+ 		ptywrite(p, args + 1, ops['n']));
+@@ -652,7 +660,7 @@
+ 	    checkptycmd(p);
+ 	    if (ops['L'])
+ 		printf("%s %s%s%s ", nam, (p->echo ? "-e " : ""),
+-		       (p->block ? "-b " : ""), p->name);
++		       (p->nblock ? "-b " : ""), p->name);
+ 	    else if (p->fin)
+ 		printf("(finished) %s: ", p->name);
+ 	    else
+diff -u -r ../oz/Src/utils.c ./Src/utils.c
+--- ../oz/Src/utils.c	Sat Oct 21 20:35:10 2000
++++ ./Src/utils.c	Sun Oct 22 00:17:51 2000
+@@ -1315,7 +1315,7 @@
+ mod_export int
+ read_poll(int fd, int *readchar, int polltty)
+ {
+-    int ret = 0;
++    int ret = -1;
+     long mode = -1;
+     char c;
+ #ifdef HAVE_SELECT
+@@ -1360,31 +1360,26 @@
+     polltty = 0;
+ #endif
+ #ifdef HAVE_SELECT
+-    if (!ret) {
+-	expire_tv.tv_sec = expire_tv.tv_usec = 0;
+-	FD_ZERO(&foofd);
+-	FD_SET(fd, &foofd);
+-	if (select(fd+1, (SELECT_ARG_2_T) &foofd, NULL, NULL, &expire_tv)
+-	    > 1)
+-	    ret = 1;
+-    }
++    expire_tv.tv_sec = expire_tv.tv_usec = 0;
++    FD_ZERO(&foofd);
++    FD_SET(fd, &foofd);
++    ret = select(fd+1, (SELECT_ARG_2_T) &foofd, NULL, NULL, &expire_tv);
+ #else
+ #ifdef FIONREAD
+-    if (!ret) {
+-	ioctl(fd, FIONREAD, (char *)&val);
+-	if (val)
++    if (ret < 0) {
++	ioctl(fd, FIONREAD, (char *) &val);
++	if (val >= 0)
+ 	    ret = 1;
+     }
+ #endif
+ #endif
+ 
+-    if (!ret) {
++    if (ret < 0) {
+ 	/*
+ 	 * Final attempt: set non-blocking read and try to read a character.
+ 	 * Praise Bill, this works under Cygwin (nothing else seems to).
+ 	 */
+-	if ((polltty || setblock_fd(0, fd, &mode))
+-	    && read(fd, &c, 1) > 0) {
++	if ((polltty || setblock_fd(0, fd, &mode)) && read(fd, &c, 1) > 0) {
+ 	    *readchar = STOUC(c);
+ 	    ret = 1;
+ 	}
+@@ -1397,7 +1392,7 @@
+ 	settyinfo(&ti);
+     }
+ #endif
+-    return ret;
++    return (ret > 0);
+ }
+ 
+ /**/
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

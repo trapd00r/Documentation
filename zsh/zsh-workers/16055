@@ -1,0 +1,203 @@
+From zsh-workers-return-16055-mason-zsh=primenet.com.au@sunsite.dk Mon Oct 15 17:11:47 2001
+Return-Path: <zsh-workers-return-16055-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13574 invoked from network); 15 Oct 2001 17:11:46 -0000
+Received: from unknown (HELO sunsite.dk) (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 15 Oct 2001 17:11:46 -0000
+Received: (qmail 26436 invoked by alias); 15 Oct 2001 17:11:41 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16055
+Received: (qmail 26421 invoked from network); 15 Oct 2001 17:11:40 -0000
+X-VirusChecked: Checked
+Sender: kiddleo@cav.logica.co.uk
+Message-ID: <3BCB18AD.9C7217A7@yahoo.co.uk>
+Date: Mon, 15 Oct 2001 18:11:09 +0100
+From: Oliver Kiddle <okiddle@yahoo.co.uk>
+X-Mailer: Mozilla 4.77 [en] (X11; U; Linux 2.2.15 i686)
+X-Accept-Language: en
+MIME-Version: 1.0
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: questions - calling matheval() for printf
+References: <13071.1003150455@csr.com>
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+
+Peter Stephenson wrote:
+> 
+> Sorry I didn't reply to this (the bits Bart didn'g) earlier...
+
+Thanks. I've got another question here I'm afraid.
+
+> If we need this, it would be better to hack matheval to give it an option
+> to stop and return a pointer to the end, just like strtol().  But I don't
+> think we need to adhere to POSIX printf semantics that closely.  I'd be
+> more interested in what other shells do.
+
+Ksh handles things in the way that zsh perhaps ideally should:
+
+$ printf '%d\n' 4a
+ksh: printf: 4a: arithmetic syntax error
+ksh: printf: warning: invalid argument of type d
+4
+$ printf '%d\n' 123456789012
+ksh: printf: warning: 123456789012: overflow exception
+2147483647
+
+(though I see no need for two error messages in the first case)
+
+Bash produces an error in each case though it fails to output 4 and max
+int respectively as POSIX stipulates. Note that bash doesn't attempt
+arithmetic evaluation here.
+
+> > Can a 64-bit integer be something other than long long? It seems I only
+> > have ZSH_64_BIT_TYPE to check and it might need a different format
+> > specifier for printf(3) if this is something other than long long.
+> 
+> On Alpha, it will normally be long rather than long long.  However, I
+> compiled sizeof(long long) with gcc on the Alpha at Sourceforge, and that
+
+I'll do a bit of testing on Sourceforge then. Thanks.
+
+> Can we make %q do just the same as what ${(q)foo} would do?
+
+Yes. That is what it does at the moment so I'll just ditch the patch.
+
+I have below another experimental feature. This allows the argument to
+be specified in the format in much the same way as is possible with
+printf(3). e.g:
+
+printf '%2$s %s %1$s\n' World Good Morning
+
+will print `Good Morning World'
+
+Note that glibc's printf(3) would print `Good Good World' for this but
+it seems to be the exception.
+
+The question is how should this interact with the printf(1) feature of
+reusing the format if more arguments remain. The easy answer would be
+to not reuse the format if this feature had been used. As an
+experiment, I've made it remove all arguments up to the last one used.
+This allows interesting things like:
+
+% printf '%2$s %1$s ' 1 2 3 4 5 6 ;echo
+2 1 4 3 6 5
+
+I can see this having some uses but I can also see it being a problem
+as this is likely to be used for picking out fields where the arguments
+are some command in $(...). A possibly quite good option would be an
+option to print to disable format reuse (in which case any suggestion
+on the choice of option letter?). Any other ideas on this?
+
+Note that there is no ksh precedent here as ksh seg faults if you give
+it these argument specifiers (I've got a lot of bug reporting to do
+when I finish this).
+
+If you try the patch, be aware that things may go awry if you try
+specifying widths and precisions.
+
+Oliver
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.58
+diff -u -r1.58 builtin.c
+--- Src/builtin.c	2001/10/15 11:34:27	1.58
++++ Src/builtin.c	2001/10/15 16:54:35
+@@ -2892,7 +2892,8 @@
+ int
+ bin_print(char *name, char **args, char *ops, int func)
+ {
+-    int flen, width, prec, type, argc, n, nnl = 0, ret = 0;
++    int flen, width, prec, type, argc, n, gotwidth;
++    int nnl = 0, ret = 0, maxarg = 0;
+     int flags[5], *len;
+     char *start, *endptr, *c, *d, *flag, spec[11], *fmt = NULL;
+     char **first, *flagch = "0+- #", save, nullstr = '\0';
+@@ -3095,6 +3096,11 @@
+     /* printf style output */
+     *spec='%';
+     do {
++    	if (maxarg) {
++	    first += maxarg;
++	    argc -= maxarg;
++    	    maxarg = 0;
++	}
+ 	for (c = fmt;c-fmt < flen;c++) {
+ 	    if (*c != '%') {
+ 		putc(*c, fout);
+@@ -3110,7 +3116,7 @@
+ 	    }
+ 
+ 	    type = prec = -1;
+-	    width = 0;
++	    width = gotwidth = 0;
+ 	    d = spec + 1;
+ 
+ 	    /* copy only one of each flag as spec has finite size */
+@@ -3123,13 +3129,32 @@
+ 	    	c++;
+ 	    }
+ 
+-	    if (*c == '*') {
+-		if (*args) width = (int)mathevali(*args++);
+-		c++;
+-	    } else if (idigit(*c)) {
++	    if (idigit(*c)) {
+ 		width = strtoul(c, &endptr, 0);
+ 		c = endptr;
++		if (*c == '$') {
++		    DPUTS(width <= 0, "specified zero or negative arg");
++		    if (width > argc) {
++		    	zwarnnam(name, "%d: argument specifier out of range",
++			    0, width);
++			ret = 1;
++		    } else {
++		    	if (width > maxarg) maxarg = width;
++		    	args = first + width - 1;
++		    }
++		    if (idigit(*++c)) {
++		    	width = strtoul(c, &endptr, 0);
++			c = endptr;
++			gotwidth = 1;
++		    } else
++		    	width = 0;
++		} else
++		    gotwidth = 1;
+ 	    }
++	    if (!gotwidth && *c == '*') {
++		if (*args) width = (int)mathevali(*args++);
++		c++;
++	    }
+ 	    *d++ = '*';
+ 
+ 	    if (*c == '.') {
+@@ -3224,7 +3249,7 @@
+ 		    	*d++ = 'l', *d++ = *c, *d = '\0';
+ 			zlongval = (*args) ? mathevali(*args++) : 0;
+ 			if (errflag) {
+-			    zlongval = 0;
++			    doubleval = 0;
+ 			    errflag = 0;
+ 			}
+ 			print_val(zlongval)
+@@ -3255,8 +3280,11 @@
+ 		    }
+ 		}
+ 	    }
++	    if (maxarg && (args - first > maxarg))
++	    	maxarg = args - first;
+ 	}
+ 
++    	if (maxarg) args = first + maxarg;
+     /* if there are remaining args, reuse format string */
+     } while (*args && args != first);
+
+_____________________________________________________________________
+This message has been checked for all known viruses by the 
+MessageLabs Virus Scanning Service. For further information visit
+http://www.messagelabs.com/stats.asp
+

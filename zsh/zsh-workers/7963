@@ -1,0 +1,403 @@
+From zsh-workers-return-7963-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Sep 20 16:50:29 1999
+Return-Path: <zsh-workers-return-7963-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18919 invoked from network); 20 Sep 1999 16:50:26 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 20 Sep 1999 16:50:26 -0000
+Received: (qmail 6917 invoked by alias); 20 Sep 1999 16:50:16 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7963
+Received: (qmail 6910 invoked from network); 20 Sep 1999 16:50:15 -0000
+Message-Id: <9909201614.AA25466@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: Re: PATCH: 3.1.6-pws-4: floating point support 
+In-Reply-To: "Peter Stephenson"'s message of "Mon, 20 Sep 1999 11:14:56 DFT."
+             <9909200914.AA31751@ibmth.df.unipi.it> 
+Date: Mon, 20 Sep 1999 18:14:47 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Peter Stephenson wrote:
+> > While doing some random fooling around with this, I noticed:
+> > 
+> > zagzig<23> ((integer florp=9.2))
+> > zsh: bad math expression: unbalanced stack
+> > zagzig<24> typeset -F
+> > florp=9.2000000000
+> > 
+> > The variable got assigned in spite of the syntax error?  Ouch.
+> 
+> The math parser is rather a hack; there's never been any proper syntax
+> checking, which is why you always get that meaningless (to the user) error
+> message.  What happens here is that `integer' gets put on the stack as a
+> parameter, then so does florp.  Then when = is found, its right hand side
+> is evaluated and the operator called.  At that point, that operation is
+> finished, so the parser goes back and finds it's now got `parameter value'
+> on the stack with no operator.
+> 
+> I'll see if I can think of something.
+
+OK, this does some better checking.  It now knows if it should have an
+operator or an operand next, so the error is picked up before the
+assignment.  However, evaluation and parsing are still done together, so an
+error later than the assignment would not stop it.
+
+I improved the error message; as far as I can see, we can say farewell to
+unbalanced stacks, but if anyone can get the shell to produce the old
+message somehow or other, I'd like to hear about it.
+
+Another change is that $(( ... )) no longer passes the inner pair of
+parentheses down to matheval.  I can't see a good reason for that; ((
+... )) doesn't do that, and it adds an extra recursive call, so it's best
+avoided.  This makes the error messages at the end of parsing consistent,
+e.g.
+
+% (( foo = 1 + ))
+zsh: bad math expression: operand expected at `'
+
+although maybe there's a better way of saying end of input.
+
+It goes without saying that I haven't tried every possible math expression
+with the new code, so if anyone has some really hairy evaluations they
+could test it.  Yes, we still need a test suite for the entire shell.
+
+--- Src/math.c.m2	Fri Sep 17 13:28:39 1999
++++ Src/math.c	Mon Sep 20 17:46:15 1999
+@@ -57,24 +57,37 @@
+  * RL = right-to-left associativity *
+  * BOOL = short-circuiting boolean   */
+ 
+-#define LR 0
+-#define RL 1
+-#define BOOL 2
++#define LR   0x0000
++#define RL   0x0001
++#define BOOL 0x0002
+ 
+ #define MTYPE(x)  ((x) & 3)
+ 
+ /*
+- * OP_A2 2 argument
+- * OP_A2IR 2 argument with return type integer
+- * OP_A2IO 2 arguments, must be integer, returning integer
+- * OP_E2 2 argument with assignment
+- * OP_E2IO 2 arguments with assignment, must be integer, return integer
++ * OP_A2    2 arguments
++ * OP_A2IR  2 arguments, return integer
++ * OP_A2IO  2 arguments, must be integer, return integer
++ * OP_E2    2 arguments with assignment
++ * OP_E2IO  2 arguments with assignment, must be integer, return integer
++ * OP_OP    None of the above, but occurs where we are expecting an operator
++ *          rather than an operand.
++ * OP_OPF   Followed by an operator, not an operand.
++ *
++ * OP_A2*, OP_E2*, OP_OP*:
++ *   Occur when we need an operator; the next object must be an operand,
++ *   unless OP_OPF is also supplied.
++ *
++ * Others:
++ *   Occur when we need an operand; the next object must also be an operand,
++ *   unless OP_OPF is also supplied.
+  */
+-#define OP_A2   4
+-#define OP_A2IR 8
+-#define OP_A2IO 16
+-#define OP_E2   32
+-#define OP_E2IO 64
++#define OP_A2   0x0004
++#define OP_A2IR 0x0008
++#define OP_A2IO 0x0010
++#define OP_E2   0x0020
++#define OP_E2IO 0x0040
++#define OP_OP   0x0080
++#define OP_OPF  0x0100
+ 
+ #define M_INPAR 0
+ #define M_OUTPAR 1
+@@ -152,17 +165,17 @@
+ 
+ static int type[TOKCOUNT] =
+ {
+-/*  0 */    LR, LR, RL, RL, RL,
+-/*  5 */    RL, RL, RL, LR|OP_A2IO, LR|OP_A2IO,
+-/* 10 */    LR|OP_A2IO, LR|OP_A2, LR|OP_A2, LR|OP_A2IO, LR|OP_A2,
+-/* 15 */    LR|OP_A2, LR|OP_A2IO, LR|OP_A2IO, LR|OP_A2IR, LR|OP_A2IR,
+-/* 20 */    LR|OP_A2IR, LR|OP_A2IR, LR|OP_A2IR, LR|OP_A2IR, BOOL|OP_A2IO,
+-/* 25 */    BOOL|OP_A2IO, LR|OP_A2IO, RL, RL, RL|OP_E2,
+-/* 30 */    RL|OP_E2, RL|OP_E2, RL|OP_E2, RL|OP_E2, RL|OP_E2IO,
+-/* 35 */    RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO,
+-/* 40 */    BOOL|OP_E2IO, BOOL|OP_E2IO, RL|OP_A2IO, RL|OP_A2, RL,
+-/* 45 */    RL, RL, LR, LR, RL|OP_A2,
+-/* 50 */    LR, RL|OP_E2
++/*  0 */  LR, LR|OP_OP|OP_OPF, RL, RL, RL|OP_OP|OP_OPF,
++/*  5 */  RL|OP_OP|OP_OPF, RL, RL, LR|OP_A2IO, LR|OP_A2IO,
++/* 10 */  LR|OP_A2IO, LR|OP_A2, LR|OP_A2, LR|OP_A2IO, LR|OP_A2,
++/* 15 */  LR|OP_A2, LR|OP_A2IO, LR|OP_A2IO, LR|OP_A2IR, LR|OP_A2IR,
++/* 20 */  LR|OP_A2IR, LR|OP_A2IR, LR|OP_A2IR, LR|OP_A2IR, BOOL|OP_A2IO,
++/* 25 */  BOOL|OP_A2IO, LR|OP_A2IO, RL|OP_OP, RL|OP_OP, RL|OP_E2,
++/* 30 */  RL|OP_E2, RL|OP_E2, RL|OP_E2, RL|OP_E2, RL|OP_E2IO,
++/* 35 */  RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO, RL|OP_E2IO,
++/* 40 */  BOOL|OP_E2IO, BOOL|OP_E2IO, RL|OP_A2IO, RL|OP_A2, RL|OP_OP,
++/* 45 */  RL, RL, LR|OP_OPF, LR|OP_OPF, RL|OP_A2,
++/* 50 */  LR|OP_OPF, RL|OP_E2
+ };
+ 
+ #define LVCOUNT 32
+@@ -188,7 +201,6 @@
+ 		return (unary) ? PREPLUS : POSTPLUS;
+ 	    }
+ 	    if (*ptr == '=') {
+-		unary = 1;
+ 		ptr++;
+ 		return PLUSEQ;
+ 	    }
+@@ -199,19 +211,16 @@
+ 		return (unary) ? PREMINUS : POSTMINUS;
+ 	    }
+ 	    if (*ptr == '=') {
+-		unary = 1;
+ 		ptr++;
+ 		return MINUSEQ;
+ 	    }
+ 	    return (unary) ? UMINUS : MINUS;
+ 	case '(':
+-	    unary = 1;
+ 	    return M_INPAR;
+ 	case ')':
+ 	    return M_OUTPAR;
+ 	case '!':
+ 	    if (*ptr == '=') {
+-		unary = 1;
+ 		ptr++;
+ 		return NEQ;
+ 	    }
+@@ -219,7 +228,6 @@
+ 	case '~':
+ 	    return COMP;
+ 	case '&':
+-	    unary = 1;
+ 	    if (*ptr == '&') {
+ 		if (*++ptr == '=') {
+ 		    ptr++;
+@@ -232,7 +240,6 @@
+ 	    }
+ 	    return AND;
+ 	case '|':
+-	    unary = 1;
+ 	    if (*ptr == '|') {
+ 		if (*++ptr == '=') {
+ 		    ptr++;
+@@ -245,7 +252,6 @@
+ 	    }
+ 	    return OR;
+ 	case '^':
+-	    unary = 1;
+ 	    if (*ptr == '^') {
+ 		if (*++ptr == '=') {
+ 		    ptr++;
+@@ -258,7 +264,6 @@
+ 	    }
+ 	    return XOR;
+ 	case '*':
+-	    unary = 1;
+ 	    if (*ptr == '*') {
+ 		if (*++ptr == '=') {
+ 		    ptr++;
+@@ -272,21 +277,18 @@
+ 	    }
+ 	    return MUL;
+ 	case '/':
+-	    unary = 1;
+ 	    if (*ptr == '=') {
+ 		ptr++;
+ 		return DIVEQ;
+ 	    }
+ 	    return DIV;
+ 	case '%':
+-	    unary = 1;
+ 	    if (*ptr == '=') {
+ 		ptr++;
+ 		return MODEQ;
+ 	    }
+ 	    return MOD;
+ 	case '<':
+-	    unary = 1;
+ 	    if (*ptr == '<') {
+ 		if (*++ptr == '=') {
+ 		    ptr++;
+@@ -299,7 +301,6 @@
+ 	    }
+ 	    return LES;
+ 	case '>':
+-	    unary = 1;
+ 	    if (*ptr == '>') {
+ 		if (*++ptr == '=') {
+ 		    ptr++;
+@@ -312,14 +313,12 @@
+ 	    }
+ 	    return GRE;
+ 	case '=':
+-	    unary = 1;
+ 	    if (*ptr == '=') {
+ 		ptr++;
+ 		return DEQ;
+ 	    }
+ 	    return EQ;
+ 	case '$':
+-	    unary = 0;
+ 	    yyval.u.l = mypid;
+ 	    return NUM;
+ 	case '?':
+@@ -328,20 +327,15 @@
+ 		unary = 0;
+ 		return NUM;
+ 	    }
+-	    unary = 1;
+ 	    return QUEST;
+ 	case ':':
+-	    unary = 1;
+ 	    return COLON;
+ 	case ',':
+-	    unary = 1;
+ 	    return COMMA;
+ 	case '\0':
+-	    unary = 1;
+ 	    ptr--;
+ 	    return EOI;
+ 	case '[':
+-	    unary = 0;
+ 	    {
+ 		int base = zstrtol(ptr, &ptr, 10);
+ 
+@@ -356,7 +350,6 @@
+ 	    break;
+ 	case '0':
+ 	    if (*ptr == 'x' || *ptr == 'X') {
+-		unary = 0;
+ 		/* Should we set lastbase here? */
+ 		yyval.u.l = zstrtol(++ptr, &ptr, lastbase = 16);
+ 		return NUM;
+@@ -365,7 +358,6 @@
+ 	default:
+ 	    if (idigit(*--ptr) || *ptr == '.') {
+ 		char *nptr;
+-		unary = 0;
+ 		for (nptr = ptr; idigit(*nptr); nptr++);
+ 
+ 		if (*nptr == '.' || *nptr == 'e' || *nptr == 'E') {
+@@ -395,7 +387,6 @@
+ 		    ptr++;
+ 		    ptr = getkeystring(ptr, NULL, 6, &v);
+ 		    yyval.u.l = v;
+-		    unary = 0;
+ 		    return NUM;
+ 		}
+ 		cct = 1;
+@@ -408,7 +399,6 @@
+ 		    zerr("too many identifiers (complain to author)", NULL, 0);
+ 		    return EOI;
+ 		}
+-		unary = 0;
+ 		while (iident(*++ptr));
+ 		if (*ptr == '[') {
+ 		    int l;
+@@ -429,7 +419,6 @@
+ 	    }
+ 	    else if (cct) {
+ 		yyval.u.l = poundgetfn(NULL);
+-		unary = 0;
+ 		return NUM;
+ 	    }
+ 	    return EOI;
+@@ -515,6 +504,8 @@
+     LV lv;
+     int tp = type[what];
+ 
++    if (errflag)
++	return;
+     if (sp < 0) {
+ 	zerr("bad math expression: stack empty", NULL, 0);
+ 	return;
+@@ -904,6 +895,40 @@
+     return (x.type & MN_FLOAT) ? (zlong)x.u.d : x.u.l;
+ }
+ 
++/*
++ * Make sure we have an operator or an operand, whatever is expected.
++ * For this purpose, unary operators constitute part of an operand.
++ */
++
++/**/
++static void
++checkunary(int tp, char *ptr)
++{
++    int errmsg = 0;
++    if (tp & (OP_A2|OP_A2IR|OP_A2IO|OP_E2|OP_E2IO|OP_OP)) {
++	if (unary)
++	    errmsg = 1;
++    } else {
++	if (!unary)
++	    errmsg = 2;
++    }
++    if (errmsg) {
++	char errbuf[40];
++	int len, over = 0;
++	while (inblank(*ptr))
++	    ptr++;
++	len = strlen(ptr);
++	if (len > 10) {
++	    len = 10;
++	    over = 1;
++	}
++	sprintf(errbuf, "bad math expression: %s expected at `%%l%s'",
++		errmsg == 2 ? "operator" : "operand",
++		over ? "..." : ""); 
++	zerr(errbuf, ptr, len);
++    }
++    unary = !(tp & OP_OPF);
++}
+ 
+ /* operator-precedence parse the string and execute */
+ 
+@@ -913,10 +938,12 @@
+ {
+     zlong q;
+     int otok, onoeval;
++    char *optr = ptr;
+ 
+     if (errflag)
+ 	return;
+     mtok = zzlex();
++    checkunary(type[mtok], optr);
+     while (prec[mtok] <= pc) {
+ 	if (errflag)
+ 	    return;
+@@ -964,6 +991,8 @@
+ 	    op(otok);
+ 	    continue;
+ 	}
++	optr = ptr;
+ 	mtok = zzlex();
++	checkunary(type[mtok], optr);
+     }
+ }
+--- Src/subst.c.m2	Mon Sep 20 13:45:24 1999
++++ Src/subst.c	Mon Sep 20 18:01:23 1999
+@@ -152,7 +152,8 @@
+ 	    *str++ = '\0';
+ 	    if (endchar == Outpar && str2[1] == '(' && str[-2] == ')') {
+ 		/* Math substitution of the form $((...)) */
+-		str = arithsubst(str2 + 1, &str3, str);
++		str[-2] = '\0';
++		str = arithsubst(str2 + 2, &str3, str);
+ 		setdata(node, (void *) str3);
+ 		continue;
+ 	    }
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

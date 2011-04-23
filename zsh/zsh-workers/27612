@@ -1,0 +1,103 @@
+From zsh-workers-return-27612-mason-zsh=primenet.com.au@zsh.org Wed Jan 20 17:17:27 2010
+Return-Path: <zsh-workers-return-27612-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3470 invoked by alias); 20 Jan 2010 17:17:27 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27612
+Received: (qmail 10284 invoked from network); 20 Jan 2010 17:17:26 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at closedmail.com does not designate permitted sender hosts)
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-id: <100120091653.ZM19959@torch.brasslantern.com>
+Date: Wed, 20 Jan 2010 09:16:53 -0800
+In-reply-to: <chaz20100120133218.GB3872@yahoo.fr>
+Comments: In reply to Stephane Chazelas <stephane_chazelas@yahoo.fr>
+ "subscript expanded twice in a[subcript]++ (Was: problem with RANDOM and
+ arrays)" (Jan 20,  1:32pm)
+References: <chaz20100111201312.GB3902@seebyte.com>
+	<chaz20100120133218.GB3872@yahoo.fr>
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+To: Zsh hackers list <zsh-workers@zsh.org>
+Subject: Re: subscript expanded twice in a[subcript]++ (Was: problem with
+ RANDOM and arrays)
+MIME-version: 1.0
+Content-type: text/plain; charset=us-ascii
+
+On Jan 20,  1:32pm, Stephane Chazelas wrote:
+}
+} > My understanding is that
+} > 
+} > x[RANDOM%2+1]++
+} > 
+} > is handled as
+} > 
+} > x[RANDOM%2+1] = x[RANDOM%2] + 1
+
+It's not quite that simple; if it were, this would also fail:
+
+schaefer<519> for i ({1..1000}) ((x[$((RANDOM%2+1))]++)); echo $x
+506 494
+
+} > Similar problem:
+} > 
+} > $ x=0; ((a[++x]++)); echo $x
+} > 2
+
+I find a slightly different problem:
+
+schaefer<520> unset x a; repeat 2 { x=0; ((a[++x]++)); print X $x A $a }
+X 1 A 1
+X 2 A 1 2
+
+Note that the first time around, the op works as expected.  This seems
+to have to do with whether $a is unset:
+
+schaefer<530> unset x a; declare -a a
+schaefer<531> repeat 2 { x=0; ((a[++x]++)); print X $x A $a }
+X 2 A 1
+X 2 A 1
+
+However, the error *does* seem to be caused by both getnparam() and
+setnparam() calling getvalue(), which eventually calls getindex() where
+the subscript expression is parsed and evaluated by matheval().
+
+The calls are at math.c:1113 and math.c:1137 in the specific case of
+the "++" operator, but of course every op has its own setvar() call.
+
+Interestingly the problem for zsh seems to be that array elements are
+always scalar, never integer, so they must always be converted back
+and forth to strings when arithmetic is performed on them.  (I can't
+get to the ksh list archive to see if the problem there was similar.)
+
+I don't see any simple fix for this.  We could parse a[++x] as if it
+were a[$((++x))] before entering math context, but then ternaries
+((x ? a[x++] : a[++x])) would incorrectly increment in both branches.
+Anyway that's problematic as I don't believe the parser knows whether
+$a references a scalar array or a hash.
+
+Another option is a completely new set of APIs for fetching and
+setting variable values, which would manipulate a handle to the internal
+storage of a[N] rather than returning the value stored there so that
+we could both read and update through the same handle.  This almost
+exists e.g. getvalue()/getnumvalue() and setnumvalue(), but there are
+potential recursion issues, e.g., getnumvalue() also may make a call
+to matheval() because of this:
+
+schaefer<549> a=('y+2'); y=5; print $((++a[1]))
+8
+
+I'd like to know if ksh supports that and if so how it avoids side-
+effects on evaluating the string value of a[1] as a math expression.
+
+schaefer<550> x=0; a=(x+=3 x+=2 x+=1 x=0); ((++a[++x])); print $a
+x+=3 x+=2 x+=1 x=0 5
+

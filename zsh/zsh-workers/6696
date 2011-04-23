@@ -1,0 +1,420 @@
+From zsh-workers-return-6696-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jun 17 12:20:13 1999
+Return-Path: <zsh-workers-return-6696-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18397 invoked from network); 17 Jun 1999 12:20:10 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 Jun 1999 12:20:10 -0000
+Received: (qmail 17658 invoked by alias); 17 Jun 1999 12:20:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6696
+Received: (qmail 17650 invoked from network); 17 Jun 1999 12:20:01 -0000
+Date: Thu, 17 Jun 1999 14:19:59 +0200 (MET DST)
+Message-Id: <199906171219.OAA11816@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: PS4
+
+
+If 6693 makes it in we might think about including this one, too.
+
+It adds the option XTRACE_PROMPT, which, when set, makes the
+xtrace-prompt be expanding like normal prompts (I added an option
+because people may have PS4s that shouldn't always be expanded, but of 
+course I could change it to make PS4 always being expanded).
+
+The funny thing about this is that you can now do:
+
+  setopt xtraceprompt promptsubst
+  PS4='%B${0}:${LINENO} (%_)%b '
+
+or something like that (with FUNCTION_ARGZERO set). I really missed
+that when hacking _path_files...
+
+Bye
+ Sven
+
+P.S.: Yes, `%_' is ok. I've modified the execution code to keep track
+      of the things being executed -- I may have missed some
+      interesting cmdpush()s, though.
+
+
+diff -u -r os/builtin.c Src/builtin.c
+--- os/builtin.c	Thu Jun 17 13:18:17 1999
++++ Src/builtin.c	Thu Jun 17 13:24:31 1999
+@@ -351,7 +351,8 @@
+ 
+     /* display execution trace information, if required */
+     if (xtr) {
+-	fprintf(stderr, "%s%s", (prompt4) ? prompt4 : "", name);
++	printprompt4();
++	fprintf(stderr, "%s", name);
+ 	if (xarg)
+ 	    fprintf(stderr, " %s", xarg);
+ 	while (*oargv)
+diff -u -r os/exec.c Src/exec.c
+--- os/exec.c	Thu Jun 17 13:18:17 1999
++++ Src/exec.c	Thu Jun 17 14:00:30 1999
+@@ -307,7 +307,9 @@
+ {
+     if (!list_pipe)
+ 	deletejob(jobtab + thisjob);
++    cmdpush(CS_CURSH);
+     execlist(cmd->u.list, 1, flags & CFLAG_EXEC);
++    cmdpop();
+ 
+     return lastval;
+ }
+@@ -702,7 +704,7 @@
+ {
+     Sublist slist;
+     static int donetrap;
+-    int ret, cj;
++    int ret, cj, csp;
+     int old_pline_level, old_list_pipe;
+     /*
+      * ERREXIT only forces the shell to exit if the last command in a &&
+@@ -726,6 +728,7 @@
+ 	 * called once for each sublist that fails.          */
+ 	donetrap = 0;
+ 	slist = list->left;
++	csp = cmdsp;
+ 
+ 	/* Loop through code followed by &&, ||, or end of sublist. */
+ 	while (slist) {
+@@ -752,6 +755,7 @@
+ 			goto sublist_done;
+ 		    }
+ 		}
++		cmdpush(CS_CMDAND);
+ 		break;
+ 	    case ORNEXT:
+ 		/* If the return code is zero, we skip pipelines until *
+@@ -768,12 +772,14 @@
+ 			goto sublist_done;
+ 		     }
+ 		}
++		cmdpush(CS_CMDOR);
+ 		break;
+ 	    }
+ 	    slist = slist->right;
+ 	}
+ sublist_done:
+ 
++	cmdsp = csp;
+ 	noerrexit = oldnoerrexit;
+ 
+ 	if (sigtrapped[SIGDEBUG])
+@@ -1062,9 +1068,11 @@
+ 	if (pline->right) {
+ 	    /* if another execpline() is invoked because the command is *
+ 	     * a list it must know that we're already in a pipeline     */
++	    cmdpush(CS_PIPE);
+ 	    list_pipe = 1;
+ 	    execpline2(pline->right, how, pipes[0], output, last1);
+ 	    list_pipe = old_list_pipe;
++	    cmdpop();
+ 	    zclose(pipes[0]);
+ 	    subsh_close = -1;
+ 	}
+@@ -1087,7 +1095,7 @@
+     argv = 2 + (char **) ncalloc((countlinknodes(list) + 4) * sizeof(char *));
+     if (isset(XTRACE)) {
+ 	if (!doneps4)
+-	    fprintf(stderr, "%s", (prompt4) ? prompt4 : "");
++	    printprompt4();
+ 
+ 	for (node = firstnode(list); node; incnode(node)) {
+ 	    *ptr++ = (char *)getdata(node);
+@@ -1291,7 +1299,7 @@
+ 
+     xtr = isset(XTRACE);
+     if (xtr && nonempty(l)) {
+-	fprintf(stderr, "%s", prompt4 ? prompt4 : "");
++	printprompt4();
+ 	doneps4 = 1;
+     }
+ 
+@@ -2669,7 +2677,8 @@
+ {
+     int stat;
+     if (isset(XTRACE)) {
+-	fprintf(stderr, "%s[[", prompt4 ? prompt4 : "");
++	printprompt4();
++	fprintf(stderr, "[[");
+ 	tracingcond++;
+     }
+     stat = !evalcond(cmd->u.cond);
+@@ -2690,8 +2699,10 @@
+     char *e;
+     zlong val = 0;
+ 
+-    if (isset(XTRACE))
+-	fprintf(stderr, "%s((", prompt4 ? prompt4 : "");
++    if (isset(XTRACE)) {
++	printprompt4();
++	fprintf(stderr, "((");
++    }
+     if (args)
+ 	while ((e = (char *) ugetnode(args))) {
+ 	    if (isset(XTRACE))
+@@ -2767,6 +2778,8 @@
+ execshfunc(Cmd cmd, Shfunc shf, LinkList args)
+ {
+     LinkList last_file_list = NULL;
++    unsigned char *ocs;
++    int ocsp;
+ 
+     if (errflag)
+ 	return;
+@@ -2781,7 +2794,7 @@
+ 
+     if (isset(XTRACE)) {
+ 	LinkNode lptr;
+-	fprintf(stderr, "%s", prompt4 ? prompt4 : prompt4);
++	printprompt4();
+ 	if (args)
+ 	    for (lptr = firstnode(args); lptr; incnode(lptr)) {
+ 		if (lptr != firstnode(args))
+@@ -2791,8 +2804,14 @@
+ 	fputc('\n', stderr);
+ 	fflush(stderr);
+     }
+-
++    ocs = cmdstack;
++    ocsp = cmdsp;
++    cmdstack = (unsigned char *) zalloc(CMDSTACKSZ);
++    cmdsp = 0;
+     doshfunc(shf->nam, shf->funcdef, args, shf->flags, 0);
++    free(cmdstack);
++    cmdstack = ocs;
++    cmdsp = ocsp;
+ 
+     if (!list_pipe)
+ 	deletefilelist(last_file_list);
+diff -u -r os/init.c Src/init.c
+--- os/init.c	Thu Jun 17 13:18:18 1999
++++ Src/init.c	Thu Jun 17 14:00:44 1999
+@@ -544,7 +544,7 @@
+     histsiz = DEFAULT_HISTSIZE;
+     inithist();
+ 
+-    cmdstack = (unsigned char *) zalloc(256);
++    cmdstack = (unsigned char *) zalloc(CMDSTACKSZ);
+     cmdsp = 0;
+ 
+     bangchar = '!';
+diff -u -r os/lex.c Src/lex.c
+--- os/lex.c	Thu Jun 17 13:18:18 1999
++++ Src/lex.c	Thu Jun 17 14:01:06 1999
+@@ -219,7 +219,7 @@
+     ls->hlinesz = hlinesz;
+     ls->cstack = cmdstack;
+     ls->csp = cmdsp;
+-    cmdstack = (unsigned char *)zalloc(256);
++    cmdstack = (unsigned char *)zalloc(CMDSTACKSZ);
+     ls->tok = tok;
+     ls->isnewlin = isnewlin;
+     ls->tokstr = tokstr;
+diff -u -r os/loop.c Src/loop.c
+--- os/loop.c	Thu Jun 17 13:18:18 1999
++++ Src/loop.c	Thu Jun 17 13:56:21 1999
+@@ -71,6 +71,7 @@
+     lastval = 0;
+     loops++;
+     pushheap();
++    cmdpush(CS_FOR);
+     for (;;) {
+ 	if (node->condition) {
+ 	    str = dupstring(node->condition);
+@@ -119,6 +120,7 @@
+ 	freeheap();
+     }
+     popheap();
++    cmdpop();
+     loops--;
+     return lastval;
+ }
+@@ -147,6 +149,7 @@
+     loops++;
+     lastval = 0;
+     pushheap();
++    cmdpush(CS_SELECT);
+     inp = fdopen(dup((SHTTY == -1) ? 0 : SHTTY), "r");
+     more = selectlist(args, 0);
+     for (;;) {
+@@ -201,6 +204,7 @@
+ 	    break;
+     }
+   done:
++    cmdpop();
+     popheap();
+     fclose(inp);
+     loops--;
+@@ -279,6 +283,7 @@
+     node = cmd->u.whilecmd;
+     oldval = 0;
+     pushheap();
++    cmdpush(node->cond ? CS_UNTIL : CS_WHILE);
+     loops++;
+     for (;;) {
+ 	noerrexit = 1;
+@@ -304,6 +309,7 @@
+ 	}
+ 	oldval = lastval;
+     }
++    cmdpop();
+     popheap();
+     loops--;
+     return lastval;
+@@ -322,6 +328,7 @@
+     }
+     count = atoi(peekfirst(args));
+     pushheap();
++    cmdpush(CS_REPEAT);
+     loops++;
+     while (count--) {
+ 	execlist(cmd->u.list, 1, 0);
+@@ -337,6 +344,7 @@
+ 	    break;
+ 	}
+     }
++    cmdpop();
+     popheap();
+     loops--;
+     return lastval;
+@@ -347,7 +355,7 @@
+ execif(Cmd cmd, LinkList args, int flags)
+ {
+     struct ifcmd *node;
+-    int olderrexit;
++    int olderrexit, s = 0;
+     List *i, *t;
+ 
+     olderrexit = noerrexit;
+@@ -358,17 +366,22 @@
+     if (!noerrexit)
+ 	noerrexit = 1;
+     while (*i) {
++	cmdpush(s ? CS_ELIF : CS_IF);
+ 	execlist(*i, 1, 0);
++	cmdpop();
+ 	if (!lastval)
+ 	    break;
++	s = 1;
+ 	i++;
+ 	t++;
+     }
+     noerrexit = olderrexit;
+ 
+-    if (*t)
++    if (*t) {
++	cmdpush(s ? CS_ELIFTHEN : CS_IFTHEN);
+ 	execlist(*t, 1, flags & CFLAG_EXEC);
+-    else
++	cmdpop();
++    } else
+ 	lastval = 0;
+ 
+     return lastval;
+@@ -393,6 +406,7 @@
+     lastval = 0;
+ 
+     if (node) {
++	cmdpush(CS_CASE);
+ 	while (*p) {
+ 	    char *pat = dupstring(*p + 1);
+ 	    singsub(&pat);
+@@ -405,6 +419,7 @@
+ 	    p++;
+ 	    l++;
+ 	}
++	cmdpop();
+     }
+     return lastval;
+ }
+diff -u -r os/options.c Src/options.c
+--- os/options.c	Thu Jun 17 13:18:19 1999
++++ Src/options.c	Thu Jun 17 14:01:50 1999
+@@ -189,6 +189,7 @@
+ {NULL, "unset",		      OPT_EMULATE|OPT_BSHELL,	 UNSET},
+ {NULL, "verbose",	      0,			 VERBOSE},
+ {NULL, "xtrace",	      0,			 XTRACE},
++{NULL, "xtraceprompt",	      0,			 XTRACEPROMPT},
+ {NULL, "zle",		      OPT_SPECIAL,		 USEZLE},
+ {NULL, "braceexpand",	      OPT_ALIAS, /* ksh/bash */	 -IGNOREBRACES},
+ {NULL, "dotglob",	      OPT_ALIAS, /* bash */	 GLOBDOTS},
+diff -u -r os/utils.c Src/utils.c
+--- os/utils.c	Thu Jun 17 13:18:20 1999
++++ Src/utils.c	Thu Jun 17 14:08:13 1999
+@@ -774,6 +774,26 @@
+     }
+ }
+ 
++/* This prints the XTRACE prompt. */
++
++/**/
++void
++printprompt4(void)
++{
++    if (prompt4) {
++	if (isset(XTRACEPROMPT)) {
++	    int l;
++	    char *s = dupstring(prompt4);
++
++	    unmetafy(s, &l);
++	    s = unmetafy(promptexpand(metafy(s, l, META_NOALLOC), 0, NULL, NULL), &l);
++
++	    fprintf(stderr, "%s", s);
++	} else
++	    fprintf(stderr, "%s", prompt4);
++    }
++}
++
+ /**/
+ void
+ freestr(void *a)
+diff -u -r os/zsh.h Src/zsh.h
+--- os/zsh.h	Thu Jun 17 13:18:20 1999
++++ Src/zsh.h	Thu Jun 17 14:01:35 1999
+@@ -1248,6 +1248,7 @@
+     UNSET,
+     VERBOSE,
+     XTRACE,
++    XTRACEPROMPT,
+     USEZLE,
+     OPT_SIZE
+ };
+@@ -1359,7 +1360,8 @@
+ /* Definitions for the %_ prompt escape */
+ /****************************************/
+ 
+-#define cmdpush(X) if (!(cmdsp >= 0 && cmdsp < 256)) {;} else cmdstack[cmdsp++]=(X)
++#define CMDSTACKSZ 256
++#define cmdpush(X) if (!(cmdsp >= 0 && cmdsp < CMDSTACKSZ)) {;} else cmdstack[cmdsp++]=(X)
+ #ifdef DEBUG
+ # define cmdpop()  if (cmdsp <= 0) { \
+ 			fputs("BUG: cmdstack empty\n", stderr); \
+diff -u od/Zsh/options.yo Doc/Zsh/options.yo
+--- od/Zsh/options.yo	Thu Jun 17 12:04:03 1999
++++ Doc/Zsh/options.yo	Thu Jun 17 14:12:31 1999
+@@ -962,6 +962,13 @@
+ item(tt(XTRACE) (tt(-x), ksh: tt(-x)))(
+ Print commands and their arguments as they are executed.
+ )
++pindex(XTRACE_PROMPT)
++cindex(tracing, prompt)
++cindex(prompt, parameter expansion)
++item(tt(XTRACE_PROMPT))(
++Expand the prompt shown when commands are traced using normal prompt
++expansion rules.
++)
+ pindex(ZLE)
+ cindex(editor, enabling)
+ cindex(enabling the editor)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

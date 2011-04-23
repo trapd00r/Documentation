@@ -1,0 +1,166 @@
+From zsh-workers-return-22155-mason-zsh=primenet.com.au@sunsite.dk Thu Jan 12 03:42:20 2006
+Return-Path: <zsh-workers-return-22155-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25585 invoked from network); 12 Jan 2006 03:42:18 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.0 (2005-09-13) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 12 Jan 2006 03:42:18 -0000
+Received: (qmail 41961 invoked from network); 12 Jan 2006 03:42:12 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 12 Jan 2006 03:42:12 -0000
+Received: (qmail 21422 invoked by alias); 12 Jan 2006 03:42:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22155
+Received: (qmail 21413 invoked from network); 12 Jan 2006 03:42:09 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 12 Jan 2006 03:42:09 -0000
+Received: (qmail 41728 invoked from network); 12 Jan 2006 03:42:09 -0000
+Received: from dsl3-63-249-88-2.cruzio.com (HELO dot.blorf.net) (63.249.88.2)
+  by a.mx.sunsite.dk with SMTP; 12 Jan 2006 03:42:05 -0000
+Received: by dot.blorf.net (Postfix, from userid 1000)
+	id D129C8E9B; Wed, 11 Jan 2006 19:42:00 -0800 (PST)
+Date: Wed, 11 Jan 2006 19:42:00 -0800
+From: Wayne Davison <wayned@users.sourceforge.net>
+To: zsh-workers@sunsite.dk
+Subject: Another idea on how to insert illegal multibyte characters
+Message-ID: <20060112034200.GB28221@dot.blorf.net>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mP3DRpeJDSE+ciuQ"
+Content-Disposition: inline
+User-Agent: Mutt/1.5.11
+
+
+--mP3DRpeJDSE+ciuQ
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+Here's another idea on how filenames with illegal byte sequences could
+be inserted in the command line:  insert a $'\321' string for each one.
+Since this idiom uses plain ASCII, it inserts into the line just fine.
+It also has the advantage that zsh will interpret the sequence back into
+the appropriate character.
+
+I created an initial patch for this.  It works to insert the necessary
+letters into the command-line, but has a bug where tab completion will
+not remove enough characters when moving from match to match if the
+previous match had one or more expanded $'\321' sequences.  If folks
+like this idea, I imagine this bug wouldn't be too hard to fix.
+
+Opinions?
+
+..wayne..
+
+--mP3DRpeJDSE+ciuQ
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="another-try.diff"
+
+--- Src/Zle/zle_utils.c	12 Jan 2006 01:04:17 -0000	1.36
++++ Src/Zle/zle_utils.c	12 Jan 2006 03:12:34 -0000
+@@ -233,8 +233,9 @@ mod_export ZLE_STRING_T
+ stringaszleline(char *instr, int incs, int *outll, int *outsz, int *outcs)
+ {
+     ZLE_STRING_T outstr;
+-    int ll, sz;
++    int ll;
+ #ifdef MULTIBYTE_SUPPORT
++    int eol = 0;
+     mbstate_t mbs;
+ #endif
+ 
+@@ -256,17 +257,15 @@ stringaszleline(char *instr, int incs, i
+     }
+     unmetafy(instr, &ll);
+ 
+-    /*
+-     * ll is the maximum number of characters there can be in
+-     * the output string; the closer to ASCII the string, the
+-     * better the guess.  For the 2 see above.
+-     */
+-    sz = (ll + 2) * ZLE_CHAR_SIZE;
++#ifdef MULTIBYTE_SUPPORT
++    /* Compute the maximum amount of memory we'll need, which takes the
++     * pessimistic view that every character in the input needs to turn
++     * into a $'\321' string in the output.  For the reason for the +2,
++     * see the function comments. */
+     if (outsz)
+-	*outsz = ll;
+-    outstr = (ZLE_STRING_T)zalloc(sz);
++	*outsz = ll * 7;
++    outstr = (ZLE_STRING_T)zalloc((ll*7 + 2) * ZLE_CHAR_SIZE);
+ 
+-#ifdef MULTIBYTE_SUPPORT
+     if (ll) {
+ 	char *inptr = instr;
+ 	wchar_t *outptr = outstr;
+@@ -275,22 +274,36 @@ stringaszleline(char *instr, int incs, i
+ 	memset(&mbs, '\0', sizeof mbs);
+ 
+ 	while (ll > 0) {
+-	    size_t cnt = mbrtowc(outptr, inptr, ll, &mbs);
++	    size_t cnt = eol ? MB_INVALID : mbrtowc(outptr, inptr, ll, &mbs);
+ 
+-	    /*
+-	     * At this point we don't handle either incomplete (-2) or
+-	     * invalid (-1) multibyte sequences.  Use the current length
+-	     * and return.
+-	     */
+-	    if (cnt == MB_INCOMPLETE || cnt == MB_INVALID)
++	    switch (cnt) {
++	    case MB_INCOMPLETE:
++		eol = 1;
++		/* FALL THROUGH */
++	    case MB_INVALID:
++		/* Get mbs out of its undefined state. */
++		memset(&mbs, '\0', sizeof mbs);
++		/* Transform invalid character sequences into $'\321'
++		 * strings that will be converted by the shell into
++		 * the appropriate character. */
++		*outptr++ = L'$';
++		*outptr++ = L'\'';
++		*outptr++ = L'\\';
++		*outptr++ = L'0' + (STOUC(*inptr) / 0100);
++		*outptr++ = L'0' + ((STOUC(*inptr) / 010) & 07);
++		*outptr++ = L'0' + (STOUC(*inptr) & 07);
++		*outptr = L'\'';
++		cnt = 1;
+ 		break;
+-
+-	    if (cnt == 0) {
++	    case 0:
+ 		/* Converting '\0' returns 0, but a '\0' is a real
+ 		 * character for us, so we should consume 1 byte
+ 		 * (certainly true for Unicode and unlikely to be false
+ 		 * in any non-pathological multibyte representation). */
+ 		cnt = 1;
++		/* FALL THROUGH */
++	    default:
++		break;
+ 	    }
+ 
+ 	    if (outcs) {
+@@ -311,7 +324,15 @@ stringaszleline(char *instr, int incs, i
+ 	if (outcs)
+ 	    *outcs = 0;
+     }
+-#else
++
++#else /* !MULTIBYTE_SUPPORT */
++
++    if (outsz)
++	*outsz = ll;
++    /* ll is the number of characters in the unmetafied string.  For the
++     * reason for the +2, see the function comments. */
++    outstr = (ZLE_STRING_T)zalloc(ll + 2);
++
+     memcpy(outstr, instr, ll);
+     *outll = ll;
+     if (outcs)
+
+--mP3DRpeJDSE+ciuQ--
+

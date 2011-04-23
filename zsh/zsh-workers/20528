@@ -1,0 +1,160 @@
+From zsh-workers-return-20528-mason-zsh=primenet.com.au@sunsite.dk Fri Oct 29 10:07:54 2004
+Return-Path: <zsh-workers-return-20528-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20271 invoked from network); 29 Oct 2004 10:07:53 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 29 Oct 2004 10:07:53 -0000
+Received: (qmail 44539 invoked from network); 29 Oct 2004 10:07:47 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 29 Oct 2004 10:07:47 -0000
+Received: (qmail 16488 invoked by alias); 29 Oct 2004 10:07:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 20528
+Received: (qmail 16471 invoked from network); 29 Oct 2004 10:07:31 -0000
+Received: from unknown (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 29 Oct 2004 10:07:31 -0000
+Received: (qmail 43782 invoked from network); 29 Oct 2004 10:06:34 -0000
+Received: from lhuumrelay3.lnd.ops.eu.uu.net (62.189.58.19)
+  by a.mx.sunsite.dk with SMTP; 29 Oct 2004 10:06:33 -0000
+Received: from MAILSWEEPER01.csr.com (mailhost1.csr.com [62.189.183.235])
+	by lhuumrelay3.lnd.ops.eu.uu.net (8.11.0/8.11.0) with ESMTP id i9TA6W909993
+	for <zsh-workers@sunsite.dk>; Fri, 29 Oct 2004 10:06:32 GMT
+Received: from EXCHANGE02.csr.com (unverified [192.168.137.45]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T6cf0c53d1ec0a88d014f4@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Fri, 29 Oct 2004 11:05:26 +0100
+Received: from news01.csr.com ([192.168.143.38]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Fri, 29 Oct 2004 11:09:41 +0100
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.12.11/8.12.11) with ESMTP id i9TA6TbJ032333
+	for <zsh-workers@sunsite.dk>; Fri, 29 Oct 2004 11:06:30 +0100
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.12.11/8.12.11/Submit) with ESMTP id i9TA6TmF032330
+	for <zsh-workers@sunsite.dk>; Fri, 29 Oct 2004 11:06:29 +0100
+Message-Id: <200410291006.i9TA6TmF032330@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk
+Subject: Re: exec fd>>(list) freezes 
+In-reply-to: <20041028175605.GA25021@scowler.net> 
+References: <20041028173304.GA24398@scowler.net> <20041028175015.GA24788@scowler.net> <20041028175605.GA25021@scowler.net>
+Date: Fri, 29 Oct 2004 11:06:28 +0100
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 29 Oct 2004 10:09:41.0937 (UTC) FILETIME=[683B1A10:01C4BD9F]
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.0 required=6.0 tests=none autolearn=no version=2.63
+X-Spam-Hits: 0.0
+
+Clint Adams wrote:
+> In the past, "exec 8>>(grep a)" used to work; now it doesn't return.  Is
+> this broken or am I confused?
+...
+> > Specifically, it worked in 4.0.9 and prior versions, but chokes on 4.1.1
+> > and later.
+> 
+> Is this because of 18492?
+
+Yes, it's now waiting for the grep process to finish.  This is
+obviously inappropriate if the fd is being opened for the shell's
+own future use.
+
+A test for this might be sensible, but in this case the race which was
+fixed by 18492 is intrinsic.  You don't even have a PID to wait for.
+(If you had wanted one, you would have used a coprocess.)
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.76
+diff -u -r1.76 exec.c
+--- Src/exec.c	21 Oct 2004 00:33:50 -0000	1.76
++++ Src/exec.c	29 Oct 2004 10:01:39 -0000
+@@ -2205,7 +2205,7 @@
+ 
+     /* Do process substitutions */
+     if (redir)
+-	spawnpipes(redir);
++	spawnpipes(redir, nullexec);
+ 
+     /* Do io redirections */
+     while (redir && nonempty(redir)) {
+@@ -3113,11 +3113,17 @@
+ #endif   /* HAVE_FIFOS and PATH_DEV_FD not defined */
+ }
+ 
+-/* > >(...) or < <(...) (does not use named pipes) */
++/*
++ * > >(...) or < <(...) (does not use named pipes)
++ *
++ * If the second argument is 1, this is part of
++ * an "exec < <(...)" or "exec > >(...)" and we shouldn't
++ * wait for the job to finish before continuing.
++ */
+ 
+ /**/
+ static int
+-getpipe(char *cmd)
++getpipe(char *cmd, int nullexec)
+ {
+     Eprog prog;
+     int pipes[2], out = *cmd == Inang;
+@@ -3133,7 +3139,8 @@
+ 	    zclose(pipes[!out]);
+ 	    return -1;
+ 	}
+-	addproc(pid, NULL, 1, &bgtime);
++	if (!nullexec)
++	    addproc(pid, NULL, 1, &bgtime);
+ 	return pipes[!out];
+     }
+     entersubsh(Z_ASYNC, 1, 0, 0);
+@@ -3157,11 +3164,17 @@
+     pp[1] = movefd(pp[1]);
+ }
+ 
+-/* Do process substitution with redirection */
++/*
++ * Do process substitution with redirection
++ *
++ * If the second argument is 1, this is part of
++ * an "exec < <(...)" or "exec > >(...)" and we shouldn't
++ * wait for the job to finish before continuing.
++ */
+ 
+ /**/
+ static void
+-spawnpipes(LinkList l)
++spawnpipes(LinkList l, int nullexec)
+ {
+     LinkNode n;
+     Redir f;
+@@ -3172,7 +3185,7 @@
+ 	f = (Redir) getdata(n);
+ 	if (f->type == REDIR_OUTPIPE || f->type == REDIR_INPIPE) {
+ 	    str = f->name;
+-	    f->fd2 = getpipe(str);
++	    f->fd2 = getpipe(str, nullexec);
+ 	}
+     }
+ }
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

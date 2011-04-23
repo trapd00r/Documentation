@@ -1,0 +1,168 @@
+From wayne@tenor.clarinet.com Tue May 14 04:44:17 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id EAA19184 for <mason@werple.mira.net.au>; Tue, 14 May 1996 04:44:09 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id OAA25481; Mon, 13 May 1996 14:36:40 -0400 (EDT)
+Resent-Date: Mon, 13 May 1996 14:36:40 -0400 (EDT)
+Message-Id: <199605131835.LAA05254@tenor.clari.net>
+To: hzoli@unicorn.sch.bme.hu
+Cc: Zsh hacking and development <zsh-workers@math.gatech.edu>
+Subject: Re: history-beginning-search fixes 
+In-reply-to: hzoli's message of Sun, 12 May 1996 05:02:20 +0200.
+	     <199605120302.FAA05347@hzoli.ppp.cs.elte.hu> 
+Date: Mon, 13 May 1996 11:35:41 -0700
+From: Wayne Davison <wayne@tenor.clarinet.com>
+Resent-Message-ID: <"Qc7ze1.0.3E6.t4ubn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1063
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 4074
+Status: O
+
+Zoltan Hidvegi writes:
+> history-beginning-search-* stopped working after Zefram latest patch if the
+> cursor was at the end of the line.  Here is the fix.
+
+There's a problem with these functions (and the history-search-* ones)
+that they are comparing the unmetafied line against metafied history
+lines.
+
+The folowing patch fixes that and switches the functions back to using
+str[n]cmp() (since they are comparing metafied lines).
+
+I also optimized the second strcmp() call to skip the N characters that
+we just compared and found to be equal.
+
+Finally, I changed the history-search-forward function to have a similar
+fix that Zephram added to history-beginning-search-forward that allows it
+to find the last line in the history.  It's not really the correct fix in
+either case (we should probably add a global to store the starting line
+of a sequence of ZLE_HISTSEARCH commands), but it handles most of the
+search cases people will run into.
+
+..wayne..
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: zle_hist.c
+@@ -373,17 +373,18 @@
+ historysearchbackward(void)
+ {
+     int t0, ohistline = histline;
+-    char *s;
++    char *s, *mline;
+ 
+     remember_edits();
++    mline = qgetevent(histline);
+     if (lastcmd & ZLE_HISTSEARCH)
+ 	t0 = histpos;
+     else {
+ 	for (t0 = 0; t0 < ll && !iblank(line[t0]); t0++);
+ 	if (t0 < ll)
+ 	    t0++;
++	t0 = histpos = metalen(mline, t0);
+     }
+-    histpos = t0;
+     for (;;) {
+ 	histline--;
+ 	if (!(s = qgetevent(histline))) {
+@@ -391,8 +392,8 @@
+ 	    histline = ohistline;
+ 	    return;
+ 	}
+-	if (strlen(UTOSCP(s)) > t0
+-	 && !strncmp(s, UTOSCP(line), t0) && strcmp(s, UTOSCP(line)))
++	if (strlen(s) > t0 &&
++	    !strncmp(s, mline, t0) && strcmp(s + t0, mline + t0))
+ 	    break;
+     }
+     setline(s);
+@@ -403,17 +404,18 @@
+ historysearchforward(void)
+ {
+     int t0, ohistline = histline;
+-    char *s;
++    char *s, *mline;
+ 
+     remember_edits();
++    mline = qgetevent(histline);
+     if (lastcmd & ZLE_HISTSEARCH)
+ 	t0 = histpos;
+     else {
+ 	for (t0 = 0; t0 < ll && !iblank(line[t0]); t0++);
+ 	if (t0 < ll)
+ 	    t0++;
++	t0 = histpos = metalen(mline, t0);
+     }
+-    histpos = t0;
+     for (;;) {
+ 	histline++;
+ 	if (!(s = qgetevent(histline))) {
+@@ -421,8 +423,8 @@
+ 	    histline = ohistline;
+ 	    return;
+ 	}
+-	if (strlen(UTOSCP(s)) > t0
+-	 && !strncmp(s, UTOSCP(line), t0) && strcmp(s, UTOSCP(line)))
++	if ((histline == curhist || strlen(s) > t0) &&
++	    !strncmp(s, mline, t0) && strcmp(s + t0, mline + t0))
+ 	    break;
+     }
+     setline(s);
+@@ -1103,11 +1105,13 @@
+ void
+ historybeginningsearchbackward(void)
+ {
+-    int cpos = cs;		/* save cursor position */
++    int pos, cpos = cs;		/* save cursor position */
+     int ohistline = histline;
+-    char *s;
++    char *s, *mline;
+ 
+     remember_edits();
++    mline = qgetevent(histline);
++    pos = metalen(mline, cs);
+     for (;;) {
+ 	histline--;
+ 	if (!(s = qgetevent(histline))) {
+@@ -1115,9 +1119,8 @@
+ 	    histline = ohistline;
+ 	    return;
+ 	}
+-	if (strlen((char *)s) > cs &&
+-	    !memcmp(s, (char *)line, cs) &&
+-	    (strlen((char *)s) > ll || memcmp(s, (char *)line, ll)))
++	if (strlen(s) > pos &&
++	    !strncmp(s, mline, pos) && strcmp(s + pos, mline + pos))
+ 	    break;
+     }
+ 
+@@ -1132,11 +1135,13 @@
+ void
+ historybeginningsearchforward(void)
+ {
+-    int cpos = cs;		/* save cursor position */
++    int pos, cpos = cs;		/* save cursor position */
+     int ohistline = histline;
+-    char *s;
++    char *s, *mline;
+ 
+     remember_edits();
++    mline = qgetevent(histline);
++    pos = metalen(mline, cs);
+     for (;;) {
+ 	histline++;
+ 	if (!(s = qgetevent(histline))) {
+@@ -1144,9 +1149,8 @@
+ 	    histline = ohistline;
+ 	    return;
+ 	}
+-	if ((histline == curhist || strlen((char *)s) > cs) &&
+-	    !memcmp(s, (char *)line, cs) &&
+-	    (strlen((char *)s) > ll || memcmp(s, (char *)line, ll)))
++	if ((histline == curhist || strlen(s) > pos) &&
++	    !strncmp(s, mline, pos) && strcmp(s + pos, mline + pos))
+ 	    break;
+     }
+ 
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+
+

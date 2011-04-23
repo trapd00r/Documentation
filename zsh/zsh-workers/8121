@@ -1,0 +1,104 @@
+From zsh-workers-return-8121-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Oct 01 17:43:27 1999
+Return-Path: <zsh-workers-return-8121-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9019 invoked from network); 1 Oct 1999 17:43:26 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 1 Oct 1999 17:43:26 -0000
+Received: (qmail 3363 invoked by alias); 1 Oct 1999 17:43:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8121
+Received: (qmail 3356 invoked from network); 1 Oct 1999 17:43:18 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <991001163203.ZM28059@candle.brasslantern.com>
+Date: Fri, 1 Oct 1999 16:32:03 +0000
+In-Reply-To: <19991001002659.A3777@adore.lightlink.com>
+Comments: In reply to Paul Kimoto <kimoto@lightlink.com>
+        "Re: command-spelling correction strangeness" (Oct  1, 12:26am)
+References: <19990928235656.A22062@perdita.antigonus.net> 
+	<990929053943.ZM22102@candle.brasslantern.com> 
+	<19990929020225.A21607@adore.lightlink.com> 
+	<991001021154.ZM25595@candle.brasslantern.com> 
+	<19990930232303.A5982@perdita.antigonus.net> 
+	<991001040228.ZM25695@candle.brasslantern.com> 
+	<19991001002659.A3777@adore.lightlink.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Paul Kimoto <kimoto@lightlink.com>
+Subject: Re: command-spelling correction strangeness
+Cc: zsh-workers@sunsite.auc.dk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Oct 1, 12:26am, Paul Kimoto wrote:
+} Subject: Re: command-spelling correction strangeness
+}
+} On Fri, Oct 01, 1999 at 04:02:27AM +0000, Bart Schaefer wrote:
+} > Did you try my patch?  Did it make any difference to the behavior you
+} > see?  [...]  I couldn't reproduce anything like what you
+} > were seeing unless I unsetopt hashcmds.
+}
+} Your suspicion is right -- your patch doesn't make a difference: 
+} sorry for misleading you.
+
+OK, the real scoop:  My diagnosis was correct as far as it went, but I
+missed one detail, which is that even when hashcmds is set it's possible
+for `pathchecked' (zsh's internal pointer to how much of the path it has
+searched) to already have advanced beyond the directory containing the
+actual command.  In that case resuming the check where it left off is not
+sufficient.
+
+Zsh's internal Cmdnam structure holds a pointer to the spot in the path
+where the command was found, so it's possible to restart the search from
+there, and I actually had that implemented for a bit; but it occurred to
+me that the reason the command can't be executed might be because it was
+moved to another place in the path, in which event the search ought to be
+started over from the beginning.  This works because hashing of a single
+command does a test for executable-non-directory-ness, whereas hashing an
+entire directory simply stuffs every entry into the table.  (So the whole
+problem can be avoided in the first place by "unsetopt hashdirs".)
+
+This goes on top of the previous patch.  Arguably, removing the hash node
+could also be conditional on (flags & HASHED) -- that is, don't implicitly
+remove it if the user explicitly hashed it -- but I can't think of any
+good reason to deliberately hash a bogus command location.
+
+Index: exec.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/exec.c,v
+retrieving revision 1.59
+diff -c -r1.59 exec.c
+--- exec.c	1999/09/30 15:45:44	1.59
++++ exec.c	1999/10/01 16:19:30
+@@ -1692,19 +1692,23 @@
+ 	if (!hn) {
+ 	    /* Resolve external commands */
+ 	    char *cmdarg = (char *) peekfirst(args);
++	    char **checkpath = pathchecked;
+ 	    int dohashcmd = isset(HASHCMDS);
+ 
+ 	    hn = cmdnamtab->getnode(cmdnamtab, cmdarg);
+ 	    if (hn && trycd && !isreallycom((Cmdnam)hn)) {
++		if (!(((Cmdnam)hn)->flags & HASHED)) {
++		    checkpath = path;
++		    dohashcmd = 1;
++		}
+ 		cmdnamtab->removenode(cmdnamtab, cmdarg);
+ 		cmdnamtab->freenode(hn);
+ 		hn = NULL;
+-		dohashcmd = 1;
+ 	    }
+ 	    if (!hn && dohashcmd && strcmp(cmdarg, "..")) {
+ 		for (s = cmdarg; *s && *s != '/'; s++);
+ 		if (!*s)
+-		    hn = (HashNode) hashcmd(cmdarg, pathchecked);
++		    hn = (HashNode) hashcmd(cmdarg, checkpath);
+ 	    }
+ 	}
+ 
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

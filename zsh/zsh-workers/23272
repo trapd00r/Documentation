@@ -1,0 +1,684 @@
+From zsh-workers-return-23272-mason-zsh=primenet.com.au@sunsite.dk Fri Apr 13 11:22:15 2007
+Return-Path: <zsh-workers-return-23272-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16707 invoked from network); 13 Apr 2007 11:22:09 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.8 (2007-02-13) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00,FORGED_RCVD_HELO
+	autolearn=ham version=3.1.8
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 13 Apr 2007 11:22:09 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 84011 invoked from network); 13 Apr 2007 11:22:03 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 13 Apr 2007 11:22:03 -0000
+Received: (qmail 9677 invoked by alias); 13 Apr 2007 11:21:59 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23272
+Received: (qmail 9664 invoked from network); 13 Apr 2007 11:21:57 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 13 Apr 2007 11:21:57 -0000
+Received: (qmail 83641 invoked from network); 13 Apr 2007 11:21:57 -0000
+Received: from cluster-d.mailcontrol.com (217.69.20.190)
+  by a.mx.sunsite.dk with SMTP; 13 Apr 2007 11:21:54 -0000
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly38d.srv.mailcontrol.com (MailControl) with ESMTP id l3DBKIaV008951
+	for <zsh-workers@sunsite.dk>; Fri, 13 Apr 2007 12:21:30 +0100
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.1830);
+	 Fri, 13 Apr 2007 12:21:14 +0100
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.13.8/8.13.4) with ESMTP id l3DBLDM9010464
+	for <zsh-workers@sunsite.dk>; Fri, 13 Apr 2007 12:21:13 +0100
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.13.8/8.13.8/Submit) with ESMTP id l3DBLDAu010461
+	for <zsh-workers@sunsite.dk>; Fri, 13 Apr 2007 12:21:13 +0100
+Message-Id: <200704131121.l3DBLDAu010461@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: bad patterns in ${var[(r)...]}
+Date: Fri, 13 Apr 2007 12:21:12 +0100
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 13 Apr 2007 11:21:14.0134 (UTC) FILETIME=[D8B46360:01C77DBD]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A-06-00-00 (www.mailcontrol.com) on 10.68.0.148
+
+A reverse match of a parameter index with a bad pattern always retrieves
+the first element:  see the test added to D04parameter.ztst.  Presumably
+it should return the empty string as if the pattern didn't match.
+
+Under these circumstances ${var[(I)...]} would return 0.  You *could*
+argue that ${var[(r)...]} is just the value at the index given by
+${var[(I)...]}, which, as 0 is mapped to 1, is what's happening at the
+moment.  However, I think that's counterintuitive and not useful.  Index
+0 is at least testable (unless KSH_ARRAYS is set).
+
+I think the patch below handles this without breaking anything else
+(certainly nothing that isn't obscure, since the parameter tests are
+fairly comprehensive).  Most of the large hunk is just reindentation.
+It may not be the simplest change, however---it ought to be possible to
+treat the case exactly as a failed match instead of using a separate
+flag, but I didn't follow through all the logic for that.
+
+I spotted this because of a test in _arguments around line 100 where it
+looks to see if a complicated option expression is already in its list
+before adding it:
+
+       if [[ -z ${tmp[(r)${match[1]%%[^a-zA-Z0-9-]#}]} ]]; then
+	 tmp+=($match[1])
+       fi
+
+In the case in question the expression in the subscript became
+"--follow[={name|descriptor" (from tail --help).  The test previously
+always failed if there was anything in $tmp (in this case there was -f)
+because of the bug.  Now it will always succeed because the bad pattern
+won't match anything.  I think that's correct given the code, but it
+should be testing against a string.  I don't know of an easy way to do
+that with subscripting (this has annoyed me for ages) but I'll play with
+this separately.
+
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.123
+diff -u -r1.123 params.c
+--- Src/params.c	8 Feb 2007 10:43:30 -0000	1.123
++++ Src/params.c	13 Apr 2007 11:10:54 -0000
+@@ -935,13 +935,17 @@
+  * *w is only set if we need to find the end of a word (input; should
+  *  be set to 0 by the caller).
+  *
+- * The final two arguments are to support multibyte characters.
++ * The next two arguments are to support multibyte characters.
+  * If supplied they are set to the length of the character before
+  * the index position and the one at the index position.  If
+  * multibyte characters are not in use they are set to 1 for
+  * consistency.  Note they aren't fully handled if a2 is non-zero,
+  * since they aren't needed.
+  *
++ * The final argument points to a variable that will be set to 1
++ * if a bad pattern was encountered.  It should be initialised to 0
++ * by the caller and tested on return to see if indexing failed.
++ *
+  * Returns a raw offset into the value from the start or end (i.e.
+  * after the arithmetic for Meta and possible multibyte characters has
+  * been taken into account).  This actually gives the offset *after*
+@@ -951,10 +955,10 @@
+ /**/
+ static zlong
+ getarg(char **str, int *inv, Value v, int a2, zlong *w,
+-       int *prevcharlen, int *nextcharlen)
++       int *prevcharlen, int *nextcharlen, int *inderr)
+ {
+     int hasbeg = 0, word = 0, rev = 0, ind = 0, down = 0, l, i, ishash;
+-    int keymatch = 0, needtok = 0, arglen;
++    int keymatch = 0, needtok = 0, arglen, len;
+     char *s = *str, *sep = NULL, *t, sav, *d, **ta, **p, *tt, c;
+     zlong num = 1, beg = 0, r = 0;
+     Patprog pprog = NULL;
+@@ -1237,267 +1241,268 @@
+ 	if (!keymatch) {
+ 	    tokenize(s);
+ 	    remnulargs(s);
++	    pprog = patcompile(s, 0, NULL);
++	    if (!pprog) {
++		*inderr = 1;
++		return 0;
++	    }
+ 	}
+ 
+-	if (keymatch || (pprog = patcompile(s, 0, NULL))) {
+-	    int len;
+-
+-	    if (v->isarr) {
+-		if (ishash) {
+-		    scanprog = pprog;
+-		    scanstr = s;
+-		    if (keymatch)
+-			v->isarr |= SCANPM_KEYMATCH;
+-		    else if (ind)
+-			v->isarr |= SCANPM_MATCHKEY;
+-		    else
+-			v->isarr |= SCANPM_MATCHVAL;
+-		    if (down)
+-			v->isarr |= SCANPM_MATCHMANY;
+-		    if ((ta = getvaluearr(v)) &&
+-			(*ta || ((v->isarr & SCANPM_MATCHMANY) &&
+-				 (v->isarr & (SCANPM_MATCHKEY | SCANPM_MATCHVAL |
+-					      SCANPM_KEYMATCH))))) {
+-			*inv = v->inv;
+-			*w = v->end;
+-			return 1;
++	if (v->isarr) {
++	    if (ishash) {
++		scanprog = pprog;
++		scanstr = s;
++		if (keymatch)
++		    v->isarr |= SCANPM_KEYMATCH;
++		else if (ind)
++		    v->isarr |= SCANPM_MATCHKEY;
++		else
++		    v->isarr |= SCANPM_MATCHVAL;
++		if (down)
++		    v->isarr |= SCANPM_MATCHMANY;
++		if ((ta = getvaluearr(v)) &&
++		    (*ta || ((v->isarr & SCANPM_MATCHMANY) &&
++			     (v->isarr & (SCANPM_MATCHKEY | SCANPM_MATCHVAL |
++					  SCANPM_KEYMATCH))))) {
++		    *inv = v->inv;
++		    *w = v->end;
++		    return 1;
++		}
++	    } else
++		ta = getarrvalue(v);
++	    if (!ta || !*ta)
++		return 0;
++	    len = arrlen(ta);
++	    if (beg < 0)
++		beg += len;
++	    if (beg >= 0 && beg < len) {
++		if (down) {
++		    if (!hasbeg)
++			beg = len - 1;
++		    for (r = 1 + beg, p = ta + beg; p >= ta; r--, p--) {
++			if (pattry(pprog, *p) && !--num)
++			    return r;
+ 		    }
+ 		} else
+-		    ta = getarrvalue(v);
+-		if (!ta || !*ta)
+-		    return 0;
+-		len = arrlen(ta);
+-		if (beg < 0)
+-		    beg += len;
+-		if (beg >= 0 && beg < len) {
+-		    if (down) {
+-			if (!hasbeg)
+-			    beg = len - 1;
+-			for (r = 1 + beg, p = ta + beg; p >= ta; r--, p--) {
+-			    if (pattry(pprog, *p) && !--num)
+-				return r;
+-			}
+-		    } else
+-			for (r = 1 + beg, p = ta + beg; *p; r++, p++)
+-			    if (pattry(pprog, *p) && !--num)
+-				return r;
++		    for (r = 1 + beg, p = ta + beg; *p; r++, p++)
++			if (pattry(pprog, *p) && !--num)
++			    return r;
++	    }
++	} else if (word) {
++	    ta = sepsplit(d = s = getstrvalue(v), sep, 1, 1);
++	    len = arrlen(ta);
++	    if (beg < 0)
++		beg += len;
++	    if (beg >= 0 && beg < len) {
++		if (down) {
++		    if (!hasbeg)
++			beg = len - 1;
++		    for (r = 1 + beg, p = ta + beg; p >= ta; p--, r--)
++			if (pattry(pprog, *p) && !--num)
++			    break;
++		    if (p < ta)
++			return 0;
++		} else {
++		    for (r = 1 + beg, p = ta + beg; *p; r++, p++)
++			if (pattry(pprog, *p) && !--num)
++			    break;
++		    if (!*p)
++			return 0;
+ 		}
+-	    } else if (word) {
+-		ta = sepsplit(d = s = getstrvalue(v), sep, 1, 1);
+-		len = arrlen(ta);
+-		if (beg < 0)
+-		    beg += len;
+-		if (beg >= 0 && beg < len) {
++	    }
++	    if (a2)
++		r++;
++	    for (i = 0; (t = findword(&d, sep)) && *t; i++)
++		if (!--r) {
++		    r = (zlong)(t - s + (a2 ? -1 : 1));
++		    if (!a2 && *tt != ',')
++			*w = r + strlen(ta[i]) - 1;
++		    return r;
++		}
++	    return a2 ? -1 : 0;
++	} else {
++	    /* Searching characters */
++	    int slen;
++	    d = getstrvalue(v);
++	    if (!d || !*d)
++		return 0;
++	    /*
++	     * beg and len are character counts, not raw offsets.
++	     * Remember we need to return a raw offset.
++	     */
++	    len = MB_METASTRLEN(d);
++	    slen = strlen(d);
++	    if (beg < 0)
++		beg += len;
++	    MB_METACHARINIT();
++	    if (beg >= 0 && beg < len) {
++		char *de = d + slen;
++
++		if (a2) {
++		    /*
++		     * Second argument: we don't need to
++		     * handle prevcharlen or nextcharlen, but
++		     * we do need to handle characters appropriately.
++		     */
+ 		    if (down) {
++			int nmatches = 0;
++			char *lastpos = NULL;
++
+ 			if (!hasbeg)
+-			    beg = len - 1;
+-			for (r = 1 + beg, p = ta + beg; p >= ta; p--, r--)
+-			    if (pattry(pprog, *p) && !--num)
+-				break;
+-			if (p < ta)
+-			    return 0;
+-		    } else {
+-			for (r = 1 + beg, p = ta + beg; *p; r++, p++)
+-			    if (pattry(pprog, *p) && !--num)
+-				break;
+-			if (!*p)
+-			    return 0;
+-		    }
+-		}
+-		if (a2)
+-		    r++;
+-		for (i = 0; (t = findword(&d, sep)) && *t; i++)
+-		    if (!--r) {
+-			r = (zlong)(t - s + (a2 ? -1 : 1));
+-			if (!a2 && *tt != ',')
+-			    *w = r + strlen(ta[i]) - 1;
+-			return r;
+-		    }
+-		return a2 ? -1 : 0;
+-	    } else {
+-		/* Searching characters */
+-		int slen;
+-		d = getstrvalue(v);
+-		if (!d || !*d)
+-		    return 0;
+-		/*
+-		 * beg and len are character counts, not raw offsets.
+-		 * Remember we need to return a raw offset.
+-		 */
+-		len = MB_METASTRLEN(d);
+-		slen = strlen(d);
+-		if (beg < 0)
+-		    beg += len;
+-		MB_METACHARINIT();
+-		if (beg >= 0 && beg < len) {
+-                    char *de = d + slen;
++			    beg = len;
+ 
+-		    if (a2) {
+ 			/*
+-			 * Second argument: we don't need to
+-			 * handle prevcharlen or nextcharlen, but
+-			 * we do need to handle characters appropriately.
++			 * See below: we have to move forward,
++			 * but need to count from the end.
+ 			 */
+-			if (down) {
+-			    int nmatches = 0;
+-			    char *lastpos = NULL;
+-
+-			    if (!hasbeg)
+-				beg = len;
+-
+-			    /*
+-			     * See below: we have to move forward,
+-			     * but need to count from the end.
+-			     */
+-			    for (t = d, r = 0; r <= beg; r++) {
+-				sav = *t;
+-				*t = '\0';
+-				if (pattry(pprog, d)) {
+-				    nmatches++;
+-				    lastpos = t;
+-				}
+-				*t = sav;
+-				if (t == de)
+-				    break;
+-				t += MB_METACHARLEN(t);
++			for (t = d, r = 0; r <= beg; r++) {
++			    sav = *t;
++			    *t = '\0';
++			    if (pattry(pprog, d)) {
++				nmatches++;
++				lastpos = t;
+ 			    }
++			    *t = sav;
++			    if (t == de)
++				break;
++			    t += MB_METACHARLEN(t);
++			}
+ 
+-			    if (nmatches >= num) {
+-				if (num > 1) {
+-				    nmatches -= num;
+-				    MB_METACHARINIT();
+-				    for (t = d, r = 0; ; r++) {
+-					sav = *t;
+-					*t = '\0';
+-					if (pattry(pprog, d) &&
+-					    nmatches-- == 0) {
+-					    lastpos = t;
+-					    *t = sav;
+-					    break;
+-					}
++			if (nmatches >= num) {
++			    if (num > 1) {
++				nmatches -= num;
++				MB_METACHARINIT();
++				for (t = d, r = 0; ; r++) {
++				    sav = *t;
++				    *t = '\0';
++				    if (pattry(pprog, d) &&
++					nmatches-- == 0) {
++					lastpos = t;
+ 					*t = sav;
+-					t += MB_METACHARLEN(t);
++					break;
+ 				    }
+-				}
+-				/* else lastpos is already OK */
+-
+-				return lastpos - d;
+-			    }
+-			} else {
+-			    /*
+-			     * This handling of the b flag
+-			     * gives odd results, but this is the
+-			     * way it's always worked.
+-			     */
+-			    for (t = d; beg && t <= de; beg--)
+-				t += MB_METACHARLEN(t);
+-			    for (;;) {
+-				sav = *t;
+-				*t = '\0';
+-				if (pattry(pprog, d) && !--num) {
+ 				    *t = sav;
+-				    /*
+-				     * This time, don't increment
+-				     * pointer, since it's already
+-				     * after everything we matched.
+-				     */
+-				    return t - d;
++				    t += MB_METACHARLEN(t);
+ 				}
+-				*t = sav;
+-				if (t == de)
+-				    break;
+-				t += MB_METACHARLEN(t);
+ 			    }
++			    /* else lastpos is already OK */
++
++			    return lastpos - d;
+ 			}
+ 		    } else {
+ 			/*
+-			 * First argument: this is the only case
+-			 * where we need prevcharlen and nextcharlen.
++			 * This handling of the b flag
++			 * gives odd results, but this is the
++			 * way it's always worked.
+ 			 */
+-			int lastcharlen;
++			for (t = d; beg && t <= de; beg--)
++			    t += MB_METACHARLEN(t);
++			for (;;) {
++			    sav = *t;
++			    *t = '\0';
++			    if (pattry(pprog, d) && !--num) {
++				*t = sav;
++				/*
++				 * This time, don't increment
++				 * pointer, since it's already
++				 * after everything we matched.
++				 */
++				return t - d;
++			    }
++			    *t = sav;
++			    if (t == de)
++				break;
++			    t += MB_METACHARLEN(t);
++			}
++		    }
++		} else {
++		    /*
++		     * First argument: this is the only case
++		     * where we need prevcharlen and nextcharlen.
++		     */
++		    int lastcharlen;
+ 
+-			if (down) {
+-			    int nmatches = 0;
+-			    char *lastpos = NULL;
+-
+-			    if (!hasbeg)
+-				beg = len;
+-
+-			    /*
+-			     * We can only move forward through
+-			     * multibyte strings, so record the
+-			     * matches.
+-			     * Unfortunately the count num works
+-			     * from the end, so it's easy to get the
+-			     * last one but we need to repeat if
+-			     * we want another one.
+-			     */
+-			    for (t = d, r = 0; r <= beg; r++) {
+-				if (pattry(pprog, t)) {
+-				    nmatches++;
+-				    lastpos = t;
+-				}
+-				if (t == de)
+-				    break;
+-				t += MB_METACHARLEN(t);
++		    if (down) {
++			int nmatches = 0;
++			char *lastpos = NULL;
++
++			if (!hasbeg)
++			    beg = len;
++
++			/*
++			 * We can only move forward through
++			 * multibyte strings, so record the
++			 * matches.
++			 * Unfortunately the count num works
++			 * from the end, so it's easy to get the
++			 * last one but we need to repeat if
++			 * we want another one.
++			 */
++			for (t = d, r = 0; r <= beg; r++) {
++			    if (pattry(pprog, t)) {
++				nmatches++;
++				lastpos = t;
+ 			    }
++			    if (t == de)
++				break;
++			    t += MB_METACHARLEN(t);
++			}
+ 
+-			    if (nmatches >= num) {
+-				if (num > 1) {
+-				    /*
+-				     * Need to start again and repeat
+-				     * to get the right match.
+-				     */
+-				    nmatches -= num;
+-				    MB_METACHARINIT();
+-				    for (t = d, r = 0; ; r++) {
+-					if (pattry(pprog, t) &&
+-					    nmatches-- == 0) {
+-					    lastpos = t;
+-					    break;
+-					}
+-					t += MB_METACHARLEN(t);
++			if (nmatches >= num) {
++			    if (num > 1) {
++				/*
++				 * Need to start again and repeat
++				 * to get the right match.
++				 */
++				nmatches -= num;
++				MB_METACHARINIT();
++				for (t = d, r = 0; ; r++) {
++				    if (pattry(pprog, t) &&
++					nmatches-- == 0) {
++					lastpos = t;
++					break;
+ 				    }
++				    t += MB_METACHARLEN(t);
+ 				}
+-				/* else lastpos is already OK */
++			    }
++			    /* else lastpos is already OK */
+ 
++			    /* return pointer after matched char */
++			    lastpos +=
++				(lastcharlen = MB_METACHARLEN(lastpos));
++			    if (prevcharlen)
++				*prevcharlen = lastcharlen;
++			    if (nextcharlen)
++				*nextcharlen = MB_METACHARLEN(lastpos);
++			    return lastpos - d;
++			}
++
++			for (r = beg + 1, t = d + beg; t >= d; r--, t--) {
++			    if (pattry(pprog, t) &&
++				!--num)
++				return r;
++			}
++		    } else {
++			for (t = d; beg && t <= de; beg--)
++			    t += MB_METACHARLEN(t);
++			for (;;) {
++			    if (pattry(pprog, t) && !--num) {
+ 				/* return pointer after matched char */
+-				lastpos +=
+-				    (lastcharlen = MB_METACHARLEN(lastpos));
++				t += (lastcharlen = MB_METACHARLEN(t));
+ 				if (prevcharlen)
+ 				    *prevcharlen = lastcharlen;
+ 				if (nextcharlen)
+-				    *nextcharlen = MB_METACHARLEN(lastpos);
+-				return lastpos - d;
+-			    }
+-
+-			    for (r = beg + 1, t = d + beg; t >= d; r--, t--) {
+-				if (pattry(pprog, t) &&
+-				    !--num)
+-				    return r;
+-			    }
+-			} else {
+-			    for (t = d; beg && t <= de; beg--)
+-				t += MB_METACHARLEN(t);
+-			    for (;;) {
+-				if (pattry(pprog, t) && !--num) {
+-				    /* return pointer after matched char */
+-				    t += (lastcharlen = MB_METACHARLEN(t));
+-				    if (prevcharlen)
+-					*prevcharlen = lastcharlen;
+-				    if (nextcharlen)
+-					*nextcharlen = MB_METACHARLEN(t);
+-				    return t - d;
+-				}
+-				if (t == de)
+-				    break;
+-				t += MB_METACHARLEN(t);
++				    *nextcharlen = MB_METACHARLEN(t);
++				return t - d;
+ 			    }
++			    if (t == de)
++				break;
++			    t += MB_METACHARLEN(t);
+ 			}
+ 		    }
+ 		}
+-		return down ? 0 : slen + 1;
+ 	    }
++	    return down ? 0 : slen + 1;
+ 	}
+     }
+     return r;
+@@ -1507,7 +1512,7 @@
+ int
+ getindex(char **pptr, Value v, int dq)
+ {
+-    int start, end, inv = 0;
++    int start, end, inv = 0, inderr = 0;
+     char *s = *pptr, *tbrack;
+ 
+     *s++ = '[';
+@@ -1540,7 +1545,8 @@
+ 	zlong we = 0, dummy;
+ 	int startprevlen, startnextlen;
+ 
+-	start = getarg(&s, &inv, v, 0, &we, &startprevlen, &startnextlen);
++	start = getarg(&s, &inv, v, 0, &we, &startprevlen, &startnextlen,
++		       &inderr);
+ 
+ 	if (inv) {
+ 	    if (!v->isarr && start != 0) {
+@@ -1614,7 +1620,7 @@
+ 
+ 	    if ((com = (*s == ','))) {
+ 		s++;
+-		end = getarg(&s, &inv, v, 1, &dummy, NULL, NULL);
++		end = getarg(&s, &inv, v, 1, &dummy, NULL, NULL, &inderr);
+ 	    } else {
+ 		end = we ? we : start;
+ 	    }
+@@ -1644,6 +1650,12 @@
+     }
+     *tbrack = ']';
+     *pptr = s;
++
++    if (inderr) {
++	v->start = 1;
++	v->end = 0;
++    }
++
+     return 0;
+ }
+ 
+Index: Test/D04parameter.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D04parameter.ztst,v
+retrieving revision 1.24
+diff -u -r1.24 D04parameter.ztst
+--- Test/D04parameter.ztst	21 Jan 2007 22:47:42 -0000	1.24
++++ Test/D04parameter.ztst	13 Apr 2007 11:10:54 -0000
+@@ -903,3 +903,9 @@
+ >6100620061
+ >6100620062
+ >610063
++
++  badpat="a[b"
++  array=(X)
++  print A${array[(r)$badpat]}B
++0:Bad patterns should never match array elements
++>AB
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+To access the latest news from CSR copy this link into a web browser:  http://www.csr.com/email_sig.php
+
+To get further information regarding CSR, please visit our Investor Relations page at http://ir.csr.com/csr/about/overview
+

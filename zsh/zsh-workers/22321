@@ -1,0 +1,261 @@
+From zsh-workers-return-22321-mason-zsh=primenet.com.au@sunsite.dk Sun Mar 05 09:13:15 2006
+Return-Path: <zsh-workers-return-22321-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19105 invoked from network); 5 Mar 2006 09:13:12 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.0 (2005-09-13) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 5 Mar 2006 09:13:12 -0000
+Received: (qmail 44637 invoked from network); 5 Mar 2006 09:13:05 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 5 Mar 2006 09:13:05 -0000
+Received: (qmail 19571 invoked by alias); 5 Mar 2006 09:13:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22321
+Received: (qmail 19562 invoked from network); 5 Mar 2006 09:13:01 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 5 Mar 2006 09:13:01 -0000
+Received: (qmail 44335 invoked from network); 5 Mar 2006 09:13:01 -0000
+Received: from vms048pub.verizon.net (206.46.252.48)
+  by a.mx.sunsite.dk with SMTP; 5 Mar 2006 09:12:59 -0000
+Received: from torch.brasslantern.com ([71.116.81.225])
+ by vms048.mailsrvcs.net (Sun Java System Messaging Server 6.2-4.02 (built Sep
+ 9 2005)) with ESMTPA id <0IVN008W7DLG4EI6@vms048.mailsrvcs.net> for
+ zsh-workers@sunsite.dk; Sun, 05 Mar 2006 03:12:53 -0600 (CST)
+Received: from torch.brasslantern.com (localhost.localdomain [127.0.0.1])
+	by torch.brasslantern.com (8.13.1/8.13.1) with ESMTP id k259DqPq007227	for
+ <zsh-workers@sunsite.dk>; Sun, 05 Mar 2006 01:14:00 -0800
+Received: (from schaefer@localhost)	by torch.brasslantern.com
+ (8.13.1/8.13.1/Submit) id k259DpQW007226	for zsh-workers@sunsite.dk; Sun,
+ 05 Mar 2006 01:13:51 -0800
+Date: Sun, 05 Mar 2006 01:13:51 -0800
+From: Bart Schaefer <schaefer@brasslantern.com>
+Subject: Re: [PATCH][RFC] check for heap memory in zfree()
+In-reply-to: <200603041158.02573.arvidjaar@newmail.ru>
+To: "Zsh-workers" <zsh-workers@sunsite.dk>
+Message-id: <060305011351.ZM7225@torch.brasslantern.com>
+MIME-version: 1.0
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+Content-type: text/plain; charset=us-ascii
+References: <20060302175252.GA31734@let.rug.nl>
+	<200603041104.48265.arvidjaar@mail.ru>
+	<200603041158.02573.arvidjaar@newmail.ru>
+Comments: In reply to Andrey Borzenkov <arvidjaar@newmail.ru>
+ "[PATCH][RFC] check for heap memory in zfree()" (Mar  4, 11:57am)
+
+On Mar 4, 11:57am, Andrey Borzenkov wrote:
+} 
+} I did not receive my previous mail so I am not sure if it was ever 
+} delivered ...
+
+I don't recall seeing it but my mail was messed up for a while by a
+bad interaction between a new /etc/hosts and an old /etc/hosts.allow.
+
+} > The problem is rather non-trivial. dirsgetfn returns array built
+} > on-the-fly in heap, while typeset -U calls uniqarray() that tries
+} > to zfree array elements.
+
+Peter's patch in 22318 fixes this by always copying the array in a
+PM_ARRAY parameter before uniquifying it.  That conflicts with your
+builtin.c hunk in 22320, which has the same effect except generalized
+to all parameters.
+
+I'm not entirely happy with either of these because both needlessly
+duplicate memory in the case where the array is already free-able.
+It seems as if it should be possible for "typeset -U" to be made more
+efficient than assignment-by-copy.
+
+Skipping ahead:
+
+} OK attached is patch that checks if memory has been allocated from heap. 
+} Comments on whether it makes sense?
+
+I don't like this, either.  The free() operation should be very fast;
+a scan for whether every pointer we might free is actually on the heap
+is counter-productive.  And yes, it would mask other bugs.
+
+People are already complaining that multibyte support has made zsh
+significantly slower, let's not pile on still more overhead.
+
+I suggest a compromise approach:  Add a function to test whether a
+pointer is in one of the heaps, and when a caller is not certain about
+the allocation of the memory it is about to free(), it can guard with
+the test function.
+
+In this specific case it's uniqarray() that is doing the unsafe freeing,
+so that's where the call to the test function would go.  I think it's
+safe to a assume that an array won't contain a mix of permanent and
+heap memory, so we only need to make one call to the test.
+
+} > There are at least two problems here:
+
+Actually there are three, the last of which has nothing to do with the
+crash: pushd/popd modify the internal dirstack linked-list directly,
+so $dirstack does not remain unique.  Further, $PWD is never placed in
+the directory stack until pushd, so the output of "dirs" is not unique
+when the current directory is the same as one elsewhere in the stack.
+
+Maybe someone can remind me why it's up to the parameter set-function
+to free its argument?  That seems completely inside-out to me.
+
+} > Apparently to solve it in general we need one of
+} >
+} > - per-parameter type ->uniq function (is it an overkill?) Possibly
+} > generalized to per-parameter ->setflags function.
+
+This does appear to be necessary in order to fix the third problem.  In
+essence, "typeset -U dirstack" should execute "setopt pushdignoredups",
+and nothing less is going to produce the desired effect.
+
+Since it's probably a bad thing to have "typeset" produce side-effects
+on "setopt", it might be more effective to enforce that -U does not
+apply to dirstack.  All the other parameter module arrays are read-only,
+but we'd still need some PM_ flag to handle this case in general.  Is
+it reasonable to treat PM_REMOVABLE as an indication that the array is
+constructed on the fly and hence can't be made unique?
+
+I notice that there's no warning printed for typeset -U on a read-only
+or non-array parameter, but there is a warning for -U on a restricted
+parameter when the RESTRICTED option is set.  Isn't that inconsistent?
+
+} > - some way to know if passed pointer was allocated from heap or not. I
+} > guess it should be possible; something like isheap(p)?
+
+The patch below adds zheapptr(p), which returns p if it is on the heap
+or NULL otherwise.  This seemed more general than a simple boolean, but
+it's not used for anything but boolean tests in the patch, which thereby
+fixes uniqarray().
+
+This patch also partly reverts 22318, opting to call the array set fn
+after uniqarray() only for PM_SPECIAL parameters.  This keeps $dirstack
+working the way it did after 22318, but does not fix problem #3.
+
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/builtin.c,v
+retrieving revision 1.36
+diff -u -r1.36 builtin.c
+--- Src/builtin.c	4 Mar 2006 09:26:06 -0000	1.36
++++ Src/builtin.c	5 Mar 2006 08:59:00 -0000
+@@ -1924,10 +1924,11 @@
+ 	    Param apm;
+ 	    char **x;
+ 	    if (PM_TYPE(pm->flags) == PM_ARRAY) {
+-		x = zarrdup((*pm->gsu.a->getfn)(pm));
++		x = (*pm->gsu.a->getfn)(pm);
+ 		uniqarray(x);
+-		pm->gsu.a->setfn(pm, x);
+-		if (pm->ename && x)
++		if (pm->flags & PM_SPECIAL)
++		    (*pm->gsu.a->setfn)(pm, zarrdup(x));
++		else if (pm->ename && x)
+ 		    arrfixenv(pm->ename, x);
+ 	    } else if (PM_TYPE(pm->flags) == PM_SCALAR && pm->ename &&
+ 		       (apm =
+Index: Src/mem.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/mem.c,v
+retrieving revision 1.6
+diff -u -r1.6 mem.c
+--- Src/mem.c	14 Aug 2004 05:01:23 -0000	1.6
++++ Src/mem.c	5 Mar 2006 05:12:11 -0000
+@@ -329,6 +329,21 @@
+ }
+ #endif
+ 
++/* check whether a pointer is within a memory pool */
++
++/**/
++mod_export void *
++zheapptr(void *p)
++{
++    Heap h;
++    queue_signals();
++    for (h = heaps; h; h = h->next)
++	if ((char *)p >= arena(h) &&
++	    (char *)p + H_ISIZE < arena(h) + ARENA_SIZEOF(h))
++	    break;
++    unqueue_signals();
++    return (h ? p : 0);
++}
+ 
+ /* allocate memory from the current memory pool */
+ 
+Index: Src/params.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/params.c,v
+retrieving revision 1.34
+diff -u -r1.34 params.c
+--- Src/params.c	4 Mar 2006 09:26:06 -0000	1.34
++++ Src/params.c	5 Mar 2006 08:58:26 -0000
+@@ -2820,11 +2820,11 @@
+ 	*dptr->arrptr = sepsplit(x, sepbuf, 0, 0);
+ 	if (pm->flags & PM_UNIQUE)
+ 	    uniqarray(*dptr->arrptr);
++	zsfree(x);
+     } else
+ 	*dptr->arrptr = NULL;
+     if (pm->ename)
+ 	arrfixenv(pm->nam, *dptr->arrptr);
+-    zsfree(x);
+ }
+ 
+ /**/
+@@ -2847,17 +2847,16 @@
+ }
+ 
+ /**/
+-void
+-uniqarray(char **x)
++static void
++arrayuniq(char **x, int freeok)
+ {
+     char **t, **p = x;
+ 
+-    if (!x || !*x)
+-	return;
+     while (*++p)
+ 	for (t = x; t < p; t++)
+ 	    if (!strcmp(*p, *t)) {
+-		zsfree(*p);
++		if (freeok)
++		    zsfree(*p);
+ 		for (t = p--; (*t = t[1]) != NULL; t++);
+ 		break;
+ 	    }
+@@ -2865,18 +2864,20 @@
+ 
+ /**/
+ void
+-zhuniqarray(char **x)
++uniqarray(char **x)
+ {
+-    char **t, **p = x;
++    if (!x || !*x)
++	return;
++    arrayuniq(x, !zheapptr(*x));
++}
+ 
++/**/
++void
++zhuniqarray(char **x)
++{
+     if (!x || !*x)
+ 	return;
+-    while (*++p)
+-	for (t = x; t < p; t++)
+-	    if (!strcmp(*p, *t)) {
+-		for (t = p--; (*t = t[1]) != NULL; t++);
+-		break;
+-	    }
++    arrayuniq(x, 0);
+ }
+ 
+ /* Function to get value of special parameter `#' and `ARGC' */
+

@@ -1,0 +1,198 @@
+From zsh-workers-return-7373-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Aug 05 10:56:34 1999
+Return-Path: <zsh-workers-return-7373-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22577 invoked from network); 5 Aug 1999 10:56:32 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Aug 1999 10:56:32 -0000
+Received: (qmail 15186 invoked by alias); 5 Aug 1999 10:56:22 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7373
+Received: (qmail 15179 invoked from network); 5 Aug 1999 10:56:22 -0000
+Date: Thu, 5 Aug 1999 12:56:15 +0200 (MET DST)
+Message-Id: <199908051056.MAA16349@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Wed, 4 Aug 1999 17:00:44 +0000
+Subject: Re: Completion problems.
+
+
+Bart Schaefer wrote:
+
+> I think (2) would be quite useful in other contexts anyway.  Perhaps (Q)?
+> (And we could add (q) which means the same as :q, just for completeness.)
+
+;-) I've been thinking about (q), too.
+
+> There is some question about what paramter unquoting should do in the case
+> of mismatched quotes.  I can think of cases where you'd want it to produce
+> the same errors as using that same quoting in a command, and other cases
+> (like completion) where you'd just like it to assume the closing quote.
+
+Right. Maybe I'll find some time soon...
+
+> } [...] with match specs using `*'-patterns new stuff can be inserted
+> } anywhere in the word. To retain the single quotes the completion code
+> } would have to keep track of the original positions and would have to
+> } calculate the new positions for every single or double quote inside
+> } the word. This is extremly difficult, expensive (i.e. slow), and at
+> } least I wouldn't implement it (if anyone else is interested: try to
+> } find out how the completion code now handles completion inside braces
+> } -- you would have to do something similar, but not only for two
+> } places, but for a whole list of positions).
+> 
+> I almost hate to mention this, but braces can be nested, and right now
+> completion doesn't work in that case -- presumably *because* it isn't
+> keeping track of a list of positions.
+
+I didn't write the original in-brace-completion-code, but I think it
+was done in the way it was done mainly because `a{b<TAB>' is
+relatively easy to parse and there is only one possible prefix to
+complete whereas with `a{b{c' we would have to collect multiple parts
+of the string to complete (instead of just removing a bit) and with
+`a{b,c}d{e<TAB>' we would have to handle both `abde' and `acde', of
+course. At the time completion in braces was added the code only
+inserted a prefix and/or a suffix at the cursor position so there
+wasn't a problem with keeping a list of positions.
+
+Do you want to say that completion in nested braces should be
+possible? (Horrors. But, yes, maybe it should be...)
+
+> There are similar (?) problems with nested parameter substitutions:
+> 
+> zagzig<1> echo ${${p<TAB>
+> path     perl     prompt   psvar           
+> zagzig<1> echo ${${pa<TAB>
+> zagzig<1> echo ${${path} 
+>                          ^Cursor is now here; arguably no space should
+>                           have been added, because it can't possibly be
+>                           correct in that context.  Also, if you now type
+>                           a right-curly, the trailing space is deleted,
+>                           but the right-curly is not inserted (which I
+>                           guess is theoretically correct).
+
+Completion inside parameter expansions is a different thing because
+there we only look at the name and ignore the surrounding parts of the 
+string.
+The patch below makes the code check for nested parameter expansions
+and not insert a space then. The algorithm for testing for nested
+expansions is very simple, but I think it should get most things
+right.
+The patch also makes `}' remove the suffix for completion after
+`${...' in the new completion stuff and avoid the space on nested
+expansions there, too.
+Btw. did you all know that the new completion code currently doesn't
+respect AUTO_PARAM_SLASH? I knew, but didn't tell anyone. Naughty me.
+
+> BTW, expand-or-complete is a pain in the butt when combined with braces,
+> because as soon as you close the braces the next TAB *expands* them,
+> leaving you with multiple half-finished words.  You can prevent this by
+> setting GLOB_COMPLETE, but in that case completion after the right-brace
+> still doesn't work.
+
+See above -- completion after a closed `{a,b}' would be something
+completely new: multiple prefixes. We would have to generate multiple
+sets of matches and then select those present in all sets.
+
+Bye
+ Sven
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Mon Aug  2 11:44:52 1999
++++ Src/Zle/comp.h	Thu Aug  5 10:47:52 1999
+@@ -227,7 +227,8 @@
+ #define CMF_FILE     1		/* this is a file */
+ #define CMF_REMOVE   2		/* remove the suffix */
+ #define CMF_PARBR    4		/* paramter expansion with a brace */
+-#define CMF_NOLIST   8		/* should not be listed */
++#define CMF_PARNEST  8		/* nested paramter expansion */
++#define CMF_NOLIST  16		/* should not be listed */
+ 
+ 
+ /* Stuff for completion matcher control. */
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Wed Aug  4 11:38:31 1999
++++ Src/Zle/zle_tricky.c	Thu Aug  5 10:55:33 1999
+@@ -728,7 +728,7 @@
+     if ((*p == String || *p == Qstring) && p[1] != Inpar && p[1] != Inbrack) {
+ 	/* This is really a parameter expression (not $(...) or $[...]). */
+ 	char *b = p + 1, *e = b;
+-	int n = 0, br = 1;
++	int n = 0, br = 1, nest = 0;
+ 
+ 	if (*b == Inbrace) {
+ 	    char *tb = b;
+@@ -740,6 +740,10 @@
+ 	    /* Ignore the possible (...) flags. */
+ 	    b++, br++;
+ 	    n = skipparens(Inpar, Outpar, &b);
++
++	    for (tb = p - 1; tb > s && *tb != Outbrace && *tb != Inbrace; tb--);
++	    if (tb > s && *tb == Inbrace && (tb[-1] == String || *tb == Qstring))
++		nest = 1;
+ 	}
+ 
+ 	/* Ignore the stuff before the parameter name. */
+@@ -788,9 +792,11 @@
+ 	     * global variables. */
+ 
+ 	    if (set) {
+-		if (br >= 2)
++		if (br >= 2) {
+ 		    mflags |= CMF_PARBR;
+-
++		    if (nest)
++			mflags |= CMF_PARNEST;
++		}
+ 		/* Get the prefix (anything up to the character before the name). */
+ 		isuf = dupstring(e);
+ 		untokenize(isuf);
+@@ -7728,6 +7734,8 @@
+ 	    minfo.insc++;
+ 	    if (minfo.we)
+ 		minfo.end += minfo.insc;
++	    if (m->flags & CMF_PARNEST)
++		havesuff = 1;
+ 	}
+ 	if ((m->flags & CMF_FILE) || (m->ripre && isset(AUTOPARAMSLASH))) {
+ 	    /* If we have a filename or we completed a parameter name      *
+@@ -7741,11 +7749,12 @@
+ 		t = 1;
+ 	    else {
+ 		/* Build the path name. */
+-		if (m->ripre && !*psuf) {
++		if (m->ripre && !*psuf && !(m->flags & CMF_PARNEST)) {
+ 		    int ne = noerrs;
+ 
+-		    p = (char *) zhalloc(strlen(m->ripre) + strlen(str) + 1);
+-		    sprintf(p, "%s%s", m->ripre, str);
++		    p = (char *) zhalloc(strlen(m->ripre) + strlen(str) + 2);
++		    sprintf(p, "%s%s%c", m->ripre, str,
++			    ((m->flags & CMF_PARBR) ? Outbrace : '\0'));
+ 		    noerrs = 1;
+ 		    parsestr(p);
+ 		    singsub(&p);
+diff -u oc/Base/_brace_parameter Completion/Base/_brace_parameter
+--- oc/Base/_brace_parameter	Mon Aug  2 11:45:10 1999
++++ Completion/Base/_brace_parameter	Thu Aug  5 11:00:29 1999
+@@ -7,6 +7,8 @@
+ if [[ "$SUFFIX" = *\}* ]]; then
+   ISUFFIX="${SUFFIX#*\}}$ISUFFIX"
+   SUFFIX="${SUFFIX%%\}*}"
++elif [[ "$LBUFFER" = *\$\{[^}]#\$\{[^}]#$PREFIX ]]; then
++  suf='}'
+ else
+   suf='} '
+ fi
+@@ -18,4 +20,4 @@
+ 
+ [[ n -gt 0 ]] && suf=''
+ 
+-_parameters -Qs "${q[1,-n-1]}" -S "$suf" -r '-:?#%+=[/'
++_parameters -Qs "${q[1,-n-1]}" -S "$suf" -r '-:?#%+=[/}'
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

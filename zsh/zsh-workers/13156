@@ -1,0 +1,133 @@
+From zsh-workers-return-13156-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Nov 13 10:21:44 2000
+Return-Path: <zsh-workers-return-13156-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28475 invoked from network); 13 Nov 2000 10:21:43 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 13 Nov 2000 10:21:43 -0000
+Received: (qmail 3725 invoked by alias); 13 Nov 2000 10:21:49 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13156
+Received: (qmail 3716 invoked from network); 13 Nov 2000 10:21:48 -0000
+Date: Mon, 13 Nov 2000 11:21:32 +0100 (MET)
+Message-Id: <200011131021.LAA30936@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Sun, 5 Nov 2000 01:59:58 +0000
+Subject: Re: PATCH: Misc. zpty tweaks, plus commentary
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> The problem is that whenever zsh forks a builtin, it closes all descriptors
+> numbered higher than 10, which includes the master pty descriptor.  So if
+> you try to use `zpty -r' or `zpty -w' in a pipeline, or try to put them in
+> the background, they'll get "invalid file descriptor" when attempting to
+> access the pty.  I've played with "hiding" the master fd by zeroing its slot
+> in fdtable[], and that does make zpty work correctly, but it also means that
+> the master descriptor is still open when running other builtins, which is
+> not quite so desirable.
+
+I don't see any simple solution either. Maybe this is yet another
+reason for a more sophisticated file-descriptior/blocking/waiting
+handling in the core. Not only that modules should be able to register 
+file-descriptors that should be monitored whenever the shell is
+waiting, they should also be able to register handler functions (for
+reading, writing, exceptions, closing, etc.).
+
+
+[ in another message: ]
+
+> On Nov 4, 11:29pm, I wrote:
+> }
+> } `zpty -w' already was able to stream into the pty (even though that's
+> } not documented); e.g. `zpty -w foo < file' writes the entire contents
+> } of the file to the pty [...] Now `zpty -r foo' can stream the output
+> } as well.  Unfortunately, it's still not possible to do both at once.
+> }
+> } The problem is that whenever zsh forks a builtin, it closes all
+> } descriptors numbered higher than 10, which includes the master pty
+> } descriptor.
+> 
+> Although a C-code-level fix would be preferable, a workaround has just
+> occurred to me:  Using a subshell will prevent the descriptors from
+> being closed.  So with 13116 applied, you should be able to do:
+> 
+>     zpty -b foo cat
+>     yes blah | (zpty -w foo) &
+>     (zpty -r foo) | less
+>     zpty -d foo
+> 
+> This reveals that still another remaining problem is that `zpty -w' on a
+> blocking pty doesn't stop when the process on the pty is killed.  There
+> doesn't seem to be any simple fix for this; write() itself is blocked,
+> and does not get interrupted with SIGPIPE as would normally occur.
+
+Hm, yes. There might be a solution using the fact that we have a
+subshell that we could make ignore SIGHUP (and write something to the
+pty or whatever). But I currently can't see how this really helps.
+
+
+[ and in yet another message: ]
+
+> ...
+> 
+> I haven't done anything about it, but this code clearly expects that
+> no '\0' bytes will ever be sent to or received from the pty.  That's
+> obviously a fallacy; we shouldn't be treating this data as C strings.
+
+Yes and no. For reading, this already worked (the call to metafy()). But
+somehow I forgot to do the same for `zpty -w'. The patch fixes this.
+
+> It would appear from the documentation that, with a blocking pty,
+> `zpty -r' must always return either 0 or 2.  Is this really the case?
+> (On my RH5.2 linux system, select() always returns 1 after the pty's
+> command has exited, so read_poll() also returns 1 and cmd->fin never
+> gets set.  read(), however, gets an I/O error (errno == 5), so `zpty -r'
+> returns 1 and it's not possible to detect that the command has finished.
+
+Rats. The same here. Why didn't I notice that?
+
+Another reason for not using read_poll(), does anyone see a way to
+allow us to find out if a command has exited and still be able to read 
+the rest of its output?
+
+
+Bye
+ Sven
+
+Index: Src/Modules/zpty.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/zpty.c,v
+retrieving revision 1.18
+diff -u -r1.18 zpty.c
+--- Src/Modules/zpty.c	2000/11/11 19:50:29	1.18
++++ Src/Modules/zpty.c	2000/11/13 10:05:24
+@@ -562,13 +562,15 @@
+ ptywrite(Ptycmd cmd, char **args, int nonl)
+ {
+     if (*args) {
+-	char sp = ' ';
++	char sp = ' ', *tmp;
++	int len;
+ 
+-	while (*args)
+-	    if (ptywritestr(cmd, *args, strlen(*args)) ||
++	while (*args) {
++	    unmetafy((tmp = dupstring(*args)), &len);
++	    if (ptywritestr(cmd, tmp, len) ||
+ 		(*++args && ptywritestr(cmd, &sp, 1)))
+ 		return 1;
+-
++	}
+ 	if (!nonl) {
+ 	    sp = '\n';
+ 	    if (ptywritestr(cmd, &sp, 1))
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,190 @@
+From zsh-workers-return-13349-mason-zsh=primenet.com.au@sunsite.dk Mon Jan 15 10:43:00 2001
+Return-Path: <zsh-workers-return-13349-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20866 invoked from network); 15 Jan 2001 10:42:59 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 Jan 2001 10:42:59 -0000
+Received: (qmail 23511 invoked by alias); 15 Jan 2001 10:42:53 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13349
+Received: (qmail 23499 invoked from network); 15 Jan 2001 10:42:53 -0000
+Date: Mon, 15 Jan 2001 11:42:51 +0100 (MET)
+Message-Id: <200101151042.LAA01557@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Felix Rosencrantz's message of Sun, 14 Jan 2001 21:04:35 -0800
+	(PST)
+Subject: PATCH: completion positions
+
+
+Felix Rosencrantz wrote:
+
+> I've been using the new cycle completion positions code a little and
+> encountered a couple of small glitches.
+> 
+> Here's one case where the insert_positions doesn't have all the positions.
+> 
+> Using the following test case with zsh -f:
+> autoload -U compinit cycle-completion-positions ; compinit -D
+> compdef _tst tst
+> _tst () {compadd -M 'r:|[.,_-]=**' A.B.C  A.B.C.D  A.C}
+> zle -N cycle cycle-completion-positions
+> bindkey "^T" cycle
+> tst A.C<TAB>
+> 
+> At this point the value of $_lastcomp[insert_positions] is only 7, after the
+> last character.  It should have one more value on the first dot.  
+> I've sort of expected that insert_positions might not always list all
+> positions, though I thought it would be worth mentioning. 
+
+Thinko, sorry.  It didn't use it because the minimum and maximum
+lengths of missing string (sans the empty string) were equal.
+
+> (I was thinking I
+> could be useful by adding "insert_positions" output to the 54compmatch.ztst
+> test, such that all the cases reported it's value.  Would this be worthwhile? )
+
+Yes, that would be nice to have, I think.
+
+> Another situation occurs with a character being deleted.  This one is partly
+> due to my matching spec being complicated, but it seems like the character
+> shouldn't be deleted.  Again run it through zsh -f.  
+> 
+> autoload -U compinit cycle-completion-positions ; compinit -D
+> compdef _tst tst
+> _tst () {
+> compadd -M 'r:|[.,_-]=** r:[^0-9]||[0-9]=**'  a-b_1_2_2  a-b_2_0.gz 
+> a-b_2_0.zip}
+> tst a-b_2<TAB>  --> tst a-b__ 
+> 
+> The 2 is deleted.
+
+Which should never happen, right.  The code to split a string into
+parts wasn't clever enough.
+
+> >the position after the word is always
+> >unconditionally added (that seemed sensible, even if there may be
+> >cases when there is nothing missing at the end).
+> 
+> Also, I was wondering if it would make sense to somehow distinguish between
+> cases where the end of word position is and isn't missing something.  So it
+> would be possible to configure cycle-completion-positions not to go to eow
+> if it wasn't a hot spot.  It seems there is a difference that might be
+> useful to report.
+> 
+> This might be implemented by adding 2 colon's before that value in
+> insert_positions, if it wasn't missing something.  Then it would be easy
+> to remove the extra colon, if the eow is always wanted. Or it would be easy
+> to remove the eow value if it is not wanted as a cycle point
+> when nothing is missing.
+
+Just for the fun of it I've added this and `#if 0'ed it out because
+this isn't enough. We would have to distinguish three cases:
+
+- something missing at the end
+- nothing missing at the end
+- nothing missing at the end but the inserted string is equal to one
+  of the matches
+
+That last one is the problem (eow should be one of the positions).
+It's hard to find out if the inserted string is equal to one of the
+matches.  I need to think about this some more.
+
+
+Bye
+ Sven
+
+Index: Src/Zle/compmatch.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compmatch.c,v
+retrieving revision 1.29
+diff -u -r1.29 compmatch.c
+--- Src/Zle/compmatch.c	2001/01/12 13:50:14	1.29
++++ Src/Zle/compmatch.c	2001/01/15 10:35:47
+@@ -1133,16 +1133,16 @@
+     Cmlist ms;
+     Cmatcher mp;
+     int t, op = plen;
+-    char *p = str;
++    char *p = str, *os = str;
+ 
+     while (len) {
+ 	for (t = 0, ms = bmatchers; ms && !t; ms = ms->next) {
+ 	    mp = ms->matcher;
+-	    if (mp && mp->flags == CMF_RIGHT && mp->wlen < 0 &&
+-		!mp->llen && len >= mp->ralen + mp->lalen && mp->ralen &&
++	    if (mp && mp->flags == CMF_RIGHT && mp->wlen < 0 && mp->ralen &&
++		!mp->llen && len >= mp->ralen && (str - os) >= mp->lalen &&
+ 		pattern_match(mp->right, str, NULL, NULL) &&
+ 		(!mp->lalen ||
+-		 ((str - p) >= mp->lalen &&
++		 ((str - os) >= mp->lalen &&
+ 		  pattern_match(mp->left, str - mp->lalen, NULL, NULL)))) {
+ 		int olen = str - p, llen;
+ 
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.31
+diff -u -r1.31 compresult.c
+--- Src/Zle/compresult.c	2001/01/12 13:50:14	1.31
++++ Src/Zle/compresult.c	2001/01/15 10:35:47
+@@ -249,7 +249,7 @@
+ 	/* Remember the position if this is the first prefix with
+ 	 * missing characters. */
+ 	if ((l->flags & CLF_MISS) && !(l->flags & CLF_SUF)) {
+-	    if (posl && l->min != l->max && (npos = cs + padd) != opos) {
++	    if (posl && (npos = cs + padd) != opos) {
+ 		opos = npos;
+ 		addlinknode(posl, (void *) ((long) npos));
+ 	    }
+@@ -303,7 +303,7 @@
+ 	    if (l->flags & CLF_MID)
+ 		mid = cs;
+ 	    else if (l->flags & CLF_SUF) {
+-		if (posl && l->min != l->max && (npos = cs + padd) != opos) {
++		if (posl && (npos = cs + padd) != opos) {
+ 		    opos = npos;
+ 		    addlinknode(posl, (void *) ((long) npos));
+ 		}
+@@ -414,7 +414,13 @@
+ 	l = l->next;
+     }
+     if (posl && (npos = cs + padd) != opos)
++#if 0
++	/* This could be used to put an extra colon before the end-of-word
++	 * position if there is nothing missing. */
++	addlinknode(posl, (void *) ((long) -npos));
++#endif
+ 	addlinknode(posl, (void *) ((long) npos));
++
+     if (ins) {
+ 	int ocs = cs;
+ 
+@@ -483,9 +489,18 @@
+     LinkNode node;
+     int l;
+     char buf[40], *s;
++    long p;
+ 
+     for (node = firstnode(list), l = 0; node; incnode(node)) {
+-	sprintf(buf, "%ld", (long) getdata(node));
++	p = (long) getdata(node);
++#if 0
++	/* This could be used to put an extra colon before the end-of-word
++	 * position if there is nothing missing. */
++	if (p < 0)
++	    sprintf(buf, ":%ld", -p);
++	else
++#endif
++	    sprintf(buf, "%ld", p);
+ 	setdata(node, dupstring(buf));
+ 	l += 1 + strlen(buf);
+     }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

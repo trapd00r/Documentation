@@ -1,0 +1,122 @@
+From zsh-workers-return-18475-mason-zsh=primenet.com.au@sunsite.dk Sat Apr 26 20:22:31 2003
+Return-Path: <zsh-workers-return-18475-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5677 invoked from network); 26 Apr 2003 20:22:31 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 26 Apr 2003 20:22:31 -0000
+Received: (qmail 3064 invoked by alias); 26 Apr 2003 20:22:25 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 18475
+Received: (qmail 3057 invoked from network); 26 Apr 2003 20:22:25 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 26 Apr 2003 20:22:25 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [195.92.195.173] by sunsite.dk (MessageWall 1.0.8) with SMTP; 26 Apr 2003 20:22:25 -0000
+Received: from modem-61.missouri.dialup.pol.co.uk ([62.137.76.61] helo=pwstephenson.fsnet.co.uk)
+	by cmailg3.svr.pol.co.uk with esmtp (Exim 4.14)
+	id 199WBj-0001MK-4e
+	for zsh-workers@sunsite.dk; Sat, 26 Apr 2003 21:22:23 +0100
+Received: by pwstephenson.fsnet.co.uk (Postfix, from userid 501)
+	id 12ACB1B76D; Sat, 26 Apr 2003 20:27:17 +0100 (BST)
+Received: from pwstephenson.fsnet.co.uk (localhost [127.0.0.1])
+	by pwstephenson.fsnet.co.uk (Postfix) with ESMTP id 093C01B76C
+	for <zsh-workers@sunsite.dk>; Sat, 26 Apr 2003 20:27:16 +0100 (BST)
+To: zsh-workers@sunsite.dk
+Subject: Re: Y03arguments.ztst fails 
+In-reply-to: "Peter Stephenson"'s message of "Fri, 25 Apr 2003 11:42:25 BST."
+             <14802.1051267345@csr.com> 
+Date: Sat, 26 Apr 2003 20:27:11 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20030426192717.12ACB1B76D@pwstephenson.fsnet.co.uk>
+
+Peter Stephenson wrote:
+> I'm seeing these failures in Y03arguments.ztst too, they don't seem to
+> be there in 4.1.1-test-1.  I would think it's more likely to be in the
+> functions than the C code, since no-one dares touch the latter.
+
+It's the change below from 18458.  Oliver, what's the right fix?  I presume
+the test needs updating to add some `+'s explicitly, or to set the
+style.  The latter is probably easiest --- adding 
+
+zstyle ":completion:*:options" prefix-needed no
+
+to comptest makes Y03arguments.ztst pass.
+
+Index: _describe
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/Utility/_describe,v
+retrieving revision 1.13
+retrieving revision 1.14
+diff -u -p -r1.13 -r1.14
+--- _describe	23 May 2002 12:16:42 -0000	1.13
++++ _describe	22 Apr 2003 12:33:08 -0000	1.14
+@@ -20,6 +20,10 @@ elif [[ "$1" = -t* ]]; then
+   shift
+ fi
+ 
++[[ "$_type" = options && ! -prefix [-+]* ]] && \
++    zstyle -T ":completion:${curcontext}:options" prefix-needed &&
++        return 1
++
+ # Do the tests. `showd' is set if the descriptions should be shown.
+ 
+ zstyle -T ":completion:${curcontext}:$_type" verbose && _showd=yes
+
+
+> I'm also getting random failures with multios tests which I haven't seen
+> before.  I don't think the underlying problem is new, I think it's the
+> same issue as this comment:
+> 
+> # Following two tests have to be separated since in
+> #   print bar >foo >bar && print "$(<foo) $(<bar)"
+> # the multios aren't flushed until after the substitutions take
+> # place.  This can't be right.
+
+Grud.  I can partially fix this by storing a list of auxiliary processes
+for which the job should wait.  This applies for both multios and >(...)
+subsituttions.  Unfortunately there are two problems.
+
+1. It only works for builtins.  This is because in e.g. `cat > >(...)'
+the cat is forked before the >(...), so that doesn't get into the job
+table of the shell which is waiting for the cat.  The only two obvious
+fixes are (i) reorder the fork of >(...) to before the fork of the cat
+--- messy and inefficient, requiring extra management of file
+descriptors in the parent shell (as is currently done for builtins) (ii)
+make the cat process fork again and wait for both the cat and the >(...)
+(since it's not feasible to assume one must exit before the other) ---
+even messier and more inefficient.  [Waiting for cats to do anything is
+always frustrating.]
+
+2. It doesn't always work even then.  Possibly this is because I've got
+my wires crossed and haven't implemented properly, but also possibly
+it's to do with the additional complexities for handling processes in
+the current shell, a.k.a. `list_pipe', see exec.c passim.  Anyway, it
+seems to work from the command line, and for the multios tests, but it
+doesn't work for this test in D03procsubst.ztst:
+
+  paste <(cut -f2 FILE1) <(cut -f4 FILE2) > >(sed 's/e/E/g' >OUTFILE)
+  sleep 1       # since the sed is asynchronous
+  cat OUTFILE
+0:>(...) substitution
+>SEcond ViErtE
+
+even in the modified form:
+
+# slightly desperate hack to force >(...) to be synchronous
+  { paste <(cut -f2 FILE1) <(cut -f4 FILE2) } > >(sed 's/e/E/g' >OUTFILE)
+  cat OUTFILE
+0:>(...) substitution
+>SEcond	ViErtE
+
+In fact, I'm fairly clueless about which tests in the list_pipe code
+should be modified to look at the auxiliary process list as well as the
+main process list.  So I've given up on this for now.
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

@@ -1,0 +1,126 @@
+From zsh-workers-return-8134-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Oct 05 09:46:58 1999
+Return-Path: <zsh-workers-return-8134-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23513 invoked from network); 5 Oct 1999 09:46:48 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Oct 1999 09:46:48 -0000
+Received: (qmail 25609 invoked by alias); 5 Oct 1999 09:46:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8134
+Received: (qmail 25600 invoked from network); 5 Oct 1999 09:46:18 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <991005094557.ZM4191@candle.brasslantern.com>
+Date: Tue, 5 Oct 1999 09:45:57 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: All sorts of file-descriptor strangeness
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+A very long time ago, I wrote:
+
+} From the PS1 prompt,
+} 
+}         read -eu0k1
+} 
+} reads a line from the terminal and echoes back the first character.
+} However, if instead I redirect input to read like so:
+} 
+}         repeat 3 print x y z | read -eu0k1
+} 
+} then nothing is read.  I have to use
+} 
+}         repeat 3 print x y z | read -eu0k 1
+} 
+} to get the desired behavior.  Why does the source of the input affect
+} the option parsing?
+
+Of course the source of the input doesn't really affect the option parsing.
+Rather, it affects whether a byte can be read from file descriptor 1.
+
+Zsh's generic option parser grabs "-eu0k1" and sets values in the `ops'
+array ops['e'], ops['u'], ops['0'], ops['k'], ops['1'].  The problem is,
+it loses all the ordering information -- so when /bin/read comes along
+and counts backwards from 9 checking ops['9'], ops['8'], and so on to
+get the argument to the 'u' option, it finds ops['1'] before ops['0'].
+The result is that "-eu0k1" is parsed as "-eu1k".  When stdin is the
+terminal, stdout is a read/write descriptor and reading from it is the
+same as reading stdin; but when stdin is the pipe, stdout is write-only,
+and so read fails.
+
+While thinking about what, if anything other than documentation, to do
+about this, it occurred to me that -u can only refer to FDs 0 through 9,
+because it depends on being able to use a single-character index into
+ops[].  This sent me rambling into the parsing of >& and <& redirections,
+and on a hunt through the ChangeLog, both of which produced startling
+revelations.
+
+For one thing, did you know that back in January of 1996, Zoltan added
+the "&>" operator to zsh?  It is both undocumented and exceptionally
+inconsistent in its behavior, and I'm still not precisely sure what it
+is supposed to do.  If it's the first redirection after starting "zsh -f":
+
+	zagzig% echo 1&>3
+	1
+	zagzig% 
+
+This has now created an empty file named "3" and echoed "1\n" to stdout.
+But if next I do this:
+
+	zagzig% echo 22>&1
+	22
+	zagzig% echo 1&>3
+	zagzig% 
+
+Now suddenly the file "3" contains "1\n" -- completely ignoring noclobber,
+I may add.  I don't know what's magic about the >&1, but from then on the
+&> operator acts just like >|.
+
+Let's talk about that 22>&1 for a moment.  The number on the left side of
+an >& or <& must be a single digit, or zsh treats it as a separate word
+and not as part of the redirection.  The number on the right, on the other
+hand, can be as many digits long as you like, and can even have whitespace
+in front of it, and still zsh happily converts it to an integer and tries
+to dup() it.  This usually simply prints "bad file number" -- but if you
+happen to hit one of the descriptors that movefd() has allocated, you can
+produce some strange effects, usually ending with a sudden exit.
+
+Finally, I'm pretty sure that it's something like this >&1 mystery that
+causes the "coproc" descriptor leakage that I described in a previous
+message to zsh-users.  Examining "ls -l /proc/$$/fd" I discovered that
+
+	zagzig% echo >&1
+	zagzig% coproc tr a-z A-Z
+
+produces FOUR new descriptors: 3 (from "echo >&1"), 11, 13, and 14.  FD
+11 is the coproc output, but both 13 and 14 are the coproc input!  From
+this point forward, every time a coproc is created it gets an extra dup
+of its input descriptor.  (There doesn't seem to be anything I can do
+with 3; "echo >> /proc/$$/fd/3" produces "permission denied" and putting
+3 on the right of an >& or <& produces "bad file descriptor".)
+
+I'm pretty sure all this has something to do with addfd(), based on this
+comment from exec.c (carats my emphasis):
+
+/* Add a fd to an multio.  fd1 must be < 10, and may be in any state. *
+ * fd2 must be open, and is `consumed' by this function.  Note that   *
+ * fd1 == fd2 is possible, and indicates that fd1 was really closed.  *
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ * We effectively do `fd2 = movefd(fd2)' at the beginning of this     *
+ * function, but in most cases we can avoid an extra dup by delaying  *
+ * the movefd: we only >need< to move it if we're actually doing a    *
+ * multiple redirection.                                              */
+
+Note that >&1 is the same as 1>&1, which might cause addfd() to believe
+that the descriptor was closed when really it has not been.  I haven't
+stepped there with a debugger yet, and it's 2:30 AM here so I think I'm
+going to give up for now; but I will say that it happens whether or not
+the multios option is set.  (Same for the &> oddness.)
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

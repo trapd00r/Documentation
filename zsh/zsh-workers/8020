@@ -1,0 +1,185 @@
+From zsh-workers-return-8020-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Sep 23 09:36:22 1999
+Return-Path: <zsh-workers-return-8020-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 685 invoked from network); 23 Sep 1999 09:36:20 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Sep 1999 09:36:20 -0000
+Received: (qmail 12328 invoked by alias); 23 Sep 1999 09:36:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8020
+Received: (qmail 12317 invoked from network); 23 Sep 1999 09:36:07 -0000
+Message-Id: <9909230900.AA26426@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: delete-to-char 
+In-Reply-To: "Vin Shelton"'s message of "22 Sep 1999 22:47:23 DFT."
+             <m2so46s5s4.fsf@zion.ne.mediaone.net> 
+Date: Thu, 23 Sep 1999 11:00:33 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Vin Shelton wrote:
+> >>>>> On 20 Sep 1999, I wrote:
+> 
+> Vin> OK, I'm waking up to the new world of modules and I came across the
+> Vin> deltochar module and the delete-to-char function.  I hope I'm not
+> Vin> rehashing an old discussion, but both XEmacs (as of 21.0) and FSF
+> Vin> Emacs (as of at least 20.4) now define zap-to-char as deleting up to
+> Vin> but not including the specified character.  It would be good, IMHO, to
+> Vin> have delete-to-char model that functionality.  Currently
+> Vin> delete-to-char deletes up to and including the specified character.
+
+Sorry, I meant to reply to this before.  I hadn't changed it before,
+firstly because I never understood why they changed the behaviour and don't
+like the new one, and secondly because since I wrote delete-to-char it's
+become easy to do the same thing as a shell function, which I've included
+below.  (Actually, until Sven adapted read -k quite recently, it
+wasn't that easy.)  But Sven's right that it should really be in a different
+widget.  The patch at the end, after the function, uses your code
+to adapt the deltochar() function, but only when called from a different
+widget zap-to-char; this makes the change very economical.
+
+> Not waiting for the bits to dry, I generated this patch.  In the
+> course of testing this, I found that M-digit did not work for me with
+> bindkey -me, even though bindkey thinks they are bound to
+> digit-argument.  M-anydigit just beeps.  "od -x" tells me that M-0
+> sends 0xb0, M-1 sends 0xb1, etc.  Do I have my xterm/stty settings
+> wrong, or is this a bug in zsh.
+
+The other meta things, like M-x, work, right?  I'm having the same problem.
+I thought it was just my terminal, but maybe it's zsh.  If I type M-1 it
+just beeps, but if I type `bindkey "', then a quoted M-1, then `"<RETURN>',
+it says
+"\M-1" digit-argument
+so something a little weird is happening.
+
+
+emulate -L zsh
+setopt extendedglob
+
+integer num=${NUMERIC:-1} ret
+local key match mbegin mend oldrbuf="$RBUFFER" oldlbuf="$LBUFFER"
+
+read -k key
+while (( num )); do
+  if (( num > 0 )); then
+    if [[ $RBUFFER = (#b)[^$key]#$key(*) ]]; then
+      if (( num == 1 )); then
+	RBUFFER=$key${match[1]}
+      else
+	RBUFFER=${match[1]}
+      fi
+      (( num-- ))
+    else
+      ret=1
+      RBUFFER="$oldrbuf"
+      break
+    fi
+  else
+    if [[ $LBUFFER = (#b)(*)${key}[^$key]# ]]; then
+      if (( num == -1 )); then
+	LBUFFER=${match[1]}$key
+      else
+	LBUFFER=${match[1]}
+      fi
+      (( num++ ))
+    else
+      ret=1
+      LBUFFER="$oldlbuf"
+      break
+    fi
+  fi
+done
+
+return $ret
+
+
+--- Doc/Zsh/mod_deltochar.yo.dc2	Thu Sep 23 10:31:21 1999
++++ Doc/Zsh/mod_deltochar.yo	Thu Sep 23 10:51:15 1999
+@@ -1,6 +1,6 @@
+ texinode(The deltochar Module)(The example Module)(The complist Module)(Zsh Modules)
+ sect(The deltochar Module)
+-The tt(deltochar) module makes available one ZLE function:
++The tt(deltochar) module makes available two ZLE functions:
+ 
+ startitem()
+ tindex(delete-to-char)
+@@ -8,5 +8,11 @@
+ Read a character from the keyboard, and
+ delete from the cursor position up to and including the next
+ (or, with repeat count var(n), the var(n)th) instance of that character.
++Negative repeat counts mean delete backwards.
++)
++tindex(zap-to-char)
++item(tt(zap-to-char))(
++This behaves like tt(delete-to-char), except that the final occurence of
++the character itself is not deleted.
+ )
+ enditem()
+--- Src/Zle/deltochar.c.dc2	Thu Sep 23 10:31:21 1999
++++ Src/Zle/deltochar.c	Thu Sep 23 10:52:27 1999
+@@ -31,19 +31,22 @@
+ #include "deltochar.pro"
+ 
+ static Widget w_deletetochar;
++static Widget w_zaptochar;
+ 
+ /**/
+ static int
+ deltochar(char **args)
+ {
+     int c = getkey(0), dest = cs, ok = 0, n = zmult;
++    int zap = (bindk->widget == w_zaptochar);
+ 
+     if (n > 0) {
+ 	while (n-- && dest != ll) {
+ 	    while (dest != ll && line[dest] != c)
+ 		dest++;
+ 	    if (dest != ll) {
+-		dest++;
++		if (!zap || n > 0)
++		    dest++;
+ 		if (!n) {
+ 		    forekill(dest - cs, 0);
+ 		    ok++;
+@@ -59,7 +62,7 @@
+ 		dest--;
+ 	    if (line[dest] == c) {
+ 		if (!n) {
+-		    backkill(cs - dest, 1);
++		    backkill(cs - dest - zap, 1);
+ 		    ok++;
+ 		}
+ 		if (dest)
+@@ -83,9 +86,14 @@
+ {
+     w_deletetochar = addzlefunction("delete-to-char", deltochar,
+                                     ZLE_KILL | ZLE_KEEPSUFFIX);
+-    if (w_deletetochar)
+-	return 0;
+-    zwarnnam(m->nam, "name clash when adding ZLE function `delete-to-char'",
++    if (w_deletetochar) {
++	w_zaptochar = addzlefunction("zap-to-char", deltochar,
++				     ZLE_KILL | ZLE_KEEPSUFFIX);
++	if (w_zaptochar)
++	    return 0;
++	deletezlefunction(w_deletetochar);
++    }
++    zwarnnam(m->nam, "deltochar: name clash when adding ZLE functions",
+ 	     NULL, 0);
+     return -1;
+ }
+@@ -97,6 +105,7 @@
+ cleanup_deltochar(Module m)
+ {
+     deletezlefunction(w_deletetochar);
++    deletezlefunction(w_zaptochar);
+     return 0;
+ }
+ 
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

@@ -1,0 +1,1324 @@
+From zsh-workers-return-10908-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Apr 25 09:46:31 2000
+Return-Path: <zsh-workers-return-10908-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23036 invoked from network); 25 Apr 2000 09:46:00 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Apr 2000 09:46:00 -0000
+Received: (qmail 26795 invoked by alias); 25 Apr 2000 09:45:49 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10908
+Received: (qmail 26779 invoked from network); 25 Apr 2000 09:45:48 -0000
+Date: Tue, 25 Apr 2000 11:45:20 +0200 (MET DST)
+Message-Id: <200004250945.LAA03283@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Tanaka Akira's message of 21 Apr 2000 23:49:32 +0900
+Subject: Re: optional argument?
+
+
+Tanaka Akira wrote:
+
+> In article <200004190800.KAA04575@beta.informatik.hu-berlin.de>,
+>   Sven Wischnowsky <wischnow@informatik.hu-berlin.de> writes:
+> 
+> > > I think `optional arguments' of _arguments doesn't work now.
+> 
+> > The problem is the `->' case: _arguments can't `add' matches for more
+> > than one `->state' because it doesn't add any of them.
+> 
+> I realized another problem.
+> 
+> Suppose following situation.
+> 
+> % _tst () { _arguments '-o::optarg:(optarg)' ':arg1:(arg1)' ':arg2:(arg2)' }
+> % tst -o xxx <TAB>
+> 
+> Because an argument for `-o' is optional, `xxx' is an argument for the
+> option or first non-option argument.  So, the word to be completed by
+> <TAB> is first non-option argument or second non-option argument.
+> Hence `arg1' and `arg2' should be completed.  But I think this is bit
+> confused and not so useful.
+
+Oh, did you have to say that?
+
+At the weekend I hacked on _arguments (and comparguments) to allow
+_arguments to complete more than one action when appropriate. And the
+case above is of course one of cases where it is done.
+
+Getting the right specs to use is terribly difficult with all the
+power of _arguments, so if anyone finds any bugs...
+
+
+Changes:
+
+- Some internal changes and changes to the comparguments builtin which 
+  you don't have to care about.
+- The $context and $state returned by _arguments are now arrays, so
+  that more than one `->state' action may have to be handled. This can 
+  only happen with some combinations of optional args in _arguments
+  specs, obviously. None of our completion functions needed to really
+  loop over these arrays.
+- This also means that `_arguments -C ...' only works, if only one
+  state has to be used.
+- To make grouping work correctly I had to change the tags and context 
+  strings a bit. It is now `option-o-1' (i.e. a `option' is prepended) 
+  and these and the full `argument-1' is used as the tag. Small change 
+  to _tags for this.
+- There may be problems with the mixture of optional (non-option-)
+  argument specs and argument specs with a position number (`2:...:...').
+  But that's a weird thing to do anyway.
+- As discussed lately, only the mutex lists for the things that appear 
+  before the cursor are used (Hi, Oliver). This seemed to make
+  sense...
+
+
+And while I was hacking on this anyway, I also added a new helper
+`_argument_sets' that gets any number of _argument spec lists,
+separated by single hyphens:
+
+  _argument_sets \
+      -a -b \
+      - set1 -x -y \
+      - set2 -1 -2
+
+The first word after the hyphen is the name of the set. It is
+prepended to the tags used and can appear in mutex lists, either on
+its own to disallow a whole set or as in `(set1--x)' and so on (note:
+two hyphens here, the set name and a hyphen is prepended).
+
+Anything before the first hyphen is shared by all sets (and hence
+never gets a set name prepended).
+
+Here, too, may be problems I didn't find, especially because it tries
+to be clever and automatically avoid completing from sets when it
+finds an option not described for those sets.
+
+I guess, we'll just have to play with it...
+
+
+There are also some fixes for the new (changed) functions in
+Builtins. In particular I forgot to document that with `->state'
+actions it is almost always the right thing to add a `&& return 0'
+after the _arguments, so that we return the right value when
+_arguments was able to generate the matches.
+
+Bye
+ Sven
+
+Index: Completion/Base/.distfiles
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/.distfiles,v
+retrieving revision 1.1.1.15
+diff -u -r1.1.1.15 .distfiles
+--- Completion/Base/.distfiles	1999/11/17 15:01:46	1.1.1.15
++++ Completion/Base/.distfiles	2000/04/25 09:44:43
+@@ -1,7 +1,7 @@
+ DISTFILES_SRC='
+     .distfiles 
+-    _arg_compile _arguments _brace_parameter _combination _command_names
+-    _condition _default _describe _equal _first _jobs _math _parameter
+-    _precommand _redirect _regex_arguments _subscript _tilde _value
+-    _values
++    _arg_compile _argument_sets _arguments _brace_parameter _combination
++    _command_names _condition _default _describe _equal _first _jobs _math
++    _parameter _precommand _redirect _regex_arguments _subscript _tilde
++    _value _values
+ '
+Index: Completion/Base/_argument_sets
+===================================================================
+RCS file: _argument_sets
+diff -N _argument_sets
+--- /dev/null	Tue May  5 13:32:27 1998
++++ _argument_sets	Tue Apr 25 02:44:43 2000
+@@ -0,0 +1,56 @@
++#autoload
++
++local all ret=1 end xor has_args had_args ostate ocontext oopt_args r
++local opre="$PREFIX" oipre="$IPREFIX" ocur="$CURRENT"
++local osuf="$SUFFIX" oisuf="$ISUFFIX" owords
++
++owords="$words[@]"
++
++end=$argv[(i)-]
++[[ end -gt $# ]] && return 1
++
++all=( "${(@)argv[1,end]}" )
++
++shift end
++
++xor=()
++ostate=()
++ocontext=()
++
++while true; do
++  end=$argv[(i)-]
++
++  _arguments -M xor "$1" "$all[@]" "${(@)argv[2,end-1]}"
++  r=$?
++
++  oopt_args=( "$oopt_args[@]" "${(kv)opt_args}" )
++  if [[ r -eq 300 ]]; then
++    ret=300
++    ostate=( "$ostate[@]" "$state[@]" )
++    ocontext=( "$ocontext[@]" "$context[@]" )
++    PREFIX="$opre"   SUFFIX="$osuf"
++    IPREFIX="$oipre" ISUFFIX="$oisuf"
++    CURRENT="$ocur"  words=( "$owords[@]" )
++  elif [[ "$r$ret" = 01 ]]; then
++    ret=0
++  fi
++  
++  [[ end -gt $# ]] && break
++
++  shift end
++done
++
++opt_args=( "$oopt_args[@]" )
++
++if [[ ret -eq 300 ]]; then
++  state=( "$ostate[@]" )
++  context=( "$ocontext[@]" )
++elif [[ -z "$has_args" ]]; then
++  if [[ -n "$had_args" ]]; then
++    _message "no more arguments"
++  else
++    _message "no arguments"
++  fi
++fi
++
++return ret
+Index: Completion/Base/_arguments
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/_arguments,v
+retrieving revision 1.4
+diff -u -r1.4 _arguments
+--- Completion/Base/_arguments	2000/04/07 12:43:32	1.4
++++ Completion/Base/_arguments	2000/04/25 09:44:43
+@@ -4,7 +4,7 @@
+ # descriptions given as arguments to this function.
+ 
+ local long cmd="$words[1]" descr mesg subopts opt usecc autod
+-local oldcontext="$curcontext" hasopts
++local oldcontext="$curcontext" hasopts multi ismulti
+ 
+ long=$argv[(I)--]
+ if (( long )); then
+@@ -148,36 +148,37 @@
+   set -- "$tmpargv[@]" "${(@P)name}"
+ fi
+ 
++multi=(-i)
+ subopts=()
+-while [[ "$1" = -(O*|C) ]]; do
++while [[ "$1" = -(O*|C|M*) ]]; do
+   case "$1" in
+   -C) usecc=yes; shift ;;
+   -O) subopts=( "${(@P)2}" ); shift 2 ;;
+-  *)  subopts=( "${(@P)1[3,-1]}" ); shift ;;
++  -O*)  subopts=( "${(@P)1[3,-1]}" ); shift ;;
++  -M) ismulti=yes multi=(-I "$2" "$3"); shift 3 ;;
++  -M*) ismulti=yes multi=(-I "${1[3,-1]}" "$2"); shift 2 ;;
+   esac
+ done
+ 
+ zstyle -s ":completion:${curcontext}:options" auto-description autod
+ 
+-if (( $# )) && comparguments -i "$autod" "$@"; then
++if (( $# )) && comparguments "$multi[@]" "$autod" "$@"; then
+   local nm="$compstate[nmatches]" action noargs aret expl local
+   local next direct odirect equal single match matched ws tmp1 tmp2 tmp3
+-  local opts subc prefix suffix
++  local opts subc tc prefix suffix descrs actions subcs
+   local origpre="$PREFIX" origipre="$IPREFIX"
+ 
+-  if comparguments -D descr action; then
+-    comparguments -C subc
+-    curcontext="${oldcontext%:*}:$subc"
+-
++  if comparguments -D descrs actions subcs; then
+     if comparguments -O next direct odirect equal; then
+       opts=yes
+-      _tags arguments options
++      _tags "$subcs[@]" options
+     else
+-      _tags arguments
++      _tags "$subcs[@]"
+     fi
+   else
+     if comparguments -a; then
+       noargs='no more arguments'
++      had_args=yes
+     else
+       noargs='no arguments'
+     fi
+@@ -187,83 +188,100 @@
+     _tags options
+   fi
+ 
++  context=()
++  state=()
++
+   while true; do
+     while _tags; do
+-      if [[ -n "$matched" ]] || _requested arguments; then
+-        _description arguments expl "$descr"
++      while (( $#descrs )); do
+ 
+-        if [[ "$action" = \=\ * ]]; then
+-          action="$action[3,-1]"
+-          words=( "$subc" "$words[@]" )
+-	  (( CURRENT++ ))
+-        fi
++	action="$actions[1]"
++	descr="$descrs[1]"
++	subc="$subcs[1]"
+ 
+-        if [[ "$action" = -\>* ]]; then
+-          comparguments -W line opt_args
+-          state="${${action[3,-1]##[ 	]#}%%[ 	]#}"
+-	  if [[ -n "$usecc" ]]; then
+-	    curcontext="${oldcontext%:*}:$subc"
+-	  else
+-	    context="$subc"
+-	  fi
+-          compstate[restore]=''
+-          aret=yes
+-        else
+-          if [[ -z "$local" ]]; then
+-            local line
+-            typeset -A opt_args
+-            local=yes
++        if [[ -n "$matched" ]] || _requested "$subc"; then
++
++          curcontext="${oldcontext%:*}:$subc"
++
++          _description "$subc" expl "$descr"
++
++          if [[ "$action" = \=\ * ]]; then
++            action="$action[3,-1]"
++            words=( "$subc" "$words[@]" )
++	    (( CURRENT++ ))
+           fi
+ 
+-          comparguments -W line opt_args
++          if [[ "$action" = -\>* ]]; then
++            comparguments -W line opt_args
++            state=( "$state[@]" "${${action[3,-1]##[ 	]#}%%[ 	]#}" )
++	    if [[ -n "$usecc" ]]; then
++	      curcontext="${oldcontext%:*}:$subc"
++	    else
++	      context=( "$context[@]" "$subc" )
++	    fi
++            compstate[restore]=''
++            aret=yes
++          else
++            if [[ -z "$local" ]]; then
++              local line
++              typeset -A opt_args
++              local=yes
++            fi
+ 
+-          if [[ "$action" = \ # ]]; then
++            comparguments -W line opt_args
+ 
+-            # An empty action means that we should just display a message.
++            if [[ "$action" = \ # ]]; then
+ 
+-            [[ -n "$matched" ]] && compadd -n -Q -S '' -s "$SUFFIX" - "$PREFIX"
+-            mesg="$descr"
++              # An empty action means that we should just display a message.
+ 
+-          elif [[ "$action" = \(\(*\)\) ]]; then
++              [[ -n "$matched" ]] &&
++                  compadd -n -Q -S '' -s "$SUFFIX" - "$PREFIX"
++              mesg="$descr"
+ 
+-            # ((...)) contains literal strings with descriptions.
++            elif [[ "$action" = \(\(*\)\) ]]; then
+ 
+-            eval ws\=\( "${action[3,-3]}" \)
++              # ((...)) contains literal strings with descriptions.
+ 
+-            _describe "$descr" ws -M "$match" "$subopts[@]"
++              eval ws\=\( "${action[3,-3]}" \)
+ 
+-          elif [[ "$action" = \(*\) ]]; then
++              _describe -t "$subc" "$descr" ws -M "$match" "$subopts[@]"
+ 
+-            # Anything inside `(...)' is added directly.
++            elif [[ "$action" = \(*\) ]]; then
+ 
+-            _all_labels arguments expl "$descr" \
+-                compadd "$subopts[@]" - ${=action[2,-2]}
+-          elif [[ "$action" = \{*\} ]]; then
++              # Anything inside `(...)' is added directly.
+ 
+-            # A string in braces is evaluated.
++              _all_labels "$subc" expl "$descr" \
++                  compadd "$subopts[@]" - ${=action[2,-2]}
++            elif [[ "$action" = \{*\} ]]; then
+ 
+-            while _next_label arguments expl "$descr"; do
+-              eval "$action[2,-2]"
+-            done
+-          elif [[ "$action" = \ * ]]; then
++              # A string in braces is evaluated.
+ 
+-            # If the action starts with a space, we just call it.
++              while _next_label "$subc" expl "$descr"; do
++                eval "$action[2,-2]"
++              done
++            elif [[ "$action" = \ * ]]; then
+ 
+-	    eval "action=( $action )"
+-            while _next_label arguments expl "$descr"; do
+-              "$action[@]"
+-            done
+-          else
++              # If the action starts with a space, we just call it.
++
++	      eval "action=( $action )"
++              while _next_label "$subc" expl "$descr"; do
++                "$action[@]"
++              done
++            else
+ 
+-            # Otherwise we call it with the description-arguments.
++              # Otherwise we call it with the description-arguments.
+ 
+-            eval "action=( $action )"
+-            while _next_label arguments expl "$descr"; do
+-              "$action[1]" "$subopts[@]" "$expl[@]" "${(@)action[2,-1]}"
+-	    done
++              eval "action=( $action )"
++              while _next_label "$subc" expl "$descr"; do
++                "$action[1]" "$subopts[@]" "$expl[@]" "${(@)action[2,-1]}"
++	      done
++            fi
+           fi
+         fi
+-      fi
++        shift 1 descrs
++        shift 1 actions
++        shift 1 subcs
++      done
+ 
+       if [[ -z "$matched$hasopts" ]] && _requested options &&
+           { ! zstyle -T ":completion:${curcontext}:options" prefix-needed ||
+@@ -344,7 +362,11 @@
+   [[ -n "$aret" ]] && return 300
+ 
+   [[ -n "$mesg" ]] && _message "$mesg"
+-  [[ -n "$noargs" ]] && _message "$noargs"
++  if [[ -n "$noargs" ]]; then
++    [[ -z "$ismulti" ]] && _message "$noargs"
++  else
++    has_args=yes
++  fi
+ 
+   # Set the return value.
+ 
+Index: Completion/Base/_describe
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/_describe,v
+retrieving revision 1.3
+diff -u -r1.3 _describe
+--- Completion/Base/_describe	2000/04/11 07:57:56	1.3
++++ Completion/Base/_describe	2000/04/25 09:44:43
+@@ -10,6 +10,12 @@
+ if [[ "$1" = -o ]]; then
+   _type=options
+   shift
++elif [[ "$1" = -t ]]; then
++  _type="$2"
++  shift 2
++elif [[ "$1" = -t* ]]; then
++  _type="${1[3,-1]}"
++  shift
+ fi
+ 
+ # Do the tests. `showd' is set if the descriptions should be shown.
+Index: Completion/Builtins/_bindkey
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Builtins/_bindkey,v
+retrieving revision 1.2
+diff -u -r1.2 _bindkey
+--- Completion/Builtins/_bindkey	2000/04/12 15:05:34	1.2
++++ Completion/Builtins/_bindkey	2000/04/25 09:44:43
+@@ -24,7 +24,7 @@
+   '(-l -L -d -D -A -N -m -s *)-r[unbind specified in-strings]:*:in-string' \
+   '(-l -L -d -D -A -N -m -r *)-s[bind each in-string to each out-string]:*:key string' \
+   '(-e -v -a -M -l -L -d -D -A -N -m)-R[interpret in-strings as ranges]' \
+-  '(-l -L -d -A -N -m -r -s)*::widgets:->widget'
++  '(-l -L -d -A -N -m -r -s)*::widgets:->widget' && return 0
+ 
+ case $state in
+   keymap)
+Index: Completion/Builtins/_compdef
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Builtins/_compdef,v
+retrieving revision 1.3
+diff -u -r1.3 _compdef
+--- Completion/Builtins/_compdef	2000/04/11 07:57:56	1.3
++++ Completion/Builtins/_compdef	2000/04/25 09:44:43
+@@ -8,11 +8,19 @@
+   '(-a -n -p -P -k -K)-d[delete]:*:completed command:->ccom' \
+   '(-n -d -P -k -K)-p[completion for command matching pattern]:completion function:->cfun:pattern' \
+   '(-n -d -p -k -K)-P[as -p for commands without own completion]:completion function:->cfun:pattern' \
+-  '(-d -p -P -K)-k[define widget and key binding]:completion function:->cfun:widget name::style:->style:*:key' \
+-  '(-d -p -P -k)-K[define multiple widgets based on function]:completion function:->cfun:widget name::style:->style:*:key' \
+-  '1:completion function:->cfun' \
+-  '2:commands:_command_names'
+-  
++  '(-d -p -P -K)-k[define widget and key binding]:completion function:->cfun:style:->style:*:key' \
++  '(-d -p -P -k)-K[define multiple widgets based on function]:*::: :->multi' \
++  ':completion function:->cfun' \
++  '*:commands: _command_names' && return 0
++
++if [[ $state = multi ]]; then
++  case $(( CURRENT % 3 )) in
++  0) _message key
++     return 1;;
++  1) state=cfun;;
++  2) state=style;;
++  esac
++fi
+ 
+ case $state in
+   ccom)
+Index: Completion/Builtins/_emulate
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Builtins/_emulate,v
+retrieving revision 1.1
+diff -u -r1.1 _emulate
+--- Completion/Builtins/_emulate	2000/04/01 20:43:43	1.1
++++ Completion/Builtins/_emulate	2000/04/25 09:44:43
+@@ -3,4 +3,4 @@
+ _arguments -C -s \
+   '-L[set local_options and local_traps as well]' \
+   '-R[reset all options instead of only those needed for script portability]' \
+-  '1::shell to emulate:(zsh sh ksh csh)'
++  '::shell to emulate:(zsh sh ksh csh)'
+Index: Completion/Builtins/_zpty
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Builtins/_zpty,v
+retrieving revision 1.3
+diff -u -r1.3 _zpty
+--- Completion/Builtins/_zpty	2000/04/11 07:57:56	1.3
++++ Completion/Builtins/_zpty	2000/04/25 09:44:43
+@@ -9,7 +9,7 @@
+   '(-e -b -d -r -L)-w[send string to command]:name:->name:*:strings to write' \
+   '(-e -b -d -w -L *)-r[read string from command]:name:->name:param:_parameters' \
+   '(-e -b -d -w -r)-L[list defined commands as calls]' \
+-  '(-r)*::args:_normal'
++  '(-r)*::args:_normal' && return 0
+ 
+ if [[ $state = name ]]; then
+   list=( ${${(f)"$(zpty)"}#*\) } )
+Index: Completion/Core/_tags
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_tags,v
+retrieving revision 1.4
+diff -u -r1.4 _tags
+--- Completion/Core/_tags	2000/04/17 08:04:42	1.4
++++ Completion/Core/_tags	2000/04/25 09:44:43
+@@ -53,7 +53,7 @@
+     "$_sort_tags" "$@"
+   else
+     zstyle -a ":completion:${curcontext}:" tag-order order ||
+-        order=('arguments values' options)
++        order=('(|*-)argument-* (|*-)option-* values' options)
+ 
+     for tag in $order; do
+       case $tag in
+Index: Doc/Zsh/compsys.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compsys.yo,v
+retrieving revision 1.21
+diff -u -r1.21 compsys.yo
+--- Doc/Zsh/compsys.yo	2000/04/20 08:04:57	1.21
++++ Doc/Zsh/compsys.yo	2000/04/25 09:44:46
+@@ -331,7 +331,7 @@
+ 
+ As an example, the context name
+ 
+-example(tt(:completion::complete:dvips:-o-1:files))
++example(tt(:completion::complete:dvips:option-o-1:files))
+ 
+ says that normal completion was attempted on an argument of the tt(dvips)
+ command (more precisely: completion was attempted on the first argument
+@@ -1501,7 +1501,7 @@
+ program.  It contains an override for the default package set
+ for a given context.  For example,
+ 
+-example(zstyle ':completion:*:complete:dpkg:--status-1:' packageset avail)
++example(zstyle ':completion:*:complete:dpkg:option--status-1:' packageset avail)
+ 
+ causes available packages, rather than only installed packages,
+ to be completed for `dpkg --status'.
+@@ -2879,11 +2879,11 @@
+ `tt((-two -three 1)-one:...)' or `tt((-foo):...)'. In the first
+ example, the options `tt(-two)' and `tt(-three)' and the first
+ argument will not be offered as possible completions if the option
+-`tt(-one)' is on the line. Also, the list may contain a single star as
+-one of its elements to specify that the description for the rest
+-arguments should not be used and it may contain a colon to specify
+-that the descriptions for all normal (non-option-) arguments should
+-not be used.
++`tt(-one)' is on the line before the cursor. Also, the list may
++contain a single star as one of its elements to specify that the
++description for the rest arguments should not be used and it may
++contain a colon to specify that the descriptions for all normal
++(non-option-) arguments should not be used.
+ 
+ In each of the cases above, the var(action) says how the possible
+ completions should be generated. In cases where only one of a fixed
+@@ -2896,9 +2896,10 @@
+ tt(description) style for the tt(values) tag is set.
+ 
+ An var(action) of the form `tt(->)var(string)' is used by functions
+-that implement a state machine. In this case, the `var(string)' (with
+-all leading and trailing spaces and tabs removed) will be stored in
+-the global parameter tt(state) and the function returns with a return
++that implement a state machine. In this case, the `var(string)'s (with
++all leading and trailing spaces and tabs removed) of all actions that
++have to be used will be stored in
++the global array tt(state) and the function returns with a return
+ value of 300 (to make it distinguishable from other return values)
+ after setting the global `tt(context)', `tt(line)' and `tt(opt_args)'
+ parameters as described below and without resetting any changes made
+@@ -2965,13 +2966,15 @@
+ `tt(opt_args)', using the option names as keys and their arguments as
+ the values. For options that have more than one argument these are
+ given as one string, separated by colons. All colons in the original
+-arguments are preceded with backslashes. The parameter `tt(context)'
+-will be set to the automatically created context name. This is either
+-a string of the form `var(-opt)tt(-)var(n)' for the var(n)'th argument 
++arguments are preceded with backslashes.
++
++The parameter `tt(context)'
++will be set to the automatically created context names. This are either
++strings of the form `tt(option)var(-opt)tt(-)var(n)' for the var(n)'th argument 
+ of the option var(-opt), or a string of the form `tt(argument-)var(n)' 
+ for the var(n)'th argument (for rest arguments the var(n) is the
+ string `tt(rest)'). For example, when completing the argument of the tt(-o)
+-option, the name is `tt(-o-1)' and for the second normal (non-option-)
++option, the name is `tt(option-o-1)' and for the second normal (non-option-)
+ argument it is `tt(argument-2)'.
+ 
+ Also, during the evaluation of the var(action), the context name in
+@@ -3090,6 +3093,41 @@
+ `var(postscript file)' and makes files ending in `tt(ps)' or `tt(eps)' 
+ be completed. The last description says that all other arguments are
+ `var(page numbers)' but does not give possible completions.
++)
++findex(_argument_sets)
++item(tt(_argument_sets) var(sets) ...)(
++This is like tt(_arguments) but allows to specify multiple sets of
++options and arguments. The arguments are sets of specifications for
++tt(_arguments) separated by single hyphens. The specifications before
++the first hyphen are shared by all sets given after the first
++hyphen. The first word in every other set gives the name of the
++set. This name may appear in exclusion lists in the specifications,
++either alone or before (with a `tt(-)' between the name and the rest)
++one of the possible values described for tt(_arguments) above.
++
++For example:
++
++example(_argument_sets \
++    -a \
++  - set1 \
++    -c \
++  - set2 \
++    -d \
++    ':arg:(x2 y2)')
++
++This defines two sets. When the command line contains the option
++`tt(-c)', the `tt(-d)' option and the argument will not be considered
++possible completions. When it contains `tt(-d)' or an argument, the
++option `tt(-c)' will not be completed any more, but if `tt(-a)' is
++given, both sets will still be considered valid, because it appears
++before the first hyphen, so both sets contain this option.
++
++Don't expect too much with complicated options that get their
++arguments in the same string and `tt(->)var(state)' actions or with
++the tt(-C) option that is given to tt(_arguments), otherwise most
++things should work. Note that the contexts reported in the tt(context) 
++array and the options in the tt(opt_args) association are prefixed
++with the set names and a hyphen.
+ )
+ findex(_values)
+ item(tt(_values) var(specs) ...)(
+Index: Etc/completion-style-guide
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Etc/completion-style-guide,v
+retrieving revision 1.3
+diff -u -r1.3 completion-style-guide
+--- Etc/completion-style-guide	2000/04/11 07:57:57	1.3
++++ Etc/completion-style-guide	2000/04/25 09:44:46
+@@ -27,7 +27,7 @@
+ 
+   local context ...
+   ...
+-  _arguments ... '-foo:foo:->foo'
++  _arguments ... '-foo:foo:->foo' && return 0
+   ...
+   if [[ "$state" = foo ]]; then
+     _tags -C "$context" ...
+@@ -47,7 +47,7 @@
+ 
+   local curcontext="$curcontext" ...
+   ...
+-  _arguments -C ... 'foo:foo:->foo'
++  _arguments -C ... 'foo:foo:->foo' && return 0
+   ...
+   if [[ "$state" = foo ]]; then
+     _tags ...
+@@ -59,6 +59,32 @@
+ value changed by `_arguments' and `_values' is only used in your
+ function (and make sure to initialise it to its old value as in the
+ example).
++
++All this only works if the specifications given to `_arguments' define 
++options and arguments that are completely separate. If there is more
++than one `->state' action and more than one of them might be needed
++for the same word, you'll have to use a loop:
++
++  local state context line i expl ret=1
++  ...
++  _arguments \
++      '::arg1:->arg1' \
++      '*:args:->rest' && return 0
++
++  while (( $#state )); do
++    case "$state[1]" in
++    arg1) _wanted -C "$context[1]" foo expl 'foo' compadd - foo1 foo2 && ret=0;;
++    rest) _wanted -C "$context[1]" bar expl 'bar' compadd - bar1 bar2 && ret=0;;
++    esac
++    shift 1 state
++    shift 1 context
++  done
++
++  return ret
++
++As you can see, `state' and `context' are really arrays. In this
++example, completion for the first argument has to complete both `foo's 
++and `bar's.
+ 
+ Then, before adding the matches, see if matches of that type are
+ requested by the user in the current context. If you will add only one 
+Index: Src/Zle/computil.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/computil.c,v
+retrieving revision 1.7
+diff -u -r1.7 computil.c
+--- Src/Zle/computil.c	2000/04/17 08:53:37	1.7
++++ Src/Zle/computil.c	2000/04/25 09:44:47
+@@ -304,6 +304,7 @@
+     char *match;		/* -M spec to use */
+     int argsactive;		/* if arguments are still allowed */
+ 				/* used while parsing a command line */
++    char *set;			/* set name, shared */
+ };
+ 
+ /* Description for an option. */
+@@ -317,6 +318,7 @@
+     Caarg args;			/* option arguments */
+     int active;			/* still allowed on command line */
+     int num;			/* it's the num'th option */
++    char *set;			/* set name, shared */
+ };
+ 
+ #define CAO_NEXT    1
+@@ -335,7 +337,10 @@
+     char *end;			/* end-pattern for ::<pat>:... */
+     char *opt;			/* option name if for an option */
+     int num;			/* it's the num'th argument */
++    int min;			/* it's also this argument, using opt. args */
++    int direct;			/* number was given directly */
+     int active;			/* still allowed on command line */
++    char *set;			/* set name, shared */
+ };
+ 
+ #define CAA_NORMAL 1
+@@ -393,6 +398,7 @@
+ 	Caopt p, n;
+ 
+ 	zsfree(d->match);
++	zsfree(d->set);
+ 	if (d->defs)
+ 	    freearray(d->defs);
+ 
+@@ -454,7 +460,8 @@
+ /* Parse an argument definition. */
+ 
+ static Caarg
+-parse_caarg(int mult, int type, int num, char *oname, char **def)
++parse_caarg(int mult, int type, int num, int opt, char *oname, char **def,
++	    char *set)
+ {
+     Caarg ret = (Caarg) zalloc(sizeof(*ret));
+     char *p = *def, *d, sav;
+@@ -463,8 +470,11 @@
+     ret->descr = ret->action = ret->end = NULL;
+     ret->xor = NULL;
+     ret->num = num;
++    ret->min = num - opt;
+     ret->type = type;
+     ret->opt = ztrdup(oname);
++    ret->direct = 0;
++    ret->set = set;
+ 
+     /* Get the description. */
+ 
+@@ -498,16 +508,22 @@
+ /* Parse an array of definitions. */
+ 
+ static Cadef
+-parse_cadef(char *nam, char **args)
++parse_cadef(char *nam, char **args, int multi)
+ {
+     Cadef ret;
+     Caopt *optp;
++    Caarg argp;
+     char **oargs = args, *p, *q, *match = "r:|[_-]=* r:|=*", **xor;
+-    char *adpre, *adsuf;
++    char *adpre, *adsuf, *set = NULL, *doset = NULL;
+     int single = 0, anum = 1, xnum, nopts, ndopts, nodopts;
+ 
+     nopts = ndopts = nodopts = 0;
+ 
++    if (multi) {
++	if (!args[1])
++	    return NULL;
++	set = tricat(*args++, "-", "");
++    }
+     /* First string is the auto-description definition. */
+ 
+     for (p = args[0]; *p && (p[0] != '%' || p[1] != 'd'); p++);
+@@ -551,6 +567,7 @@
+     ret->defs = zarrdup(oargs);
+     ret->ndefs = arrlen(oargs);
+     ret->lastt = time(0);
++    ret->set = set;
+     if (single) {
+ 	ret->single = (Caopt *) zalloc(256 * sizeof(Caopt));
+ 	memset(ret->single, 0, 256 * sizeof(Caopt));
+@@ -561,6 +578,10 @@
+     /* Get the definitions. */
+ 
+     for (optp = &(ret->opts); *args; args++) {
++        if (args[0][0] == '-' && !args[0][1]) {
++	    doset = set;
++	    continue;
++	}
+ 	p = dupstring(*args);
+ 	xnum = 0;
+ 	if (*p == '(') {
+@@ -689,7 +710,7 @@
+ 		/* There's at least one argument. */
+ 
+ 		Caarg *oargp = &oargs;
+-		int atype, rest, oanum = 1;
++		int atype, rest, oanum = 1, onum = 0;
+ 		char *end;
+ 
+ 		/* Loop over the arguments. */
+@@ -736,7 +757,10 @@
+ 
+ 		    /* And the definition. */
+ 
+-		    *oargp = parse_caarg(!rest, atype, oanum++, name, &p);
++		    *oargp = parse_caarg(!rest, atype, oanum++, onum,
++					 name, &p, doset);
++		    if (atype == CAA_OPT)
++			onum++;
+ 		    if (end)
+ 			(*oargp)->end = ztrdup(end);
+ 		    oargp = &((*oargp)->next);
+@@ -751,6 +775,7 @@
+ 	    optp = &((*optp)->next);
+ 
+ 	    opt->next = NULL;
++	    opt->set = doset;
+ 	    opt->name = ztrdup(rembslashcolon(name));
+ 	    if (descr)
+ 		opt->descr = ztrdup(descr);
+@@ -810,15 +835,15 @@
+ 		} else
+ 		    type = CAA_RARGS;
+ 	    }
+-	    ret->rest = parse_caarg(0, type, -1, NULL, &p);
++	    ret->rest = parse_caarg(0, type, -1, 0, NULL, &p, doset);
+ 	    ret->rest->xor = xor;
+ 	} else {
+ 	    /* It's a normal argument definition. */
+ 
+-	    int type = CAA_NORMAL;
++	    int type = CAA_NORMAL, direct;
+ 	    Caarg arg, tmp, pre;
+ 
+-	    if (idigit(*p)) {
++	    if ((direct = idigit(*p))) {
+ 		/* Argment number is given. */
+ 		int num = 0;
+ 
+@@ -840,8 +865,9 @@
+ 		type = CAA_OPT;
+ 		p++;
+ 	    }
+-	    arg = parse_caarg(0, type, anum - 1, NULL, &p);
++	    arg = parse_caarg(0, type, anum - 1, 0, NULL, &p, doset);
+ 	    arg->xor = xor;
++	    arg->direct = direct;
+ 
+ 	    /* Sort the new definition into the existing list. */
+ 
+@@ -865,7 +891,13 @@
+     ret->nopts = nopts;
+     ret->ndopts = ndopts;
+     ret->nodopts = nodopts;
+-    
++
++    for (argp = ret->args, xnum = 0; argp; argp = argp->next) {
++	if (!argp->direct)
++	    argp->min = argp->num - xnum;
++	if (argp->type == CAA_OPT)
++	    xnum++;
++    }
+     return ret;
+ }
+ 
+@@ -873,7 +905,7 @@
+  * are newly built. */
+ 
+ static Cadef
+-get_cadef(char *nam, char **args)
++get_cadef(char *nam, char **args, int multi)
+ {
+     Cadef *p, *min, new;
+     int i, na = arrlen(args);
+@@ -887,7 +919,7 @@
+ 	    min = p;
+     if (i)
+ 	min = p;
+-    if ((new = parse_cadef(nam, args))) {
++    if ((new = parse_cadef(nam, args, multi))) {
+ 	freecadef(*min);
+ 	*min = new;
+     }
+@@ -974,10 +1006,10 @@
+     if (d->argsactive) {
+ 	Caarg a = d->args;
+ 
+-	while (a && a->num < n)
++	while (a && (n < a->min || n > a->num))
+ 	    a = a->next;
+ 
+-	if (a && a->num == n && a->active)
++	if (a && a->min <= n && a->num >= n && a->active)
+ 	    return a;
+ 
+ 	return (d->rest && d->rest->active ? d->rest : NULL);
+@@ -987,20 +1019,32 @@
+ 
+ /* Use a xor list, marking options as inactive. */
+ 
+-static void
+-ca_inactive(Cadef d, char **xor)
++static LinkList ca_xor;
++
++static int
++ca_inactive(Cadef d, char **xor, int cur)
+ {
+-    if (xor) {
++    if (xor && cur <= compcurrent) {
+ 	Caopt opt;
++	char *x;
++	int sl = (d->set ? strlen(d->set) : -1);
+ 
+-	for (; *xor; xor++) {
+-	    if (xor[0][0] == ':' && !xor[0][1])
++	for (; (x = *xor); xor++) {
++	    if (ca_xor)
++		addlinknode(ca_xor, x);
++	    if (sl > 0) {
++		if (strpfx(d->set, x))
++		    x += sl;
++		else if (!strncmp(d->set, x, sl - 1))
++		    return 1;
++	    }
++	    if (x[0] == ':' && !x[1])
+ 		d->argsactive = 0;
+-	    else if (xor[0][0] == '*' && !xor[0][1]) {
++	    else if (x[0] == '*' && !x[1]) {
+ 		if (d->rest)
+ 		    d->rest->active = 0;
+-	    } else if (xor[0][0] >= '0' && xor[0][0] <= '9') {
+-		int n = atoi(xor[0]);
++	    } else if (x[0] >= '0' && x[0] <= '9') {
++		int n = atoi(x);
+ 		Caarg a = d->args;
+ 
+ 		while (a && a->num < n)
+@@ -1008,10 +1052,11 @@
+ 
+ 		if (a && a->num == n)
+ 		    a->active = 0;
+-	    } else if ((opt = ca_get_opt(d, *xor, 1, NULL)))
++	    } else if ((opt = ca_get_opt(d, x, 1, NULL)))
+ 		opt->active = 0;
+ 	}
+     }
++    return 0;
+ }
+ 
+ /* State when parsing a command line. */
+@@ -1022,7 +1067,7 @@
+     Caarg def, ddef;
+     Caopt curopt;
+     int opt, arg, argbeg, optbeg, nargbeg, restbeg, curpos;
+-    int inopt, inrest, inarg, nth, doff, singles;
++    int inopt, inrest, inarg, nth, doff, singles, oopt;
+     LinkList args;
+     LinkList *oargs;
+ };
+@@ -1030,10 +1075,10 @@
+ static struct castate ca_laststate;
+ static int ca_parsed = 0, ca_alloced = 0;
+ 
+-/* Pars a command line. */
++/* Parse a command line. */
+ 
+-static void
+-ca_parse_line(Cadef d)
++static int
++ca_parse_line(Cadef d, int multi)
+ {
+     Caarg adef, ddef;
+     Caopt ptr, wasopt;
+@@ -1073,7 +1118,7 @@
+     state.curopt = NULL;
+     state.argbeg = state.optbeg = state.nargbeg = state.restbeg =
+ 	state.nth = state.inopt = state.inarg = state.opt = state.arg = 1;
+-    state.inrest = state.doff = state.singles = state.doff = 0;
++    state.inrest = state.doff = state.singles = state.doff = state.oopt = 0;
+     state.curpos = compcurrent;
+     state.args = znewlinklist();
+     state.oargs = (LinkList *) zalloc(d->nopts * sizeof(LinkList));
+@@ -1086,7 +1131,7 @@
+     if (!compwords[1]) {
+ 	ca_laststate.opt = ca_laststate.arg = 0;
+ 
+-	return;
++	return 0;
+     }
+     /* Loop over the words from the line. */
+ 
+@@ -1095,7 +1140,8 @@
+ 	ddef = adef = NULL;
+ 	doff = state.singles = 0;
+ 
+-	ca_inactive(d, argxor);
++	if (ca_inactive(d, argxor, cur))
++	    return 1;
+ 
+ 	/* We've a definition for an argument, skip to the next. */
+ 
+@@ -1104,7 +1150,8 @@
+ 	    if (state.curopt)
+ 		zaddlinknode(state.oargs[state.curopt->num], ztrdup(line));
+ 
+-	    state.opt = (state.def->type == CAA_OPT);
++	    if ((state.opt = (state.def->type == CAA_OPT)) && state.def->opt)
++		state.oopt++;
+ 
+ 	    if (state.def->type == CAA_REST || state.def->type == CAA_RARGS ||
+ 		state.def->type == CAA_RREST) {
+@@ -1145,7 +1192,8 @@
+ 
+ 	    state.oargs[state.curopt->num] = znewlinklist();
+ 
+-	    ca_inactive(d, state.curopt->xor);
++	    if (ca_inactive(d, state.curopt->xor, cur))
++		return 1;
+ 
+ 	    /* Collect the argument strings. Maybe. */
+ 
+@@ -1184,7 +1232,8 @@
+ 		if ((tmpopt = d->single[STOUC(*p)])) {
+ 		    state.oargs[tmpopt->num] = znewlinklist();
+ 
+-		    ca_inactive(d, tmpopt->xor);
++		    if (ca_inactive(d, tmpopt->xor, cur))
++			return 1;
+ 		}
+ 	    }
+ 	    if (state.def &&
+@@ -1203,12 +1252,16 @@
+ 		state.opt = 0;
+ 	    else
+ 		state.curopt = NULL;
+-	} else if (state.arg) {
++	} else if (multi && (*line == '-' || *line == '+') && cur != compcurrent)
++	    return 1;
++	else if (state.arg) {
+ 	    /* Otherwise it's a normal argument. */
+ 	    if (state.inopt) {
+ 		state.inopt = 0;
+ 		state.nargbeg = cur - 1;
+ 	    }
++	    if (!d->args && !d->rest)
++		return 1;
+ 	    if ((adef = state.def = ca_get_arg(d, state.nth)) &&
+ 		(state.def->type == CAA_RREST ||
+ 		 state.def->type == CAA_RARGS)) {
+@@ -1291,6 +1344,7 @@
+ 	    }
+ 	}
+     }
++    return 0;
+ }
+ 
+ /* Build a colon-list from a list. */
+@@ -1327,6 +1381,88 @@
+ 	return ztrdup("");
+ }
+ 
++static void
++ca_set_data(char *opt, Caarg arg, char **args, int single)
++{
++    LinkList descr, act, subc;
++    char nbuf[40], *buf;
++    int restr = 0, onum, miss = 0, rest, oopt = 1, lopt = 0, addopt;
++
++    descr = newlinklist();
++    act = newlinklist();
++    subc = newlinklist();
++
++ rec:
++
++    addopt = (opt ? 0 : ca_laststate.oopt);
++
++    for (; arg && (arg->num < 0 ||
++		   (arg->min <= ca_laststate.nth + addopt &&
++		    arg->num >= ca_laststate.nth));) {
++	if ((lopt = arg->type == CAA_OPT) && !opt && oopt > 0)
++	    oopt = 0;
++
++	addlinknode(descr, arg->descr);
++	addlinknode(act, arg->action);
++
++	if (!restr) {
++	    if ((restr = (arg->type == CAA_RARGS)))
++		restrict_range(ca_laststate.optbeg, arrlen(compwords) - 1);
++	    else if ((restr = (arg->type == CAA_RREST)))
++		restrict_range(ca_laststate.argbeg, arrlen(compwords) - 1);
++	}
++	if (arg->opt) {
++	    buf = (char *) zhalloc((arg->set ? strlen(arg->set) : 0) +
++				   strlen(arg->opt) + 40);
++	    if (arg->num > 0)
++		sprintf(buf, "%soption%s-%d",
++			(arg->set ? arg->set : ""), arg->opt, arg->num);
++	    else
++		sprintf(buf, "%soption%s-rest",
++			(arg->set ? arg->set : ""), arg->opt);
++	} else if (arg->num > 0) {
++	    sprintf(nbuf, "argument-%d", arg->num);
++	    buf = (arg->set ? dyncat(arg->set, nbuf) : dupstring(nbuf));
++	} else
++	    buf = (arg->set ? dyncat(arg->set, "argument-rest") :
++		   dupstring("argument-rest"));
++
++	addlinknode(subc, buf);
++
++	if (single)
++	    break;
++
++	if (!opt && arg->num >= 0 && !arg->next && miss)
++	    arg = ca_laststate.d->rest;
++	else {
++	    onum = arg->num;
++	    rest = (onum != arg->min && onum == ca_laststate.nth);
++	    if ((arg = arg->next)) {
++		if (arg->num != onum + 1)
++		    miss = 1;
++	    } else if (rest || (oopt > 0 && !opt)) {
++		arg = ca_laststate.d->rest;
++		oopt = -1;
++	    }
++	}
++    }
++    if (!single && opt && lopt) {
++	opt = NULL;
++	arg = ca_get_arg(ca_laststate.d, ca_laststate.nth);
++
++	goto rec;
++    }
++    if (!opt && oopt > 0) {
++	oopt = -1;
++	arg = ca_laststate.d->rest;
++
++	goto rec;
++    }
++    set_list_array(args[0], descr);
++    set_list_array(args[1], act);
++    set_list_array(args[2], subc);
++}
++
+ static int
+ bin_comparguments(char *nam, char **args, char *ops, int func)
+ {
+@@ -1340,14 +1476,14 @@
+ 	zwarnnam(nam, "invalid argument: %s", args[0], 0);
+ 	return 1;
+     }
+-    if (args[0][1] != 'i' && !ca_parsed) {
++    if (args[0][1] != 'i' && args[0][1] != 'I' && !ca_parsed) {
+ 	zwarnnam(nam, "no parsed state", NULL, 0);
+ 	return 1;
+     }
+     switch (args[0][1]) {
+-    case 'i': min = 2; max = -1; break;
+-    case 'D': min = 2; max =  2; break;
+-    case 'C': min = 1; max =  1; break;
++    case 'i':
++    case 'I': min = 2; max = -1; break;
++    case 'D': min = 3; max =  3; break;
+     case 'O': min = 4; max =  4; break;
+     case 'L': min = 3; max =  4; break;
+     case 's': min = 1; max =  1; break;
+@@ -1368,17 +1504,43 @@
+     }
+     switch (args[0][1]) {
+     case 'i':
++    case 'I':
+ 	if (compcurrent > 1 && compwords[0]) {
+-	    Cadef def = get_cadef(nam, args + 1);
++	    Cadef def;
+ 	    int cap = ca_parsed;
++	    LinkList cax = ca_xor;
+ 
+ 	    ca_parsed = 0;
+ 
+-	    if (!def)
+-		return 1;
++	    if (args[0][1] == 'I') {
++		char **xor;
+ 
+-	    ca_parsed = cap;
+-	    ca_parse_line(def);
++		if (!(def = get_cadef(nam, args + 2, 1)))
++		    return 1;
++
++		ca_parsed = cap;
++		ca_xor = newlinklist();
++		if ((xor = getaparam(args[1]))) {
++		    if (arrcontains(xor, args[2], 0) ||
++			ca_inactive(def, xor, compcurrent)) {
++			ca_xor = cax;
++			return 1;
++		    }
++		}
++		if (ca_parse_line(def, 1)) {
++		    ca_xor = cax;
++		    return 1;
++		}
++		set_list_array(args[1], ca_xor);
++	    } else {
++		if (!(def = get_cadef(nam, args + 1, 0)))
++		    return 1;
++
++		ca_parsed = cap;
++		ca_xor = NULL;
++		ca_parse_line(def, 0);
++	    }
++	    ca_xor = cax;
+ 	    ca_parsed = 1;
+ 
+ 	    return 0;
+@@ -1390,35 +1552,11 @@
+ 	    Caarg arg = ca_laststate.def;
+ 
+ 	    if (arg) {
+-		setsparam(args[1], ztrdup(arg->descr));
+-		setsparam(args[2], ztrdup(arg->action));
+-
+ 		if (ca_laststate.doff > 0)
+ 		    ignore_prefix(ca_laststate.doff);
+-		if (arg->type == CAA_RARGS)
+-		    restrict_range(ca_laststate.optbeg,
+-				   arrlen(compwords) - 1);
+-		else if (arg->type == CAA_RREST)
+-		    restrict_range(ca_laststate.argbeg,
+-				   arrlen(compwords) - 1);
+-		return 0;
+-	    }
+-	    return 1;
+-	}
+-    case 'C':
+-	{
+-	    Caarg arg = ca_laststate.def;
+ 
+-	    if (arg) {
+-		char buf[20];
++		ca_set_data(arg->opt, arg, args + 1, (ca_laststate.doff > 0));
+ 
+-		if (arg->num > 0)
+-		    sprintf(buf, "%d", arg->num);
+-		else
+-		    strcpy(buf, "rest");
+-
+-		setsparam(args[1], (arg->opt ? tricat(arg->opt, "-", buf) :
+-				    tricat("argument-", buf, "")));
+ 		return 0;
+ 	    }
+ 	    return 1;
+@@ -1474,11 +1612,7 @@
+ 	    Caopt opt = ca_get_opt(ca_laststate.d, args[1], 1, NULL);
+ 
+ 	    if (opt && opt->args) {
+-		setsparam(args[2], ztrdup(opt->args->descr));
+-		setsparam(args[3], ztrdup(opt->args->action));
+-
+-		if (args[4])
+-		    setsparam(args[4], tricat(opt->name, "-1", ""));
++		ca_set_data(opt->name, opt->args, args + 2, 1);
+ 
+ 		return 0;
+ 	    }
+@@ -1528,7 +1662,8 @@
+ 	    for (o = ca_laststate.d->opts, a = ca_laststate.oargs; o;
+ 		 o = o->next, a++) {
+ 		if (*a) {
+-		    *p++ = ztrdup(o->name);
++		    *p++ = (o->set ? tricat(o->set, o->name, "") :
++			    ztrdup(o->name));
+ 		    *p++ = ca_colonlist(*a);
+ 		}
+ 	    }
+@@ -1740,7 +1875,7 @@
+ 		vtype = CVV_OPT;
+ 	    } else
+ 		vtype = CVV_ARG;
+-	    arg = parse_caarg(0, 0, 0, name, &p);
++	    arg = parse_caarg(0, 0, 0, 0, name, &p, NULL);
+ 	} else {
+ 	    vtype = CVV_NOARG;
+ 	    arg = NULL;
+@@ -2243,6 +2378,7 @@
+ 
+ /* Check if an array contains a string. */
+ 
++/**/
+ static int
+ arrcontains(char **a, char *s, int colon)
+ {
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

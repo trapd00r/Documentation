@@ -1,0 +1,378 @@
+From zsh-workers-return-8746-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Nov 23 10:47:33 1999
+Return-Path: <zsh-workers-return-8746-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5320 invoked from network); 23 Nov 1999 10:47:32 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Nov 1999 10:47:32 -0000
+Received: (qmail 28022 invoked by alias); 23 Nov 1999 10:47:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8746
+Received: (qmail 28013 invoked from network); 23 Nov 1999 10:47:13 -0000
+Date: Tue, 23 Nov 1999 11:47:02 +0100 (MET)
+Message-Id: <199911231047.LAA07963@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 22 Nov 1999 17:44:12 +0000
+Subject: Re: Problems with "comparguments" (Re: PATCH: broken _netscape)
+
+
+Bart Schaefer wrote:
+
+> On Nov 22,  4:08pm, Oliver Kiddle wrote:
+> } Subject: PATCH: broken _netscape
+> }
+> } _netscape in pws-9 seems to be broken. This patch fixes it to a point
+> } where it atleast runs without errors but for some reason, completion of
+> } the arguments doesn't work. I suspect that it is a bug somewhere in
+> } _arguments.
+> 
+> I may be entirely wrong, but based on a scan through the "set -x" output
+> when completing after "netscape -", I'd say this is the same bug that is
+> causing "cvs" to complete --allow-root and the directories after it.  I
+> suspect a parsing bug in "comparguments".
+
+It was the same bug, but only in shell code: the test if the thing on
+the line could be turned into an option name with an argument so that
+we can immediately complete that was performed too early. In fact, the 
+nesting of the loops was the wrong way round.
+
+> While we're on the topic, I noticed this in the manual page for "rxvt" the
+> other day:
+> 
+>        -pixmap: file[;geom]
+> ...
+> 
+> Note that here we have an option whose name actually includes a colon.  As
+> far as I can tell there's *no* way to represent this in the argument list
+> for _arguments or comparguments; perhaps _regex_arguments could deal with
+> it, but it doesn't appear so from a look at _apt.
+
+The patch below also hacks computil.c to allow colons in option names
+by preceding them with a backslash:
+
+  local curcontext="$curcontext" line style ret=1
+  typeset -A opt_args
+
+  _arguments \
+      ...
+      '-pixmap\::rotten option name and argument style:->foo' && ret=0
+
+  if [[ -n "$state" ]]; then
+    if compset -P '*\;' ; then
+      _message 'geometry'
+    else
+      _files -S '\;' && ret=0
+    fi
+  fi
+
+  return ret
+
+> The mini-language of _arg_compile could handle it:
+
+I know. But I didn't feel like turning that into C. More precisely, I
+didn't feel like re-writing all functions that use _arguments. And
+again: I know, a function/builtin that turns a _argument-list into the 
+mini-language-form... But still: when looking at functions like _mount 
+this is rather hairy.
+
+Bye
+ Sven
+
+diff -u -r oldsrc/Zle/computil.c Src/Zle/computil.c
+--- oldsrc/Zle/computil.c	Tue Nov 23 10:03:08 1999
++++ Src/Zle/computil.c	Tue Nov 23 11:38:34 1999
+@@ -50,12 +50,15 @@
+ cdisp_calc(Cdisp disp, char **args)
+ {
+     char *cp;
+-    int i;
++    int i, nbc;
+ 
+     for (; *args; args++) {
+-	if ((cp = strchr(*args, ':')) && cp[1]) {
++	for (nbc = 0, cp = *args; *cp && *cp != ':'; cp++)
++	    if (*cp == '\\' && cp[1])
++		cp++, nbc++;
++	if (*cp == ':' && cp[1]) {
+ 	    disp->colon++;
+-	    if ((i = cp - *args) > disp->pre)
++	    if ((i = cp - *args - nbc) > disp->pre)
+ 		disp->pre = i;
+ 	    if ((i = strlen(cp + 1)) > disp->suf)
+ 		disp->suf = i;
+@@ -70,7 +73,7 @@
+ {
+     int sl = strlen(sep), pre = disp->pre, suf;
+     VARARR(char, buf, disp->pre + disp->suf + sl + 1);
+-    char **ret, **rp, *cp;
++    char **ret, **rp, *cp, *copy, *cpp, oldc;
+ 
+     ret = (char **) zalloc((arrlen(args) + 1) * sizeof(char *));
+ 
+@@ -78,18 +81,21 @@
+     suf = pre + sl;
+ 
+     for (rp = ret; *args; args++) {
+-	if ((cp = strchr(*args, ':')) && cp[1]) {
++	copy = dupstring(*args);
++	for (cp = cpp = copy; *cp && *cp != ':'; cp++) {
++	    if (*cp == '\\' && cp[1])
++		cp++;
++	    *cpp++ = *cp;
++	}
++	oldc = *cpp;
++	*cpp = '\0';
++	if (((cpp == cp && oldc == ':') || *cp == ':') && cp[1]) {
+ 	    memset(buf, ' ', pre);
+-	    memcpy(buf, *args, (cp - *args));
++	    memcpy(buf, copy, (cpp - copy));
+ 	    strcpy(buf + suf, cp + 1);
+ 	    *rp++ = ztrdup(buf);
+-	} else {
+-	    if (cp)
+-		*cp = '\0';
+-	    *rp++ = ztrdup(*args);
+-	    if (cp)
+-		*cp = ':';
+-	}
++	} else
++	    *rp++ = ztrdup(copy);
+     }
+     *rp = NULL;
+ 
+@@ -153,6 +159,7 @@
+ }
+ 
+ /* Initialisation. Store and calculate the string and matches and so on. */
++
+ static int
+ cd_init(char *nam, char *sep, char **args, int disp)
+ {
+@@ -218,15 +225,21 @@
+ 
+     if ((set = cd_state.sets)) {
+ 	char **sd, **sdp, **md, **mdp, **ss, **ssp, **ms, **msp;
+-	char **p, **mp, *cp;
++	char **p, **mp, *cp, *copy, *cpp, oldc;
+ 	int dl = 1, sl = 1, sepl = strlen(cd_state.sep);
+ 	int pre = cd_state.disp.pre, suf = cd_state.disp.suf;
+ 	VARARR(char, buf, pre + suf + sepl + 1);
+ 
+ 	for (p = set->strs; *p; p++)
+-	    if (cd_state.showd && (cp = strchr(*p, ':')) && cp[1])
+-		dl++;
+-	    else
++	    if (cd_state.showd) {
++		for (cp = *p; *cp && *cp != ':'; cp++)
++		    if (*cp == '\\' && cp[1])
++			cp++;
++		if (*cp == ':' && cp[1])
++		    dl++;
++		else
++		    sl++;
++	    } else
+ 		sl++;
+ 
+ 	sd = (char **) zalloc(dl * sizeof(char *));
+@@ -243,32 +256,34 @@
+ 
+ 	for (sdp = sd, ssp = ss, mdp = md, msp = ms,
+ 		 p = set->strs, mp = set->matches; *p; p++) {
+-	    if ((cp = strchr(*p, ':')) && cp[1] && cd_state.showd) {
++	    copy = dupstring(*p);
++	    for (cp = cpp = copy; *cp && *cp != ':'; cp++) {
++		if (*cp == '\\' && cp[1])
++		    cp++;
++		*cpp++ = *cp;
++	    }
++	    oldc = *cpp;
++	    *cpp = '\0';
++	    if (((cpp == cp && oldc == ':') || *cp == ':') && cp[1] &&
++		cd_state.showd) {
+ 		memset(buf, ' ', pre);
+-		memcpy(buf, *p, (cp - *p));
++		memcpy(buf, copy, (cpp - copy));
+ 		strcpy(buf + suf, cp + 1);
+ 		*sdp++ = ztrdup(buf);
+ 		if (mp) {
+ 		    *mdp++ = ztrdup(*mp);
+ 		    if (*mp)
+ 			mp++;
+-		} else {
+-		    *cp = '\0';
+-		    *mdp++ = ztrdup(*p);
+-		    *cp = ':';
+-		}
++		} else
++		    *mdp++ = ztrdup(copy);
+ 	    } else {
+-		if (cp)
+-		    *cp = '\0';
+-		*ssp++ = ztrdup(*p);
++		*ssp++ = ztrdup(copy);
+ 		if (mp) {
+ 		    *msp++ = ztrdup(*mp);
+ 		    if (*mp)
+ 			mp++;
+ 		} else
+-		    *msp++ = ztrdup(*p);
+-		if (cp)
+-		    *cp = ':';
++		    *msp++ = ztrdup(copy);
+ 	    }
+ 	}
+ 	*sdp = *ssp = *mdp = *msp = NULL;
+@@ -473,6 +488,25 @@
+     return r;
+ }
+ 
++/* Add backslashes before colons. */
++
++static char *
++bslashcolon(char *s)
++{
++    char *p, *r;
++
++    r = p = zhalloc((2 * strlen(s)) + 1);
++
++    while (*s) {
++	if (*s == ':')
++	    *p++ = '\\';
++	*p++ = *s++;
++    }
++    *p = '\0';
++
++    return r;
++}
++
+ /* Parse an argument definition. */
+ 
+ static Caarg
+@@ -766,7 +800,7 @@
+ 		optp = &((*optp)->next);
+ 
+ 		opt->next = NULL;
+-		opt->name = ztrdup(name);
++		opt->name = ztrdup(rembslashcolon(name));
+ 		if (descr)
+ 		    opt->descr = ztrdup(descr);
+ 		else if (adpre && oargs && !oargs->next &&
+@@ -1414,14 +1448,15 @@
+ 		    default:          l = equal;   break;
+ 		    }
+ 		    if (p->descr) {
+-			int len = strlen(p->name) + strlen(p->descr) + 2;
++			char *n = bslashcolon(p->name);
++			int len = strlen(n) + strlen(p->descr) + 2;
+ 
+ 			str = (char *) zhalloc(len);
+-			strcpy(str, p->name);
++			strcpy(str, n);
+ 			strcat(str, ":");
+ 			strcat(str, p->descr);
+ 		    } else
+-			str = p->name;
++			str = bslashcolon(p->name);
+ 		    addlinknode(l, str);
+ 		}
+ 	    }
+diff -u -r oldcompletion/Base/_arguments Completion/Base/_arguments
+--- oldcompletion/Base/_arguments	Tue Nov 23 10:05:36 1999
++++ Completion/Base/_arguments	Tue Nov 23 10:24:36 1999
+@@ -190,8 +190,8 @@
+     _tags options
+   fi
+ 
+-  while _tags; do
+-    while true; do
++  while true; do
++    while _tags; do
+       if [[ -n "$matched" ]] || _requested arguments; then
+         _description expl "$descr"
+ 
+@@ -286,30 +286,31 @@
+             equal -QqS= -M "$match"
+         fi
+       fi
+-      if [[ -n "$opts" && -z "$aret$matched" &&
+-            nm -eq compstate[nmatches] ]]; then
++    done
++    if [[ -n "$opts" && -z "$aret$matched" &&
++          nm -eq compstate[nmatches] ]]; then
+ 
+-        prefix="${PREFIX#*\=}"
+-        suffix="$SUFFIX"
+-        PREFIX="${PREFIX%%\=*}"
+-        SUFFIX=''
+-        compadd -M "$match" -D equal - "${(@)equal%%:*}"
+-
+-        if [[ $#equal -eq 1 ]]; then
+-	  PREFIX="$prefix"
+-	  SUFFIX="$suffix"
+-	  IPREFIX="${IPREFIX}${equal[1]%%:*}="
+-	  matched=yes
++      prefix="${PREFIX#*\=}"
++      suffix="$SUFFIX"
++      PREFIX="${PREFIX%%\=*}"
++      SUFFIX=''
++      compadd -M "$match" -D equal - "${(@)equal%%:*}"
++
++      if [[ $#equal -eq 1 ]]; then
++        PREFIX="$prefix"
++	SUFFIX="$suffix"
++	IPREFIX="${IPREFIX}${equal[1]%%:*}="
++	matched=yes
+ 
+-	  comparguments -L "${equal[1]%%:*}" descr action subc
+-	  curcontext="${oldcontext}:$subc"
++	comparguments -L "${equal[1]%%:*}" descr action subc
++	curcontext="${oldcontext}:$subc"
+ 
+-	  continue
+-        fi
++	_tags arguments
++
++	continue
+       fi
+-      break
+-    done
+-    [[ -n "$aret" || nm -ne compstate[nmatches] ]] && break
++    fi
++    break
+   done
+ 
+   [[ -z "$aret" || -z "$usecc" ]] && curcontext="$oldcontext"
+diff -u olddoc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- olddoc/Zsh/compsys.yo	Mon Nov 22 14:29:17 1999
++++ Doc/Zsh/compsys.yo	Tue Nov 23 11:40:30 1999
+@@ -1985,8 +1985,8 @@
+ where it can be left is when neither a var(message), nor a var(action) 
+ is given.
+ 
+-To include a colon in the var(message) or the var(action), it has to
+-be preceded by a backslash.
++To include a colon in the option name, the var(message) or the
++var(action), it has to be preceded by a backslash.
+ 
+ During the evaluation or execution of the action the array `tt(line)'
+ will be set to the command name and normal arguments from the command
+@@ -2017,12 +2017,6 @@
+ `tt(-)tt(-prefix)') are still considered to contain only one option
+ name. This allows the use of the `tt(-s)' option to describe
+ single-letter options together with such long option names.
+-
+-Another option supported is `tt(-O) var(name)'. The var(name) will be
+-taken as the name of an array and its elements will be given to
+-functions called to generate matches when executing the
+-var(actions). For example, this allows one to give options for the
+-tt(compadd) builtin that should be used.
+ 
+ Another option supported is `tt(-O) var(name)'. The var(name) will be
+ taken as the name of an array and its elements will be given to
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

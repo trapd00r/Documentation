@@ -1,0 +1,389 @@
+From zsh-workers-return-6705-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jun 17 15:43:41 1999
+Return-Path: <zsh-workers-return-6705-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22553 invoked from network); 17 Jun 1999 15:43:39 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 Jun 1999 15:43:39 -0000
+Received: (qmail 16397 invoked by alias); 17 Jun 1999 15:43:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6705
+Received: (qmail 16390 invoked from network); 17 Jun 1999 15:43:17 -0000
+Message-Id: <9906171514.AA17363@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: PATCH: LINENO (was: Re: PATCH: 3.0.6-pre-4: COLUMNS/LINES environment handling) 
+In-Reply-To: "Sven Wischnowsky"'s message of "Thu, 17 Jun 1999 13:18:00 DFT."
+             <199906171118.NAA11128@beta.informatik.hu-berlin.de> 
+Date: Thu, 17 Jun 1999 17:14:40 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Sven Wischnowsky wrote:
+> Peter Stephenson wrote:
+> 
+> > This is a non-sequitur, but while I was looking at the UNIX spec I noticed
+> > that LINENO, unlike LINES, is specified, and it says that functions as well
+> > as scripts should have it set.  You'll find out that with autoloaded
+> > functions you always get 0 from `print $LINENO' (the question of why is not
+> > entirely trivial).
+> 
+> Hm. This looks almost too simple, but it seems to work.
+
+I've rediscovered some of the subtleties:
+
+% cat fn
+# Hello, I am fn.
+
+fn() { 
+  print $LINENO;
+}
+% fpath=(.)
+% autoload fn
+% fn
+4
+
+i.e. the line number in the file,  not the function as expected ---
+consider what happens if the file defines multiple functions, then you
+certainly want the line in the function.
+
+and also at the command line:
+
+% fn() {
+function> print $LINENO
+function> }
+% fn
+18
+
+--- same problem, since the `file' here is what you're typing at the
+prompt.  What's more, LINENO doesn't get updated inside such function
+definitions since only a complete set of input up to the next PS1 is
+considered a `line'.
+
+However, this patch (6693) is certainly going in the right direction;
+probably the point I missed before was that incrementing lineno should
+happen somewhere else, i.e. where Sven has put the new code.  So I simply
+propose that lineno always gets incremented there (if it does at all),
+rather than when it used to; then function definitions can be handled like
+strings by saving and restoring lineno at the appropriate point.  The patch
+applies after Sven's.
+
+Side effects and subtleties (gives the word subtlety a whole new meaning):
+- The most obvious change is that continuation lines at the prompt each
+  increment LINENO.  I think this is OK: it's compatible with the way
+  lines are read from everywhere else, i.e. counting real lines and not
+  prompts.  There is no problem with the single UNIX spec, since that leaves
+  the behaviour of $LINENO in this circumstance undefined; ksh just lets
+  it be 0.  A possible problem would be that people thought $LINENO could
+  be simply related to the history line number.  However, there are so many
+  possibilities with history anyway that I don't think this is an
+  objection.  I don't actually know of an application for the fact that
+  $LINENO counts interactive input lines.
+- I've made the lineno include any lines in a function definition, even
+  though they will be counted separately for the function, i.e.
+    % fn() {
+    function> }
+  will increment LINENO by 2, as with any other multi-line command.
+- The new point at which lineno is incremented means that lines for files
+  (including when reading from the terminal via zle) have to start
+  numbering at 1 rather than 0 -- this is a purely internal change, but be
+  on the lookout of off-by-one errors.
+- a function defined like `fn() { print $LINENO; }' will print 0; this is
+  for compatibility with ksh.  It's pretty logical, if you think of the
+  zsh-style autoload case as
+   fn() {
+     <autoloaded body goes here>
+   }
+  then this is consistent.
+- I've kept most of Sven's parse_string() argument changes, i.e. whether
+  things should use the current lineno from where they were evaluated or
+  keep track of their own.  There was still a problem with this, at least
+  by comparison with ksh; consider:
+  fn() {
+    trap 'print $LINENO' DEBUG
+    :
+    :
+  }
+  prints a whole series of 1's.  In ksh, it does what you probably expect,
+  printing the line number of the line where the trap was called.
+  I fixed this by making parse_string set the current lineno to -1 when the
+  structure isn't keeping track of its own lineno's, setting the
+  ln flag to 0 for calling traps defined with the trap builtin (function
+  traps, of course, have to use their own line numbers), and making
+  pipelines leave the global lineno alone if the command had a lineno < 0.
+  This brought up another subtlety (you'll like this one):  the code which
+  set the lineno restored it at the end of the pipeline, while the DEBUG
+  trap was run at the end of the list.  So I've altered it not to restore
+  the lineno until after the list.  I hope this is OK, because the only
+  time execpline2() shouldn't set lineno is for a complete block of things
+  all with it equal to -1.  Note that the above function now gives
+  something like:
+   1
+   2
+   3
+   23
+  because the DEBUG trap doesn't get unset at the end (localfunctions is
+  something we should still probably do), so you get the interactive line
+  number printed.  I've documented the difference in trap behaviours for the
+  trap builtin.
+- While we're fixing things, eval now (previously goodness knows) gives the
+  line of the script on which the eval command was called.  This seems OK
+  so I haven't touched it further.  ksh does the same, but for some reason
+  increments LINENO to 1 inside eval in an interactive shell.
+- For reasons which will be startlingly clear, other quirks are to be
+  expected.
+
+And I meant to get round to looking at zle arguments today.  That's going
+to have to wait.
+
+--- Doc/Zsh/builtins.yo.fd	Wed Jun  9 09:28:57 1999
++++ Doc/Zsh/builtins.yo	Thu Jun 17 16:53:03 1999
+@@ -842,7 +842,8 @@
+ cindex(signals, trapping)
+ cindex(trapping signals)
+ item(tt(trap) [ var(arg) [ var(sig) ... ] ])(
+-var(arg) is a command to be read and executed when the shell
++var(arg) is a series of commands (usually quoted to protect it from
++immediate evaluation by the shell) to be read and executed when the shell
+ receives var(sig).  Each var(sig) can be given as a number
+ or as the name of a signal.
+ If var(arg) is `tt(-)', then all traps var(sig) are reset to their
+@@ -862,6 +863,20 @@
+ 
+ The tt(trap) command with no arguments prints a list of commands
+ associated with each signal.
++
++Note that traps defined with the tt(trap) builtin are slightly different
++from those defined as `tt(TRAP)var(NAL) () { ... }', as the latter have
++their own function environment (line numbers, local variables, etc.) while
++the former use the environment of the command in which they were called.
++For example,
++
++example(trap 'print $LINENO' DEBUG)
++
++will print the line number of command executed after it has run, while
++
++example(TRAPDEBUG() { print $LINENO; })
++
++will always print the number zero.
+ )
+ findex(true)
+ cindex(doing nothing, successfully)
+--- Src/builtin.c.fd	Thu Jun 17 16:36:28 1999
++++ Src/builtin.c	Thu Jun 17 17:00:51 1999
+@@ -3619,7 +3619,7 @@
+     arg = *argv++;
+     if (!*arg)
+ 	l = NULL;
+-    else if (!(l = parse_string(arg, 1))) {
++    else if (!(l = parse_string(arg, 0))) {
+ 	zwarnnam(name, "couldn't parse trap command", NULL, 0);
+ 	return 1;
+     }
+--- Src/exec.c.fd	Thu Jun 17 14:16:49 1999
++++ Src/exec.c	Thu Jun 17 16:41:06 1999
+@@ -139,14 +139,11 @@
+     int oldlineno = lineno;
+ 
+     lexsave();
+-    lineno = 1;
+     inpush(s, (ln ? INP_LINENO : 0), NULL);
+     strinbeg(0);
+-    if (ln)
+-	lineno = 1;
++    lineno = ln ? 1 : -1;
+     l = parse_list();
+-    if (ln)
+-	lineno = oldlineno;
++    lineno = oldlineno;
+     strinend();
+     inpop();
+     lexrestore();
+@@ -705,7 +702,7 @@
+     Sublist slist;
+     static int donetrap;
+     int ret, cj, csp;
+-    int old_pline_level, old_list_pipe;
++    int old_pline_level, old_list_pipe, oldlineno;
+     /*
+      * ERREXIT only forces the shell to exit if the last command in a &&
+      * or || fails.  This is the case even if an earlier command is a
+@@ -717,6 +714,7 @@
+     cj = thisjob;
+     old_pline_level = pline_level;
+     old_list_pipe = list_pipe;
++    oldlineno = lineno;
+ 
+     if (sourcelevel && unset(SHINSTDIN))
+ 	pline_level = list_pipe = 0;
+@@ -808,6 +806,7 @@
+ 
+     pline_level = old_pline_level;
+     list_pipe = old_list_pipe;
++    lineno = oldlineno;
+     if (dont_change_job)
+ 	thisjob = cj;
+ }
+@@ -1012,13 +1011,12 @@
+ {
+     pid_t pid;
+     int pipes[2];
+-    int oldlineno;
+ 
+     if (breaks || retflag)
+ 	return;
+ 
+-    oldlineno = lineno;
+-    lineno = pline->left->lineno;
++    if (pline->left->lineno >= 0)
++	lineno = pline->left->lineno;
+ 
+     if (pline_level == 1) {
+ 	if (!sfcontext)
+@@ -1078,8 +1076,6 @@
+ 	    subsh_close = -1;
+ 	}
+     }
+-
+-    lineno = oldlineno;
+ }
+ 
+ /* make the argv array */
+--- Src/init.c.fd	Thu Jun 17 14:16:50 1999
++++ Src/init.c	Thu Jun 17 15:26:04 1999
+@@ -539,6 +539,7 @@
+     int i;
+ #endif
+ 
++    lineno = 1;
+     noeval = 0;
+     curhist = 0;
+     histsiz = DEFAULT_HISTSIZE;
+@@ -878,7 +879,7 @@
+     SHIN = tempfd;
+     bshin = fdopen(SHIN, "r");
+     subsh  = 0;
+-    lineno = 0;
++    lineno = 1;
+     loops  = 0;
+     dosetopt(SHINSTDIN, 0, 1);
+     scriptname = s;
+--- Src/input.c.fd	Thu Jun 17 15:15:19 1999
++++ Src/input.c	Thu Jun 17 16:13:42 1999
+@@ -186,7 +186,7 @@
+ 	    inbufct--;
+ 	    if (itok(lastc = STOUC(*inbufptr++)))
+ 		continue;
+-	    if ((inbufflags & INP_LINENO) && lastc == '\n')
++	    if (((inbufflags & INP_LINENO) || !strin) && lastc == '\n')
+ 		lineno++;
+ 	    return lastc;
+ 	}
+@@ -281,23 +281,20 @@
+ 	zputs(ingetcline, stderr);
+ 	fflush(stderr);
+     }
+-    if (*ingetcline && ingetcline[strlen(ingetcline) - 1] == '\n') {
+-	/* We've now read a complete line. */
+-	lineno++;
+-	if (interact && isset(SUNKEYBOARDHACK) && isset(SHINSTDIN) &&
+-	    SHTTY != -1 && *ingetcline && ingetcline[1] &&
+-	    ingetcline[strlen(ingetcline) - 2] == '`') {
+-	    /* Junk an unmatched "`" at the end of the line. */
+-	    int ct;
+-	    char *ptr;
+-
+-	    for (ct = 0, ptr = ingetcline; *ptr; ptr++)
+-		if (*ptr == '`')
+-		    ct++;
+-	    if (ct & 1) {
+-		ptr[-2] = '\n';
+-		ptr[-1] = '\0';
+-	    }
++    if (*ingetcline && ingetcline[strlen(ingetcline) - 1] == '\n' &&
++	interact && isset(SUNKEYBOARDHACK) && isset(SHINSTDIN) &&
++	SHTTY != -1 && *ingetcline && ingetcline[1] &&
++	ingetcline[strlen(ingetcline) - 2] == '`') {
++	/* Junk an unmatched "`" at the end of the line. */
++	int ct;
++	char *ptr;
++
++	for (ct = 0, ptr = ingetcline; *ptr; ptr++)
++	    if (*ptr == '`')
++		ct++;
++	if (ct & 1) {
++	    ptr[-2] = '\n';
++	    ptr[-1] = '\0';
+ 	}
+     }
+     isfirstch = 1;
+@@ -361,7 +358,7 @@
+ 	    inbufptr--;
+ 	    inbufct++;
+ 	    inbufleft++;
+-	    if ((inbufflags & INP_LINENO) && c == '\n')
++	    if (((inbufflags & INP_LINENO) || !strin) && c == '\n')
+ 		lineno--;
+ 	}
+ #ifdef DEBUG
+--- Src/parse.c.fd	Thu Jun 17 14:56:01 1999
++++ Src/parse.c	Thu Jun 17 15:28:47 1999
+@@ -890,6 +890,8 @@
+ static void
+ par_funcdef(Cmd c)
+ {
++    int oldlineno = lineno;
++    lineno = 0;
+     nocorrect = 1;
+     incmdpos = 0;
+     yylex();
+@@ -912,13 +914,17 @@
+     if (tok == INBRACE) {
+ 	yylex();
+ 	c->u.list = par_list();
+-	if (tok != OUTBRACE)
++	if (tok != OUTBRACE) {
++	    lineno += oldlineno;
+ 	    YYERRORV;
++	}
+ 	yylex();
+     } else if (unset(SHORTLOOPS)) {
++	lineno += oldlineno;
+ 	YYERRORV;
+     } else
+ 	c->u.list = par_list1();
++    lineno += oldlineno;
+ }
+ 
+ /*
+@@ -1023,6 +1029,8 @@
+ 		c->redir = newlinklist();
+ 	    par_redir(c->redir);
+ 	} else if (tok == INOUTPAR) {
++	    int oldlineno = lineno;
++	    lineno = 0;
+ 	    incmdpos = 1;
+ 	    cmdpush(CS_FUNCDEF);
+ 	    yylex();
+@@ -1033,6 +1041,7 @@
+ 		c->u.list = par_list();
+ 		if (tok != OUTBRACE) {
+ 		    cmdpop();
++		    lineno += oldlineno;
+ 		    YYERROR;
+ 		}
+ 		yylex();
+@@ -1051,6 +1060,7 @@
+ 	    }
+ 	    cmdpop();
+ 	    c->type = FUNCDEF;
++	    lineno += oldlineno;
+ 	} else
+ 	    break;
+ 	isnull = 0;
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

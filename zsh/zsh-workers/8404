@@ -1,0 +1,427 @@
+From zsh-workers-return-8404-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Oct 25 09:34:52 1999
+Return-Path: <zsh-workers-return-8404-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21884 invoked from network); 25 Oct 1999 09:34:47 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Oct 1999 09:34:47 -0000
+Received: (qmail 29143 invoked by alias); 25 Oct 1999 09:31:57 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8404
+Received: (qmail 29032 invoked from network); 25 Oct 1999 09:31:51 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <991025093146.ZM25984@candle.brasslantern.com>
+Date: Mon, 25 Oct 1999 09:31:46 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: 3.1.6-bart-7: Self-loading auto-functions
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+The first hunk of added text in the builtins.yo diff explains this pretty
+completely.  There may be a more elegant way to implement it than the way
+I did, but it was pretty straightforward this way.
+
+One change that may be controversial is the output of "functions".  As was
+mentioned in the exchange I had with Zefram, it no longer puts "undefined"
+in front of an autoloaded function name.  In the course of changing that,
+I found that it might also output "traced" in that position, which for the
+purposes of making `eval $(functions)' work was equally annoying.  Further,
+it might be useful to differentiate an actual autoloaded function from one
+that merely calls "autoload -X".
+
+So it now outputs comments like this:
+
+foo() {
+	# undefined
+	# traced
+	builtin autoload -X
+}
+
+The comments use the user's $histchars[2], and you can tell a defined
+function from an undefined one because of course defined functions always
+have their comments stripped.  If anyone has a better idea for this, I'd
+be glad to see it changed.
+
+Note that saving/restoring the value of the $functions special parameter
+(from `zmodload parameter') has the side-effect of converting undefined
+functions into functions defined to call autoload -X.  Oh, well.
+
+There's one partial bug fix in the paramter.c diff below: Unloading the
+module would dump core when trying to unset the $dirstack parameter.  The
+remaining badness after the patch is that the dirstack gets erased as a
+side-effect of unloading the module, but at 2:15 AM I didn't feel like
+tackling that part.
+
+Index: Doc/Zsh/builtins.yo
+===================================================================
+@@ -71,7 +71,24 @@
+ findex(autoload)
+ cindex(functions, autoloading)
+ cindex(autoloading functions)
+-alias(autoload)(functions -u)
++item(tt(autoload) [ {tt(PLUS())|tt(-)}tt(UXmt) ] [ var(name) ... ])(
++Equivalent to tt(functions -u), with the exception of tt(-X)/tt(+X).
++
++The flag tt(-X) may be used only inside a shell function, and may not be
++followed by a var(name).  It causes the calling function to be marked for
++autoloading and then immediately loaded and executed, with the current
++array of positional parameters as arguments.  This replaces the previous
++definition of the function.  If no function definition is found, an error
++is printed and the function remains undefined and marked for autoloading.
++
++The flag tt(+X) attempts to load each var(name) as an autoloaded function,
++but does em(not) execute it.  The exit status is zero (success) if the
++function was not previously defined em(and) a definition for it was found.
++This does em(not) replace any existing definition of the function.  The
++exit status is nonzero (failure) if the function was already defined or
++when no definition was found.  In the latter case the function remains
++undefined and marked for autoloading.
++)
+ findex(bg)
+ cindex(jobs, backgrounding)
+ xitem(tt(bg) [ var(job) ... ])
+@@ -353,7 +370,7 @@
+ point numbers are not permitted.
+ )
+ findex(functions)
+-item(tt(functions) [ {tt(PLUS())|tt(-)}tt(tum) ] [ var(name) ... ])(
++item(tt(functions) [ {tt(PLUS())|tt(-)}tt(UXmtu) ] [ var(name) ... ])(
+ Equivalent to tt(typeset -f).
+ )
+ findex(getln)
+@@ -1028,6 +1045,7 @@
+ For arrays (but not for associative arrays), keep only the first
+ occurrence of each duplicated value.  This may also be set for
+ colon-separated special parameters like tt(PATH) or tt(FIGNORE), etc.
++This flag has a different meaning when used with tt(-f); see below.
+ )
+ item(tt(-Z))(
+ Right justify and fill with leading zeros if the first non-blank
+@@ -1044,8 +1062,8 @@
+ )
+ item(tt(-f))(
+ The names refer to functions rather than parameters.  No assignments
+-can be made, and the only other valid flags are tt(-t), tt(-u) and
+-tt(-U).  The flag tt(-t) turns on execution tracing for this
++can be made, and the only other valid flags are tt(-t), tt(-u), tt(-U),
++tt(-X) and tt(+X).  The flag tt(-t) turns on execution tracing for this
+ function.  The tt(-u) and tt(-U) flags cause the function to be
+ marked for autoloading; tt(-U) also causes alias expansion to be
+ suppressed when the function is loaded.  The tt(fpath) parameter
+@@ -1096,10 +1114,12 @@
+ )
+ item(tt(-t))(
+ Tags the named parameters.  Tags have no special meaning to the shell.
++This flag has a different meaning when used with tt(-f); see above.
+ )
+ item(tt(-u))(
+ Convert the result to upper case whenever the parameter is expanded.
+ The value is em(not) converted when assigned.
++This flag has a different meaning when used with tt(-f); see above.
+ )
+ item(tt(-x))(
+ Mark for automatic export to the environment of subsequently
+Index: Doc/Zsh/func.yo
+===================================================================
+@@ -74,6 +74,29 @@
+ the initialization message on the first call, and the other message on the
+ second and subsequent calls.
+ 
++It is also possible to create a function that is not marked autoloaded,
++yet loads its own definition by searching tt(fpath): `tt(autoload -X)',
++when called from within a shell function tt(myfunc), is equivalent to:
++
++example(unfunction myfunc
++autoload myfunc
++myfunc "$@")
++
++In fact, the tt(functions) command outputs `tt(builtin autoload -X)' as
++the body of an autoloaded function.  A true autoloaded function can be
++identifed by the presence of the comment `tt(# undefined)' in the body,
++because all comments are discarded from defined functions.  This is done
++so that
++
++example(eval "$(functions)")
++
++produces a reasonable result.
++
++To load the definition of an autoloaded function tt(myfunc) without
++executing tt(myfunc), use:
++
++example(autoload +X myfunc)
++
+ sect(Special Functions)
+ The following functions, if defined, have special meaning to
+ the shell:
+Index: Src/builtin.c
+===================================================================
+@@ -43,7 +43,7 @@
+     BUILTIN(".", BINF_PSPECIAL, bin_dot, 1, -1, 0, NULL, NULL),
+     BUILTIN(":", BINF_PSPECIAL, bin_true, 0, -1, 0, NULL, NULL),
+     BUILTIN("alias", BINF_MAGICEQUALS | BINF_PLUSOPTS, bin_alias, 0, -1, 0, "Lgmr", NULL),
+-    BUILTIN("autoload", BINF_TYPEOPTS, bin_functions, 0, -1, 0, "tU", "u"),
++    BUILTIN("autoload", BINF_TYPEOPTS, bin_functions, 0, -1, 0, "tUX", "u"),
+     BUILTIN("bg", 0, bin_fg, 0, -1, BIN_BG, NULL, NULL),
+     BUILTIN("break", BINF_PSPECIAL, bin_break, 0, 1, BIN_BREAK, NULL, NULL),
+     BUILTIN("bye", 0, bin_break, 0, 1, BIN_EXIT, NULL, NULL),
+@@ -1998,6 +1998,29 @@
+     return returnval;
+ }
+ 
++/* Helper for bin_functions() when run as "autoload -X" */
++
++static int
++eval_autoload(Shfunc shf, char *name, char *ops, int func)
++{
++    if (!(shf->flags & PM_UNDEFINED))
++	return 1;
++
++    if (shf->funcdef)
++	freestruct(shf->funcdef);
++
++    if (ops['X'] == 1) {
++	char *fargv[3];
++	fargv[0] = name;
++	fargv[1] = "\"$@\"";
++	fargv[2] = 0;
++	shf->funcdef = mkautofn(shf);
++	return bin_eval(name, fargv, ops, func);
++    }
++
++    return loadautofn(shf);
++}
++
+ /* Display or change the attributes of shell functions.   *
+  * If called as autoload, it will define a new autoloaded *
+  * (undefined) shell function.                            */
+@@ -2012,10 +2035,10 @@
+     int on = 0, off = 0, pflags = 0;
+ 
+     /* Do we have any flags defined? */
+-    if (ops['u'] == 1)
+-	on |= PM_UNDEFINED;
+-    else if (ops['u'] == 2)
++    if (ops['u'] == 2)
+ 	off |= PM_UNDEFINED;
++    else if (ops['u'] == 1 || ops['X'])
++	on |= PM_UNDEFINED;
+     if (ops['U'] == 1)
+ 	on |= PM_UNALIASED|PM_UNDEFINED;
+     else if (ops['U'] == 2)
+@@ -2025,7 +2048,8 @@
+     else if (ops['t'] == 2)
+ 	off |= PM_TAGGED;
+ 
+-    if (off & PM_UNDEFINED) {
++    if ((off & PM_UNDEFINED) ||
++	(ops['X'] == 1 && (ops['m'] || *argv || !scriptname))) {
+ 	zwarnnam(name, "invalid option(s)", NULL, 0);
+ 	return 1;
+     }
+@@ -2037,10 +2061,22 @@
+      * are given, we will print only functions containing these  *
+      * flags, else we'll print them all.                         */
+     if (!*argv) {
+-	if (ops['U'] && !ops['u'])
+-	    on &= ~PM_UNDEFINED;
+-	scanhashtable(shfunctab, 1, on|off, DISABLED, shfunctab->printnode,
+-		      pflags);
++	if (ops['X'] == 1) {
++	    if ((shf = (Shfunc) shfunctab->getnode(shfunctab, scriptname))) {
++		DPUTS(!shf->funcdef,
++		      "BUG: Calling autoload from empty function");
++	    } else {
++		shf = (Shfunc) zcalloc(sizeof *shf);
++		shfunctab->addnode(shfunctab, ztrdup(scriptname), shf);
++	    }
++	    shf->flags = on;
++	    return eval_autoload(shf, scriptname, ops, func);
++	} else {
++	    if (ops['U'] && !ops['u'])
++		on &= ~PM_UNDEFINED;
++	    scanhashtable(shfunctab, 1, on|off, DISABLED, shfunctab->printnode,
++			  pflags);
++	}
+ 	return 0;
+     }
+ 
+@@ -2061,8 +2097,14 @@
+ 			for (shf = (Shfunc) shfunctab->nodes[i]; shf;
+ 			     shf = (Shfunc) shf->next)
+ 			    if (pattry(pprog, shf->nam) &&
+-				!(shf->flags & DISABLED))
+-				shf->flags = (shf->flags | on) & (~off);
++				!(shf->flags & DISABLED)) {
++				shf->flags = (shf->flags |
++					      (on & ~PM_UNDEFINED)) & ~off;
++				if (ops['X'] &&
++				    eval_autoload(shf, shf->nam, ops, func)) {
++				    returnval = 1;
++				}
++			    }
+ 		    }
+ 		}
+ 	    } else {
+@@ -2078,10 +2120,12 @@
+     for (; *argv; argv++) {
+ 	if ((shf = (Shfunc) shfunctab->getnode(shfunctab, *argv))) {
+ 	    /* if any flag was given */
+-	    if (on|off)
++	    if (on|off) {
+ 		/* turn on/off the given flags */
+ 		shf->flags = (shf->flags | (on & ~PM_UNDEFINED)) & ~off;
+-	    else
++		if (ops['X'] && eval_autoload(shf, shf->nam, ops, func))
++		    returnval = 1;
++	    } else
+ 		/* no flags, so just print */
+ 		shfunctab->printnode((HashNode) shf, pflags);
+ 	} else if (on & PM_UNDEFINED) {
+@@ -2091,6 +2135,8 @@
+ 	    shf->flags = on;
+ 	    shf->funcdef = mkautofn(shf);
+ 	    shfunctab->addnode(shfunctab, ztrdup(*argv), shf);
++	    if (ops['X'] && eval_autoload(shf, shf->nam, ops, func))
++		returnval = 1;
+ 	} else
+ 	    returnval = 1;
+     }
+Index: Src/exec.c
+===================================================================
+@@ -2911,11 +2911,11 @@
+     l = getfpfunc(shf->nam);
+     noaliases = noalias;
+ 
+-    if(l == &dummy_list) {
++    if (l == &dummy_list) {
+ 	zerr("%s: function definition file not found", shf->nam, 0);
+ 	return 1;
+     }
+-    if(isset(KSHAUTOLOAD)) {
++    if (isset(KSHAUTOLOAD)) {
+ 	VARARR(char, n, strlen(shf->nam) + 1);
+ 	strcpy(n, shf->nam);
+ 	execlist(l, 1, 0);
+@@ -2933,6 +2933,31 @@
+     }
+     execlist(shf->funcdef, 1, 0);
+     return lastval;
++}
++
++/**/
++int
++loadautofn(Shfunc shf)
++{
++    /* Copied from execautofn() -- should consolidate someday */
++
++    int noalias = noaliases;
++    List l;
++
++    noaliases = (shf->flags & PM_UNALIASED);
++    l = getfpfunc(shf->nam);
++    noaliases = noalias;
++
++    if (l == &dummy_list) {
++	zerr("%s: function definition file not found", shf->nam, 0);
++	return 1;
++    }
++    PERMALLOC {
++	shf->funcdef = dupstruct(stripkshdef(l, shf->nam));
++    } LASTALLOC;
++    shf->flags &= ~PM_UNDEFINED;
++
++    return 0;
+ }
+ 
+ /* execute a shell function */
+Index: Src/hashtable.c
+===================================================================
+@@ -872,21 +872,29 @@
+     }
+  
+     if (f->flags & PM_UNDEFINED)
+-	printf("undefined ");
+-    if (f->flags & PM_TAGGED)
+-	printf("traced ");
+-    if ((f->flags & PM_UNDEFINED) || !f->funcdef) {
+-	nicezputs(f->nam, stdout);
+-	printf(" () { }\n");
+-	return;
++	t = tricat("builtin autoload -X",
++		   ((f->flags & PM_UNALIASED)? "U" : ""),
++		   ((f->flags & PM_TAGGED)? "t" : ""));
++    else {
++	if (!f->funcdef)
++	    t = 0;
++	else
++	    t = getpermtext((void *) f->funcdef);
+     }
+- 
+-    t = getpermtext((void *) f->funcdef);
++
+     quotedzputs(f->nam, stdout);
+-    printf(" () {\n\t");
+-    zputs(t, stdout);
+-    printf("\n}\n");
+-    zsfree(t);
++    if (t) {
++	printf(" () {\n\t");
++	if (f->flags & PM_UNDEFINED)
++	    printf("%c undefined\n\t", hashchar);
++	if (f->flags & PM_TAGGED)
++	    printf("%c traced\n\t", hashchar);
++	zputs(t, stdout);
++	printf("\n}\n");
++	zsfree(t);
++    } else {
++	printf(" () { }\n");
++    }
+ }
+ 
+ /**************************************/
+Index: Src/Modules/parameter.c
+===================================================================
+@@ -424,7 +424,9 @@
+ 
+ 	if ((shf = (Shfunc) shfunctab->getnode(shfunctab, name))) {
+ 	    if (shf->flags & PM_UNDEFINED)
+-		pm->u.str = "undefined";
++		pm->u.str = tricat("builtin autoload -X",
++				   ((shf->flags & PM_UNALIASED)? "U" : ""),
++				   ((shf->flags & PM_TAGGED)? "t" : ""));
+ 	    else {
+ 		char *t = getpermtext((void *) dupstruct((void *)
+ 							 shf->funcdef)), *h;
+@@ -467,9 +469,12 @@
+ 	    if (!(hn->flags & DISABLED)) {
+ 		pm.nam = hn->nam;
+ 		if (func != scancountparams) {
+-		    if (((Shfunc) hn)->flags & PM_UNDEFINED)
+-			pm.u.str = "undefined";
+-		    else {
++		    if (((Shfunc) hn)->flags & PM_UNDEFINED) {
++			Shfunc shf = (Shfunc) hn;
++			pm.u.str = tricat("builtin autoload -X",
++					  ((shf->flags & PM_UNALIASED)? "U" : ""),
++					  ((shf->flags & PM_TAGGED)? "t" : ""));
++		    } else {
+ 			char *t = getpermtext((void *)
+ 					      dupstruct((void *) ((Shfunc) hn)->funcdef));
+ 
+@@ -779,7 +784,7 @@
+     PERMALLOC {
+ 	freelinklist(dirstack, freestr);
+ 	dirstack = newlinklist();
+-	while (*x)
++	while (x && *x)
+ 	    addlinknode(dirstack, ztrdup(*x++));
+     } LASTALLOC;
+ }
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

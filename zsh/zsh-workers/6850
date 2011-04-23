@@ -1,0 +1,95 @@
+From zsh-workers-return-6850-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jun 25 12:53:30 1999
+Return-Path: <zsh-workers-return-6850-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8621 invoked from network); 25 Jun 1999 12:53:29 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Jun 1999 12:53:29 -0000
+Received: (qmail 23006 invoked by alias); 25 Jun 1999 12:53:01 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6850
+Received: (qmail 22999 invoked from network); 25 Jun 1999 12:53:00 -0000
+Date: Fri, 25 Jun 1999 14:52:58 +0200 (MET DST)
+Message-Id: <199906251252.OAA02488@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Fri, 25 Jun 1999 10:10:01 +0000
+Subject: Re: 3.0.6-pre-5 problem
+
+
+Bart Schaefer wrote:
+
+> On Jun 25, 11:38am, Sven Wischnowsky wrote:
+> } Subject: Re: 3.0.6-pre-5 problem
+> }
+> } I hope this fixes it.
+> 
+> No such luck.  Here's "pstree" output:
+> 
+> zsh(28198)-+-pstree(4199)
+>            |-xterm(4146)---zsh(4147)-+-mutt(4149)
+>            |                         `-zsh(4153)
+>            `-xterm(4191)---zsh(4192)---zsh(4194)---mutt(4196)
+> 
+> The first xterm (4146) I ran the "mutt" function directly from the top
+> shell and then hit ^Z.  4149 and 4153 are both stopped; 4146 is blocked
+> in wait4() which means that 4147 can't get any keystrokes (the xterm
+> isn't feeding it) which is the hang that Jos sees.
+> 
+> The second xterm (4191) I ran a new zsh -f (4194) and then the "mutt"
+> function; there, 4194 and 4196 are stopped.
+> 
+> Note that in the first case zsh created an extra dummy job, but in the
+> second case it didn't.  This must have something to do with which process
+> is the group leader.
+
+(To Bart: I was doing it inside an xterm, but from a bash that ran
+inside the xterm.)
+
+I could finally reproduce it when trying to look at it with strace,
+which finally opened my eyes (I would have needed a `ps j' output). It 
+goes like this: Someone exec()s zsh without putting it into its own
+process group. Then we start the function and zsh executes external
+commands in its own process group. Then the user hits ^Z and all three 
+of them receive the SIGTSTP. The external command is stopped, which is 
+fine, zsh ignores it, which is better, and the parent of zsh happens
+to not ignore it and stopt, which is deadly.
+
+So, if we have agreed to use the kill-loop-patches, we'll have to make 
+sure that every decent interactive zsh with job-control runs in its
+own process group which is what the patch below does.
+
+Ok. Since I still couldn't reproduce the exact original problem, I'd
+be thankful for any response (*especially* if it's fixed).
+
+Bye
+ Sven
+
+P.S.: Peter: 6838 should be superfluous, but I still like the look of 6848.
+
+--- os/init.c	Thu Jun 24 19:00:56 1999
++++ Src/init.c	Fri Jun 25 14:41:12 1999
+@@ -390,7 +390,16 @@
+ #ifdef JOB_CONTROL
+     /* If interactive, make the shell the foreground process */
+     if (opts[MONITOR] && interact && (SHTTY != -1)) {
+-	attachtty(GETPGRP());
++      /* Since we now sometimes execute programs in the process group
++       * of the parent shell even when using job-control, we have to
++       * make sure that we run in our own process group. Otherwise if
++       * we are called from a program that doesn't put us in our own
++       * group a SIGTSTP that we ignore might stop our parent process.
++       * Instead of the two calls below we once had:
++       *   attachtty(GETPGRP());
++       */
++	attachtty(getpid());
++	setpgrp(0L, 0L);
+ 	if ((mypgrp = GETPGRP()) > 0) {
+ 	    while ((ttpgrp = gettygrp()) != -1 && ttpgrp != mypgrp) {
+ 		sleep(1);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

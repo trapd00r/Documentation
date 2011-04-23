@@ -1,0 +1,353 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Thu Nov 14 02:34:48 1996
+Return-Path: zsh-workers-request@euclid.skiles.gatech.edu
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.6/8.7.3) with ESMTP id CAA05228 for <mason@primenet.com.au>; Thu, 14 Nov 1996 02:34:42 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id KAA01092; Wed, 13 Nov 1996 10:10:40 -0500 (EST)
+Resent-Date: Wed, 13 Nov 1996 10:10:40 -0500 (EST)
+Message-Id: <199611131510.QAA24982@hydra.ifh.de>
+X-Authentication-Warning: hydra.ifh.de: Host pws@localhost didn't use HELO protocol
+To: zsh-workers@math.gatech.edu (Zsh hackers list), rjones@pobox.com
+Subject: OPEN_MAX from sysconf
+Date: Wed, 13 Nov 1996 16:10:39 +0100
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"RfrAT1.0.-G.mJUYo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2389
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+rjones@ptc.com wrote:
+> i discovered this possible bug:
+> 
+> in a directory with a large number of files:
+> 
+> % cat < * > /dev/null
+> 
+> this gives a seg fault on irix.  on solaris, according to a friend, it
+> just stops at the 54th file.  my best guess is that the fdtable is
+> filling up.  there don't seem to be any upper-bounds checks in the
+> functions in util.c that deal with fdtable.  no lower bound check in
+> zclose, either, so sometimes max_zsh_fd can go beyond the end of the
+> array or go negative (unless there's some invariant condition that keeps
+> it from going negative.  some debugging seemed to indicate that it was
+> going neg, though.).
+
+Phew, this is rather a mess when you look into the details.  Here's
+the story.
+
+On IRIX 5.3 here, limits.h defines OPEN_MAX to 60 (so the default in
+zsh's system.h is never used) while sysconf returns 200 (and that may
+be arbitrary --- see below), so it's likely the system is blindly
+returning fd's up to 200 while zsh's table is only set up for 60,
+which is infelicitous: simple tinkering won't fix it.
+
+Luckily, it's not beyond the wit of man to get configure to decide
+whether we can extract OPEN_MAX from sysconf(_SC_OPEN_MAX) and make
+this take precendence over the value in any header files.  Bad news:
+this value changes if you use setrlimit() to alter the number of open
+files allowed (the command `limit -s descriptors <n>' does this), so
+the value returned by sysconf() can't be compiled into zsh.  I've
+changed fdtable to be a pointer which is initialised in init.c either
+from sysconf() if available, or from OPEN_MAX if not, and added an
+associated counter, fdtable_size.  (This had to go in main() because
+it's needed before init_io(), but that can be called again and this
+shouldn't be.)
+
+This makes another change necessary: if the user raises the file
+descriptor limit, you need to check whether the sysconf() return value
+has increased and therefore you need to increase fdtable_size.  (In
+fact, the getrlimit() manual here explicitly says that OPEN_MAX is
+tied to the value of the RLIMIT_NOFILE limit.)  Luckily there's only
+one call to getrlimit() that needs fixing.  It may be the user limits
+are the only ones, i.e. if you're root you can decide to set the
+no. of descriptors as high as you like --- in fact, my hard limit is
+2500 which is very unlikely to correspond to any compiled-in value.
+
+It looks like the only alternative to this patch would be to make some
+arbitrary limit to the number of fd's and enforce that for max_zsh_fd,
+and simply reject any fd's which the system returns higher than that.
+I don't thinks that's a good solution.
+
+I've also stuck in a debugging check in utils.c for max_zsh_fd.
+
+Anyway, here's the patch. The configure.in part (and the others)
+should be OK, the configure patch is liable to fail after any other
+configure fiddling because of the #line directives, and I suspect the
+dl hacking will have that effect.  Sorry.
+
+(Another day gone.  This is known in the trade as `waiting for new data'.)
+
+*** Src/exec.c.open	Thu Oct 10 12:05:10 1996
+--- Src/exec.c	Wed Nov 13 16:03:31 1996
+***************
+*** 69,74 ****
+--- 69,89 ----
+  	    return -1;
+  	}
+  	current_limits[limnum] = limits[limnum];
++ #if defined(RLIMIT_NOFILE) && defined(HAVE_SC_OPEN_MAX)
++ 	/* If we change the limit on the number
++ 	 * of descriptors, sysconf() may return a different number
++ 	 * from _SC_OPEN_MAX, which we use to set the maximum number of
++ 	 * descriptors.  It's not worth changing the table unless this
++ 	 * increases.
++ 	 */
++ 	if (limnum == RLIMIT_NOFILE) {
++ 	    int newsize = (int)sysconf(_SC_OPEN_MAX);
++ 	    if (newsize > fdtable_size) {
++ 		fdtable = (char *)realloc(fdtable, newsize);
++ 		fdtable_size = newsize;
++ 	    }
++ 	}
++ #endif
+      }
+      return 0;
+  }
+***************
+*** 981,987 ****
+  {
+      int i, j;
+  
+!     for (i = 0; i < OPEN_MAX; i++)
+  	if (mn->pipe != i) {
+  	    for (j = 0; j < mn->ct; j++)
+  		if (mn->fds[j] == i)
+--- 996,1002 ----
+  {
+      int i, j;
+  
+!     for (i = 0; i < fdtable_size; i++)
+  	if (mn->pipe != i) {
+  	    for (j = 0; j < mn->ct; j++)
+  		if (mn->fds[j] == i)
+*** Src/globals.h.open	Thu Nov  7 16:24:30 1996
+--- Src/globals.h	Wed Nov 13 14:28:53 1996
+***************
+*** 396,402 ****
+   * table is not used.  A table element is set by movefd and cleard *
+   * by zclose.                                                      */
+  
+! EXTERN char fdtable[OPEN_MAX];
+  
+  /* The highest fd that marked with nonzero in fdtable */
+  
+--- 396,406 ----
+   * table is not used.  A table element is set by movefd and cleard *
+   * by zclose.                                                      */
+  
+! EXTERN char *fdtable;
+! 
+! /* The allocated size of fdtable:  either from OPEN_MAX or sysconf() */
+! 
+! EXTERN int fdtable_size;
+  
+  /* The highest fd that marked with nonzero in fdtable */
+  
+*** Src/init.c.open	Wed Nov 13 14:28:17 1996
+--- Src/init.c	Wed Nov 13 15:03:10 1996
+***************
+*** 61,66 ****
+--- 61,75 ----
+      opts[USEZLE] = 1;   /* may be unset in init_io() */
+      parseargs(argv);   /* sets INTERACTIVE, SHINSTDIN and SINGLECOMMAND */
+  
++ 
++     /* needed before init_io() */
++ #ifdef HAVE_SC_OPEN_MAX
++     fdtable_size = (int)sysconf(_SC_OPEN_MAX);
++ #else
++     fdtable_size = OPEN_MAX;
++ #endif
++     fdtable = zalloc(fdtable_size);
++ 
+      SHTTY = -1;
+      init_io();
+      setupvals();
+*** Src/system.h.open	Thu Nov  7 16:24:32 1996
+--- Src/system.h	Wed Nov 13 14:16:41 1996
+***************
+*** 155,162 ****
+  # endif
+  #endif
+  
+! /* we should be getting this value from sysconf(_SC_OPEN_MAX) */
+! /* but this is too much trouble                               */
+  #ifndef OPEN_MAX
+  # ifdef NOFILE
+  #  define OPEN_MAX NOFILE
+--- 155,161 ----
+  # endif
+  #endif
+  
+! /* Following only used if we can't get OPEN_MAX from sysconf */
+  #ifndef OPEN_MAX
+  # ifdef NOFILE
+  #  define OPEN_MAX NOFILE
+*** Src/utils.c.open	Thu Nov  7 16:24:33 1996
+--- Src/utils.c	Wed Nov 13 14:30:20 1996
+***************
+*** 888,895 ****
+      }
+      if(fd != -1) {
+  	fdtable[fd] = 1;
+! 	if (fd > max_zsh_fd)
+  	    max_zsh_fd = fd;
+      }
+      return fd;
+  }
+--- 888,897 ----
+      }
+      if(fd != -1) {
+  	fdtable[fd] = 1;
+! 	if (fd > max_zsh_fd) {
+  	    max_zsh_fd = fd;
++ 	    DPUTS(max_zsh_fd >= fdtable_size, "BUG: fdtable too small");
++ 	}
+      }
+      return fd;
+  }
+***************
+*** 904,911 ****
+  	zclose(y);
+      else if (x != y) {
+  	dup2(x, y);
+! 	if ((fdtable[y] = fdtable[x]) && y > max_zsh_fd)
+  	    max_zsh_fd = y;
+  	zclose(x);
+      }
+  }
+--- 906,915 ----
+  	zclose(y);
+      else if (x != y) {
+  	dup2(x, y);
+! 	if ((fdtable[y] = fdtable[x]) && y > max_zsh_fd) {
+  	    max_zsh_fd = y;
++ 	    DPUTS(max_zsh_fd >= fdtable_size, "BUG: fdtable too small");
++ 	}
+  	zclose(x);
+      }
+  }
+*** config.h.in.open	Wed Nov 13 11:07:55 1996
+--- config.h.in	Wed Nov 13 14:21:42 1996
+***************
+*** 204,209 ****
+--- 204,212 ----
+  /* Define to 1 if there is a prototype defined for ioctl() on your system */
+  #undef HAVE_IOCTL_PROTO
+  
++ /* Define to 1 if sysconf(_SC_OPEN_MAX) gives max no of fd's */
++ #undef HAVE_SC_OPEN_MAX
++ 
+  /* Define to 1 if /bin/sh does not interpret \ escape sequences */
+  #undef SH_USE_BSD_ECHO
+  
+*** configure.in.open	Wed Nov 13 10:42:31 1996
+--- configure.in	Wed Nov 13 14:54:17 1996
+***************
+*** 620,625 ****
+--- 620,639 ----
+    fi
+  fi
+  
++ dnl -----------------------------------------------
++ dnl Is OPEN_MAX available from a call to sysconf()?
++ dnl -----------------------------------------------
++ AC_CACHE_CHECK(for _SC_OPEN_MAX from sysconf(),
++ zsh_cv_sc_open_max,
++ [AC_TRY_COMPILE([#include <stdio.h>
++ #include <unistd.h>],
++ [sysconf(_SC_OPEN_MAX); ],
++ zsh_cv_sc_open_max=yes,
++ zsh_cv_sc_open_max=no)])
++ if test "$zsh_cv_sc_open_max" = yes; then
++   AC_DEFINE(HAVE_SC_OPEN_MAX)
++ fi
++ 
+  dnl ---------------------
+  dnl echo style of /bin/sh
+  dnl ---------------------
+*** configure.open	Wed Nov 13 11:33:54 1996
+--- configure	Wed Nov 13 14:38:16 1996
+***************
+*** 2923,2928 ****
+--- 2923,2961 ----
+    fi
+  fi
+  
++ echo $ac_n "checking for _SC_OPEN_MAX from sysconf()""... $ac_c" 1>&6
++ if eval "test \"`echo '$''{'zsh_cv_sc_open_max'+set}'`\" = set"; then
++   echo $ac_n "(cached) $ac_c" 1>&6
++ else
++   cat > conftest.$ac_ext <<EOF
++ #line 2932 "configure"
++ #include "confdefs.h"
++ #include <stdio.h>
++ #include <unistd.h>
++ int main() { return 0; }
++ int t() {
++ sysconf(_SC_OPEN_MAX); 
++ ; return 0; }
++ EOF
++ if eval $ac_compile; then
++   rm -rf conftest*
++   zsh_cv_sc_open_max=yes
++ else
++   rm -rf conftest*
++   zsh_cv_sc_open_max=no
++ fi
++ rm -f conftest*
++ 
++ fi
++ 
++ echo "$ac_t""$zsh_cv_sc_open_max" 1>&6
++ if test "$zsh_cv_sc_open_max" = yes; then
++   cat >> confdefs.h <<\EOF
++ #define HAVE_SC_OPEN_MAX 1
++ EOF
++ 
++ fi
++ 
+  echo $ac_n "checking if echo in /bin/sh interprets escape sequences""... $ac_c" 1>&6
+  if test "`/bin/sh -c \"echo '\\n'\"`" = "\\n"; then
+    cat >> confdefs.h <<\EOF
+***************
+*** 2950,2956 ****
+    zsh_cv_sys_elf=yes
+  else
+  cat > conftest.$ac_ext <<EOF
+! #line 2954 "configure"
+  #include "confdefs.h"
+  /* Test for whether ELF binaries are produced */
+  #include <fcntl.h>
+--- 2983,2989 ----
+    zsh_cv_sys_elf=yes
+  else
+  cat > conftest.$ac_ext <<EOF
+! #line 2987 "configure"
+  #include "confdefs.h"
+  /* Test for whether ELF binaries are produced */
+  #include <fcntl.h>
+***************
+*** 3022,3028 ****
+    zsh_cv_func_dlsym_needs_underscore=no
+  else
+  cat > conftest.$ac_ext <<EOF
+! #line 3026 "configure"
+  #include "confdefs.h"
+  
+  #include <stdio.h>
+--- 3055,3061 ----
+    zsh_cv_func_dlsym_needs_underscore=no
+  else
+  cat > conftest.$ac_ext <<EOF
+! #line 3059 "configure"
+  #include "confdefs.h"
+  
+  #include <stdio.h>
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

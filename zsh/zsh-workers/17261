@@ -1,0 +1,219 @@
+From zsh-workers-return-17261-mason-zsh=primenet.com.au@sunsite.dk Thu May 30 15:20:31 2002
+Return-Path: <zsh-workers-return-17261-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12743 invoked from network); 30 May 2002 15:20:17 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 30 May 2002 15:20:17 -0000
+Received: (qmail 17020 invoked by alias); 30 May 2002 15:20:04 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17261
+Received: (qmail 17002 invoked from network); 30 May 2002 15:20:02 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: zsh: Strange feature with 'jobs' commmand 
+In-reply-to: "=?iso-8859-1?Q?Bj=F6rn_Johannesson?="'s message of "Thu, 30 May 2002 13:54:50 +0200."
+             <20020530135450.A16761@licia.dtek.chalmers.se> 
+Date: Thu, 30 May 2002 16:19:33 +0100
+Message-ID: <27284.1022771973@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+=?iso-8859-1?Q?Bj=F6rn_Johannesson?= wrote:
+> Hi.
+> 
+> If you start a few jobs in the background and do:
+> zsh% jobs
+> [1]  - running    xmixer
+> [2]  + running    gtcd
+> zsh% _
+> 
+> ok, this is expected but this is not...
+> zsh% jobs | less
+> (END)
+
+This annoys everybody.
+
+The problem is fairly localised: you only need to list jobs in
+subshells, and the subshells will not be changing the status of jobs.
+So maybe something relatively straightforward like the following is good
+enough.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.41
+diff -u -r1.41 exec.c
+--- Src/exec.c	6 May 2002 14:46:11 -0000	1.41
++++ Src/exec.c	30 May 2002 15:12:37 -0000
+@@ -2507,13 +2507,13 @@
+ static void
+ entersubsh(int how, int cl, int fake)
+ {
+-    int sig;
++    int sig, monitor;
+ 
+     if (cl != 2)
+ 	for (sig = 0; sig < VSIGCOUNT; sig++)
+ 	    if (!(sigtrapped[sig] & ZSIG_FUNC))
+ 		unsettrap(sig);
+-    if (unset(MONITOR)) {
++    if (!(monitor = isset(MONITOR))) {
+ 	if (how & Z_ASYNC) {
+ 	    settrap(SIGINT, NULL);
+ 	    settrap(SIGQUIT, NULL);
+@@ -2569,7 +2569,7 @@
+     opts[MONITOR] = opts[USEZLE] = 0;
+     zleactive = 0;
+     if (cl)
+-	clearjobtab();
++	clearjobtab(monitor);
+     times(&shtms);
+     forklevel = locallevel;
+ }
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.15
+diff -u -r1.15 jobs.c
+--- Src/jobs.c	21 Dec 2001 16:33:39 -0000	1.15
++++ Src/jobs.c	30 May 2002 15:12:37 -0000
+@@ -55,6 +55,12 @@
+ /**/
+ mod_export struct job jobtab[MAXJOB];
+ 
++/* If we have entered a subshell, the original shell's job table. */
++static struct job *oldjobtab;
++
++/* The size of that. */
++static int oldmaxjob;
++
+ /* shell timings */
+  
+ /**/
+@@ -612,13 +618,18 @@
+ printjob(Job jn, int lng, int synch)
+ {
+     Process pn;
+-    int job = jn - jobtab, len = 9, sig, sflag = 0, llen;
++    int job, len = 9, sig, sflag = 0, llen;
+     int conted = 0, lineleng = columns, skip = 0, doputnl = 0;
+     FILE *fout = (synch == 2) ? stdout : shout;
+ 
+     if (jn->stat & STAT_NOPRINT)
+ 	return;
+ 
++    if (jn < jobtab || jn >= jobtab + MAXJOB)
++	job = jn - oldjobtab;
++    else
++	job = jn - jobtab;
++
+     if (lng < 0) {
+ 	conted = 1;
+ 	lng = 0;
+@@ -655,10 +666,10 @@
+ 	}
+     }
+ 
+-/* print if necessary */
++/* print if necessary: ignore option state on explicit call to `jobs'. */
+ 
+-    if (interact && jobbing && ((jn->stat & STAT_STOPPED) || sflag ||
+-				job != thisjob)) {
++    if (((interact && jobbing) || synch == 2) &&
++	((jn->stat & STAT_STOPPED) || sflag ||job != thisjob)) {
+ 	int len2, fline = 1;
+ 	Process qn;
+ 
+@@ -681,7 +692,7 @@
+ 	    if (job != thisjob) {
+ 		if (fline)
+ 		    fprintf(fout, "[%ld]  %c ",
+-			    (long)(jn - jobtab),
++			    (long)job,
+ 			    (job == curjob) ? '+'
+ 			    : (job == prevjob) ? '-' : ' ');
+ 		else
+@@ -956,13 +967,32 @@
+ 
+ /**/
+ mod_export void
+-clearjobtab(void)
++clearjobtab(int monitor)
+ {
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++)
+-	if (jobtab[i].ty)
++    for (i = 1; i < MAXJOB; i++) {
++	if (jobtab[i].ty) {
+ 	    zfree(jobtab[i].ty, sizeof(struct ttyinfo));
++	    jobtab[i].ty = NULL;
++	}
++	if (monitor) {
++	    /*
++	     * See if there is a jobtable worth saving.
++	     * We never free the saved version; it only happens
++	     * once for each subshell of a shell with job control,
++	     * so doesn't create a leak.
++	     */
++	    if (jobtab[i].stat)
++		oldmaxjob = i;
++	}
++    }
++
++    if (monitor && oldmaxjob) {
++	int sz = oldmaxjob * sizeof(struct job);
++	oldjobtab = (struct job *)zalloc(sz);
++	memcpy(oldjobtab, jobtab, sz);
++    }
+ 
+     memset(jobtab, 0, sizeof(jobtab)); /* zero out table */
+ }
+@@ -1274,13 +1304,22 @@
+ 	    firstjob = curjob;
+ 	} else if (func == BIN_JOBS) {
+ 	    /* List jobs. */
+-	    for (job = 0; job != MAXJOB; job++)
+-		if (job != thisjob && jobtab[job].stat) {
++	    struct job *jobptr;
++	    int maxjob;
++	    if (unset(MONITOR) && oldmaxjob) {
++		jobptr = oldjobtab;
++		maxjob = oldmaxjob;
++	    } else {
++		jobptr = jobtab;
++		maxjob = MAXJOB;
++	    }
++	    for (job = 0; job != maxjob; job++, jobptr++)
++		if (job != thisjob && jobptr->stat) {
+ 		    if ((!ops['r'] && !ops['s']) ||
+ 			(ops['r'] && ops['s']) ||
+-			(ops['r'] && !(jobtab[job].stat & STAT_STOPPED)) ||
+-			(ops['s'] && jobtab[job].stat & STAT_STOPPED))
+-			printjob(job + jobtab, lng, 2);
++			(ops['r'] && !(jobptr->stat & STAT_STOPPED)) ||
++			(ops['s'] && jobptr->stat & STAT_STOPPED))
++			printjob(jobptr, lng, 2);
+ 		}
+ 	    unqueue_signals();
+ 	    return 0;
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

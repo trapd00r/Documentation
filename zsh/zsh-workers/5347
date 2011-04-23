@@ -1,0 +1,188 @@
+From zsh-workers-return-5347-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Feb 12 08:43:57 1999
+Return-Path: <zsh-workers-return-5347-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2664 invoked from network); 12 Feb 1999 08:43:54 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Feb 1999 08:43:54 -0000
+Received: (qmail 29416 invoked by alias); 12 Feb 1999 08:42:59 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5347
+Received: (qmail 29409 invoked from network); 12 Feb 1999 08:42:57 -0000
+Date: Fri, 12 Feb 1999 09:42:14 +0100 (MET)
+Message-Id: <199902120842.JAA08278@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Thu, 11 Feb 1999 10:25:53 -0800
+Subject: Re: PATCH: compadd (+ questions)
+
+
+Bart Schaefer wrote:
+
+> On Feb 11, 10:11am, Peter Stephenson wrote:
+>
+> ...
+>
+> } I, too, found the new [[-tests a little confusing at first sight.  I'm
+> } inclined to think maybe they should be limited to those that can't be
+> } done so easily in the standard way.  For example, I don't see why
+> } people shouldn't use (( NMATCHES )) rather than [[ ! -nmatches 0 ]] .
+> } But I haven't really got a proper grip on using this yet.
+> 
+> This is what I'm thinking, too.  I may be getting my chronology confused,
+> but wasn't it the case that the new condition codes showed up before all
+> the variables for NMATCHES and CURRENT etc. were available?
+> 
+> There's a short list of stuff you can't easily do with the variables:
+> 
+> 1.  Automatic shifting of bits of PREFIX into IPREFIX, as -iprefix does
+>     and as -string and -class do with two args.
+> 2.  Adjusting the range of words used, as -position does with two args.
+> 3.  Skipping exactly N occurrences of an embedded substring, as -string
+>     and -class do with two args.
+> 
+> Have I missed any others?  Sven didn't answer my question about whether
+> the remaining condition codes are faster or have other side-effects:
+
+(Sorry, I was rather busy yesterday and had to leave earlier...)
+
+The -[m]between and -[m]after conditions also adjust the range of
+words to use and these are the ones that are most complicated to
+re-implement in shell-code.
+Changing the values of the user-visible parameters is the only
+side-effect they have.
+As for the speed: they may be a bit faster than the equivalent tests
+with parameter expansion but I don't think this is a argument for
+keeping the condition codes since normally you'll have only few such
+tests.
+
+> The point being that, although being able to add conditions in modules is
+> a cool thing, perhaps we should drop the ones that are easily replicated
+> using simple tests on the variables, and then look again at the rest to
+> see if there's a better way to express them.
+
+Agreed, although I'm not sure if I'll produce a patch for this any
+time soon.
+
+> Unless there's a reason not to, such as, interpolating the string values
+> of the variables during parsing of the expression is significantly slower
+> than recognizing the new codes themselves (which I don't know whether or
+> not is the case).
+
+Again, I don't think that this is a problem, due to the expected
+number of such tests.
+
+> } For really clean completion functions we would need a new control
+> } structure to be able to put all tests into one function and having
+> } everything reset to the previous state automatically. Doing something
+> } like:
+> } 
+> }   if comptest iprefix '-'; then
+> }     ...
+> }     compreset
+> }   else
+> } 
+> } wouldn't be that easy to glark, too.
+> 
+> I still think the right way to do this is with shell-function scoping.
+> 
+> 	tryprefix () {
+> 	    complocal	# Equivalent of "local CURRENT NMATCHES ...",
+> 	    		# if "local" worked on special parameters
+> 	    comptest ignored-prefix $1 && { shift ; "$@" }
+> 	}
+> 	tryprefix - complist -k "($signals[1,-3])"
+>
+> The unfortunate thing about this is that it clashes with $argv holding
+> the command line (but that's true of any function called from within the
+> top-level main-complete function, isn't it?).  There should probably be
+> another array that also holds the words, but I guess it isn't that hard
+> to have the main completion function set up a global for it.
+
+Ah, now I finally understand why you wanting restting in function
+scopes. One problem I have with this is that we can come up with a few 
+functions for the tests, but the things to do if the test succeeds can 
+often not easily be put in a command line.
+Also we often need combinations of tests, for and'ed tests this would
+lead to things like `tryrange -exec \; tryprefix - ...', but for or'ed 
+tests. Also, will the non-parameter-modifying tests have equivalent
+functions or will this lead to combinations of such function calls and 
+`[[...]]' conditions? This can get very hard to read, I think.
+
+About using argv for the stuff from the command line. I'm not too
+happy with this anyway. If the new style completion is slower than the 
+old one, this may partly be caused by several calls to sub-functions where 
+we have to use "$@" to propagate the positional parameters.
+
+> Looking at the above gives me a nagging idea ... it's half-formed at the
+> moment, but it goes something like this ...
+> 
+> The effect of `compsave; [[ -iprefix ... ]] ; compreset` is that we want
+> to try a completion with a particular prefix and if that fails, start
+> over with the original state and try again.  Similarly for -position to 
+> limit the range of words, etc.
+> 
+> So why don't we actually DO that?  That is, make a "recursive" call to
+> the whole completion system?  Add -iprefix, -position, -string, -class
+> options to "compcall" (or some similar new command) and have THAT adjust
+> the variables, re-invoke the appropriate main completion function, and
+> then restore everything if that function returns nonzero.  It would then
+> be an advertized side-effect of compcall that, if it returns nonzero,
+> the state of the completion variables has been adjusted -- which makes a
+> lot more sense to me than having a conditional do it.
+
+Only seldom do we want to do normal completion after adjusting the
+word/words to use. In most cases we want to do some very specialised
+calls to complist/compadd or whatever and we want only those
+matches. Especially we normally don't want the main completion
+function be called, it will use the `first'-completion-definition
+again and things like that.
+
+But, maybe we are on a completely wrong track. I forgot to mention it
+yesterday, but when splitting the examples in different files I had
+the unpleasent feeling that all this is the wrong way to do things.
+The problem is that the current approach is completion-centered, not
+command-centered. Just think about someone who wants to use one of the
+example completions for another command. He would have to either
+edit the file, adding the command name to the first line, or call
+`defcomp' by hand.
+I have the feeling, that this and your remarks about the `tryprefix'
+function and about this recursive calling (and, btw, some of the mails
+that started all this new ocmpletion stuff) point in the same
+direction. Maybe we should re-build the example code in a completely
+context-based way.
+I haven't thought that much about all this yet, but it would go like
+this:
+
+We have a collection of context-names (completely shell-code based,
+this is only vaguely connected to the CONTEXT parameter). For each
+such context we have a definition saying what should be completed in
+this context (such a definition could again be a function or an array, 
+re-using some of the code). There would be a dispatcher-function that
+gets the context-name as its argument and then invokes the
+corresponding handler. Some of these handler-functions will do some
+testing, and decide on the result of the tests, which contexts are
+really to be used. The task of the main completion widget (note: the
+widget, not the dispatcher) would be to check parameters like CONTEXT, 
+decide which context(s) to try and then call the dispatcher.
+We would then come up with files containing context-definitions (some
+of the files are exactly that already and have names that show it, I
+think that the fact that for other files names of commands seemed more
+natural may be a hint that something went wrong).
+Then we would need a way to connect command-names to context-names,
+preferably in some automagically collected way.
+When implementing the example stuff I had already had this kind of
+feeling and thus the code already looks a bit like the above, but not
+throughout. So, we wouldn't need that much changes (I think), we would
+mainly need a shift in our perception of the problem (well, at least I
+would need it) and change the code to reflect this everywhere.
+
+Bye
+ Sven
+
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

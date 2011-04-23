@@ -1,0 +1,265 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Sun Mar 30 21:33:16 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 17081 invoked from network); 30 Mar 1997 21:33:12 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 30 Mar 1997 21:33:12 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id QAA16615; Sun, 30 Mar 1997 16:26:17 -0500 (EST)
+Resent-Date: Sun, 30 Mar 1997 16:26:17 -0500 (EST)
+Date: Sun, 30 Mar 1997 22:29:08 +0100 (BST)
+From: Zefram <zefram@dcs.warwick.ac.uk>
+Message-Id: <13876.199703302129@stone.dcs.warwick.ac.uk>
+Subject: parameter scopes
+X-Patch: 237
+Resent-Message-ID: <"W8FQb1.0.W34.ufjFp"@euclid>
+To: zsh-workers@math.gatech.edu
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3049
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+This patch removes locallist, replacing it with a scan over the parameter
+table when the scope ends.  This makes little difference to timing[1]
+or memory usage[2], but it is a big simplicity win, as locallist doesn't
+have to be maintained in multiple places.  This patch depends on the
+ZLE parameters patch (3014).
+
+ -zefram
+
+[1] It saves on some dynamic memory allocation, at the expense of
+walking through the hash table more when there are few local parameters.
+It scales better: O(N) rather than O(Nn), where N is the number of
+parameters and n the number of declarations in the scope.
+
+[2] Fewer strings copied.
+
+ *** Src/builtin.c	1997/03/29 19:09:39	1.71
+ --- Src/builtin.c	1997/03/29 19:17:44
+ ***************
+ *** 1446,1455 ****
+   		if (!asg->value)
+   		    asg->value = dupstring(getsparam(asg->name));
+   		unsetparam(asg->name);
+ - 	    } else if (locallist && func != BIN_EXPORT) {
+ - 		PERMALLOC {
+ - 		    addlinknode(locallist, ztrdup(asg->name));
+ - 		} LASTALLOC;
+   	    }
+   	    /* create a new node for a parameter with the *
+   	     * flags in `on' minus the readonly flag      */
+ --- 1446,1451 ----
+ *** Src/exec.c	1997/03/26 04:48:46	1.55
+ --- Src/exec.c	1997/03/29 19:19:47
+ ***************
+ *** 2504,2510 ****
+   {
+       char **tab, **x, *oargv0 = NULL;
+       int xexittr, newexittr, oldzoptind, oldlastval;
+ -     LinkList olist;
+       char *ou;
+       void *xexitfn, *newexitfn;
+       char saveopts[OPT_SIZE];
+ --- 2504,2509 ----
+ ***************
+ *** 2553,2565 ****
+   		argzero = ztrdup(argzero);
+   	    }
+   	}
+ ! 	olist = startparamscope();
+   	ou = underscore;
+   	underscore = ztrdup(underscore);
+   	execlist(dupstruct(list), 1, 0);
+   	zsfree(underscore);
+   	underscore = ou;
+ ! 	endparamscope(olist);
+   
+   	if (retflag) {
+   	    retflag = 0;
+ --- 2552,2564 ----
+   		argzero = ztrdup(argzero);
+   	    }
+   	}
+ ! 	startparamscope();
+   	ou = underscore;
+   	underscore = ztrdup(underscore);
+   	execlist(dupstruct(list), 1, 0);
+   	zsfree(underscore);
+   	underscore = ou;
+ ! 	endparamscope();
+   
+   	if (retflag) {
+   	    retflag = 0;
+ *** Src/globals.h	1997/03/27 01:57:48	1.41
+ --- Src/globals.h	1997/03/29 19:17:44
+ ***************
+ *** 373,382 ****
+   EXTERN char *nullcmd;
+   EXTERN char *readnullcmd;
+    
+ - /* the List of local variables we have to destroy */
+ -  
+ - EXTERN LinkList locallist;
+ - 
+   /* what level of localness we are at */
+    
+   EXTERN int locallevel;
+ --- 373,378 ----
+ *** Src/init.c	1997/03/27 01:57:49	1.47
+ --- Src/init.c	1997/03/29 19:17:44
+ ***************
+ *** 535,541 ****
+   
+       breaks = loops = 0;
+       lastmailcheck = time(NULL);
+ -     locallist = NULL;
+       locallevel = sourcelevel = 0;
+       trapreturn = 0;
+       noerrexit = -1;
+ --- 535,540 ----
+ *** Src/params.c	1997/03/29 19:09:42	1.39
+ --- Src/params.c	1997/03/29 19:23:09
+ ***************
+ *** 1954,1996 ****
+       }
+   }
+   
+ ! /* Start a parameter scope: create a lew list for the recording of parameters *
+ !  * local to this new scope.  Returns the list for the enclosing scope, which  *
+ !  * should be stored and then passed to endparamscope().  (Neater, I think,    *
+ !  * than having everyone deal with locallist explicitly.)                      */
+   
+   /**/
+ ! LinkList
+   startparamscope(void)
+   {
+ -     LinkList olist = locallist;
+ - 
+ -     PERMALLOC {
+ - 	locallist = newlinklist();
+ -     } LASTALLOC;
+       locallevel++;
+ -     return olist;
+   }
+   
+   /* End a parameter scope: delete the parameters local to the scope. */
+   
+   /**/
+   void
+ ! endparamscope(LinkList olist)
+   {
+ -     char *s;
+ -     Param pm;
+ - 
+       locallevel--;
+   
+       /* destroy the local variables we have created in the scope just left */
+ !     while ((s = (char *) getlinknode(locallist))) {
+ ! 	if((pm = (Param) paramtab->getnode(paramtab, s)) &&
+ ! 	    (pm->level > locallevel))
+ ! 	    unsetparam_pm(pm, 0, 0);
+ ! 	zsfree(s);
+ !     }
+ !     zfree(locallist, sizeof(struct linklist));
+   
+ !     locallist = olist;	/* restore the old list of local variables */
+   }
+ --- 1954,1998 ----
+       }
+   }
+   
+ ! /* Start a parameter scope */
+   
+   /**/
+ ! void
+   startparamscope(void)
+   {
+       locallevel++;
+   }
+   
+   /* End a parameter scope: delete the parameters local to the scope. */
+   
+ + static LinkList locallist;
+ + 
+   /**/
+   void
+ ! endparamscope(void)
+   {
+       locallevel--;
+   
+       /* destroy the local variables we have created in the scope just left */
+ !     PERMALLOC {
+ ! 	locallist = newlinklist();
+ ! 	scanhashtable(paramtab, 0, 0, 0, scanendscope, 0);
+ ! 	freelinklist(locallist, freeendscope);
+ !     } LASTALLOC;
+ ! }
+   
+ ! /**/
+ ! void
+ ! scanendscope(HashNode hn, int flags)
+ ! {
+ !     Param pm = (Param)hn;
+ !     if(pm->level > locallevel)
+ ! 	addlinknode(locallist, pm);
+ ! }
+ ! 
+ ! /**/
+ ! void
+ ! freeendscope(void *dat)
+ ! {
+ !     unsetparam_pm((Param)dat, 0, 0);
+   }
+ *** Src/Zle/zle_main.c	1997/03/26 09:09:35	1.34
+ --- Src/Zle/zle_main.c	1997/03/29 19:19:56
+ ***************
+ *** 518,527 ****
+   	    zsfree(msg);
+   	    feep();
+   	} else {
+ ! 	  LinkList olist = startparamscope();
+   	  makezleparams();
+   	  doshfunc(l, NULL, 0, 1);
+ ! 	  endparamscope(olist);
+   	  lastcmd = 0;
+   	}
+       }
+ --- 518,527 ----
+   	    zsfree(msg);
+   	    feep();
+   	} else {
+ ! 	  startparamscope();
+   	  makezleparams();
+   	  doshfunc(l, NULL, 0, 1);
+ ! 	  endparamscope();
+   	  lastcmd = 0;
+   	}
+       }
+ *** Src/Zle/zle_params.c	1997/03/23 20:20:44	1.4
+ --- Src/Zle/zle_params.c	1997/03/29 19:17:44
+ ***************
+ *** 88,96 ****
+   	Param pm = createparam(zp->name, zp->type | PM_SPECIAL);
+   
+   	pm->level = locallevel;
+ - 	PERMALLOC {
+ - 	    addlinknode(locallist, ztrdup(zp->name));
+ - 	} LASTALLOC;
+   	pm->u.data = zp->data;
+   	switch(PM_TYPE(zp->type)) {
+   	    case PM_SCALAR:
+ --- 88,93 ----
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.3ia
+Charset: ascii
+
+iQCVAwUBMz2vGXD/+HJTpU/hAQHsygP9E9Fs3oM4V98myX9qnHSUeyhTVGpEpH5+
+SLhd5b2YbvdKvhwdcVp/0WDaNOIyYnrlOwkA2vQ/G86cclIfyMmfWTnMFYjDCvhv
+m20PS/XwETt4VQrgaqaazq28wS5O1yAybHW1HA4JeqOGtRbriqKYiSqaA1ZBkoRo
+kmGTsdz+4u4=
+=bRqr
+-----END PGP SIGNATURE-----
+

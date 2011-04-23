@@ -1,0 +1,124 @@
+From zsh-workers-return-6887-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jun 28 07:05:28 1999
+Return-Path: <zsh-workers-return-6887-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20887 invoked from network); 28 Jun 1999 07:05:27 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 Jun 1999 07:05:27 -0000
+Received: (qmail 11903 invoked by alias); 28 Jun 1999 07:04:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6887
+Received: (qmail 11896 invoked from network); 28 Jun 1999 07:04:26 -0000
+Date: Mon, 28 Jun 1999 09:04:25 +0200 (MET DST)
+Message-Id: <199906280704.JAA09417@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Sun, 27 Jun 1999 08:41:12 +0000
+Subject: Re: Final (?) info on signals/crashes when suspending "mutt" function
+
+
+Bart Schaefer wrote:
+
+> ...
+>
+> YES!  That's IT!  MUTT is calling kill(0, SIGSTOP) and blowing its parent
+> zsh out of the water!  Confirmed by changing "command" to "strace" in the
+> function above.  Mutt expects to be the process group leader, but is not.
+
+Oh, wonderful...
+
+> So that pretty much tears it.  There is no way short of forking a "watcher"
+> subshell for EVERY external process to handle both:
+> (1) badly-behaved programs whose exit status does not reveal that they died
+>     from a signal, and
+> (2) badly-behaved programs that send uncatchable signals to their entire
+>     process group even when they are not the group leader.
+> 
+> The failure in case (1) is far less catastrophic than case (2), so I think
+> the right solution is to back off to the behavior from patch 6707 (that is,
+> scrap 6819 and most of 6824, but 6848 and 6850 are orthogonal and good).
+
+Yes, including the things you said in the follow up, i.e. some bits of 
+6819 are still valid and 6850 will go anyway.
+I also build a patch over the weekend that tried to address Andrej's
+problems, it's appended below. I'll be *very* busy this week, but I'll 
+try to send a patch for it this week. I'm sorry folks, but who'd have
+expected such a behaviour...
+
+Bye
+ Sven
+
+P.S.: Note: parts of this patch may be unneeded when we go back, but
+      I'll make the patch relative to pws-24 with this patch. Ok?
+
+diff -u oos/exec.c Src/exec.c
+--- oos/exec.c	Mon Jun 28 08:37:57 1999
++++ Src/exec.c	Mon Jun 28 08:50:56 1999
+@@ -828,7 +828,7 @@
+     int ipipe[2], opipe[2];
+     int pj, newjob;
+     int old_simple_pline = simple_pline;
+-    static int lastwj;
++    static int lastwj, lpforked;
+ 
+     if (!l->left)
+ 	return lastval = (l->flags & PFLAG_NOT) != 0;
+@@ -865,7 +865,7 @@
+ 	nowait = 0;
+ 	simple_pline = (l->left->type == END);
+     }
+-    lastwj = 0;
++    lastwj = lpforked = 0;
+     execpline2(l->left, how, opipe[0], ipipe[1], last1);
+     pline_level--;
+     if (how & Z_ASYNC) {
+@@ -935,8 +935,8 @@
+ 		    jn->stat & STAT_DONE &&
+ 		    lastval2 & 0200)
+ 		    killpg(mypgrp, lastval2 & ~0200);
+-		if ((list_pipe || last1 || pline_level) &&
+-		    !list_pipe_child && 
++		if (!list_pipe_child && !lpforked && !subsh &&
++		    (list_pipe || last1 || pline_level) &&
+ 		    ((jn->stat & STAT_STOPPED) ||
+ 		     (list_pipe_job && pline_level &&
+ 		      (jobtab[list_pipe_job].stat & STAT_STOPPED)))) {
+@@ -959,6 +959,7 @@
+ 		    else if (pid) {
+ 			char dummy;
+ 
++			lpforked = 1;
+ 			list_pipe_pid = pid;
+ 			nowait = errflag = 1;
+ 			breaks = loops;
+@@ -999,9 +1000,9 @@
+ 
+ 	    if (list_pipe && (lastval & 0200) && pj >= 0 &&
+ 		(!(jn->stat & STAT_INUSE) || (jn->stat & STAT_DONE))) {
++		deletejob(jn);
+ 		jn = jobtab + pj;
+-		jn->stat |= STAT_NOPRINT;
+-		killjb(jobtab + pj, lastval & ~0200);
++		killjb(jn, lastval & ~0200);
+ 	    }
+ 	    if (list_pipe_child || ((list_pipe || pline_level) &&
+ 				    (jn->stat & STAT_DONE)))
+diff -u oos/jobs.c Src/jobs.c
+--- oos/jobs.c	Mon Jun 28 08:37:58 1999
++++ Src/jobs.c	Mon Jun 28 08:50:57 1999
+@@ -799,7 +799,8 @@
+ 			}
+ 		    if (!p) {
+ 			jn->stat &= ~STAT_SUPERJOB;
+-			if (WIFEXITED(jn->procs->status))
++			if (WIFEXITED(jn->procs->status) &&
++			    !(jn->stat & STAT_CURSH))
+ 			    jn->gleader = mypgrp;
+ 			/* This deleted the job too early if the parent
+ 			   shell waited for a command in a list that will
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,240 @@
+From zsh-workers-request@math.gatech.edu Mon Nov 02 10:46:06 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23415 invoked from network); 2 Nov 1998 10:46:03 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 2 Nov 1998 10:46:03 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id FAA12022;
+	Mon, 2 Nov 1998 05:38:36 -0500 (EST)
+Resent-Date: Mon, 2 Nov 1998 05:38:36 -0500 (EST)
+Date: Mon, 2 Nov 1998 11:36:33 +0100 (MET)
+Message-Id: <199811021036.LAA22116@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@math.gatech.edu
+In-reply-to: coordinator@zsh.org's message of Fri, 30 Oct 1998 11:48:53 GMT
+Subject: completion behaviour (was: zsh-workers: zsh-3.1.5 released)
+Resent-Message-ID: <"uAgp3.0.nx2.ikOFs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4495
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+
+Zefram wrote:
+
+> 
+> Sven: would you please update your completion patches, and post
+> new versions based on vanilla 3.1.5.  Specifically, the patches for
+> inclusive ORing, grouping of completions, and the configurable fuzziness
+> of matching.  I like all of these features.
+> 
+
+Before I start incorporating these things into 3.1.5 I'd like to ask a
+few questions.
+
+We had some discusssion about a new way to define completion behaviour 
+which (seemingly) settled on: let's use shell functions and offer a
+few new builtins. So, if I implement this, do we really want the
+changes to compctl (note: I mean compctl, most of the changes in the
+completion code itself would be used anyway) or should we leave
+compctl alone and offer the new possibilities through the new way to
+define completion behaviour, thereby giving some incentive to switch
+to the new way?
+
+Anyway, here is my suggestion for this new completion definition
+stuff:
+
+
+We use zle widgets, probably a new kind of widgets that uses some more 
+special variables, like:
+
+  CMDSTR   - the name of the current command, with some special values
+             it could be used for certain contexts (conditions, math
+             expressions, ...)
+  words    - the words of the current command (an array)
+  CURWORD  - the number of the current word (for words[CURWORD])
+  PREFIX   - the prefix of the current word
+  SUFFIX   - ...
+  NMATCHES - the number of matches produced so far
+
+Of course, many more interesting things can be thought of.
+
+Using a special widget for this ensures that we have a common wrapper
+function in the C code that must be used. The new builtins can be
+called only from  such a widget or functions called from it and in the 
+C code this should make it possible to leave most of the completion
+code unchanged (especially the allocation behaviour).
+
+The general procedure would be to define such a completion widget that
+serves as a kind of main loop, calls other functions to produce the
+matches and finally decides what to do with the matches (listing,
+inserting, ...)
+
+To make the definition and calling of completion functions for certain
+commands easier there could be a new builtin, say `compfunc':
+
+  compfunc -a <func-name> <cmd-names-or-patterns ...>
+
+    Makes <func-name> be called for the given command. <func-name> may 
+    be one of a few special strings for replacing `compctl -C -T -D'.
+
+  compfunc -d <cmd-names-or-patterns ...>
+
+    Deletes definitions.
+
+  compfunc -c [ <cmd-str> ]
+
+    Makes all of the defined functions for $CMDSTR or the given
+    <cmd-str> be called (this is most of the main loop of the current
+    completion code). We could use the return code of the completion
+    functions to decide whether more functions should be called or
+    not.
+
+  compfunc [ -L ]
+
+    Lists the definitions, probably in a form that could be used in
+    .zshrc or wherever.
+
+For producing the actual matches there is another builtin, say
+`compadd'. For simplicity we could make it use the same flags
+`compctl' uses now, but without `-x', `+', and the like, i.e. only the 
+simple match-producing flags. This would allow us to re-use most of
+the code for compctl and since only the simple flags would be
+supported, the irritating part of compctl would not be inherited.
+
+On the other side we might wih to clean things up and make `compadd'
+get new options for the things to produce. This could also be combined 
+with a different way to handle control flags (-U, -q,
+grouping,...). We could make these flags be used `from now on' and
+probably have a way to save/restore the current set of control flags
+(whose state would be stored together with the matches produced),
+e.g. (in an easy-to-read syntax):
+
+  compadd -push
+  compadd -quote -suffix '/'
+  compadd -files               # optional glob pattern here
+  ...
+  compadd -pop
+
+I'm not quite sure which would be better. But of course it should be
+possible to write some helper functions that offer one of the syntaxes 
+and internally uses the other.
+
+Probably the most important change would be how xor'ed completion,
+extended completion, and the like are handled - using shell
+constructs.
+
+Xor'ed completion is simple if we have the special variables mentioned 
+above (or some way to get this information from the completion code):
+
+  old=$NMATCHES
+  compadd ...                        # try to produce some matches
+  ...
+  if [[ $old -eq $NMATCHES ]] then   # this is the xor test
+    compadd ...
+    ...
+  fi
+                                     # more xor tests could be here
+
+More interesting is the replacement for `compctl -x'. As Bart already
+pointed out, we could use things like:
+
+  if [[ "$words[CURWORD-1]" = "-I" ]] then
+    compadd -W /usr/include -/
+  fi
+
+I.e. use the normal shell tests and the special variables. But there
+is a problem with this: with compctl the `-x' - tests not only test
+for a certain condition, but also report some information back,
+namely: the length of an prefix that should be ignored in the
+completion string and (with `r[a,b]') a restriction on the command
+words that should be used with `compctl -L'. Both of them are
+important to have and aren't that easy to do by hand, so we might want 
+to add a builtin for testing, say `comptest' that has options for the
+different tests and automatically makes the completion code use the
+resulting restrictions. Since these restrictions should be used only
+for some `compadd's, we would also need a way to switch back to the
+original (or previous) state, e.g.:
+
+  if comptest -suffix '-'; then      # makes `-' be ignored
+    compadd ...
+    ...
+    comptest -fin                    # old state again
+  fi
+
+Alternatively we could have a option meaning: activate the
+restrictions resulting from the last test.
+
+Finally we would need a way to insert the matches or the unambiguous
+string for normal completion in the line. Since we are in a zle widget 
+we could just add a way to get the prefix/suffix to insert from the
+completion code and than fiddle with [LR]BUFFER (there is a problem
+with automatically removable suffixes).
+
+So we might add a builtin to control all this, e.g.:
+
+  complist -i [ <number> ]
+
+    The first effect of this is that the completion code calculates
+    the things the user might want to insert. Without argument this
+    inserts the unambiguous string, with argument it inserts the
+    <number>'th match (this is needed to implement the menu-completion
+    behaviour).
+
+  complist -k
+
+    This notifies the completion code that the list of matches is to
+    be kept so that the next invocation of the completion widget can
+    test if there is still a valid list of matches and then continue
+    menu-completion.
+
+  complist -c
+
+    This is the counterpart of `-k'. If the completion widget still
+    has a a valid list but the completion string has changed we need
+    to clear the list so that we can produce the matches for the new
+    string.
+
+`complist' should also offer ways to access some more information,
+especially we need a way to decide if the recexact and listambiguous
+behaviour should be emulated.
+
+Finally we need a way to make the completion code list the matches
+found. This could be done with `complist' or by using the return code
+of the completion widget.
+
+Some final remarks:
+
+- Using special variables isn't necessary, we could offer a way to
+  make the information be stored in some variables with use-supplied
+  names (and partially we already have this, of course).
+- The new builtins may have different names and options. Also I'd like 
+  to think about combining soome of the builtins.
+- The matching control could be improved, too (not only the syntax ;-). 
+  We might have a builtin/optio to some builtin for defining sets of
+  matching controls under a user-supplied name and a flag to `compadd' 
+  that uses these names.
+- Using shell functions may also be a first step in supporting
+  higher-level descriptions, e.g.:
+
+    function opt-arg() {
+      [[ "$words[CURWORD-1]" = "$1" ]] && compadd "$argv[2,-1]"
+    }
+
+  With that we could make paths in `/usr/include' after `-I' be
+  completed with: 
+
+    opt-arg -I -W /usr/include -/
+
+
+So, now I would like to read some comments about all this ;-)
+
+Bye
+ Sven
+
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

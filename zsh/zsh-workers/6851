@@ -1,0 +1,299 @@
+From zsh-workers-return-6851-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jun 25 13:05:37 1999
+Return-Path: <zsh-workers-return-6851-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8702 invoked from network); 25 Jun 1999 13:05:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Jun 1999 13:05:35 -0000
+Received: (qmail 24050 invoked by alias); 25 Jun 1999 13:05:03 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6851
+Received: (qmail 23937 invoked from network); 25 Jun 1999 13:04:14 -0000
+Message-Id: <9906251235.AA17296@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: pws-??: typeset -g & more wretched typeset scoping bugs
+Date: Fri, 25 Jun 1999 14:35:21 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+This adds the option -g to typeset which forces any parameter created not
+to be made local (which is not the same as making it global); it's pretty
+simple because the logic was already used for export.  Note that for
+obvious reasons `local' doesn't get a -g flag.
+
+-g is only used for creating variables, but the effect is passed down to
+createparam() because there was no way for that to know whether it should
+use an existing pm struct even if it was at a different level of localness.
+That also fixes this existing bug:
+
+% foo=global
+% fn() { typeset foo=lev1; unset foo; fn2; }
+% fn2() { export foo=lev2exp; }
+% print $foo
+global
+% fn 
+% print $foo
+lev2exp
+
+where according to the current rules (it's even documented!), foo remains
+local inside fn even when unset (and in fact the pm struct was being hidden
+by the new global foo, which was certainly wrong according to any rules).
+
+Then I discovered that it was worse than that: you don't need the export in
+fn2, a standard assignment will cause the problem.  That's why the flag is
+called PM_LOCAL rather than PM_GLOBAL: only typeset and its pseudonyms
+should ever make anything local, so any other call to createparam() doesn't
+have the PM_LOCAL flag and hence acts like typeset -g, which is what you
+would expect.  The exception is the zle and completion parameters, which
+are always local, so they pass down PM_LOCAL too. (The rule is simple: if
+pm->local is subsequently going to be set to a non-zero locallevel,
+PM_LOCAL should be passed down to createparam().)
+
+I've also handled PM_AUTOLOAD the same way as things which change the type
+of the parameter, which means the existing struct is used (provided the
+level of localness is correct) if the type doesn't change, and if it does
+change the struct is unset and regenerated at the same local level.  This
+seems to me correct, but I haven't looked at all the possible consequences.
+
+(Please God, let this be correct this time.)
+
+The comment in typeset_single() is just to try to deconfuse myself.
+
+--- Doc/Zsh/builtins.yo.global	Wed Jun 23 09:47:12 1999
++++ Doc/Zsh/builtins.yo	Fri Jun 25 11:22:28 1999
+@@ -264,8 +264,7 @@
+ item(tt(export) [ var(name)[tt(=)var(value)] ... ])(
+ The specified var(name)s are marked for automatic export
+ to the environment of subsequently executed commands.
+-Equivalent to tt(typeset -x), except that no parameter will be created
+-to hide an existing one in an outer scope.
++Equivalent to tt(typeset -gx).
+ If a parameter specified does not
+ already exist, it is created in the global scope.
+ )
+@@ -429,7 +428,7 @@
+ )
+ alias(history)(fc -l)
+ findex(integer)
+-item(tt(integer) [ {tt(PLUS())|tt(-)}tt(lrtux) ] [ var(name)[tt(=)var(value)] ... ])(
++item(tt(integer) [ {tt(PLUS())|tt(-)}tt(glrtux) ] [ var(name)[tt(=)var(value)] ... ])(
+ Equivalent to tt(typeset -i), except that options irrelevant to
+ integers are not permitted.
+ )
+@@ -523,7 +522,7 @@
+ )
+ findex(local)
+ item(tt(local) [ {tt(PLUS())|tt(-)}tt(ALRUZailrtu) [var(n)]] [ var(name)[tt(=)var(value)] ] ...)(
+-Same as tt(typeset), except that the options tt(-x) and
++Same as tt(typeset), except that the options tt(-g), tt(-x) and
+ tt(-f) are not permitted.
+ )
+ findex(log)
+@@ -904,7 +903,7 @@
+ findex(typeset)
+ cindex(parameters, setting)
+ cindex(parameters, declaring)
+-xitem(tt(typeset) [ {tt(PLUS())|tt(-)}tt(ALRUZafilrtuxm) [var(n)]] [ \
++xitem(tt(typeset) [ {tt(PLUS())|tt(-)}tt(ALRUZafgilrtuxm) [var(n)]] [ \
+ var(name)[tt(=)var(value)] ... ])
+ item(tt(typeset) -T [ {tt(PLUS()|tt(-))}tt(LRUZrux) ] \
+   var(SCALAR)[tt(=)var(value)] var(array))(
+@@ -942,6 +941,14 @@
+ to var(array) sets it to be a single-element array.  Note that
+ both tt(typeset -xT ...) and tt(export -T ...) work, but only the
+ scalar will be marked for export.
++
++The flag tt(-g) (global) flag is treated specially: it means that any
++resulting parameter will not be restricted to local scope.  Note that this
++does not necessarily mean that the parameter will be global, as the flag
++will apply to any existing parameter (even if unset) from an enclosing
++function.  This flag does not affect the parameter after creation, hence it
++has no effect when listing existing parameters, nor does the flag tt(+g)
++have any effect.
+ 
+ If no var(name) is present, the names and values of all parameters are
+ printed.  In this case the attribute flags restrict the display to
+--- Src/Zle/compctl.c.global	Thu Jun 17 14:07:43 1999
++++ Src/Zle/compctl.c	Fri Jun 25 13:56:31 1999
+@@ -2221,7 +2221,8 @@
+ addcompparams(struct compparam *cp, Param *pp)
+ {
+     for (; cp->name; cp++, pp++) {
+-	Param pm = createparam(cp->name, cp->type | PM_SPECIAL | PM_REMOVABLE);
++	Param pm = createparam(cp->name,
++			       cp->type |PM_SPECIAL|PM_REMOVABLE|PM_LOCAL);
+ 	if (!pm)
+ 	    pm = (Param) paramtab->getnode(paramtab, cp->name);
+ 	DPUTS(!pm, "param not set in addcompparams");
+@@ -2261,7 +2262,8 @@
+ 
+     addcompparams(comprparams, comprpms);
+ 
+-    if (!(cpm = createparam(COMPSTATENAME, PM_SPECIAL|PM_REMOVABLE|PM_HASHED)))
++    if (!(cpm = createparam(COMPSTATENAME,
++			    PM_SPECIAL|PM_REMOVABLE|PM_LOCAL|PM_HASHED)))
+ 	cpm = (Param) paramtab->getnode(paramtab, COMPSTATENAME);
+     DPUTS(!cpm, "param not set in makecompparams");
+ 
+--- Src/Zle/zle_params.c.global	Thu Jun 17 13:52:55 1999
++++ Src/Zle/zle_params.c	Fri Jun 25 13:54:54 1999
+@@ -84,7 +84,7 @@
+ 
+     for(zp = zleparams; zp->name; zp++) {
+ 	Param pm = createparam(zp->name, (zp->type |PM_SPECIAL|PM_REMOVABLE|
+-					  (ro ? PM_READONLY : 0)));
++					  PM_LOCAL|(ro ? PM_READONLY : 0)));
+ 	if (!pm)
+ 	    pm = (Param) paramtab->getnode(paramtab, zp->name);
+ 	DPUTS(!pm, "param not set in makezleparams");
+--- Src/builtin.c.global	Fri Jun 25 12:04:27 1999
++++ Src/builtin.c	Fri Jun 25 14:15:03 1999
+@@ -50,7 +50,7 @@
+     BUILTIN("cd", 0, bin_cd, 0, 2, BIN_CD, NULL, NULL),
+     BUILTIN("chdir", 0, bin_cd, 0, 2, BIN_CD, NULL, NULL),
+     BUILTIN("continue", BINF_PSPECIAL, bin_break, 0, 1, BIN_CONTINUE, NULL, NULL),
+-    BUILTIN("declare", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "ALRTUZafilrtux", NULL),
++    BUILTIN("declare", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "ALRTUZafgilrtux", NULL),
+     BUILTIN("dirs", 0, bin_dirs, 0, -1, 0, "v", NULL),
+     BUILTIN("disable", 0, bin_enable, 0, -1, BIN_DISABLE, "afmr", NULL),
+     BUILTIN("disown", 0, bin_fg, 0, -1, BIN_DISOWN, NULL, NULL),
+@@ -60,7 +60,7 @@
+     BUILTIN("enable", 0, bin_enable, 0, -1, BIN_ENABLE, "afmr", NULL),
+     BUILTIN("eval", BINF_PSPECIAL, bin_eval, 0, -1, BIN_EVAL, NULL, NULL),
+     BUILTIN("exit", BINF_PSPECIAL, bin_break, 0, 1, BIN_EXIT, NULL, NULL),
+-    BUILTIN("export", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, BIN_EXPORT, "LRTUZafilrtu", "x"),
++    BUILTIN("export", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, BIN_EXPORT, "LRTUZafilrtu", "xg"),
+     BUILTIN("false", 0, bin_false, 0, -1, 0, NULL, NULL),
+     BUILTIN("fc", BINF_FCOPTS, bin_fc, 0, -1, BIN_FC, "nlreIRWAdDfEim", NULL),
+     BUILTIN("fg", 0, bin_fg, 0, -1, BIN_FG, NULL, NULL),
+@@ -74,7 +74,7 @@
+ #endif
+ 
+     BUILTIN("history", 0, bin_fc, 0, -1, BIN_FC, "nrdDfEim", "l"),
+-    BUILTIN("integer", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "lrtux", "i"),
++    BUILTIN("integer", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "glrtux", "i"),
+     BUILTIN("jobs", 0, bin_fg, 0, -1, BIN_JOBS, "dlpZrs", NULL),
+     BUILTIN("kill", 0, bin_kill, 0, -1, 0, NULL, NULL),
+     BUILTIN("let", 0, bin_let, 1, -1, 0, NULL, NULL),
+@@ -93,7 +93,7 @@
+     BUILTIN("pwd", 0, bin_pwd, 0, 0, 0, "rLP", NULL),
+     BUILTIN("r", BINF_R, bin_fc, 0, -1, BIN_FC, "nrl", NULL),
+     BUILTIN("read", 0, bin_read, 0, -1, 0, "rzu0123456789pkqecnAlE", NULL),
+-    BUILTIN("readonly", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "ALRTUZafiltux", "r"),
++    BUILTIN("readonly", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "ALRTUZafgiltux", "r"),
+     BUILTIN("rehash", 0, bin_hash, 0, 0, 0, "dfv", "r"),
+     BUILTIN("return", BINF_PSPECIAL, bin_break, 0, 1, BIN_RETURN, NULL, NULL),
+     BUILTIN("set", BINF_PSPECIAL, bin_set, 0, -1, 0, NULL, NULL),
+@@ -107,7 +107,7 @@
+     BUILTIN("trap", BINF_PSPECIAL, bin_trap, 0, -1, 0, NULL, NULL),
+     BUILTIN("true", 0, bin_true, 0, -1, 0, NULL, NULL),
+     BUILTIN("type", 0, bin_whence, 0, -1, 0, "ampfsw", "v"),
+-    BUILTIN("typeset", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "ALRTUZafilrtuxm", NULL),
++    BUILTIN("typeset", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "ALRTUZafgilrtuxm", NULL),
+     BUILTIN("umask", 0, bin_umask, 0, 1, 0, "S", NULL),
+     BUILTIN("unalias", 0, bin_unhash, 1, -1, 0, "m", "a"),
+     BUILTIN("unfunction", 0, bin_unhash, 1, -1, 0, "m", "f"),
+@@ -1494,8 +1494,14 @@
+ {
+     int usepm, tc, keeplocal = 0;
+ 
+-    /* use the existing pm? */
+-    usepm = pm && !(pm->flags & (PM_UNSET | PM_AUTOLOAD));
++    /*
++     * Do we use the existing pm?  Note that this isn't the end of the
++     * story, because if we try and create a new pm at the same
++     * locallevel as an unset one we use the pm struct anyway: that's
++     * handled in createparam().  Here we just avoid using it for the
++     * present tests if it's unset.
++     */
++    usepm = pm && !(pm->flags & PM_UNSET);
+ 
+     /* Always use an existing pm if special at current locallevel */
+     if (pm && (pm->flags & PM_SPECIAL) && pm->level == locallevel)
+@@ -1504,15 +1510,15 @@
+     /*
+      * Don't use a non-special existing param if
+      *   - the local level has changed, and
+-     *   - the function is not `export'.
++     *   - we are really locallizing the parameter
+      */
+     if (usepm && !(pm->flags & PM_SPECIAL) &&
+-	locallevel != pm->level && func != BIN_EXPORT)
++	locallevel != pm->level && (on & PM_LOCAL))
+ 	usepm = 0;
+ 
+     /* attempting a type conversion, or making a tied colonarray? */
+     if ((tc = usepm && (((off & pm->flags) | (on & ~pm->flags)) &
+-			(PM_INTEGER|PM_HASHED|PM_ARRAY|PM_TIED))))
++			(PM_INTEGER|PM_HASHED|PM_ARRAY|PM_TIED|PM_AUTOLOAD))))
+ 	usepm = 0;
+     if (tc && (pm->flags & PM_SPECIAL)) {
+ 	zerrnam(cname, "%s: can't change type of a special parameter",
+@@ -1607,7 +1613,7 @@
+ 
+     if (keeplocal)
+ 	pm->level = keeplocal;
+-    else if (func != BIN_EXPORT)
++    else if (on & PM_LOCAL)
+ 	pm->level = locallevel;
+     if (value && !(pm->flags & (PM_ARRAY|PM_HASHED)))
+ 	setsparam(pname, ztrdup(value));
+@@ -1649,6 +1655,9 @@
+ 	else if (ops[STOUC(*optstr)] == 2)
+ 	    off |= bit;
+     roff = off;
++
++    if (!ops['g'])
++	on |= PM_LOCAL;
+ 
+     /* Sanity checks on the options.  Remove conficting options. */
+     if (on & PM_INTEGER)
+--- Src/params.c.global	Fri Jun 25 12:02:10 1999
++++ Src/params.c	Fri Jun 25 13:45:11 1999
+@@ -588,7 +588,7 @@
+ 
+ 	DPUTS(oldpm && oldpm->level > locallevel,
+ 	      "BUG:  old local parameter not deleteed");
+-	if (oldpm && oldpm->level == locallevel) {
++	if (oldpm && (oldpm->level == locallevel || !(flags & PM_LOCAL))) {
+ 	    if (!(oldpm->flags & PM_UNSET) || (oldpm->flags & PM_SPECIAL)) {
+ 		oldpm->flags &= ~PM_UNSET;
+ 		return NULL;
+@@ -616,7 +616,7 @@
+ 	pm = (Param) alloc(sizeof *pm);
+ 	pm->nam = nulstring;
+     }
+-    pm->flags = flags;
++    pm->flags = flags & ~PM_LOCAL;
+ 
+     if(!(pm->flags & PM_SPECIAL))
+ 	assigngetset(pm);
+--- Src/zsh.h.global	Mon Jun 21 11:20:55 1999
++++ Src/zsh.h	Fri Jun 25 13:42:42 1999
+@@ -976,12 +976,13 @@
+ #define PM_UNALIASED	(1<<11)	/* do not expand aliases when autoloading     */
+ 
+ #define PM_TIED 	(1<<12)	/* array tied to colon-path or v.v. */
+-#define PM_SPECIAL	(1<<13) /* special builtin parameter                  */
+-#define PM_DONTIMPORT	(1<<14)	/* do not import this variable                */
+-#define PM_RESTRICTED	(1<<15) /* cannot be changed in restricted mode       */
+-#define PM_UNSET	(1<<16)	/* has null value                             */
+-#define PM_REMOVABLE	(1<<17)	/* special can be removed from paramtab */
+-#define PM_AUTOLOAD     (1<<18) /* autoloaded from module */
++#define PM_LOCAL	(1<<13) /* this parameter will be made local */
++#define PM_SPECIAL	(1<<14) /* special builtin parameter                  */
++#define PM_DONTIMPORT	(1<<15)	/* do not import this variable                */
++#define PM_RESTRICTED	(1<<16) /* cannot be changed in restricted mode       */
++#define PM_UNSET	(1<<17)	/* has null value                             */
++#define PM_REMOVABLE	(1<<18)	/* special can be removed from paramtab */
++#define PM_AUTOLOAD     (1<<19) /* autoloaded from module */
+ 
+ /* Flags for extracting elements of arrays and associative arrays */
+ #define SCANPM_WANTVALS   (1<<0)
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

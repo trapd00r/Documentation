@@ -1,0 +1,152 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Wed Mar 26 17:53:25 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 20348 invoked from network); 26 Mar 1997 17:53:22 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 26 Mar 1997 17:53:22 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id MAA17655; Wed, 26 Mar 1997 12:43:40 -0500 (EST)
+Resent-Date: Wed, 26 Mar 1997 12:43:40 -0500 (EST)
+Date: Wed, 26 Mar 1997 17:46:21 GMT
+From: Zefram <zefram@dcs.warwick.ac.uk>
+Message-Id: <11717.199703261746@stone.dcs.warwick.ac.uk>
+Subject: ksh autoloading
+X-Patch: 230
+Resent-Message-ID: <"0QM3n3.0.lJ4.B1MEp"@euclid>
+To: zsh-workers@math.gatech.edu
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3032
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+This patch changes the way ksh autoloading is handled.  Currently it is
+a kludge in execshfunc(), that if a function that was just autoloaded
+redefines itself on first execution, it is executed again.  This breaks
+on functions that really want to redefine themselves, which some do,
+and in any case isn't applied to functions autoloaded for other purposes,
+such as chpwd or widget functions.
+
+The new scheme is that when a list has been read from the file and parsed,
+it is examined to see if it is *in its entirety* a definition of the
+function being loaded.  If it is, then the contents of that definition
+is used, rather than the complete list.  This has much better defined
+semantics than the old method.
+
+ -zefram
+
+      *** Src/exec.c	1997/03/22 07:00:53	1.53
+      --- Src/exec.c	1997/03/26 02:57:18
+      ***************
+      *** 2482,2505 ****
+        	if (!(funcdef = getfpfunc(nam))) {
+        	    zerr("function not found: %s", nam, 0);
+        	    lastval = 1;
+      ! 	} else {
+      ! 	    PERMALLOC {
+      ! 		shf->flags &= ~PM_UNDEFINED;
+      ! 		funcdef = shf->funcdef = (List) dupstruct(funcdef);
+      ! 	    } LASTALLOC;
+      ! 
+      ! 	    /* Execute the function definition, we just retrived */
+      ! 	    doshfunc(shf->funcdef, cmd->args, shf->flags, 0);
+      ! 
+      ! 	    /* See if this file defined the autoloaded function *
+      ! 	     * by name.  If so, we execute it again.            */
+      ! 	    if ((shf = (Shfunc) shfunctab->getnode(shfunctab, nam))
+      ! 		&& shf->funcdef && shf->funcdef != funcdef)
+      ! 		doshfunc(shf->funcdef, cmd->args, shf->flags, 0);
+      ! 	}
+      !     } else
+      ! 	/* Normal shell function execution */
+      ! 	doshfunc(shf->funcdef, cmd->args, shf->flags, 0);
+            if (!list_pipe)
+        	deletefilelist(last_file_list);
+        }
+      --- 2482,2497 ----
+        	if (!(funcdef = getfpfunc(nam))) {
+        	    zerr("function not found: %s", nam, 0);
+        	    lastval = 1;
+      ! 	    goto end;
+      ! 	}
+      ! 	shf->flags &= ~PM_UNDEFINED;
+      ! 	PERMALLOC {
+      ! 	    shf->funcdef = (List) dupstruct(funcdef);
+      ! 	} LASTALLOC;
+      !     }
+      !     doshfunc(shf->funcdef, cmd->args, shf->flags, 0);
+      ! 
+      !     end:
+            if (!list_pipe)
+        	deletefilelist(last_file_list);
+        }
+      ***************
+      *** 2658,2664 ****
+        			r = parse_string(d);
+        		    } LASTALLOC;
+        		    zfree(d, len + 1);
+      ! 		    return r;
+        		} else {
+        		    zfree(d, len + 1);
+        		    close(fd);
+      --- 2650,2656 ----
+        			r = parse_string(d);
+        		    } LASTALLOC;
+        		    zfree(d, len + 1);
+      ! 		    return stripkshdef(r, s);
+        		} else {
+        		    zfree(d, len + 1);
+        		    close(fd);
+      ***************
+      *** 2669,2674 ****
+      --- 2661,2697 ----
+        	}
+            }
+            return NULL;
+      + }
+      + 
+      + /* Handle ksh-style autoloading.  Given the list read from an autoload file, *
+      +  * and the name of the function being defined, check to see if the file      *
+      +  * consists entirely of a single definition for that function.  If so,       *
+      +  * use the contents of that definition.  Otherwise, use the entire file.     */
+      + 
+      + /**/
+      + List
+      + stripkshdef(List l, char *name)
+      + {
+      +     Sublist s;
+      +     Pline p;
+      +     Cmd c;
+      +     if(!l)
+      + 	return NULL;
+      +     if(l->type != Z_SYNC || l->right)
+      + 	return l;
+      +     s = l->left;
+      +     if(s->flags || s->right)
+      + 	return l;
+      +     p = s->left;
+      +     if(p->right)
+      + 	return l;
+      +     c = p->left;
+      +     if(c->type != FUNCDEF || c->flags ||
+      + 	nonempty(c->redir) || nonempty(c->vars) ||
+      + 	empty(c->args) || lastnode(c->args) != firstnode(c->args) ||
+      + 	strcmp(name, peekfirst(c->args)))
+      + 	return l;
+      +     return c->u.list;
+        }
+        
+        /* check to see if AUTOCD applies here */
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.3ia
+Charset: ascii
+
+iQCVAwUBMziTIXD/+HJTpU/hAQHmbQP7B++6X39X6L344dwuvXKO23W22kvhWW/T
+P0Vc60AOgL/09xfzQO68nOlwawQFFLedtznwwMExpPbAn5lARw81JjTDG1jONyJN
+sEtoK31eQHcbBYtbOk17MWF5TeFlsPm7aap2/seKXE/djuS9yUZP6tTjCwN/6A0J
+FDwUrNL2yek=
+=MxJ5
+-----END PGP SIGNATURE-----
+

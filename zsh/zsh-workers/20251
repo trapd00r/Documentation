@@ -1,0 +1,330 @@
+From zsh-workers-return-20251-mason-zsh=primenet.com.au@sunsite.dk Mon Aug 09 17:39:08 2004
+Return-Path: <zsh-workers-return-20251-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2006 invoked from network); 9 Aug 2004 17:39:07 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 9 Aug 2004 17:39:07 -0000
+Received: (qmail 28119 invoked from network); 9 Aug 2004 17:39:02 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 9 Aug 2004 17:39:02 -0000
+Received: (qmail 14386 invoked by alias); 9 Aug 2004 17:38:48 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 20251
+Received: (qmail 14371 invoked from network); 9 Aug 2004 17:38:47 -0000
+Received: from unknown (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by 130.225.247.90 with SMTP; 9 Aug 2004 17:38:47 -0000
+Received: (qmail 27138 invoked from network); 9 Aug 2004 17:37:15 -0000
+Received: from lhuumrelay3.lnd.ops.eu.uu.net (62.189.58.19)
+  by a.mx.sunsite.dk with SMTP; 9 Aug 2004 17:37:14 -0000
+Received: from MAILSWEEPER01.csr.com (mailhost1.csr.com [62.189.183.235])
+	by lhuumrelay3.lnd.ops.eu.uu.net (8.11.0/8.11.0) with ESMTP id i79HbDv05522
+	for <zsh-workers@sunsite.dk>; Mon, 9 Aug 2004 17:37:13 GMT
+Received: from EXCHANGE02.csr.com (unverified [192.168.137.45]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T6b513f05fcc0a88d01320@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Mon, 9 Aug 2004 18:36:25 +0100
+Received: from news01.csr.com ([192.168.143.38]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Mon, 9 Aug 2004 18:39:38 +0100
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.12.11/8.12.11) with ESMTP id i79HbBak013527
+	for <zsh-workers@sunsite.dk>; Mon, 9 Aug 2004 18:37:11 +0100
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.12.11/8.12.11/Submit) with ESMTP id i79HbBrh013524
+	for <zsh-workers@sunsite.dk>; Mon, 9 Aug 2004 18:37:11 +0100
+Message-Id: <200408091737.i79HbBrh013524@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: truncation warning
+Date: Mon, 09 Aug 2004 18:37:10 +0100
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 09 Aug 2004 17:39:38.0311 (UTC) FILETIME=[D7DD1D70:01C47E37]
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.0 required=6.0 tests=none autolearn=no version=2.63
+X-Spam-Hits: 0.0
+
+This doesn't fix the problem to do with the inconsistent sizes of
+parameters and internal variables, but how does everybody feel about
+truncating a string converted to a number if necessary and warning when
+that happens?
+
+With 64-bit arithmetic, for example:
+
+% integer foo=-0x8000000000000000
+% print $foo
+-16#8000000000000000
+% integer foo=-0x8000000000000001
+zsh: number truncated after 15 digits: 8000000000000001
+% print $foo
+-16#800000000000000
+
+Raising an error would in principle be possible, but would need some
+rewriting since it looks like errflag is being reset in cases like those
+above and is not being tested between the call to zstrtol and the
+assignment.  The current assumption is that zstrtol() always works, and
+it's heavily used, so this isn't a simple change.  In fact, it's likely
+to be a nightmare to make really consistent since a lot of the uses are
+deep in the bowels of the shell.
+
+The special case of the smallest negative integer accounts for most of
+the code in the patch.  In particular, the math parser had to be
+rewritten to parse the value as a single constant.  (This means
+`- 0x8000000000000000' doesn't work, but actually that agrees with my
+understanding of the grammar:  it consists of two tokens, the second of
+which isn't a representable integer.)
+
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.20
+diff -u -r1.20 math.c
+--- Src/math.c	13 May 2004 20:04:24 -0000	1.20
++++ Src/math.c	9 Aug 2004 17:34:52 -0000
+@@ -186,6 +186,68 @@
+ /* 50 */  LR|OP_OPF, RL|OP_E2, LR|OP_OPF
+ };
+ 
++static int
++lexconstant(void)
++{
++#ifdef USE_LOCALE
++    char *prev_locale;
++#endif
++    char *nptr;
++
++    nptr = ptr;
++    if (*nptr == '-')
++	nptr++;
++
++    if (*nptr == '0')
++    {
++	nptr++;
++	if (*nptr == 'x' || *nptr == 'X') {
++	    /* Let zstrtol parse number with base */
++	    yyval.u.l = zstrtol(ptr, &ptr, 0);
++	    /* Should we set lastbase here? */
++	    lastbase = 16;
++	    return NUM;
++	}
++	else if (isset(OCTALZEROES) &&
++		 (memchr(nptr, '.', strlen(nptr)) == NULL) &&
++		 idigit(*nptr)) {
++	    yyval.u.l = zstrtol(ptr, &ptr, 0);
++	    lastbase = 8;
++	    return NUM;
++	}
++    }
++
++    while (idigit(*nptr))
++	nptr++;
++
++    if (*nptr == '.' || *nptr == 'e' || *nptr == 'E') {
++	/* it's a float */
++	yyval.type = MN_FLOAT;
++#ifdef USE_LOCALE
++	prev_locale = dupstring(setlocale(LC_NUMERIC, NULL));
++	setlocale(LC_NUMERIC, "POSIX");
++#endif
++	yyval.u.d = strtod(ptr, &nptr);
++#ifdef USE_LOCALE
++	if (prev_locale) setlocale(LC_NUMERIC, prev_locale);
++#endif
++	if (ptr == nptr || *nptr == '.') {
++	    zerr("bad floating point constant", NULL, 0);
++	    return EOI;
++	}
++	ptr = nptr;
++    } else {
++	/* it's an integer */
++	yyval.u.l = zstrtol(ptr, &ptr, 10);
++
++	if (*ptr == '#') {
++	    ptr++;
++	    yyval.u.l = zstrtol(ptr, &ptr, lastbase = yyval.u.l);
++	}
++    }
++    return NUM;
++}
++
+ /**/
+ int outputradix;
+ 
+@@ -193,9 +255,6 @@
+ static int
+ zzlex(void)
+ {
+-#ifdef USE_LOCALE
+-    char *prev_locale;
+-#endif
+     int cct = 0;
+     yyval.type = MN_INTEGER;
+ 
+@@ -220,7 +279,14 @@
+ 		ptr++;
+ 		return MINUSEQ;
+ 	    }
+-	    return (unary) ? UMINUS : MINUS;
++	    if (unary) {
++		if (idigit(*ptr) || *ptr == '.') {
++		    ptr--;
++		    return lexconstant();
++		} else
++		    return UMINUS;
++	    } else
++		return MINUS;
+ 	case '(':
+ 	    return M_INPAR;
+ 	case ')':
+@@ -376,52 +442,10 @@
+ 	case '\t':
+ 	case '\n':
+ 	    break;
+-	case '0':
+-	    if (*ptr == 'x' || *ptr == 'X') {
+-		ptr++;
+-		/* Should we set lastbase here? */
+-		yyval.u.l = zstrtol(ptr, &ptr, lastbase = 16);
+-		return NUM;
+-	    }
+-	    else if (isset(OCTALZEROES) &&
+-		    (memchr(ptr, '.', strlen(ptr)) == NULL) &&
+-		     idigit(*ptr)) {
+-	        yyval.u.l = zstrtol(ptr, &ptr, lastbase = 8);
+-		return NUM;
+-	    }
+ 	/* Fall through! */
+ 	default:
+-	    if (idigit(*--ptr) || *ptr == '.') {
+-		char *nptr;
+-		for (nptr = ptr; idigit(*nptr); nptr++);
+-
+-		if (*nptr == '.' || *nptr == 'e' || *nptr == 'E') {
+-		    /* it's a float */
+-		    yyval.type = MN_FLOAT;
+-#ifdef USE_LOCALE
+-		    prev_locale = dupstring(setlocale(LC_NUMERIC, NULL));
+-		    setlocale(LC_NUMERIC, "POSIX");
+-#endif
+-		    yyval.u.d = strtod(ptr, &nptr);
+-#ifdef USE_LOCALE
+-		    if (prev_locale) setlocale(LC_NUMERIC, prev_locale);
+-#endif
+-		    if (ptr == nptr || *nptr == '.') {
+-			zerr("bad floating point constant", NULL, 0);
+-			return EOI;
+-		    }
+-		    ptr = nptr;
+-		} else {
+-		    /* it's an integer */
+-		    yyval.u.l = zstrtol(ptr, &ptr, 10);
+-
+-		    if (*ptr == '#') {
+-			ptr++;
+-			yyval.u.l = zstrtol(ptr, &ptr, lastbase = yyval.u.l);
+-		    }
+-		}
+-		return NUM;
+-	    }
++	    if (idigit(*--ptr) || *ptr == '.')
++		return lexconstant();
+ 	    if (*ptr == '#') {
+ 		if (*++ptr == '\\' || *ptr == '#') {
+ 		    int v;
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.63
+diff -u -r1.63 utils.c
+--- Src/utils.c	2 Jun 2004 22:14:26 -0000	1.63
++++ Src/utils.c	9 Aug 2004 17:34:54 -0000
+@@ -1261,7 +1261,8 @@
+ mod_export zlong
+ zstrtol(const char *s, char **t, int base)
+ {
+-    zlong ret = 0;
++    const char *inp, *trunc = NULL;
++    zulong calc = 0, newcalc = 0;
+     int neg;
+ 
+     while (inblank(*s))
+@@ -1280,16 +1281,54 @@
+ 	else
+ 	    base = 8;
+     }
++    inp = s;
+     if (base <= 10)
+-	for (; *s >= '0' && *s < ('0' + base); s++)
+-	    ret = ret * base + *s - '0';
++	for (; *s >= '0' && *s < ('0' + base); s++) {
++	    if (trunc)
++		continue;
++	    newcalc = calc * base + *s - '0';
++	    if (newcalc < calc)
++	    {
++	      trunc = s;
++	      continue;
++	    }
++	    calc = newcalc;
++	}
+     else
+ 	for (; idigit(*s) || (*s >= 'a' && *s < ('a' + base - 10))
+-	     || (*s >= 'A' && *s < ('A' + base - 10)); s++)
+-	    ret = ret * base + (idigit(*s) ? (*s - '0') : (*s & 0x1f) + 9);
++	     || (*s >= 'A' && *s < ('A' + base - 10)); s++) {
++	    if (trunc)
++		continue;
++	    newcalc = calc*base + (idigit(*s) ? (*s - '0') : (*s & 0x1f) + 9);
++	    if (newcalc < calc)
++	    {
++		trunc = s;
++		continue;
++	    }
++	    calc = newcalc;
++	}
++
++    /*
++     * Special case: check for a number that was just too long for
++     * signed notation.
++     * Extra special case: the lowest negative number would trigger
++     * the first test, but is actually representable correctly.
++     * This is a 1 in the top bit, all others zero, so test for
++     * that explicitly.
++     */
++    if (!trunc && (zlong)calc < 0 &&
++	(!neg || calc & ~((zulong)1 << (8*sizeof(zulong)-1))))
++    {
++	trunc = s - 1;
++	calc /= base;
++    }
++
++    if (trunc)
++	zwarn("number truncated after %d digits: %s", inp, trunc - inp);
++
+     if (t)
+ 	*t = (char *)s;
+-    return neg ? -ret : ret;
++    return neg ? -(zlong)calc : (zlong)calc;
+ }
+ 
+ /**/
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

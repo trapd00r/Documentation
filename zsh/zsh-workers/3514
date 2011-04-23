@@ -1,0 +1,242 @@
+From zsh-workers-request@math.gatech.edu Tue Sep 23 16:59:57 1997
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 7502 invoked from network); 23 Sep 1997 16:59:55 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 23 Sep 1997 16:59:55 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id MAA11601;
+	Tue, 23 Sep 1997 12:54:03 -0400 (EDT)
+Resent-Date: Tue, 23 Sep 1997 12:54:03 -0400 (EDT)
+Message-Id: <199709231654.SAA02712@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: closures: supplementary
+Date: Tue, 23 Sep 1997 18:54:31 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"UmhWV3.0.9r2.gG_9q"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3514
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Using my last patch, two things turned up:
+
+1) The time for *foo (anything where * was not at the end of the
+string) was just too slow for matching against long strings.  The case
+of simple closures --- basically, at top level with nothing
+complicated nested inside --- is now handled just as it used to be
+(I'd like someone to reassure me this is kosher, but I haven't found a
+problem).  I'm pretty happy about the time now: as far as I can see,
+only things which didn't work before take significantly longer.
+
+2) I found the pathological case I was missing before:
+
+[[ ofoofo = (ofo#)# ]]
+
+failed to work after my previous patch.  Then I found some *really*
+pathological cases like:
+
+[[ ofoofo = (ofo##|f)# ]]
+
+and realised I was going to have to do more work on backtracking with
+a given list of closure matches.  I've added the new tests to
+globtests, too.  This is my last, best hope for today.  Feel free to
+destroy my illusions.
+
+*** Misc/globtests.clos2	Tue Sep 23 15:46:48 1997
+--- Misc/globtests	Tue Sep 23 18:51:25 1997
+***************
+*** 1,9 ****
+--- 1,12 ----
++ failed=0
+  while read res str pat; do
++   [[ $res = '#' ]] && continue
+    [[ $str = ${~pat} ]]
+    ts=$?
+    print "$ts:  [[ $str = $pat ]]"
+    if [[ ( $ts -gt 0 && $res = t) || ($ts -eq 0 && $res = f) ]]; then
+      print "Test failed:  [[ $str = $pat ]]"
++     (( failed++ ))
+    fi
+  done <<EOT
+  t fofo                (fo#)#
+***************
+*** 39,42 ****
+--- 42,53 ----
+  t egz    (bc##d|ef#g?|(h|)i(j|k))
+  t egzefffgzbcdij    (bc##d|ef#g?|(h|)i(j|k))#
+  f egz    (bc##d|ef##g?|(h|)i(j|k))
++ t ofoofo (ofo##)#
++ t oxfoxoxfox    (oxf(ox)##)#
++ f oxfoxfox      (oxf(ox)##)#
++ t ofoofo        (ofo##|f)#
++ # The following is supposed to match only as fo+ofo+ofo
++ t foofoofo      (foo|f|fo)(f|ofo##)#
++ t oofooofo      (of|oofo##)#
+  EOT
++ print "$failed tests failed."
+*** Src/glob.c.clos2	Tue Sep 23 11:13:36 1997
+--- Src/glob.c	Tue Sep 23 18:50:44 1997
+***************
+*** 1957,1962 ****
+--- 1957,1989 ----
+      return ret;
+  }
+  
++ struct gclose {
++     char *start;
++     char *end;
++ };
++ typedef struct gclose *Gclose;
++ 
++ static int inclosure;		/* see comment in doesmatch() */
++ 
++ /**/
++ static void
++ addclosures(Comp c, LinkList closlist, int *pdone)
++ {
++     Gclose gcnode;
++ 
++     for (; *pptr; (*pdone)++) {
++ 	char *saves = pptr;
++ 	if (!matchonce(c) || saves == pptr) {
++ 	    pptr = saves;
++ 	    break;
++ 	}
++ 	gcnode = (Gclose)zalloc(sizeof(struct gclose));
++ 	gcnode->start = saves;
++ 	gcnode->end = pptr;
++ 	pushnode(closlist, gcnode);
++     }
++ }
++ 
+  /* see if current string in pptr matches c */
+  
+  /**/
+***************
+*** 1967,1997 ****
+  	int done, retflag = 0;
+  	char *saves;
+  	LinkList closlist;
+  
+  	if (first && *pptr == '.')
+  	    return 0;
+  
+  	closlist = newlinklist();
+  
+! 	for (done = 0; ; done++) {
+  	    saves = pptr;
+! 	    if (!matchonce(c) || saves == pptr) {
+! 		pptr = saves;
+  		break;
+  	    }
+! 	    pushnode(closlist, saves);
+! 	}
+! 	if (ONEHASHP(c) || done) {
+! 	    while(pptr) {
+! 		if ((!c->next && (!LASTP(c) || !*pptr)) ||
+! 		    (c->next && doesmatch(c->next))) {
+! 		    retflag = 1;
+! 		    break;
+! 		}
+! 		pptr = (char *)getlinknode(closlist);
+  	    }
+  	}
+! 	freelinklist(closlist, (FreeFunc) NULL);
+  	return retflag;
+      } else
+  	return matchonce(c);
+--- 1994,2078 ----
+  	int done, retflag = 0;
+  	char *saves;
+  	LinkList closlist;
++ 	Gclose gcnode;
+  
+  	if (first && *pptr == '.')
+  	    return 0;
+  
++ 	if (!inclosure && !c->left) {
++ 	    /* We are not inside another closure, and the current
++ 	     * pattern is a simple string.  We handle this very common
++ 	     * case specially: otherwise, matches like *foo* are
++ 	     * extremely slow.  Here, instead of backtracking, we track
++ 	     * forward until we get a match.  At top level, we are bound
++ 	     * to get there eventually, so this is OK.
++ 	     */
++ 
++ 	    for (done = 0; ; done++) {
++ 		saves = pptr;
++ 		if ((done || ONEHASHP(c)) &&
++ 		    ((!c->next && (!LASTP(c) || !*pptr)) ||
++ 		     (c->next && doesmatch(c->next))))
++ 		    return 1;
++ 		pptr = saves;
++ 		first = 0;
++ 		if (!matchonce(c) || pptr == saves)
++ 		    return 0;
++ 	    }
++ 	}
++ 	inclosure++;
+  	closlist = newlinklist();
+  
+! 	/* Start by making a list where each match is as long
+! 	 * as possible.  We later have to take account of the
+! 	 * fact that earlier matches may be too long.
+! 	 */
+! 	done = 0;
+! 	addclosures(c, closlist, &done);
+! 	for (;;) {
+! 	    int mflag = 0;
+! 	    if (TWOHASHP(c) && !done)
+! 		break;
+  	    saves = pptr;
+! 	    /* do we really want this LASTP here?? */
+! 	    if ((!c->next && (!LASTP(c) || !*pptr)) ||
+! 		(c->next && doesmatch(c->next))) {
+! 		retflag = 1;
+  		break;
+  	    }
+! 	    /*
+! 	     * If we failed, the first thing to try is whether we can
+! 	     * shorten the match using the last pattern in the closure.
+! 	     */
+! 	    gcnode = firstnode(closlist) ? peekfirst(closlist) : NULL;
+! 	    while (gcnode && !mflag && --gcnode->end > gcnode->start) {
+! 		char savec = *gcnode->end;
+! 		*gcnode->end = '\0';
+! 		pptr = gcnode->start;
+! 		if (matchonce(c))
+! 		    mflag = 1;
+! 		*gcnode->end = savec;
+! 	    }
+! 	    if (mflag) {
+! 		/* Try again to construct a list based on
+! 		 * this new position
+! 		 */
+! 		addclosures(c, closlist, &done);
+! 		continue;
+  	    }
++ 	    /* We've now exhausted the possibilities with that match,
++ 	     * backtrack to the previous.
++ 	     */
++ 	    if ((gcnode = (Gclose)getlinknode(closlist))) {
++ 		pptr = gcnode->start;
++ 		zfree(gcnode, sizeof(struct gclose));
++ 		done--;
++ 	    } else
++ 		break;
+  	}
+! 	freelinklist(closlist, free);
+! 	inclosure--;
+! 
+  	return retflag;
+      } else
+  	return matchonce(c);
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, Platanenallee 6, 15738 Zeuthen, Germany.
+

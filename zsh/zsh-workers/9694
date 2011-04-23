@@ -1,0 +1,91 @@
+From zsh-workers-return-9694-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Feb 12 18:01:26 2000
+Return-Path: <zsh-workers-return-9694-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12324 invoked from network); 12 Feb 2000 18:01:24 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Feb 2000 18:01:24 -0000
+Received: (qmail 5153 invoked by alias); 12 Feb 2000 18:01:13 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9694
+Received: (qmail 5019 invoked from network); 12 Feb 2000 18:00:36 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000212180025.ZM16739@candle.brasslantern.com>
+Date: Sat, 12 Feb 2000 18:00:25 +0000
+In-Reply-To: <20000212231741.A20778@primenet.com.au>
+Comments: In reply to Geoff Wing <gcw@pobox.com>
+        "PATCH: 3.1.6-dev-17 (Was: BUG: backgrounding zsh does bad tty stuff)" (Feb 12, 11:17pm)
+References: <slrn8a9qc6.j8r.mason@coral.primenet.com.au> 
+	<1000212055846.ZM6576@candle.brasslantern.com> 
+	<20000212231741.A20778@primenet.com.au>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Geoff Wing <gcw@pobox.com>
+Subject: Re: PATCH: 3.1.6-dev-17 (Was: BUG: backgrounding zsh does bad tty stuff)
+Cc: zsh-workers@sunsite.auc.dk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Feb 12, 11:17pm, Geoff Wing wrote:
+} Subject: PATCH: 3.1.6-dev-17 (Was: BUG: backgrounding zsh does bad tty stu
+}
+} :There's even a loop in init.c:init_io() where zsh repeatedly attempts to
+} :force itself to be the tty foreground process
+} 
+} My problem is that zsh gets past that loop when it should be stuck there.
+} This seems to fix it for me:  we shouldn't be making ourself the process
+} group leader for the terminal until our parent has told has we're really
+} the process group leader.
+
+If the parent has made zsh the tty group leader -- note we're testing
+ttpgrp == mypgrp -- then why would zsh need to make itself the tty group
+leader?  It doesn't make sense to me to call attachtty() *after* we've
+already verified that zsh is the tty group leader.
+
+Perhaps what you mean is that we should wait for our parent to put us in
+our own process group before attempting to make that group the tty group?
+
+That isn't what your patch accomplishes, though.
+
+} Also, I don't know why the sleep(1) is in there.
+
+Note that we call GETPGRP() both before and after the sleep(1).  The
+sleep is there to give the parent a chance to assign zsh to its own
+group, i.e., have the OS context-switch to the parent and back before
+we attempt GETPGRP() the second time.
+
+Try this patch instead of 9692.  The difference that I see with the
+patch below is that instead of
+
+[1]  + suspended (tty output)  Src/zsh -f
+
+with zsh stopped in ioctl() (according to gdb), I instead get
+
+[1]  + suspended (tty input)  Src/zsh -f
+
+with zsh stopped in its own call to killpg() -- which I think is the
+desired behavior.
+
+Index: Src/init.c
+===================================================================
+@@ -399,11 +399,12 @@
+ #ifdef JOB_CONTROL
+     /* If interactive, make the shell the foreground process */
+     if (opts[MONITOR] && interact && (SHTTY != -1)) {
+-	attachtty(GETPGRP());
+ 	if ((mypgrp = GETPGRP()) > 0) {
+ 	    while ((ttpgrp = gettygrp()) != -1 && ttpgrp != mypgrp) {
+-		sleep(1);
++		sleep(1);	/* give parent time to change pgrp */
+ 		mypgrp = GETPGRP();
++		if (mypgrp == mypid)
++		    attachtty(mypgrp);
+ 		if (mypgrp == gettygrp())
+ 		    break;
+ 		killpg(mypgrp, SIGTTIN);
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

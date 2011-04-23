@@ -1,0 +1,113 @@
+From zsh-workers-return-22317-mason-zsh=primenet.com.au@sunsite.dk Thu Mar 02 21:59:51 2006
+Return-Path: <zsh-workers-return-22317-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5943 invoked from network); 2 Mar 2006 21:59:46 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.0 (2005-09-13) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 2 Mar 2006 21:59:46 -0000
+Received: (qmail 55774 invoked from network); 2 Mar 2006 21:59:40 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 2 Mar 2006 21:59:40 -0000
+Received: (qmail 8023 invoked by alias); 2 Mar 2006 21:59:37 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22317
+Received: (qmail 8013 invoked from network); 2 Mar 2006 21:59:37 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 2 Mar 2006 21:59:37 -0000
+Received: (qmail 55419 invoked from network); 2 Mar 2006 21:59:37 -0000
+Received: from mta08-winn.ispmail.ntl.com (81.103.221.48)
+  by a.mx.sunsite.dk with SMTP; 2 Mar 2006 21:59:35 -0000
+Received: from aamta11-winn.ispmail.ntl.com ([81.103.221.35])
+          by mta08-winn.ispmail.ntl.com with ESMTP
+          id <20060302215934.KIUE29066.mta08-winn.ispmail.ntl.com@aamta11-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Thu, 2 Mar 2006 21:59:34 +0000
+Received: from pwslaptop.csr.com ([81.105.236.124])
+          by aamta11-winn.ispmail.ntl.com with ESMTP
+          id <20060302215934.JGLD1217.aamta11-winn.ispmail.ntl.com@pwslaptop.csr.com>
+          for <zsh-workers@sunsite.dk>; Thu, 2 Mar 2006 21:59:34 +0000
+Received: from pwslaptop.csr.com (pwslaptop.csr.com [127.0.0.1])
+	by pwslaptop.csr.com (8.13.4/8.13.4) with ESMTP id k22LxNqK012882
+	for <zsh-workers@sunsite.dk>; Thu, 2 Mar 2006 21:59:23 GMT
+Received: from pwslaptop.csr.com (pws@localhost)
+	by pwslaptop.csr.com (8.13.4/8.13.4/Submit) with ESMTP id k22LxLrX012879
+	for <zsh-workers@sunsite.dk>; Thu, 2 Mar 2006 21:59:23 GMT
+Message-Id: <200603022159.k22LxLrX012879@pwslaptop.csr.com>
+X-Authentication-Warning: pwslaptop.csr.com: pws owned process doing -bs
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: exiting status from forked shell started within function
+Date: Thu, 02 Mar 2006 21:59:21 +0000
+
+A rather subtle bug turned up when I was playing with Dan's test in
+22277.
+
+% child() { exit 33; }
+% child &
+[1] 12804
+[1]  + 12804 exit 33    child
+% fn2() { child & }
+% fn2
+[2] 12809
+[2]  + 12809 done       child
+
+The exit status from the child is wrong when it is started in the
+background within a function.  This is because we currently only exit
+functions from the outermost context.  However, if the context where the
+process was started is not the outermost one we need to exit there.
+
+I'll commit this fix with a test based on 222277, the fix itself in
+22281, plus some calls to waitforpid() that I missed in another
+function.  The fix here (and probably only that) should be ported
+to 4.2.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.151
+diff -u -r1.151 builtin.c
+--- Src/builtin.c	7 Nov 2005 09:37:34 -0000	1.151
++++ Src/builtin.c	2 Mar 2006 21:52:59 -0000
+@@ -4119,12 +4119,15 @@
+ 	}
+ 	/*FALLTHROUGH*/
+     case BIN_EXIT:
+-	if (locallevel) {
++	if (locallevel > forklevel) {
+ 	    /*
+ 	     * We don't exit directly from functions to allow tidying
+ 	     * up, in particular EXIT traps.  We still need to perform
+ 	     * the usual interactive tests to see if we can exit at
+ 	     * all, however.
++	     *
++	     * If we are forked, we exit the shell at the function depth
++	     * at which we became a subshell, hence the comparison.
+ 	     */
+ 	    if (stopmsg || (zexit(0,2), !stopmsg)) {
+ 		retflag = 1;
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.95
+diff -u -r1.95 exec.c
+--- Src/exec.c	25 Nov 2005 10:36:20 -0000	1.95
++++ Src/exec.c	2 Mar 2006 21:53:02 -0000
+@@ -3852,7 +3852,7 @@
+     popheap();
+ 
+     if (exit_pending) {
+-	if (locallevel) {
++	if (locallevel > forklevel) {
+ 	    /* Still functions to return: force them to do so. */
+ 	    retflag = 1;
+ 	    breaks = loops;
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page still at http://www.pwstephenson.fsnet.co.uk/
+

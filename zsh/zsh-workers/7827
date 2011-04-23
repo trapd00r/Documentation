@@ -1,0 +1,1025 @@
+From zsh-workers-return-7827-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Sep 14 14:43:43 1999
+Return-Path: <zsh-workers-return-7827-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22246 invoked from network); 14 Sep 1999 14:43:38 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Sep 1999 14:43:38 -0000
+Received: (qmail 27149 invoked by alias); 14 Sep 1999 14:43:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7827
+Received: (qmail 27134 invoked from network); 14 Sep 1999 14:43:18 -0000
+Date: Tue, 14 Sep 1999 16:43:05 +0200 (MET DST)
+Message-Id: <199909141443.QAA29594@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: per-match-display-strings
+
+
+This adds the `-d' and `-l' options to `compadd'. The first one can be 
+used to give an array of strings that should be displayed instead of
+the matches. The `-l' option says that the strings given with `-d'
+should be displayed one-per-line.
+
+As I already said, the advantage of this over `-y' is that it works
+together with menu-selection.
+
+I then changed `_display' and friends to make use of `-d'.
+
+Plus a couple of typo fixes in `_mount' (it's just that I tried it
+with `mount'...).
+
+Ok, what do you think: worth including? If so, I'll have a look at the 
+other uses of `-y'...
+
+Bye
+ Sven
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Tue Sep 14 09:08:44 1999
++++ Src/Zle/comp.h	Tue Sep 14 14:19:38 1999
+@@ -184,6 +184,7 @@
+     int mcount;			/* number of matches */
+     Cmatch *matches;		/* the matches */
+     int lcount;			/* number of things to list here */
++    int llcount;		/* number of line-displays */
+     char **ylist;		/* things to list */
+     int ecount;			/* number of explanation string */
+     Cexpl *expls;		/* explanation strings */
+@@ -199,6 +200,7 @@
+ 
+ #define CGF_NOSORT  1		/* don't sort this group */
+ #define CGF_LINES   2		/* these are to be printed on different lines */
++#define CGF_HASDL   4		/* has disply strings printed on sseparate lines */
+ 
+ /* This is the struct used to hold matches. */
+ 
+@@ -212,6 +214,7 @@
+     char *prpre;		/* path prefix for opendir */
+     char *pre;			/* prefix string from -P */
+     char *suf;			/* suffix string from -S */
++    char *disp;			/* string to display (compadd -d) */
+     char autoq;			/* closing quote to add automatically */
+     int flags;			/* see CMF_* below */
+     int brpl;			/* the place where to put the brace prefix */
+@@ -224,13 +227,13 @@
+     int gnum;			/* global number */
+ };
+ 
+-#define CMF_FILE     1		/* this is a file */
+-#define CMF_REMOVE   2		/* remove the suffix */
+-#define CMF_ISPAR    4		/* is paramter expansion */
+-#define CMF_PARBR    8		/* paramter expansion with a brace */
+-#define CMF_PARNEST 16		/* nested paramter expansion */
+-#define CMF_NOLIST  32		/* should not be listed */
+-
++#define CMF_FILE      1		/* this is a file */
++#define CMF_REMOVE    2		/* remove the suffix */
++#define CMF_ISPAR     4		/* is paramter expansion */
++#define CMF_PARBR     8		/* paramter expansion with a brace */
++#define CMF_PARNEST  16		/* nested paramter expansion */
++#define CMF_NOLIST   32		/* should not be listed */
++#define CMF_DISPLINE 64		/* display strings one per line */
+ 
+ /* Stuff for completion matcher control. */
+ 
+@@ -315,6 +318,7 @@
+     char *apar;			/* array to store matches in (-A) */
+     char *opar;			/* array to store originals in (-O) */
+     char *dpar;			/* array to delete non-matches in (-D) */
++    char *disp;			/* array with display lists (-d) */
+ };
+ 
+ /* Data given to hooks. */
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Tue Sep 14 09:08:44 1999
++++ Src/Zle/compctl.c	Tue Sep 14 16:36:39 1999
+@@ -230,18 +230,24 @@
+ 			     &err);
+ 	if (err)
+ 	    return pcm_err;
+-	if (!*s || !*++s) {
+-	    zwarnnam(name, ((fl & CMF_RIGHT) ? "missing right anchor" : "missing word pattern"), NULL, 0);
+-	    return pcm_err;
++	if ((fl & CMF_RIGHT) && (!*s || !*++s)) {
++	    zwarnnam(name, "missing right anchor", NULL, 0);
++	} else if (!(fl & CMF_RIGHT)) {
++	    if (!*s) {
++		zwarnnam(name, "missing word pattern", NULL, 0);
++		return pcm_err;
++	    }
++	    s++;
+ 	}
+ 	if (fl & CMF_RIGHT) {
+ 	    right = parse_pattern(name, &s, &ral, '=', &err);
+ 	    if (err)
+ 		return pcm_err;
+-	    if (!*s || !*++s) {
++	    if (!*s) {
+ 		zwarnnam(name, "missing word pattern", NULL, 0);
+ 		return pcm_err;
+ 	    }
++	    s++;
+ 	} else
+ 	    right = NULL;
+ 
+@@ -1726,7 +1732,7 @@
+ 	return 1;
+     }
+     dat.ipre = dat.isuf = dat.ppre = dat.psuf = dat.prpre =
+-	dat.pre = dat.suf = dat.group = dat.rems = dat.remf =
++	dat.pre = dat.suf = dat.group = dat.rems = dat.remf = dat.disp = 
+ 	dat.ign = dat.exp = dat.apar = dat.opar = dat.dpar = dat.ylist = NULL;
+     dat.match = NULL;
+     dat.flags = 0;
+@@ -1839,6 +1845,13 @@
+ 	    case 'D':
+ 		sp = &(dat.dpar);
+ 		e = "parameter name expected after -%c";
++		break;
++	    case 'd':
++		sp = &(dat.disp);
++		e = "parameter name expected after -%c";
++		break;
++	    case 'l':
++		dat.flags |= CMF_DISPLINE;
+ 		break;
+ 	    case '-':
+ 		argv++;
+diff -u os/Zle/complist.c Src/Zle/complist.c
+--- os/Zle/complist.c	Tue Sep 14 09:08:45 1999
++++ Src/Zle/complist.c	Tue Sep 14 14:22:35 1999
+@@ -371,7 +371,14 @@
+ 	    }
+ 	} else {
+ 	    for (p = g->matches; (m = *p); p++) {
+-		if (!(m->flags & CMF_NOLIST)) {
++		if (m->disp) {
++		    if (m->flags & CMF_DISPLINE) {
++			nlines += 1 + printfmt(m->disp, 0, 0, 0);
++			g->flags |= CGF_HASDL;
++		    } else if ((l = strlen(m->disp)) > longest)
++			longest = l;
++		    nlist++;
++		} else if (!(m->flags & CMF_NOLIST)) {
+ 		    if ((l = niceztrlen(m->str)) > longest)
+ 			longest = l;
+ 		    nlist++;
+@@ -382,7 +389,7 @@
+ 	if ((e = g->expls)) {
+ 	    while (*e) {
+ 		if ((*e)->count)
+-		    nlines += 1 + printfmt((*e)->str, (*e)->count, 0);
++		    nlines += 1 + printfmt((*e)->str, (*e)->count, 0, 1);
+ 		e++;
+ 	    }
+ 	}
+@@ -390,7 +397,7 @@
+     longest += 2 + of;
+     if ((ncols = (columns + 1) / longest)) {
+ 	for (g = amatches; g; g = g->next)
+-	    nlines += (g->lcount + ncols - 1) / ncols;
++	    nlines += (g->lcount - g->llcount + ncols - 1) / ncols;
+     } else {
+ 	ncols = 1;
+ 	opl = 1;
+@@ -406,7 +413,12 @@
+ 		}
+ 	    } else
+ 		for (p = g->matches; (m = *p); p++)
+-		    if (!(m->flags & CMF_NOLIST))
++		    if (m->disp) {
++			if (m->flags & CMF_DISPLINE)
++			    nlines += 1 + printfmt(m->disp, 0, 0, 0);
++			else
++			    nlines += 1 + ((1 + niceztrlen(m->disp)) / columns);
++		    } else if (!(m->flags & CMF_NOLIST))
+ 			nlines += 1 + ((1 + niceztrlen(m->str)) / columns);
+ 	}
+     }
+@@ -430,7 +442,7 @@
+ 	 (!complistmax && nlines >= lines))) {
+ 	int qup;
+ 	zsetterm();
+-	qup = printfmt("zsh: do you wish to see all %n possibilities? ", nlist, 1);
++	qup = printfmt("zsh: do you wish to see all %n possibilities? ", nlist, 1, 1);
+ 	fflush(shout);
+ 	if (getzlequery() != 'y') {
+ 	    if (clearflag) {
+@@ -496,7 +508,7 @@
+ 				tcout(TCCLEAREOD);
+ 			}
+ 		    }
+-		    l = printfmt((*e)->str, (*e)->count, 1);
++		    l = printfmt((*e)->str, (*e)->count, 1, 1);
+ 		    ml += l;
+ 		    if (cl >= 0 && (cl -= l) <= 1) {
+ 			cl = -1;
+@@ -558,10 +570,47 @@
+ 		}
+ 	    }
+ 	} else if (g->lcount) {
+-	    int n = g->lcount, nl = (n + ncols - 1) / ncols, nc = nl, i, j, a = 0;
++	    int n = g->lcount - g->llcount, nl = (n + ncols - 1) / ncols;
++	    int nc = nl, i, j, a = 0;
+ 	    int zt;
+ 	    Cmatch *q;
+ 
++	    if (g->flags & CGF_HASDL) {
++		for (p = g->matches; (m = *p); p++)
++		    if (m->disp && (m->flags & CMF_DISPLINE)) {
++			if (pnl) {
++			    putc('\n', shout);
++			    pnl = 0;
++			    ml++;
++			    if (cl >= 0 && --cl <= 1) {
++				cl = -1;
++				if (tccan(TCCLEAREOD))
++				    tcout(TCCLEAREOD);
++			    }
++			}
++			hasm = 1;
++			if (mselect >= 0) {
++			    for (i = 0; i < ncols; i++) {
++				mtab[i + (ncols * ml)] = p;
++				mgtab[i + (ncols * ml)] = g;
++			    }
++			}
++			if (m->gnum == mselect) {
++			    mline = ml;
++			    mmatch = p;
++			    mgroup = g;
++			    cc = COL_MA;
++			} else
++			    cc = COL_NO;
++			zcputs(&col, cc);
++			printfmt(m->disp, 0, 1, 0);
++			if (col.cols[COL_EC])
++			    tputs(col.cols[COL_EC], 1, putshout);
++			else
++			    zcputs(&col, COL_NO);
++			pnl = 1;
++		    }
++	    }
+ 	    if (n && pnl) {
+ 		putc('\n', shout);
+ 		pnl = 0;
+@@ -601,7 +650,7 @@
+ 			cc = COL_MA;
+ 		    } else
+ 			cc = -1;
+-		    if (m->flags & CMF_FILE) {
++		    if (!m->disp && m->flags & CMF_FILE) {
+ 			struct stat buf;
+ 			char *pb;
+ 
+@@ -624,11 +673,11 @@
+ 			    putc(file_type(buf.st_mode), shout);
+ 		    } else {
+ 			zcputs(&col, cc >= 0 ? cc : COL_NO);
+-			nicezputs(m->str, shout);
++			nicezputs((m->disp ? m->disp : m->str), shout);
+ 			if (of)
+ 			    putc(' ', shout);
+ 		    }
+-		    a = longest - niceztrlen(m->str) - 2 - of;
++		    a = longest - niceztrlen(m->disp ? m->disp : m->str) - 2 - of;
+ 		    while (a--)
+ 			putc(' ', shout);
+ 		    if (col.cols[COL_EC])
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Tue Sep 14 11:52:50 1999
++++ Src/Zle/zle_tricky.c	Tue Sep 14 14:33:30 1999
+@@ -3778,7 +3778,7 @@
+     cm->qipl = qipl;
+     cm->qisl = qisl;
+     cm->autoq = (autoq ? autoq : (inbackt ? '`' : '\0'));
+-    cm->rems = cm->remf = NULL;
++    cm->rems = cm->remf = cm->disp = NULL;
+     addlinknode((alt ? fmatches : matches), cm);
+ 
+     /* One more match for this explanation. */
+@@ -3853,7 +3853,7 @@
+ {
+     char *s, *ms, *lipre = NULL, *lisuf = NULL, *lpre = NULL, *lsuf = NULL;
+     char **aign = NULL, **dparr = NULL, oaq = autoq, *oppre = dat->ppre;
+-    char *oqp = qipre, *oqs = qisuf, qc;
++    char *oqp = qipre, *oqs = qisuf, qc, **disp = NULL;
+     int lpl, lsl, pl, sl, bpl, bsl, llpl = 0, llsl = 0, nm = mnum;
+     int oisalt = 0, isalt, isexact, doadd, ois = instring, oib = inbackt;
+     Cline lc = NULL;
+@@ -3923,6 +3923,9 @@
+ 	    /* Get the suffixes to ignore. */
+ 	    if (dat->ign)
+ 		aign = get_user_var(dat->ign);
++	    /* Get the display strings. */
++	    if (dat->disp)
++		disp = get_user_var(dat->disp) - 1;
+ 	    /* Get the contents of the completion variables if we have
+ 	     * to perform matching. */
+ 	    if (dat->aflags & CAF_MATCH) {
+@@ -4041,6 +4044,10 @@
+ 	    }
+ 	    /* Walk through the matches given. */
+ 	    for (; (s = *argv); argv++) {
++		if (disp) {
++		    if (!*++disp)
++			disp = NULL;
++		}
+ 		sl = strlen(s);
+ 		bpl = brpl;
+ 		bsl = brsl;
+@@ -4085,6 +4092,8 @@
+ 					bpl, bsl, dat->flags, isexact);
+ 		    cm->rems = dat->rems;
+ 		    cm->remf = dat->remf;
++		    if (disp)
++			cm->disp = dupstring(*disp);
+ 		} else {
+ 		    if (dat->apar)
+ 			addlinknode(aparl, ms);
+@@ -4647,7 +4656,7 @@
+ 				up++;
+ 				putc('\n', shout);
+ 			    }
+-			    up += printfmt((*e)->str, (*e)->count, 1);
++			    up += printfmt((*e)->str, (*e)->count, 1, 1);
+ 			    nn = 1;
+ 			}
+ 			e++;
+@@ -5076,7 +5085,7 @@
+ 
+ 	if (amatches && !oldlist)
+ 	    amatches->ccs = (Compctl *) makearray(ccused, 0,
+-						  &(amatches->ccount), NULL);
++						  &(amatches->ccount), NULL, NULL);
+ 	else {
+ 	    LinkNode n;
+ 
+@@ -7001,6 +7010,14 @@
+ static int
+ matchcmp(Cmatch *a, Cmatch *b)
+ {
++    if ((*a)->disp) {
++	if ((*b)->disp)
++	    return strcmp((*a)->disp, (*b)->disp);
++	return -1;
++    }
++    if ((*b)->disp)
++	return 1;
++
+     return strbpcmp(&((*a)->str), &((*b)->str));
+ }
+ 
+@@ -7015,9 +7032,9 @@
+     return matchstreq(a->ipre, b->ipre) &&
+ 	matchstreq(a->pre, b->pre) &&
+ 	matchstreq(a->ppre, b->ppre) &&
+-	matchstreq(a->str, b->str) &&
+ 	matchstreq(a->psuf, b->psuf) &&
+-	matchstreq(a->suf, b->suf);
++	matchstreq(a->suf, b->suf) &&
++	!a->disp && !b->disp &&	matchstreq(a->str, b->str);
+ }
+ 
+ /* Make an array from a linked list. The second argument says whether *
+@@ -7027,11 +7044,11 @@
+ 
+ /**/
+ static Cmatch *
+-makearray(LinkList l, int s, int *np, int *nlp)
++makearray(LinkList l, int s, int *np, int *nlp, int *llp)
+ {
+     Cmatch *ap, *bp, *cp, *rp;
+     LinkNode nod;
+-    int n, nl = 0;
++    int n, nl = 0, ll = 0;
+ 
+     /* Build an array for the matches. */
+     rp = ap = (Cmatch *) ncalloc(((n = countlinknodes(l)) + 1) *
+@@ -7067,21 +7084,30 @@
+ 	    for (bp = ap; bp[1] && matcheq(*ap, bp[1]); bp++, n--);
+ 	    ap = bp;
+ 	    /* Mark those, that would show the same string in the list. */
+-	    for (; bp[1] && !strcmp((*ap)->str, (bp[1])->str); bp++)
++	    for (; bp[1] && !(*ap)->disp && !(bp[1])->disp &&
++		     !strcmp((*ap)->str, (bp[1])->str); bp++)
+ 		(bp[1])->flags |= CMF_NOLIST;
+ 	}
+-	for (ap = rp; *ap; ap++)
++	for (ap = rp; *ap; ap++) {
++	    if ((*ap)->disp && ((*ap)->flags & CMF_DISPLINE))
++		ll++;
+ 	    if ((*ap)->flags & CMF_NOLIST)
+ 		nl++;
++	}
+ 	*cp = NULL;
+     } else
+-	for (ap = rp; *ap; ap++)
++	for (ap = rp; *ap; ap++) {
++	    if ((*ap)->disp && ((*ap)->flags & CMF_DISPLINE))
++		ll++;
+ 	    if ((*ap)->flags & CMF_NOLIST)
+ 		nl++;
++	}
+     if (np)
+ 	*np = n;
+     if (nlp)
+ 	*nlp = nl;
++    if (llp)
++	*llp = ll;
+     return rp;
+ }
+ 
+@@ -7111,7 +7137,7 @@
+     }
+     mgroup = (Cmgroup) zhalloc(sizeof(struct cmgroup));
+     mgroup->name = dupstring(n);
+-    mgroup->flags = mgroup->lcount = mgroup->mcount = 0;
++    mgroup->flags = mgroup->lcount = mgroup->llcount = mgroup->mcount = 0;
+     mgroup->matches = NULL;
+     mgroup->ylist = NULL;
+     mgroup->expls = NULL;
+@@ -7183,6 +7209,7 @@
+     r->autoq = m->autoq;
+     r->qipl = m->qipl;
+     r->qisl = m->qisl;
++    r->disp = dupstring(m->disp);
+ 
+     return r;
+ }
+@@ -7197,7 +7224,7 @@
+     Cmatch *p, *q;
+     Cexpl *ep, *eq, e, o;
+     Compctl *cp, *cq;
+-    int nn, nl, fi = 0, gn = 1, mn = 1, rn;
++    int nn, nl, ll, fi = 0, gn = 1, mn = 1, rn;
+ 
+     if (hasperm)
+ 	freematches();
+@@ -7217,15 +7244,17 @@
+ 
+ 	    g->matches = makearray(g->lmatches,
+ 				   ((g->flags & CGF_NOSORT) ? 0 : 2),
+-				   &nn, &nl);
++				   &nn, &nl, &ll);
+ 	    g->mcount = nn;
+ 	    if ((g->lcount = nn - nl) < 0)
+ 		g->lcount = 0;
++	    g->llcount = ll;
+ 	    if (g->ylist) {
+ 		g->lcount = arrlen(g->ylist);
+ 		smatches = 2;
+ 	    }
+-	    g->expls = (Cexpl *) makearray(g->lexpls, 0, &(g->ecount), NULL);
++	    g->expls = (Cexpl *) makearray(g->lexpls, 0, &(g->ecount),
++					   NULL, NULL);
+ 
+ 	    g->ccount = 0;
+ 	    g->ccs = NULL;
+@@ -7254,6 +7283,7 @@
+ 	*p = NULL;
+ 
+ 	n->lcount = g->lcount;
++	n->llcount = g->llcount;
+ 	if (g->ylist)
+ 	    n->ylist = arrdup(g->ylist);
+ 	else
+@@ -7312,6 +7342,7 @@
+     zsfree(m->prpre);
+     zsfree(m->rems);
+     zsfree(m->remf);
++    zsfree(m->disp);
+ 
+     zfree(m, sizeof(m));
+ }
+@@ -8094,14 +8125,14 @@
+ 
+ /**/
+ int
+-printfmt(char *fmt, int n, int dopr)
++printfmt(char *fmt, int n, int dopr, int doesc)
+ {
+     char *p = fmt, nc[DIGBUFSIZE];
+     int l = 0, cc = 0, b = 0, s = 0, u = 0, m;
+ 
+     for (; *p; p++) {
+ 	/* Handle the `%' stuff (%% == %, %n == <number of matches>). */
+-	if (*p == '%') {
++	if (doesc && *p == '%') {
+ 	    if (*++p) {
+ 		m = 0;
+ 		switch (*p) {
+@@ -8180,7 +8211,8 @@
+ Cmatch *
+ skipnolist(Cmatch *p)
+ {
+-    while (*p && ((*p)->flags & CMF_NOLIST))
++    while (*p && (((*p)->flags & CMF_NOLIST) ||
++		  ((*p)->disp && ((*p)->flags & CMF_DISPLINE))))
+ 	p++;
+ 
+     return p;
+@@ -8255,7 +8287,14 @@
+ 	    }
+ 	} else {
+ 	    for (p = g->matches; (m = *p); p++) {
+-		if (!(m->flags & CMF_NOLIST)) {
++		if (m->disp) {
++		    if (m->flags & CMF_DISPLINE) {
++			nlines += 1 + printfmt(m->disp, 0, 0, 0);
++			g->flags |= CGF_HASDL;
++		    } else if ((l = strlen(m->disp)) > longest)
++			longest = l;
++		    nlist++;
++		} else if (!(m->flags & CMF_NOLIST)) {
+ 		    if ((l = niceztrlen(m->str)) > longest)
+ 			longest = l;
+ 		    nlist++;
+@@ -8265,7 +8304,7 @@
+ 	if ((e = g->expls)) {
+ 	    while (*e) {
+ 		if ((*e)->count)
+-		    nlines += 1 + printfmt((*e)->str, (*e)->count, 0);
++		    nlines += 1 + printfmt((*e)->str, (*e)->count, 0, 1);
+ 		e++;
+ 	    }
+ 	}
+@@ -8310,7 +8349,8 @@
+ 	 (!complistmax && nlines >= lines))) {
+ 	int qup;
+ 	zsetterm();
+-	qup = printfmt("zsh: do you wish to see all %n possibilities? ", nlist, 1);
++	qup = printfmt("zsh: do you wish to see all %n possibilities? ",
++		       nlist, 1, 1);
+ 	fflush(shout);
+ 	if (getzlequery() != 'y') {
+ 	    if (clearflag) {
+@@ -8349,7 +8389,7 @@
+ 			putc('\n', shout);
+ 			pnl = 0;
+ 		    }
+-		    printfmt((*e)->str, (*e)->count, 1);
++		    printfmt((*e)->str, (*e)->count, 1, 1);
+ 		    pnl = 1;
+ 		}
+ 		e++;
+@@ -8391,9 +8431,21 @@
+ 		}
+ 	    }
+ 	} else if (g->lcount) {
+-	    int n = g->lcount, nl = (n + ncols - 1) / ncols, nc = nl, i, j, a = 0;
++	    int n = g->lcount - g->llcount, nl = (n + ncols - 1) / ncols;
++	    int nc = nl, i, j, a = 0;
+ 	    Cmatch *q;
+ 
++	    if (g->flags & CGF_HASDL) {
++		for (p = g->matches; (m = *p); p++)
++		    if (m->disp && (m->flags & CMF_DISPLINE)) {
++			if (pnl) {
++			    putc('\n', shout);
++			    pnl = 0;
++			}
++			printfmt(m->disp, 0, 1, 0);
++			pnl = 1;
++		    }
++	    }
+ 	    if (n && pnl) {
+ 		putc('\n', shout);
+ 		pnl = 0;
+@@ -8404,11 +8456,11 @@
+ 		while (n && i--) {
+ 		    if (!(m = *q))
+ 			break;
+-		    nicezputs(m->str, shout);
++		    nicezputs((m->disp ? m->disp : m->str), shout);
+ 		    if (i)
+-			a = longest - niceztrlen(m->str);
++			a = longest - niceztrlen(m->disp ? m->disp : m->str);
+ 
+-		    if (of && m->flags & CMF_FILE) {
++		    if (of && !m->disp && m->flags & CMF_FILE) {
+ 			struct stat buf;
+ 			char *pb;
+ 
+@@ -8475,7 +8527,7 @@
+     smatches = 1;
+     validlist = 1;
+     memset(&dg, 0, sizeof(struct cmgroup));
+-    dg.ylist = (char **) makearray(l, 1, &(dg.lcount), NULL);
++    dg.ylist = (char **) makearray(l, 1, &(dg.lcount), NULL, NULL);
+     amatches = &dg;
+     ilistmatches(NULL, NULL);
+     amatches = am;
+diff -u od/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- od/Zsh/compsys.yo	Tue Sep 14 10:19:28 1999
++++ Doc/Zsh/compsys.yo	Tue Sep 14 16:27:36 1999
+@@ -583,34 +583,17 @@
+ former is unset or set to the empty string.
+ )
+ item(tt(_display))(
+-This function generates a display list usable for the `tt(-y)' option
+-of tt(compadd) and tt(compgen). For this it takes its second argument
+-as an array of possible matches with descriptions. The array may
+-either be given as the name of an array parameter or directly as a
+-list of words in parentheses.
+-
+-Each element of the array should contain a match, optionally followed
+-by a colon and the description for this match. With this
+-tt(_display) builds a string with one match and its description per
+-line. Matches witout descriptions are appended at the end and aligned
+-in multiple columns. After that, the first argument is taken as a
+-parameter name and the string built is stored in it.
+-
+-Before the building the list, however, this function first uses
+-tt(compadd) to remove all strings from the array that don't match the
+-string on the line (so that they don't appear in the list). This means 
+-that the special parameters tt(PREFIX) and tt(SUFFIX) have to be set
+-up correctly before this function is called. This call to tt(compadd)
+-also uses the other arguments given to tt(_display), by directly
+-giving them to tt(compadd).
+-
+-Finally, if the array is given as the name of a parameter, this
+-paramete will be changed to include only those strings that match the
+-string on the line.
++This function generates a display list usable for the `tt(-d)' option
++of tt(compadd). For this it takes its arguments except the first one
++as possible matches with descriptions. The strings should contain the
++match, optionally followed by a colon and the description for this
++match. From this tt(_display) builds an array with elements containing 
++the matches and their descriptions, where the descriptions are aligned.
++After that, the first argument is taken as a parameter name and the
++array built is stored in it.
+ 
+ The return value of tt(_display) is zero if there was at least one
+-matching string and the display string could be built and non-zero
+-otherwise.
++match with a description non-zero otherwise.
+ )
+ item(tt(_multi_parts))(
+ This function gets two arguments: a separator character and an
+diff -u od/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- od/Zsh/compwid.yo	Tue Sep 14 09:08:51 1999
++++ Doc/Zsh/compwid.yo	Tue Sep 14 16:40:00 1999
+@@ -366,11 +366,11 @@
+ )
+ findex(compadd)
+ cindex(completion widgets, adding specified matches)
+-xitem(tt(compadd) [ tt(-qQfenUam) ] [ tt(-F) var(array) ])
++xitem(tt(compadd) [ tt(-qQfenUaml) ] [ tt(-F) var(array) ])
+ xitem([ tt(-P) var(prefix) ] [ tt(-S) var(suffix) ])
+ xitem([ tt(-p) var(hidden-prefix) ] [ tt(-s) var(hidden-suffix) ])
+ xitem([ tt(-i) var(ignored-prefix) ] [ tt(-I) var(ignored-suffix) ])
+-xitem([ tt(-W) var(file-prefix) ] [ tt(-y) var(array) ])
++xitem([ tt(-W) var(file-prefix) ] [ tt(-y) var(array) ] [ tt(-d) var(array) ])
+ xitem([ tt(-J) var(name) ] [ tt(-V) var(name) ] [ tt(-X) var(explanation) ])
+ xitem([ tt(-r) var(remove-chars) ] [ tt(-R) var(remove-func) ])
+ xitem([ tt(-M) var(match-spec) ] [ tt(-O) var(array) ] [ tt(-A) var(array) ])
+@@ -435,6 +435,23 @@
+ is like the tt(-y) option of the tt(compctl) builtin command but the
+ var(array) argument may only be the name of an array parameter or a
+ literal array in parentheses containing the strings to display.
++)
++item(tt(-d) var(array))(
++This adds per-match display strings. The var(array) should contain one 
++element per var(word) given. The completion code will then display the 
++first element instead of the first var(word), and so on. The
++var(array) may be given as the name of a array parameter or directly
++as a space-separated list of words in parentheses.
++
++If there are fewer display strings than var(words), the leftover
++var(words) will be displayed unchanged and if there are more display
++strings than var(words), the leftover display strings will be silently
++ignored.
++)
++item(tt(-l))(
++This option only has an effect if used together with the tt(-d)
++options. If it is given, the display strings are listed one per line,
++not arrayed in columns.
+ )
+ item(tt(-J) var(name))(
+ As for tt(compctl) and tt(compgen), this gives the name of the group
+diff -u -r oldcompletion/Base/_arguments Completion/Base/_arguments
+--- oldcompletion/Base/_arguments	Tue Sep 14 11:57:31 1999
++++ Completion/Base/_arguments	Tue Sep 14 15:53:24 1999
+@@ -794,13 +794,9 @@
+         eval ws\=\( "${action[3,-3]}" \)
+ 
+ 	if [[ -n "$compconfig[describe_values]" &&
+-              "$compconfig[describe_values]" != *\!${cmd}* ]]; then
+-          if _display tmp ws -M 'r:|[_-]=* r:|=*'; then
+-            compadd "$expl[@]" -y tmp - "${(@)ws%%:*}"
+-          else
+-            [[ -n "$matched" ]] && compadd -Q -S -s "$SUFFIX" - "$PREFIX"
+-            _message "$descr"
+-          fi
++              "$compconfig[describe_values]" != *\!${cmd}* ]] &&
++           _display tmp "$ws[@]"; then
++	  compadd "$expl[@]" -M 'r:|[_-]=* r:|=*' -ld tmp - "${(@)ws%%:*}"
+         else
+ 	  compadd "$expl[@]" - "${(@)ws%%:*}"
+         fi
+@@ -841,51 +837,47 @@
+     if [[ -n "$sopts" && -n "$PREFIX" &&
+       "$PREFIX" = [-+]${~soptseq}[$sopts] ]]; then
+       if [[ "$PREFIX" = [-+]${~soptseq1} ]]; then
+-        local dpre="$PREFIX" dsuf="$SUFFIX"
+-
+-	PREFIX=''
+-	SUFFIX=''
+         if [[ -z "$compconfig[describe_options]" ||
+-              "$compconfig[describe_options]" = *\!${cmd}* ]] ||
+-           ! _display tmp odescr; then
+-          tmp=( "${dpre[1]}${(@o)^${(@)${(@M)${=:-${(k)opts} ${(k)dopts} ${(k)odopts}}:#[-+]?(|=)}#?}%=}" )
+-        fi
+-	PREFIX="$dpre"
+-	SUFFIX="$dsuf"
+-        compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' -y tmp - \
++              "$compconfig[describe_options]" = *\!${cmd}* ]]; then
++          tmp=( "${PREFIX[1]}${(@)^${(@)${(@M)${=:-${(k)opts} ${(k)dopts} ${(k)odopts}}:#[-+]?(|=)}#?}%=}" )
++          compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' -d tmp - \
+                 "${PREFIX}${(@k)^opts[(I)${PREFIX[1]}?]#?}" \
+ 	        "${PREFIX}${(@k)^dopts[(I)${PREFIX[1]}?]#?}" \
+ 	        "${PREFIX}${(@)^${(@k)odopts[(I)${PREFIX[1]}?(|=)]#?}%=}" && 
+-            ret=0
++              ret=0
++        elif _display tmp "${(@Mo)odescr:#[-+]?:*}"; then
++          compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' -ld tmp - \
++	          "${PREFIX}${(@)^${(@)${(@Mo)odescr:#[-+]?:*}%%:*}#?}" && ret=0
++        else
++          compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' -d tmp - \
++	          "${PREFIX}${(@)^${(@)${(@Mo)odescr:#[-+]?:*}%%:*}#?}" && ret=0
++        fi
+       else
+         # The last option takes an argument in the next word.
+ 
+         compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' - "${PREFIX}" && ret=0
+       fi
+     else
+-      tmp=''
+       if [[ -n "$compconfig[describe_options]" &&
+-            "$compconfig[describe_options]" != *\!${cmd}* ]]; then
+-        if _display tmp odescr; then
+-          if (( $#dopts )); then
+-            compadd -n "$expl[@]" -QS '' -M 'r:|[_-]=* r:|=*' -y tmp - \
+-                    "${(@k)dopts}" && ret=0
+-            compadd -n -J option -Q -M 'r:|[_-]=* r:|=*' - \
+-                    "${(@k)opts}" "${(@k)odopts[(I)*[^=]]}" && ret=0
+-            compadd -n -J option -QqS= -M 'r:|[_-]=* r:|=*' - \
+-                    "${(@k)odopts[(I)*=]%=}" && ret=0
+-          elif (( ${(@k)#odopts[(I)*=]} )); then
+-            compadd -n "$expl[@]" -QqS= -M 'r:|[_-]=* r:|=*' -y tmp - \
+-                    "${(@k)odopts[(I)*=]%=}" && ret=0
+-            compadd -n -J option -Q -M 'r:|[_-]=* r:|=*' - \
+-                    "${(@k)opts}" "${(@k)odopts[(I)*[^=]]}" && ret=0
+-          else
+-            compadd -n "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' -y tmp - \
+-                    "${(@k)opts}" "${(@k)odopts[(I)*[^=]]}" && ret=0
+-          fi
++            "$compconfig[describe_options]" != *\!${cmd}* ]] &&
++	 _display descr "$odescr[@]"; then
++	ws=( "${(k)opts[@]}" "${(@k)odopts[(I)*[^=]]}" )
++	if (( $#ws )); then
++	  tmp=( "${(@M)descr:#(${(j:|:)~ws}) *}" )
++          compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' -ld tmp - \
++                  "$ws[@]" && ret=0
++	fi
++	if (( $#dopts )); then
++	  tmp=( "${(@M)descr:#(${(kj:|:)~dopts}) *}" )
++          compadd "$expl[@]" -QS '' -M 'r:|[_-]=* r:|=*' -ld tmp - \
++                  "${(@k)dopts}" && ret=0
+         fi
+-      fi
+-      if [[ -z "$tmp" ]]; then
++	if (( ${(@k)#odopts[(I)*=]} )); then
++	  tmp=( "${(@M)descr:#(${(kj:|:)~odopts[(I)*=]}) *}" )
++          compadd "$expl[@]" -QqS= -M 'r:|[_-]=* r:|=*' -ld tmp - \
++                  "${(@k)odopts[(I)*=]%=}" && ret=0
++        fi
++      else
+         compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' - \
+                 "${(@k)opts}" "${(@k)odopts[(I)*[^=]]}" && ret=0
+         compadd "$expl[@]" -QqS= -M 'r:|[_-]=* r:|=*' - \
+diff -u -r oldcompletion/Base/_values Completion/Base/_values
+--- oldcompletion/Base/_values	Tue Sep 14 09:09:01 1999
++++ Completion/Base/_values	Tue Sep 14 16:16:55 1999
+@@ -285,29 +285,25 @@
+   [[ -n "$sep" && ${#snames}+${#names}+${#onames} -ne 1 ]] &&
+       expl=( "-qS$sep" "$expl[@]" )
+ 
+-  tmp=''
+   if [[ -n "$compconfig[describe_values]" &&
+-        "$compconfig[describe_values]" != *\!${words[1]}* ]]; then
+-    if _display tmp odescr -M 'r:|[_-]=* r:|=*'; then
+-      if (( $#snames )); then
+-        compadd "$expl[@]" -y tmp -M 'r:|[_-]=* r:|=*' - \
+-                "$snames[@]" && ret=0
+-        compadd -n -S= -J "_$gdescr" -M 'r:|[_-]=* r:|=*' - \
+-                "${(@k)names}" && ret=0
+-        compadd -n -qS= -J "_$gdescr" -M 'r:|[_-]=* r:|=*' - \
+-                "${(@k)onames}" && ret=0
+-      elif (( $#names )); then
+-        compadd -n -S= "$expl[@]" -y tmp -M 'r:|[_-]=* r:|=*' - \
+-                "${(@k)names}" && ret=0
+-        compadd -n -qS= -J "_$gdescr" -M 'r:|[_-]=* r:|=*' - \
+-                "${(@k)onames}" && ret=0
+-      else
+-        compadd -n -qS= "$expl[@]" -y tmp -M 'r:|[_-]=* r:|=*' - \
+-                "${(@k)onames}" && ret=0
+-      fi
++        "$compconfig[describe_values]" != *\!${words[1]}* ]] &&
++     _display descr "$odescr[@]"; then
++    if (( $#snames )); then
++      tmp=( "${(@M)descr:#(${(j:|:)~snames}) *}" )
++      compadd "$expl[@]" -ld tmp -M 'r:|[_-]=* r:|=*' - \
++              "${(@)tmp%% *}" && ret=0
+     fi
+-  fi
+-  if [[ -z "$tmp" ]]; then
++    if (( $#names )); then
++      tmp=( "${(@M)descr:#(${(kj:|:)~names}) *}" )
++      compadd -S= "$expl[@]" -ld tmp -M 'r:|[_-]=* r:|=*' - \
++              "${(@)tmp%% *}" && ret=0
++    fi
++    if (( $#onames )); then
++      tmp=( "${(@M)descr:#(${(kj:|:)~onames}) *}" )
++      compadd -qS= "$expl[@]" -ld tmp -M 'r:|[_-]=* r:|=*' - \
++              "${(@)tmp%% *}" && ret=0
++    fi
++  else
+     compadd "$expl[@]" -M 'r:|[_-]=* r:|=*' - "$snames[@]" && ret=0
+     compadd -S= "$expl[@]" -M 'r:|[_-]=* r:|=*' - "${(@k)names}" && ret=0
+     compadd -qS= "$expl[@]" -M 'r:|[_-]=* r:|=*' - "${(@k)onames}" && ret=0
+@@ -356,11 +352,12 @@
+ 
+       eval ws\=\( "${action[3,-3]}" \)
+ 
+-      if _display tmp ws; then
+-        compadd "$expl[@]" -y tmp - "${(@)ws%%:*}"
++      if [[ -n "$compconfig[describe_values]" &&
++            "$compconfig[describe_values]" != *\!${cmd}* ]] &&
++         _display tmp "$ws[@]"; then
++	compadd "$expl[@]" -M 'r:|[_-]=* r:|=*' -ld tmp - "${(@)ws%%:*}"
+       else
+-        _message "$descr"
+-        return 1
++	compadd "$expl[@]" - "${(@)ws%%:*}"
+       fi
+     elif [[ "$action" = \(*\) ]]; then
+ 
+diff -u -r oldcompletion/Core/_display Completion/Core/_display
+--- oldcompletion/Core/_display	Tue Sep 14 09:09:06 1999
++++ Completion/Core/_display	Tue Sep 14 16:08:23 1999
+@@ -1,82 +1,38 @@
+ #autoload
+ 
+-# This builds a display-list for the `-y' option of `compadd' and
+-# `compgen' out of the arguments it gets. The first argument is
+-# taken as the name of a parameter and the string built is stored
+-# into it.
+-# The second argument is the name of an array whose elements each
+-# contains a string to complete, optionally followed by a colon
+-# and a description. The display list created will contain one
+-# line per string with the description after it, all nicely
+-# aligned. Strings without descriptions are put at the end in a
+-# column-oriented fashion.
+-# All arguments after the second one are given as arguments to
+-# `compadd'.
+-# This function will also do the matching required to find out
+-# which strings will be included in the list. All elements that
+-# don't match will be removed from the array. This means that the
+-# special parameters `PREFIX' and `SUFFIX' have to be set up 
+-# correctly before this function is called.
+-
+-local _param="$1" _arr _len _i _tmp _simple
+-
+-# Remove all descriptions not matched by the string on the line.
+-
+-if [[ "${2[1]}" = \( ]]; then
+-  _arr=( ${(Qo)=2[2,-2]} )
+-else
+-  _arr=( "${(@Po)2}" )
+-fi
+-
+-_arr=( "${(@)_arr:#}" )
+-compadd -D _arr "${(@)argv[3,-1]}" - "${(@)_arr%%:*}"
+-
+-[[ "${2[1]}" != \( ]] && eval "${2}=( \"\$_arr[@]\" )"
+-
+-if (( $#_arr )); then
+-
+-  # There are strings left, first get the length of the longest of
+-  # them (to be able to align them) and collect all strings without
+-  # descriptions.
+-
+-  _simple=()
+-  _len=-1
+-  for _i in "$_arr[@]";  do
+-    _tmp="${#_i%%:*}"
+-    if [[ "$_i" = *:?* ]]; then
+-      [[ _tmp -gt _len ]] && _len="$_tmp"
+-    else
+-      _simple=( "$_simple[@]" "${_i%:}" )
+-    fi
+-  done
+-
+-  if [[ _len -lt 0 ]]; then
+-    eval "${_param}=''"
+-    return 1
++# This builds a display-list for the `-ld' option of `compadd'
++# out of the arguments it gets. The first argument is taken as
++# the name of a parameter and the array built is stored into it.
++# The other arguments are strings consisting of the match optionally
++# followed by a colon and a description. The display list created
++# will contain one element per match with the description after it,
++# all nicely aligned.
++
++local _param="$1" _len _i _tmp _hasd
++
++
++shift
++
++# First get the length of the longest string (to be able to align them).
++
++_len=-1
++for _i; do
++  _tmp="${#_i%%:*}"
++  [[ "$_i" = *:?* && _tmp -gt _len ]] && _len="$_tmp"
++done
++
++# Now we build the list in `_tmp'.
++
++_tmp=()
++for _i; do
++  if [[ "$_i" = *:?* ]]; then
++    _tmp=( "$_tmp[@]" "${(r:_len:: :)_i%%:*} -- ${_i#*:}" )
++    _hasd=yes
++  else
++    _tmp=( "$_tmp[@]" "${_i%:}" )
+   fi
++done
+ 
+-  # Now we build the list in `_tmp', adding one line per string.
++eval "${_param}=( \"\$_tmp[@]\" )"
+ 
+-  _tmp=''
+-  for _i in "$_arr[@]"; do
+-    [[ "$_i" = *:?* ]] && _tmp="$_tmp
+-${(r:_len:: :)_i%%:*} -- ${_i#*:}"
+-  done
+-
+-  # If there were strings without descriptions, we just add them by
+-  # calling `print -c'.
+-
+-  (( $#_simple )) && _tmp="${_tmp}
+-$(print -c - $_simple)"
+-
+-  eval "${_param}=\"\${_tmp[2,-1]}\""
+-
+-  return 0
+-else
+-
+-  # None of the strings matches what's on the line, signal this by
+-  # setting the parameter to an empty string and by the return value.
+-
+-  eval "${_param}=''"
+-  return 1
+-fi
++[[ -n "$_hasd" ]]
+diff -u -r oldcompletion/User/_mount Completion/User/_mount
+--- oldcompletion/User/_mount	Tue Sep 14 09:09:14 1999
++++ Completion/User/_mount	Tue Sep 14 16:36:59 1999
+@@ -191,7 +191,7 @@
+       '-u[remount file system]' \
+       ':dev or dir:->devordir' \
+       ':mount point:_files -/'
+-
++    )
+     fss=( advfs ufs nfs mfs cdfs )
+     ;;
+   *)
+@@ -204,7 +204,9 @@
+       '-f[fake mount]' \
+       ':dev or dir:->devordir' \
+       ':mount point:_files -/'
++    )
+     fss=( ufs )
++    ;;
+   esac
+ 
+   _arguments "$args[@]" && ret=0
+@@ -228,7 +230,7 @@
+ fstype)
+   compset -P '*,'
+   _description expl 'file system type'
+-  compadd "$expl[@]" -qS, -M 'L:no=' - "$fss[@]" && ret=0
++  compadd "$expl[@]" -qS, -M 'L:|no=' - "$fss[@]" && ret=0
+   ;;
+ fsopt)
+   eval 'tmp=(' '"$_fs_'${(s:,:)^${options[-t]:-${deffs}}}'[@]"' ')'
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

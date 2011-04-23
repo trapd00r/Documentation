@@ -1,0 +1,391 @@
+From zsh-workers-return-28179-mason-zsh=primenet.com.au@zsh.org Sat Aug 21 00:08:33 2010
+Return-Path: <zsh-workers-return-28179-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18857 invoked by alias); 21 Aug 2010 00:08:33 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28179
+Received: (qmail 28507 invoked from network); 21 Aug 2010 00:08:29 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.48 as permitted sender)
+Date: Sat, 21 Aug 2010 01:07:58 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@zsh.org
+Subject: Re: Bug#593426: zsh: Status of background jobs not updated
+Message-ID: <20100821010758.74dac00e@pws-pc>
+In-Reply-To: <20100820095527.4ef353e1@csr.com>
+References: <20100818025148.13456.14691.reportbug@salamander.skynet.lan>
+	<20100818182959.GA29785@scru.org>
+	<20100818210959.2a9d4d25@pws-pc>
+	<100819212253.ZM27882@torch.brasslantern.com>
+	<20100820095527.4ef353e1@csr.com>
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.18.9; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Cloudmark-Analysis: v=1.1 cv=4QByPj+6Iq2k/6L54d+eVKTdgQxdscpRskJJReCfdXo= c=1 sm=0 a=Tl0LJv6T4H8A:10 a=DogomfpGjd0A:10 a=kj9zAlcOel0A:10 a=4UtWO5riAAAA:8 a=NLZqzBF-AAAA:8 a=VPWSc3Nq432MObkQym8A:9 a=TGZbSSgZZPokriR6FO4A:7 a=HrzU2EV3Qe5vz5y2hCewX-YC1cAA:4 a=CjuIK1q_8ugA:10 a=Shd8Sdw-9eQA:10 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+On Fri, 20 Aug 2010 09:55:27 +0100
+Peter Stephenson <Peter.Stephenson@csr.com> wrote:
+> But it would still be better to check the status by waiting at appropriate
+> points, which needs the fix to take care of the case that the child has
+> actually exited I mentioned before, which needs a lot of care as it's
+> dealing with some basic and race-prone stuff.
+
+Turns out not to be so hard, and not so dangerous, I think.
+
+The chunk for handling SIGCHLD lifts cleanly out into a function (that's
+all I've done in signals.h).  It's already safe about checking whether
+there are multiple processes with state changes, or no processes left to
+handle.  Given that this runs asynchronously anyway, running it at
+judicious points where signals are queued (so the same code isn't going
+to get run simultaneously by an interrupt) should be safe, and if it
+isn't it's probably because of some pre-existing problem rather than
+something I've introduced.
+
+The remaining part is to persuade wait to tell us about continued
+processes and for update_job() to know what to do about them.
+
+I've therefore conditionally taken out the code that updates continued
+statuses after sending them the signals.
+
+This should make the discussion in the other part of this thread moot.
+
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.78
+diff -p -u -r1.78 jobs.c
+--- Src/jobs.c	18 Aug 2010 21:21:17 -0000	1.78
++++ Src/jobs.c	20 Aug 2010 23:57:24 -0000
+@@ -331,11 +361,20 @@ update_job(Job jn)
+     int val = 0, status = 0;
+     int somestopped = 0, inforeground = 0;
+ 
+-    for (pn = jn->auxprocs; pn; pn = pn->next)
++    for (pn = jn->auxprocs; pn; pn = pn->next) {
++#ifdef WIFCONTINUED
++	if (WIFCONTINUED(pn->status))
++	    pn->status = SP_RUNNING;
++#endif
+ 	if (pn->status == SP_RUNNING)
+ 	    return;
++    }
+ 
+     for (pn = jn->procs; pn; pn = pn->next) {
++#ifdef WIFCONTINUED
++	if (WIFCONTINUED(pn->status))
++	    pn->status = SP_RUNNING;
++#endif
+ 	if (pn->status == SP_RUNNING)      /* some processes in this job are running       */
+ 	    return;                        /* so no need to update job table entry         */
+ 	if (WIFSTOPPED(pn->status))        /* some processes are stopped                   */
+@@ -1793,6 +1833,14 @@ bin_fg(char *name, char **argv, Options 
+     }
+ 
+     queue_signals();
++    /*
++     * In case any processes changed state recently, wait for them.
++     * This updates stopped processes (but we should have been
++     * signalled about those, up to inevitable races), and also
++     * continued processes if that feature is available.
++     */
++    wait_for_processes();
++
+     /* If necessary, update job table. */
+     if (unset(NOTIFY))
+ 	scanjobs();
+@@ -2216,8 +2264,11 @@ bin_kill(char *nam, char **argv, UNUSED(
+ 	    job, and send the job a SIGCONT if sending it a non-stopping
+ 	    signal. */
+ 	    if (jobtab[p].stat & STAT_STOPPED) {
++#ifndef WIFCONTINUED
++		/* With WIFCONTINUED we find this out properly */
+ 		if (sig == SIGCONT)
+ 		    makerunning(jobtab + p);
++#endif
+ 		if (sig != SIGKILL && sig != SIGCONT && sig != SIGTSTP
+ 		    && sig != SIGTTOU && sig != SIGTTIN && sig != SIGSTOP)
+ 		    killjb(jobtab + p, SIGCONT);
+@@ -2230,14 +2281,18 @@ bin_kill(char *nam, char **argv, UNUSED(
+ 	    if (kill(pid, sig) == -1) {
+ 		zwarnnam("kill", "kill %s failed: %e", *argv, errno);
+ 		returnval++;
+-	    } else if (sig == SIGCONT) {
++	    } 
++#ifndef WIFCONTINUED
++	    else if (sig == SIGCONT) {
+ 		Job jn;
+ 		Process pn;
++		/* With WIFCONTINUED we find this out properly */
+ 		if (findproc(pid, &jn, &pn, 0)) {
+ 		    if (WIFSTOPPED(pn->status))
+ 			pn->status = SP_RUNNING;
+ 		}
+ 	    }
++#endif
+ 	}
+     }
+     unqueue_signals();
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.58
+diff -p -u -r1.58 signals.c
+--- Src/signals.c	12 May 2010 10:07:01 -0000	1.58
++++ Src/signals.c	20 Aug 2010 23:57:24 -0000
+@@ -400,6 +400,129 @@ signal_suspend(UNUSED(int sig), int wait
+ /**/
+ int last_signal;
+ 
++/*
++ * Wait for any processes that have changed state.
++ *
++ * The main use for this is in the SIGCHLD handler.  However,
++ * we also use it to pick up status changes of jobs when
++ * updating jobs.
++ */
++/**/
++void
++wait_for_processes(void)
++{
++    /* keep WAITING until no more child processes to reap */
++    for (;;) {
++	/* save the errno, since WAIT may change it */
++	int old_errno = errno;
++	int status;
++	Job jn;
++	Process pn;
++	pid_t pid;
++	pid_t *procsubpid = &cmdoutpid;
++	int *procsubval = &cmdoutval;
++	int cont = 0;
++	struct execstack *es = exstack;
++
++	/*
++	 * Reap the child process.
++	 * If we want usage information, we need to use wait3.
++	 */
++#if defined(HAVE_WAIT3) || defined(HAVE_WAITPID)
++# ifdef WCONTINUED
++# define WAITFLAGS (WNOHANG|WUNTRACED|WCONTINUED)
++# else
++# define WAITFLAGS (WNOHANG|WUNTRACED)
++# endif
++#endif
++#ifdef HAVE_WAIT3
++# ifdef HAVE_GETRUSAGE
++	struct rusage ru;
++
++	pid = wait3((void *)&status, WAITFLAGS, &ru);
++# else
++	pid = wait3((void *)&status, WAITFLAGS, NULL);
++# endif
++#else
++# ifdef HAVE_WAITPID
++	pid = waitpid(-1, &status, WAITFLAGS);
++# else
++	pid = wait(&status);
++# endif
++#endif
++
++	if (!pid)  /* no more children to reap */
++	    break;
++
++	/* check if child returned was from process substitution */
++	for (;;) {
++	    if (pid == *procsubpid) {
++		*procsubpid = 0;
++		if (WIFSIGNALED(status))
++		    *procsubval = (0200 | WTERMSIG(status));
++		else
++		    *procsubval = WEXITSTATUS(status);
++		use_cmdoutval = 1;
++		get_usage();
++		cont = 1;
++		break;
++	    }
++	    if (!es)
++		break;
++	    procsubpid = &es->cmdoutpid;
++	    procsubval = &es->cmdoutval;
++	    es = es->next;
++	}
++	if (cont)
++	    continue;
++
++	/* check for WAIT error */
++	if (pid == -1) {
++	    if (errno != ECHILD)
++		zerr("wait failed: %e", errno);
++	    /* WAIT changed errno, so restore the original */
++	    errno = old_errno;
++	    break;
++	}
++
++	/*
++	 * Find the process and job containing this pid and
++	 * update it.
++	 */
++	pn = NULL;
++	if (findproc(pid, &jn, &pn, 0)) {
++#if defined(HAVE_WAIT3) && defined(HAVE_GETRUSAGE)
++	    struct timezone dummy_tz;
++	    gettimeofday(&pn->endtime, &dummy_tz);
++	    pn->status = status;
++	    pn->ti = ru;
++#else
++	    update_process(pn, status);
++#endif
++	    update_job(jn);
++	} else if (findproc(pid, &jn, &pn, 1)) {
++	    pn->status = status;
++	    update_job(jn);
++	} else {
++	    /* If not found, update the shell record of time spent by
++	     * children in sub processes anyway:  otherwise, this
++	     * will get added on to the next found process that
++	     * terminates.
++	     */
++	    get_usage();
++	}
++	/*
++	 * Remember the status associated with $!, so we can
++	 * wait for it even if it's exited.  This value is
++	 * only used if we can't find the PID in the job table,
++	 * so it doesn't matter that the value we save here isn't
++	 * useful until the process has exited.
++	 */
++	if (pn != NULL && pid == lastpid && lastpid_status != -1L)
++	    lastpid_status = lastval2;
++    }
++}
++
+ /* the signal handler */
+  
+ /**/
+@@ -458,110 +581,7 @@ zhandler(int sig)
+  
+     switch (sig) {
+     case SIGCHLD:
+-
+-	/* keep WAITING until no more child processes to reap */
+-	for (;;) {
+-	    /* save the errno, since WAIT may change it */
+-	    int old_errno = errno;
+-	    int status;
+-	    Job jn;
+-	    Process pn;
+-	    pid_t pid;
+-	    pid_t *procsubpid = &cmdoutpid;
+-	    int *procsubval = &cmdoutval;
+-	    int cont = 0;
+-	    struct execstack *es = exstack;
+-
+-	    /*
+-	     * Reap the child process.
+-	     * If we want usage information, we need to use wait3.
+-	     */
+-#ifdef HAVE_WAIT3
+-# ifdef HAVE_GETRUSAGE
+-	    struct rusage ru;
+-
+-	    pid = wait3((void *)&status, WNOHANG|WUNTRACED, &ru);
+-# else
+-	    pid = wait3((void *)&status, WNOHANG|WUNTRACED, NULL);
+-# endif
+-#else
+-# ifdef HAVE_WAITPID
+-	    pid = waitpid(-1, &status, WNOHANG|WUNTRACED);
+-# else
+-	    pid = wait(&status);
+-# endif
+-#endif
+-
+-	    if (!pid)  /* no more children to reap */
+-		break;
+-
+-	    /* check if child returned was from process substitution */
+-	    for (;;) {
+-		if (pid == *procsubpid) {
+-		    *procsubpid = 0;
+-		    if (WIFSIGNALED(status))
+-			*procsubval = (0200 | WTERMSIG(status));
+-		    else
+-			*procsubval = WEXITSTATUS(status);
+-		    use_cmdoutval = 1;
+-		    get_usage();
+-		    cont = 1;
+-		    break;
+-		}
+-		if (!es)
+-		    break;
+-		procsubpid = &es->cmdoutpid;
+-		procsubval = &es->cmdoutval;
+-		es = es->next;
+-	    }
+-	    if (cont)
+-		continue;
+-
+-	    /* check for WAIT error */
+-	    if (pid == -1) {
+-		if (errno != ECHILD)
+-		    zerr("wait failed: %e", errno);
+-		/* WAIT changed errno, so restore the original */
+-		errno = old_errno;
+-		break;
+-	    }
+-
+-	    /*
+-	     * Find the process and job containing this pid and
+-	     * update it.
+-	     */
+-	    pn = NULL;
+-	    if (findproc(pid, &jn, &pn, 0)) {
+-#if defined(HAVE_WAIT3) && defined(HAVE_GETRUSAGE)
+-		struct timezone dummy_tz;
+-		gettimeofday(&pn->endtime, &dummy_tz);
+-		pn->status = status;
+-		pn->ti = ru;
+-#else
+-		update_process(pn, status);
+-#endif
+-		update_job(jn);
+-	    } else if (findproc(pid, &jn, &pn, 1)) {
+-		pn->status = status;
+-		update_job(jn);
+-	    } else {
+-		/* If not found, update the shell record of time spent by
+-		 * children in sub processes anyway:  otherwise, this
+-		 * will get added on to the next found process that
+-		 * terminates.
+-		 */
+-		get_usage();
+-	    }
+-	    /*
+-	     * Remember the status associated with $!, so we can
+-	     * wait for it even if it's exited.  This value is
+-	     * only used if we can't find the PID in the job table,
+-	     * so it doesn't matter that the value we save here isn't
+-	     * useful until the process has exited.
+-	     */
+-	    if (pn != NULL && pid == lastpid && lastpid_status != -1L)
+-		lastpid_status = lastval2;
+-	}
++	wait_for_processes();
+         break;
+  
+     case SIGHUP:
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

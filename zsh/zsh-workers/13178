@@ -1,0 +1,193 @@
+From zsh-workers-return-13178-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Nov 21 19:59:22 2000
+Return-Path: <zsh-workers-return-13178-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15560 invoked from network); 21 Nov 2000 19:59:20 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Nov 2000 19:59:20 -0000
+Received: (qmail 22686 invoked by alias); 21 Nov 2000 19:58:44 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13178
+Received: (qmail 22661 invoked from network); 21 Nov 2000 19:58:43 -0000
+Date: Tue, 21 Nov 2000 14:58:38 -0500
+From: "Glenn F. Maynard" <glennm@mediaone.net>
+To: zsh-workers@sunsite.auc.dk
+Subject: xterm title/screen title+hardstatus
+Message-ID: <20001121145838.A2755@h0040333b7dc3.ne.mediaone.net>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.2.5i
+
+I've been trying to solve the problems with getting reliable titles and
+hardstatus lines (for screen).
+
+Two major problems: dealing with all input lines, and following processes
+around when job switching.
+
+The first is the more difficult one.  I couldn't get tcsh or bash to do
+this; zsh has come the closest.  In particular, there're issues with
+dealing with commands containing single quotes, double quotes, both nested,
+and escaping.  Zsh handles the quoting issue fine (tcsh can't seem to do
+it at all; simple things like perl -e 'print "Hello";' become a major
+task.)  Dealing with escapes is much more difficult (from preexec):
+preexec appears to receive the original, unparsed input command (including
+whitespace)--except that escapes are parsed, so a command like
+echo "Hello\nThere\n"; contains two real newlines, not the character
+sequence "\n".  I don't know if this is intentional: the rest of the
+preexec parameters seem completely unparsed (no parameter parsing, no
+variable substitution, no whitespace stripping), so my guess is that it
+is.  Passing the string through the "escape everything" command is no good,
+since it escapes quotes and everything else that hasn't been touched.  My
+objective is to display exactly what was typed in the titlebar (parsed
+somewhat: the first word, the command, is placed in the title; the remainder,
+if anything, is placed in the hardstatus line.)
+
+The second is a bit easier, especially since zsh provides $jobtexts[].  It
+needs a bit of help from the shell; it'd be silly to reimplement getjob()
+in shell code (since it'd need to be updated if new job codes are introduced.)
+I wasn't sure where this should be added, however.  Currently, I've added a
+variable expansion parameter: if FOO=%vi, then ${(J)FOO} expands to the job
+number.  The patch has at least two problems: first, I couldn't find anything
+to pass as a command name to the second argument of getjob(), so any errors
+in it come from "foo".  Second, errors are bad in this case: if I run an fg
+with bad arguments (fg %12345), getjob() says as much, so two errors are
+printed (one from preexec calling getjob, and another from fg.)  I'm not sure
+how to fix these, or if there's a better way to do this.
+
+Other problems I've had: Whitespace stripping was rather tricky; I'm sure
+there's a better way to do it.  The (z) (split) expansion command has very
+strange behavior: it splits on spaces if there's more than one word; if
+there's only one word, it splits it into an array of single characters.
+Is this intentional or a bug? It's very difficult to use; the hack I used
+to get around it should be fairly obvious.
+
+The function currently only works in screen; it doesn't handle the case of
+being run under xterm (which uses a different escape and only handles
+a single title setting; screen has two, a 20ish-character title and an
+arbitrary length hard status line.)  If someone wants to use the script
+as is in screen, use 
+
+hardstatus string "%t%?: %h%?"
+
+in .screenrc to display both.
+
+Patch (with above listed flaws); written for 3.1.9-dev-7, applies against CVS:
+
+diff -ur zsh-3.1.9-dev-7/Src/jobs.c zsh-3.1.9.dev7-job/Src/jobs.c
+--- zsh-3.1.9-dev-7/Src/jobs.c	Tue Oct 17 08:57:38 2000
++++ zsh-3.1.9.dev7-job/Src/jobs.c	Wed Nov 15 02:07:26 2000
+@@ -1089,7 +1089,7 @@
+  * to a job number.                                             */
+ 
+ /**/
+-static int
++int
+ getjob(char *s, char *prog)
+ {
+     int jobnum, returnval;
+diff -ur zsh-3.1.9-dev-7/Src/subst.c zsh-3.1.9.dev7-job/Src/subst.c
+--- zsh-3.1.9-dev-7/Src/subst.c	Mon Jun 19 05:14:34 2000
++++ zsh-3.1.9.dev7-job/Src/subst.c	Wed Nov 15 02:54:25 2000
+@@ -767,6 +767,7 @@
+     char hkeys = 0;
+     char hvals = 0;
+     int subexp;
++    int joblookup = 0;
+ 
+     *s++ = '\0';
+     if (!ialnum(c = *s) && c != '#' && c != Pound && c != '-' &&
+@@ -912,6 +913,10 @@
+ 			goto flagerr;
+ 		    break;
+ 
++		case 'J':
++		    joblookup++;
++		    break;
++
+ 		case 'l':
+ 		    tt = 1;
+ 		/* fall through */
+@@ -1687,6 +1692,26 @@
+ 	opts[PROMPTSUBST] = ops;
+ 	opts[PROMPTBANG] = opb;
+ 	opts[PROMPTPERCENT] = opp;
++    }
++    if (joblookup) {
++	if (isarr) {
++	    char **ap;
++
++	    if (!copied)
++		aval = arrdup(aval), copied = 1;
++	    ap = aval;
++
++	    for (; *ap; ap++) {
++		int i = getjob(*ap, "foo");
++		*ap = hcalloc(16);
++		sprintf(*ap, "%i", i);
++            }
++	} else {
++	    int i = getjob(val, "foo");
++	    val = hcalloc(16);
++	    sprintf(val, "%i", i);
++	    copied = 1;
++	}
+     }
+     if (quotemod) {
+ 	if (--quotetype > 3)
+
+(That allocation could probably be handled better, too, but it wouldn't matter
+unless some masochistic person uses a system with 64-bit randomized PIDs.)
+
+Zsh functions:
+
+preexec() {
+	local cmd spl pnum lhs rhs
+	cmd=$@
+	
+	while [[ $cmd == *\  ]] do cmd=${cmd% } ; done
+	while [[ $cmd == \ * ]] do cmd=${cmd# } ; done
+# bug? ${(z)xxx} should split a string into an array of words; but if there
+# is only 1 word, we get an array of chars. work around this.
+
+	spl=${(z)cmd}
+	if [[ ${#spl} == ${#cmd} ]] then
+		# it was split into an array of chars
+		lhs=${cmd}
+		rhs=
+	else
+		lhs=${spl[1]}
+		shift spl
+		rhs=${spl[*]}
+	fi
+
+	# strip off any path from lhs
+	lhs=${lhs:t}
+	# is this a command which restarts an existing job?
+	# lhs "fg"
+	if [[ $lhs == "fg" ]] then
+		pnum=${(J)rhs}
+		preexec ${jobtexts[$pnum]}
+		return
+	fi
+
+	# lhs %*?
+	if [[ $lhs == %* ]] then
+		pnum=${(J)lhs}
+		preexec ${jobtexts[$pnum]}
+		return
+	fi
+
+	echo -n '\033k'$lhs'\033'\\
+	echo -n '\033_'$rhs'\033'\\
+}
+
+precmd() {
+	echo -n '\033kzsh\033\\\033_'$PWD'\033'\\
+}
+
+-- 
+Glenn Maynard
+

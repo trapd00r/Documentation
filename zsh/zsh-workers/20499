@@ -1,0 +1,373 @@
+From zsh-workers-return-20499-mason-zsh=primenet.com.au@sunsite.dk Mon Oct 18 05:01:49 2004
+Return-Path: <zsh-workers-return-20499-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2359 invoked from network); 18 Oct 2004 05:01:48 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 18 Oct 2004 05:01:48 -0000
+Received: (qmail 23262 invoked from network); 18 Oct 2004 05:01:39 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 18 Oct 2004 05:01:39 -0000
+Received: (qmail 11431 invoked by alias); 18 Oct 2004 05:01:36 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 20499
+Received: (qmail 11417 invoked from network); 18 Oct 2004 05:01:35 -0000
+Received: from unknown (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 18 Oct 2004 05:01:35 -0000
+Received: (qmail 22863 invoked from network); 18 Oct 2004 05:00:36 -0000
+Received: from dsl3-63-249-88-2.cruzio.com (HELO binome.blorf.net) (63.249.88.2)
+  by a.mx.sunsite.dk with SMTP; 18 Oct 2004 05:00:34 -0000
+Received: by binome.blorf.net (Postfix, from userid 1000)
+	id D901882D; Sun, 17 Oct 2004 22:00:32 -0700 (PDT)
+Date: Sun, 17 Oct 2004 22:00:32 -0700
+From: Wayne Davison <wayned@users.sourceforge.net>
+To: zsh-workers@sunsite.dk
+Subject: Re: skip rewriting history if exiting due to signal
+Message-ID: <20041018050032.GA32556@blorf.net>
+References: <20041001193658.GD26529@blorf.net> <20041017194842.GA26158@blorf.net> <Pine.LNX.4.61.0410171652500.8058@toltec.zanshin.com>
+Mime-Version: 1.0
+Content-Type: multipart/mixed; boundary="45Z9DzgjV8m4Oswq"
+Content-Disposition: inline
+In-Reply-To: <Pine.LNX.4.61.0410171652500.8058@toltec.zanshin.com>
+User-Agent: Mutt/1.5.6+20040722i
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.0 required=6.0 tests=none autolearn=no version=2.63
+X-Spam-Hits: 0.0
+
+
+--45Z9DzgjV8m4Oswq
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+On Sun, Oct 17, 2004 at 05:21:18PM -0700, Bart Schaefer wrote:
+> - It requires a writable directory rather than merely a writable histfile.
+
+We already require this due to our never updating the histfile without
+first creating the file $HISTFILE.LOCK.
+
+>   Similarly, perhaps detect when the histfile is a symlink and fall back?
+
+That's certainly possible, but I'm thinking that it's not something we
+need to be concerned about.  However, I could be wrong.
+
+> - You haven't tested for failure of unlink() [though I'm not sure what the
+>   response to such failure would be ... except see below about O_EXCL].
+
+The unlink() we don't really care about because I had meant to add
+O_EXCL to the following open() call (and indeed had already tweaked that
+into my local version).  The failure of the open will cause the existing
+"can't write history file" error to be output, but it would be good to
+upgrade that warning to mention which history file we were really trying
+to write.
+
+> - You haven't tested for failure of rename() -- and note that rename() may 
+>   falsely report failure in the event of certain NFS errors.
+
+Yes, we should generate a warning about that (though I don't know what
+we should do about the false NFS errors you mention).  It seems to me
+that we don't need to do anything after the warning (i.e. the
+$HISTFILE.new file would be left intact, but we wouldn't try to copy it
+to the actual $HISTFILE or anything like that).
+
+> I wasn't aware of [$HISTFILE.$$]; it should be changed.  Using the PID
+> as a disambiguator is also not safe when NFS is involved
+
+Looks like a simple improvement to gettempname() to make it take an
+optional prefix arg will allow us to use that to create a better unique
+filename based on $HISTFILE.  I've attached a patch that implements
+this, fixes an unsafe use of gettempname() in builtin.c, and adds a new
+string function named bicat() that works like dyncat(), but uses
+permanent memory instead of the heap.
+
+> No, [$HISTFILE.new would] definitely be worse (even more likely to
+> have conflict when multiple shells are rewriting the history), not
+> better.
+
+No, the .new file is only written out after the lock is successful, so
+there's no conflict unless someone breaks a lock.  The main difference
+would be whether there is a random $HISTFILE.$$ left lying around when
+zsh gets killed when writing out the history file, as opposed to the
+constant $HISTFILE.new file being left (since the latter would get
+reused quickly, but the former would stick around).  I'm thinking that
+having extra, partial copies of the histfile lying around isn't going to
+be particularly useful for data recovery, so it might be better to
+switch over to just using $HISTFILE.new.
+
+I'm also attaching a second patch that contains an updated version of
+the rewrite-histfile-to-temp-file patch, this time using $HISTFILE.new
+as the temp-file's name.
+
+Thanks for the feedback!
+
+..wayne..
+
+--45Z9DzgjV8m4Oswq
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="hist-lock.patch"
+
+--- Src/builtin.c	5 Oct 2004 10:39:43 -0000	1.129
++++ Src/builtin.c	18 Oct 2004 04:28:36 -0000
+@@ -1445,7 +1445,7 @@ bin_fc(char *nam, char **argv, Options o
+ 	char *fil;
+ 
+ 	retval = 1;
+-	fil = gettempname();
++	fil = gettempname(NULL, 1);
+ 	if (((tempfd = open(fil, O_WRONLY | O_CREAT | O_EXCL | O_NOCTTY, 0600))
+ 	     == -1) ||
+ 	    ((out = fdopen(tempfd, "w")) == NULL)) {
+@@ -3534,8 +3534,8 @@ bin_print(char *name, char **args, Optio
+     	if ((fout = open_memstream(&buf, &mcount)) == NULL)
+ 	    zwarnnam(name, "open_memstream failed", NULL, 0);
+ #else
+-	char *tmpf = gettempname();
+-    	if ((fout = fopen(tmpf, "w+")) == NULL)
++	char *tmpf = gettempname(NULL, 1);
++	if (!(fout = fdopen(open(tmpf, O_RDWR|O_CREAT|O_EXCL, 0644), "w+")))
+ 	    zwarnnam(name, "can't open temp file: %e", NULL, errno);
+ 	unlink(tmpf);
+ #endif
+--- Src/exec.c	8 Oct 2004 14:37:30 -0000	1.74
++++ Src/exec.c	18 Oct 2004 04:28:37 -0000
+@@ -2801,7 +2801,7 @@ getherestr(struct redir *fn)
+     untokenize(t);
+     unmetafy(t, &len);
+     t[len++] = '\n';
+-    s = gettempname();
++    s = gettempname(NULL, 1);
+     if (!s || (fd = open(s, O_CREAT|O_WRONLY|O_EXCL|O_NOCTTY, 0600)) == -1)
+ 	return -1;
+     write(fd, t, len);
+@@ -2975,7 +2975,7 @@ getoutputfile(char *cmd)
+ 	return NULL;
+     if (!(prog = parsecmd(cmd)))
+ 	return NULL;
+-    if (!(nam = gettempname()))
++    if (!(nam = gettempname(NULL, 1)))
+ 	return NULL;
+ 
+     nam = ztrdup(nam);
+@@ -3022,7 +3022,7 @@ getoutputfile(char *cmd)
+ static char *
+ namedpipe(void)
+ {
+-    char *tnam = gettempname();
++    char *tnam = gettempname(NULL, 1);
+ 
+ # ifdef HAVE_MKFIFO
+     if (mkfifo(tnam, 0600) < 0)
+--- Src/hist.c	1 Oct 2004 19:48:53 -0000	1.54
++++ Src/hist.c	18 Oct 2004 04:28:38 -0000
+@@ -2129,23 +2129,19 @@ lockhistfile(char *fn, int keep_trying)
+ 	return 0;
+     if (!lockhistct++) {
+ 	struct stat sb;
+-	int fd, len;
++	FILE *out;
+ 	char *lockfile;
+ #ifdef HAVE_LINK
+ 	char *tmpfile;
+ #endif
+ 
+-	fn = unmeta(fn);
+-	len = strlen(fn);
+-	lockfile = zalloc(len + 5 + 1);
+-	sprintf(lockfile, "%s.LOCK", fn);
++	lockfile = bicat(unmeta(fn), ".LOCK");
+ #ifdef HAVE_LINK
+-	tmpfile = zalloc(len + 10 + 1);
+-	sprintf(tmpfile, "%s.%ld", fn, (long)mypid);
+-	unlink(tmpfile); /* NFS's O_EXCL is often broken... */
+-	if ((fd = open(tmpfile, O_WRONLY|O_CREAT|O_EXCL, 0644)) >= 0) {
+-	    write(fd, tmpfile+len+1, strlen(tmpfile+len+1));
+-	    close(fd);
++	tmpfile = gettempname(fn, 0);
++	out = fdopen(open(tmpfile, O_WRONLY|O_CREAT|O_EXCL, 0644), "w");
++	if (out) {
++	    fprintf(out, "%ld %s\n", (long)getpid(), getsparam("HOST"));
++	    fclose(out);
+ 	    while (link(tmpfile, lockfile) < 0) {
+ 		if (errno != EEXIST || !keep_trying)
+ 		    ;
+@@ -2167,7 +2163,7 @@ lockhistfile(char *fn, int keep_trying)
+ 	}
+ 	free(tmpfile);
+ #else /* not HAVE_LINK */
+-	while ((fd = open(lockfile, O_WRONLY|O_CREAT|O_EXCL, 0644)) < 0) {
++	while (!(out = fdopen(open(lockfile, O_WRONLY|O_CREAT|O_EXCL, 0644), "w"))) {
+ 	    if (errno != EEXIST || !keep_trying)
+ 		break;
+ 	    if (stat(lockfile, &sb) < 0) {
+@@ -2180,13 +2176,11 @@ lockhistfile(char *fn, int keep_trying)
+ 	    else
+ 		unlink(lockfile);
+ 	}
+-	if (fd < 0)
++	if (!out)
+ 	    lockhistct--;
+ 	else {
+-	    char buf[16];
+-	    sprintf(buf, "%ld", (long)mypid);
+-	    write(fd, buf, strlen(buf));
+-	    close(fd);
++	    fprintf(out, "%ld %s\n", (long)mypid, getsparam("HOST"));
++	    fclose(out);
+ 	}
+ #endif /* not HAVE_LINK */
+ 	free(lockfile);
+--- Src/string.c	19 Feb 2001 10:26:54 -0000	1.4
++++ Src/string.c	18 Oct 2004 04:50:22 -0000
+@@ -105,6 +105,22 @@ dyncat(char *s1, char *s2)
+ 
+ /**/
+ mod_export char *
++bicat(const char *s1, const char *s2)
++{
++    /* This version always uses permanently-allocated space. */
++    char *ptr;
++    size_t l1 = strlen(s1);
++
++    ptr = (char *)zalloc(l1 + strlen(s2) + 1);
++    strcpy(ptr, s1);
++    strcpy(ptr + l1, s2);
++    return ptr;
++}
++
++/* like strdup(), but with a specified length */
++
++/**/
++mod_export char *
+ dupstrpfx(const char *s, int len)
+ {
+     char *r = zhalloc(len + 1);
+@@ -118,6 +134,7 @@ dupstrpfx(const char *s, int len)
+ mod_export char *
+ ztrduppfx(const char *s, int len)
+ {
++    /* This version always uses permanently-allocated space. */
+     char *r = zalloc(len + 1);
+ 
+     memcpy(r, s, len);
+--- Src/utils.c	18 Oct 2004 03:32:16 -0000	1.67
++++ Src/utils.c	18 Oct 2004 04:28:40 -0000
+@@ -1122,28 +1122,33 @@ zclose(int fd)
+     return -1;
+ }
+ 
+-/* Get a file name relative to $TMPPREFIX which *
+- * is unique, for use as a temporary file.      */
+- 
+ #ifdef HAVE__MKTEMP
+ extern char *_mktemp(char *);
+ #endif
+ 
++/* Get a unique filename for use as a temporary file.  If "prefix" is
++ * NULL, the name is relative to $TMPPREFIX.  If "use_heap" is true, we
++ * allocate the returned name on the heap. */
++ 
+ /**/
+ mod_export char *
+-gettempname(void)
++gettempname(const char *prefix, int use_heap)
+ {
+-    char *s, *ret;
++    char *ret;
+  
+     queue_signals();
+-    if (!(s = getsparam("TMPPREFIX")))
+-	s = DEFAULT_TMPPREFIX;
++    if (!prefix && !(prefix = getsparam("TMPPREFIX")))
++	prefix = DEFAULT_TMPPREFIX;
++    if (use_heap)
++	ret = dyncat(unmeta(prefix), "XXXXXX");
++    else
++	ret = bicat(unmeta(prefix), ".XXXXXX");
+  
+ #ifdef HAVE__MKTEMP
+     /* Zsh uses mktemp() safely, so silence the warnings */
+-    ret = ((char *) _mktemp(dyncat(unmeta(s), "XXXXXX")));
++    ret = (char *) _mktemp(ret);
+ #else
+-    ret = ((char *) mktemp(dyncat(unmeta(s), "XXXXXX")));
++    ret = (char *) mktemp(ret);
+ #endif
+     unqueue_signals();
+ 
+--- Src/Modules/zftp.c	2 Jun 2004 22:15:00 -0000	1.32
++++ Src/Modules/zftp.c	18 Oct 2004 04:28:41 -0000
+@@ -1971,7 +1971,7 @@ zftp_open(char *name, char **args, int f
+      * However, it is closed whenever there are no connections open.
+      */
+     if (zfstatfd == -1) {
+-	fname = gettempname();
++	fname = gettempname(NULL, 1);
+ 	zfstatfd = open(fname, O_RDWR|O_CREAT|O_EXCL, 0600);
+ 	DPUTS(zfstatfd == -1, "zfstatfd not created");
+ #if defined(F_SETFD) && defined(FD_CLOEXEC)
+
+--45Z9DzgjV8m4Oswq
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="hist.patch"
+
+--- hist.c.orig	2004-10-17 21:51:17.000000000 -0700
++++ hist.c	2004-10-17 21:49:52.000000000 -0700
+@@ -2005,7 +2005,7 @@
+ void
+ savehistfile(char *fn, int err, int writeflags)
+ {
+-    char *t, *start = NULL;
++    char *t, *tmpfile, *start = NULL;
+     FILE *out;
+     Histent he;
+     zlong xcurhist = curhist - !!(histactive & HA_ACTIVE);
+@@ -2042,12 +2042,14 @@
+ 	    extended_history = 1;
+     }
+     if (writeflags & HFILE_APPEND) {
++	tmpfile = NULL;
+ 	out = fdopen(open(unmeta(fn),
+ 			O_CREAT | O_WRONLY | O_APPEND | O_NOCTTY, 0600), "a");
+     }
+     else {
+-	out = fdopen(open(unmeta(fn),
+-			 O_CREAT | O_WRONLY | O_TRUNC | O_NOCTTY, 0600), "w");
++	tmpfile = bicat(unmeta(fn), ".new");
++	unlink(tmpfile);
++	out = fdopen(open(tmpfile, O_WRONLY | O_CREAT | O_EXCL, 0600), "w");
+     }
+     if (out) {
+ 	for (; he && he->histnum <= xcurhist; he = down_histent(he)) {
+@@ -2092,6 +2094,11 @@
+ 	    lasthist.text = ztrdup(start);
+ 	}
+ 	fclose(out);
++	if (tmpfile) {
++	    if (rename(tmpfile, unmeta(fn)) < 0)
++		zerr("can't rename %s.new to $HISTFILE", fn, 0);
++	    free(tmpfile);
++	}
+ 
+ 	if (writeflags & HFILE_SKIPOLD
+ 	 && !(writeflags & (HFILE_FAST | HFILE_NO_REWRITE))) {
+@@ -2111,8 +2118,13 @@
+ 	    pophiststack();
+ 	    histactive = remember_histactive;
+ 	}
+-    } else if (err)
+-	zerr("can't write history file %s", fn, 0);
++    } else if (err) {
++	if (tmpfile) {
++	    zerr("can't write history file %s.new", fn, 0);
++	    free(tmpfile);
++	} else
++	    zerr("can't write history file %s", fn, 0);
++    }
+ 
+     unlockhistfile(fn);
+ }
+
+--45Z9DzgjV8m4Oswq--
+

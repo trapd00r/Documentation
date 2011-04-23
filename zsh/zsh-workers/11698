@@ -1,0 +1,220 @@
+From zsh-workers-return-11698-mason-zsh=primenet.com.au@sunsite.auc.dk Wed May 31 22:28:22 2000
+Return-Path: <zsh-workers-return-11698-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 206 invoked from network); 31 May 2000 22:28:20 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 May 2000 22:28:20 -0000
+Received: (qmail 24286 invoked by alias); 31 May 2000 22:28:12 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11698
+Received: (qmail 24279 invoked from network); 31 May 2000 22:28:11 -0000
+To: Zsh Workers <zsh-workers@sunsite.auc.dk>
+Subject: Re: BUG: vared in function 
+In-reply-to: "Peter Stephenson"'s message of "Wed, 31 May 2000 22:55:21 BST."
+             <E12xGSP-0006NP-00.2000-05-31-22-55-21@mail2.svr.pol.co.uk> 
+Date: Wed, 31 May 2000 23:28:08 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E12xGy9-000474-00.2000-05-31-23-28-09@mail1.svr.pol.co.uk>
+
+Peter Stephenson wrote:
+> Bernd Eggink wrote:
+> > Argh... 
+> > 
+> >    # t
+> >    vared -cp "Aha: " BLAH
+> > 
+> >    % t
+> >    t:vared:2: ZLE not enabled
+> > 
+> > This breaks lots of my scripts! 
+> > On the command line, 'vared' works. 
+> 
+> (I take it that should be `script' rather than `function' in the subject
+> line, functions are OK.)
+> 
+> I don't think there's any good reason why zle shouldn't be enabled
+> especially.
+
+In fact, what about this?  If it works for read, shouldn't it work for
+vared?  It certainly seems to.
+
+I removed the references to oshout, because it seems to me that if SHTTY is
+-1 shout has no business being anything but NULL --- that was certainly the
+intention when I introduced shout, although there's been a lot of water
+under the bridge (and everywhere else) since then.  Maybe the question even
+got asked, in which case I missed it.
+
+I'm in two minds on whether to commit this.  On the one hand, there is more
+of a potential for problems with read or vared.  On the other hand, without
+it it introduces a new problem just for one version.
+
+I remembered the mod_export, anyway.
+
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.20
+diff -u -r1.20 builtin.c
+--- Src/builtin.c	2000/05/27 08:31:32	1.20
++++ Src/builtin.c	2000/05/31 22:22:51
+@@ -3357,6 +3357,39 @@
+ static char *zbuf;
+ static int readfd;
+ 
++/**/
++mod_export int
++openttyspecially(int kopt)
++{
++    int haso = 0;
++
++    if (SHTTY == -1) {
++	/* need to open /dev/tty specially */
++	if ((SHTTY = open("/dev/tty", O_RDWR|O_NOCTTY)) != -1) {
++	    haso = 1;
++	    init_shout();
++	}
++    } else if (!shout) {
++	/* We need an output FILE* on the tty */
++	init_shout();
++    }
++    /* We should have a SHTTY opened by now. */
++    if (SHTTY == -1) {
++	/* Unfortunately, we didn't. */
++	fprintf(stderr, "not interactive and can't open terminal\n");
++	fflush(stderr);
++	return 1;
++    }
++    if (unset(INTERACTIVE))
++	gettyinfo(&shttyinfo);
++    /* attach to the tty */
++    attachtty(mypgrp);
++    if (kopt)
++	setcbreak();
++    readfd = SHTTY;
++    return haso;
++}
++
+ /* Read a character from readfd, or from the buffer zbuf.  Return EOF on end of
+ file/buffer. */
+ 
+@@ -3376,7 +3409,6 @@
+     int isem = !strcmp(term, "emacs"), izle = zleactive && getkeyptr;
+     char *buf, *bptr, *firstarg, *zbuforig;
+     LinkList readll = newlinklist();
+-    FILE *oshout = NULL;
+ 
+     if ((ops['k'] || ops['b']) && *args && idigit(**args)) {
+ 	if (!(nchars = atoi(*args)))
+@@ -3398,33 +3430,8 @@
+ 	return compctlread(name, args, ops, reply);
+ 
+     if ((ops['k'] && !ops['u'] && !ops['p']) || ops['q']) {
+-	if (!zleactive) {
+-	    if (SHTTY == -1) {
+-		/* need to open /dev/tty specially */
+-		if ((SHTTY = open("/dev/tty", O_RDWR|O_NOCTTY)) != -1) {
+-		    haso = 1;
+-		    oshout = shout;
+-		    init_shout();
+-		}
+-	    } else if (!shout) {
+-		/* We need an output FILE* on the tty */
+-		init_shout();
+-	    }
+-	    /* We should have a SHTTY opened by now. */
+-	    if (SHTTY == -1) {
+-		/* Unfortunately, we didn't. */
+-		fprintf(stderr, "not interactive and can't open terminal\n");
+-		fflush(stderr);
+-		return 1;
+-	    }
+-	    if (unset(INTERACTIVE))
+-		gettyinfo(&shttyinfo);
+-	    /* attach to the tty */
+-	    attachtty(mypgrp);
+-	    if (!isem && ops['k'])
+-		setcbreak();
+-	    readfd = SHTTY;
+-	}
++	if (!zleactive)
++	    haso = openttyspecially(!isem && ops['k']);
+ 	keys = 1;
+     } else if (ops['u'] && !ops['p']) {
+ 	/* -u means take input from the specified file descriptor. *
+@@ -3485,7 +3492,7 @@
+ 		settyinfo(&shttyinfo);
+ 	    if (haso) {
+ 		fclose(shout);	/* close(SHTTY) */
+-		shout = oshout;
++		shout = NULL;
+ 		SHTTY = -1;
+ 	    }
+ 	}
+@@ -3517,7 +3524,7 @@
+ 	    /* dispose of result appropriately, etc. */
+ 	    if (haso) {
+ 		fclose(shout);	/* close(SHTTY) */
+-		shout = oshout;
++		shout = NULL;
+ 		SHTTY = -1;
+ 	    }
+ 	}
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.5
+diff -u -r1.5 zle_main.c
+--- Src/Zle/zle_main.c	2000/05/30 03:43:27	1.5
++++ Src/Zle/zle_main.c	2000/05/31 22:22:55
+@@ -741,10 +741,11 @@
+     int create = 0, ifl;
+     int type = PM_SCALAR, obreaks = breaks, haso = 0;
+     char *p1 = NULL, *p2 = NULL;
+-    FILE *oshout = NULL;
+ 
+-    if (unset(USEZLE)) {
+-	zwarnnam(name, "ZLE not enabled", NULL, 0);
++    if (unset(USEZLE) || SHTTY == -1)
++	haso = openttyspecially(0);
++    if (SHTTY == -1) {
++	zwarnnam(name, "can't open terminal", NULL, 0);
+ 	return 1;
+     }
+     if (zleactive) {
+@@ -830,17 +831,6 @@
+ 	return 1;
+     }
+ 
+-    if (SHTTY == -1) {
+-	/* need to open /dev/tty specially */
+-	if ((SHTTY = open("/dev/tty", O_RDWR|O_NOCTTY)) == -1) {
+-	    zwarnnam(name, "can't access terminal", NULL, 0);
+-	    return 1;
+-	}
+-	oshout = shout;
+-	init_shout();
+-
+-	haso = 1;
+-    }
+     /* edit the parameter value */
+     zpushnode(bufstack, ztrdup(s));
+ 
+@@ -857,7 +847,7 @@
+     varedarg = ova;
+     if (haso) {
+ 	fclose(shout);	/* close(SHTTY) */
+-	shout = oshout;
++	shout = NULL;
+ 	SHTTY = -1;
+     }
+     if (!t || errflag) {
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@CambridgeSiliconRadio.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

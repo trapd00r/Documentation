@@ -1,0 +1,203 @@
+From zsh-workers-return-7380-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Aug 05 14:26:55 1999
+Return-Path: <zsh-workers-return-7380-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28448 invoked from network); 5 Aug 1999 14:26:53 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Aug 1999 14:26:53 -0000
+Received: (qmail 20919 invoked by alias); 5 Aug 1999 14:26:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7380
+Received: (qmail 20912 invoked from network); 5 Aug 1999 14:26:44 -0000
+Date: Thu, 5 Aug 1999 16:26:40 +0200 (MET DST)
+Message-Id: <199908051426.QAA17397@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Thu, 05 Aug 1999 15:18:05 +0200
+Subject: Re: PATCH: parameter and quoting (was: Re: Completion problems.)
+
+
+Peter Stephenson wrote:
+
+> Sven Wischnowsky wrote:
+> > Ah, right, hadn't thought about patterns (ahem)... "${a%'}" reports
+> > the error.
+> > 
+> > Hm. Should the proposed new flag apply to those, too, and change the
+> > current behaviour to not report the error or should the current
+> > behaviour of (Q) be changed?
+> 
+> The first possibility sounds sensible to me, too, since ksh allows
+> you to do
+
+Fine. This adds the (X) flag to turn on error-reporting. Both `e' and
+`E' were already taken, I could have used `w' or `W' for `warning' or 
+something like that, but that isn't really correct. Other free
+characters are: DGHJKTVWYZabcdghmnuwxyz -- any suggestions, or is `X'
+acceptable?
+
+This also makes `:Q' work for history expansions. I always forget that 
+history doesn't use modify().
+
+
+Then Andrej Borsenkow wrote:
+
+> Unfortunately, Single UNIX requires, that quotes be matched. This is from the
+> description of double-quotes:
+> 
+> ==
+> Within the string of characters from an enclosed ${ to the matching "}", an even
+> number of unescaped double-quotes or single-quotes, if any, must occur.
+> ==
+> 
+> It means, that preceding example MUST be
+> 
+> echo "${a%\'}"
+
+Damn, I just had the patch... but even if we decide to follow the
+standard and not ksh here, it will be easier with this patch.
+
+Bye
+ Sven
+
+diff -u os/hist.c Src/hist.c
+--- os/hist.c	Thu Aug  5 14:19:19 1999
++++ Src/hist.c	Thu Aug  5 16:16:43 1999
+@@ -577,6 +577,18 @@
+ 	    case 'q':
+ 		quote(&sline);
+ 		break;
++	    case 'Q':
++		{
++		    int one = noerrs, oef = errflag;
++
++		    noerrs = 1;
++		    parse_subst_string(sline);
++		    noerrs = one;
++		    errflag = oef;
++		    remnulargs(sline);
++		    untokenize(sline);
++		}
++		break;
+ 	    case 'x':
+ 		quotebreak(&sline);
+ 		break;
+diff -u os/subst.c Src/subst.c
+--- os/subst.c	Thu Aug  5 14:19:21 1999
++++ Src/subst.c	Thu Aug  5 16:10:54 1999
+@@ -721,7 +721,7 @@
+     int flnum = 0;
+     int sortit = 0, casind = 0;
+     int casmod = 0;
+-    int quotemod = 0;
++    int quotemod = 0, quoteerr = 0;
+     char *sep = NULL, *spsep = NULL;
+     char *premul = NULL, *postmul = NULL, *preone = NULL, *postone = NULL;
+     char *replstr = NULL;	/* replacement string for /orig/repl */
+@@ -830,6 +830,9 @@
+ 		case 'Q':
+ 		    quotemod = -1;
+ 		    break;
++		case 'X':
++		    quoteerr = 1;
++		    break;
+ 
+ 		case 'e':
+ 		    eval = 1;
+@@ -1388,12 +1391,23 @@
+ 	case '#':
+ 	case Pound:
+ 	case '/':
+-	    if (qt)
+-		if (parse_subst_string(s)) {
++	    if (qt) {
++		int one = noerrs, oef = errflag, haserr;
++
++		if (!quoteerr)
++		    noerrs = 1;
++		haserr = parse_subst_string(s);
++		noerrs = one;
++		if (!quoteerr) {
++		    errflag = oef;
++		    if (haserr)
++			tokenize(s);
++		} else if (haserr || errflag) {
+ 		    zerr("parse error in ${...%c...} substitution",
+ 			 NULL, s[-1]);
+ 		    return NULL;
+ 		}
++	    }
+ 	    {
+ 		char t = s[-1];
+ 
+@@ -1567,16 +1581,22 @@
+ 		for (; *ap; ap++)
+ 		    *ap = bslashquote(*ap, NULL, 0);
+ 	    else {
+-		int one = noerrs, oef = errflag;
++		int one = noerrs, oef = errflag, haserr = 0;
+ 
+-		noerrs = 1;
++		if (!quoteerr)
++		    noerrs = 1;
+ 		for (; *ap; ap++) {
+-		    parse_subst_string(*ap);
++		    haserr |= parse_subst_string(*ap);
+ 		    remnulargs(*ap);
+ 		    untokenize(*ap);
+ 		}
+ 		noerrs = one;
+-		errflag = oef;
++		if (!quoteerr)
++		    errflag = oef;
++		else if (haserr || errflag) {
++		    zerr("parse error in parameter value", NULL, 0);
++		    return NULL;
++		}
+ 	    }
+ 	} else {
+ 	    if (!copied)
+@@ -1584,12 +1604,18 @@
+ 	    if (quotemod > 0)
+ 		val = bslashquote(val, NULL, 0);
+ 	    else {
+-		int one = noerrs, oef = errflag;
++		int one = noerrs, oef = errflag, haserr;
+ 
+-		noerrs = 1;
+-		parse_subst_string(val);
++		if (!quoteerr)
++		    noerrs = 1;
++		haserr = parse_subst_string(val);
+ 		noerrs = one;
+-		errflag = oef;
++		if (!quoteerr)
++		    errflag = oef;
++		else if (haserr || errflag) {
++		    zerr("parse error in parameter value", NULL, 0);
++		    return NULL;
++		}
+ 		remnulargs(val);
+ 		untokenize(val);
+ 	    }
+diff -u od/Zsh/expn.yo Doc/Zsh/expn.yo
+--- od/Zsh/expn.yo	Thu Aug  5 14:19:13 1999
++++ Doc/Zsh/expn.yo	Thu Aug  5 16:17:48 1999
+@@ -587,6 +587,11 @@
+ item(tt(Q))(
+ Remove one level of quotes from the resulting words.
+ )
++item(tt(X))(
++With this flag parsing errors occuring with the tt(Q) flag or the
++pattern matching forms such as `tt(${)var(name)tt(#)var(pattern)tt(})' 
++are reported. Without the flag they are silently ignored.
++)
+ item(tt(c))(
+ With tt(${#)var(name)tt(}), count the total number of characters in an array,
+ as if the elements were concatenated with spaces between them.
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

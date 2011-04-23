@@ -1,0 +1,239 @@
+From zsh-workers-return-15115-mason-zsh=primenet.com.au@sunsite.dk Wed Jun 27 11:20:55 2001
+Return-Path: <zsh-workers-return-15115-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1048 invoked from network); 27 Jun 2001 11:20:53 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Jun 2001 11:20:53 -0000
+Received: (qmail 15677 invoked by alias); 27 Jun 2001 11:19:57 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15115
+Received: (qmail 15658 invoked from network); 27 Jun 2001 11:19:56 -0000
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+Date: Wed, 27 Jun 2001 13:18:44 +0200 (MET DST)
+Message-Id: <200106271118.NAA25488@beta.informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+Subject: Re: PATCH: Re: disowning stopped jobs
+In-Reply-To: <1010626164005.ZM3853@candle.brasslantern.com>
+
+Bart Schaefer wrote:
+
+> On Jun 26, 10:15am, Sven Wischnowsky wrote:
+> } Subject: PATCH: Re: disowning stopped jobs
+> }
+> } Just had an idea. Why not give an option to disown, say `-c' for
+> } `continue', that makes it wake up stopped jobs before disowning them?
+> 
+> I think I'd rather have a setopt, as presently `-c' would be interpreted
+> by disown as a job spec.  However, I don't feel strongly about it.
+
+Hm, I was thinking the same after I'd sent that.
+
+Here is the patch, adding the option `AUTO_CONTINUE' (any better name?).
+It also makes the `%foo &!' and `%foo &|' forms make the job running
+automatically, independent of the option's setting.
+
+
+Bye
+  Sven
+
+Index: Doc/Zsh/builtins.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/builtins.yo,v
+retrieving revision 1.30
+diff -u -r1.30 builtins.yo
+--- Doc/Zsh/builtins.yo	2001/06/14 09:49:02	1.30
++++ Doc/Zsh/builtins.yo	2001/06/27 11:20:09
+@@ -230,6 +230,12 @@
+ no longer report their status, and will not complain if you
+ try to exit an interactive shell with them running or stopped.
+ If no var(job) is specified, disown the current job.
++
++If the var(job)s are currently stopped and the tt(AUTO_CONTINUE) option
++is not set, a warning is printed containing information about how to
++make them running after they have been disowned.  If one of the latter
++two forms is used, the var(job)s will automatically be made running,
++independent of the setting of the tt(AUTO_CONTINUE) option.
+ )
+ findex(echo)
+ item(tt(echo) [ tt(-neE) ] [ var(arg) ... ])(
+Index: Doc/Zsh/options.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/options.yo,v
+retrieving revision 1.20
+diff -u -r1.20 options.yo
+--- Doc/Zsh/options.yo	2001/06/12 10:34:57	1.20
++++ Doc/Zsh/options.yo	2001/06/27 11:20:10
+@@ -91,6 +91,14 @@
+ and the command is the name of a directory, perform the tt(cd)
+ command to that directory.
+ )
++pindex(AUTO_CONTINUE)
++cindex(jobs, continuing automatically)
++cindex(continuing jobs automatically)
++item(tt(AUTO_CONT))(
++With this option set, stopped jobs that are removed from the job table
++with the tt(disown) builtin command are automatically sent a tt(CONT)
++signal to make them running.
++)
+ pindex(AUTO_LIST)
+ cindex(completion, listing choices)
+ item(tt(AUTO_LIST) (tt(-9)) <D>)(
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.32
+diff -u -r1.32 exec.c
+--- Src/exec.c	2001/06/25 00:15:05	1.32
++++ Src/exec.c	2001/06/27 11:20:11
+@@ -1645,7 +1645,7 @@
+     int nullexec = 0, assign = 0, forked = 0;
+     int is_shfunc = 0, is_builtin = 0, is_exec = 0;
+     /* Various flags to the command. */
+-    int cflags = 0, checked = 0;
++    int cflags = 0, checked = 0, oautocont = opts[AUTOCONTINUE];
+     LinkList redir;
+     wordcode code;
+     Wordcode beg = state->pc, varspc;
+@@ -1680,6 +1680,8 @@
+      * reference to a job in the job table.                */
+     if (type == WC_SIMPLE && args && nonempty(args) &&
+ 	*(char *)peekfirst(args) == '%') {
++        if (how & Z_DISOWN)
++            opts[AUTOCONTINUE] = 1;
+ 	pushnode(args, dupstring((how & Z_DISOWN)
+ 				 ? "disown" : (how & Z_ASYNC) ? "bg" : "fg"));
+ 	how = Z_SYNC;
+@@ -1833,6 +1835,7 @@
+ 		if (cflags & BINF_BUILTIN) {
+ 		    zwarn("no such builtin: %s", cmdarg, 0);
+ 		    lastval = 1;
++                    opts[AUTOCONTINUE] = oautocont;
+ 		    return;
+ 		}
+ 		break;
+@@ -1856,6 +1859,7 @@
+ 
+     if (errflag) {
+ 	lastval = 1;
++        opts[AUTOCONTINUE] = oautocont;
+ 	return;
+     }
+ 
+@@ -1899,6 +1903,7 @@
+ 
+     if (errflag) {
+ 	lastval = 1;
++        opts[AUTOCONTINUE] = oautocont;
+ 	return;
+     }
+ 
+@@ -1981,6 +1986,7 @@
+ 	if ((pid = zfork()) == -1) {
+ 	    close(synch[0]);
+ 	    close(synch[1]);
++            opts[AUTOCONTINUE] = oautocont;
+ 	    return;
+ 	} if (pid) {
+ 	    close(synch[1]);
+@@ -2006,6 +2012,7 @@
+ 		}
+ 	    }
+ 	    addproc(pid, text);
++            opts[AUTOCONTINUE] = oautocont;
+ 	    return;
+ 	}
+ 	/* pid == 0 */
+@@ -2373,6 +2380,7 @@
+ 
+     zsfree(STTYval);
+     STTYval = 0;
++    opts[AUTOCONTINUE] = oautocont;
+ }
+ 
+ /* Arrange to have variables restored. */
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.12
+diff -u -r1.12 jobs.c
+--- Src/jobs.c	2001/06/26 08:18:23	1.12
++++ Src/jobs.c	2001/06/27 11:20:12
+@@ -1215,7 +1215,7 @@
+ int
+ bin_fg(char *name, char **argv, char *ops, int func)
+ {
+-    int job, lng, firstjob = -1, retval = 0;
++    int job, lng, firstjob = -1, retval = 0, ofunc = func;
+ 
+     if (ops['Z']) {
+ 	int len;
+@@ -1299,6 +1299,8 @@
+     for (; (firstjob != -1) || *argv; (void)(*argv && argv++)) {
+ 	int stopped, ocj = thisjob;
+ 
++        func = ofunc;
++
+ 	if (func == BIN_WAIT && isanum(*argv)) {
+ 	    /* wait can take a pid; the others can't. */
+ 	    pid_t pid = (long)atoi(*argv);
+@@ -1326,6 +1328,13 @@
+ 	    unqueue_signals();
+ 	    return 1;
+ 	}
++        /* If AUTO_CONTINUE is set (automatically make stopped jobs running
++         * on disown), we actually do a bg and then delete the job table entry. */
++
++        if (isset(AUTOCONTINUE) && func == BIN_DISOWN &&
++            jobtab[job].stat & STAT_STOPPED)
++            func = BIN_BG;
++
+ 	/* We have a job number.  Now decide what to do with it. */
+ 	switch (func) {
+ 	case BIN_FG:
+@@ -1386,7 +1395,8 @@
+ 	    if (func != BIN_BG) {
+ 		waitjobs();
+ 		retval = lastval2;
+-	    }
++	    } else if (ofunc == BIN_DISOWN)
++	        deletejob(jobtab + job);
+ 	    break;
+ 	case BIN_JOBS:
+ 	    printjob(job + jobtab, lng, 2);
+Index: Src/options.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/options.c,v
+retrieving revision 1.9
+diff -u -r1.9 options.c
+--- Src/options.c	2001/06/12 10:34:57	1.9
++++ Src/options.c	2001/06/27 11:20:12
+@@ -75,6 +75,7 @@
+ {NULL, "alwaystoend",	      0,			 ALWAYSTOEND},
+ {NULL, "appendhistory",	      OPT_ALL,			 APPENDHISTORY},
+ {NULL, "autocd",	      OPT_EMULATE,		 AUTOCD},
++{NULL, "autocontinue",	      0,			 AUTOCONTINUE},
+ {NULL, "autolist",	      OPT_ALL,			 AUTOLIST},
+ {NULL, "automenu",	      OPT_ALL,			 AUTOMENU},
+ {NULL, "autonamedirs",	      0,			 AUTONAMEDIRS},
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.31
+diff -u -r1.31 zsh.h
+--- Src/zsh.h	2001/06/12 10:34:57	1.31
++++ Src/zsh.h	2001/06/27 11:20:13
+@@ -1314,6 +1314,7 @@
+     ALWAYSTOEND,
+     APPENDHISTORY,
+     AUTOCD,
++    AUTOCONTINUE,
+     AUTOLIST,
+     AUTOMENU,
+     AUTONAMEDIRS,
+
+-- 
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

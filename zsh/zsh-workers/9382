@@ -1,0 +1,244 @@
+From zsh-workers-return-9382-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jan 20 08:57:13 2000
+Return-Path: <zsh-workers-return-9382-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13089 invoked from network); 20 Jan 2000 08:57:12 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 20 Jan 2000 08:57:12 -0000
+Received: (qmail 27247 invoked by alias); 20 Jan 2000 08:57:00 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9382
+Received: (qmail 27239 invoked from network); 20 Jan 2000 08:56:59 -0000
+Date: Thu, 20 Jan 2000 09:56:57 +0100 (MET)
+Message-Id: <200001200856.JAA22386@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Wed, 19 Jan 2000 19:38:33 +0000
+Subject: PATCH: Re: If someone wants to try...
+
+
+Peter Stephenson wrote:
+
+> Sven Wischnowsky wrote:
+> > Missing initialisation for a tstack field in two places.
+> 
+> Yes, now `which _path_files' (which was in effect what was going wrong
+> before) works, which is a pretty good test.  
+> 
+> However, I can get a core dump with this:
+> 
+> fn() {
+> 
+> [[ $#ignore -eq 0 && -z $gopt && -n $FIGNORE ]]
+> 
+> if [[ "$pre[1]" = \~ ]]; then; fi
+> 
+> }
+> which fn
+> 
+> (I'm not saying the last bit should necessarily work, although it would be
+> nice if it did nothing, simply that it shouldn't core dump when you look at
+> it.)  It's probably related to:
+> 
+> % fn() { if true; then; fi; }
+> % which fn
+> fn () {
+>         if true
+>         then
+> 
+> }
+
+This tries to handle it in a way that avoids such errors in the
+future. execompile() now uses WC_END's in places where empty lists are 
+in the node structure. And it makes WC_END be handled correctly in
+text.c and exec.c.
+
+The hunk in parameter.c replaces a freestruct() and the hunk in mem.c
+updates the comment (it was talking about a certain dupstruct()
+function).
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/Modules/parameter.c Src/Modules/parameter.c
+--- ../z.old/Src/Modules/parameter.c	Thu Jan 20 09:07:28 2000
++++ Src/Modules/parameter.c	Thu Jan 20 09:48:09 2000
+@@ -361,7 +361,7 @@
+ 	if (!strncmp(name, "TRAP", 4) &&
+ 	    (sn = getsignum(name + 4)) != -1) {
+ 	    if (settrap(sn, shf->funcdef)) {
+-		freestruct(shf->funcdef);
++		freeeprog(shf->funcdef);
+ 		zfree(shf, sizeof(*shf));
+ 		zsfree(val);
+ 		LASTALLOC_RETURN;
+diff -ru ../z.old/Src/exec.c Src/exec.c
+--- ../z.old/Src/exec.c	Thu Jan 20 09:07:18 2000
++++ Src/exec.c	Thu Jan 20 09:53:12 2000
+@@ -842,9 +842,6 @@
+ 	    break;
+ 	code = *state->pc++;
+     }
+-    if (wc_code(code) == WC_END)
+-	state->pc--;
+-
+     pline_level = old_pline_level;
+     list_pipe = old_list_pipe;
+     lineno = oldlineno;
+diff -ru ../z.old/Src/mem.c Src/mem.c
+--- ../z.old/Src/mem.c	Thu Jan 20 09:07:19 2000
++++ Src/mem.c	Thu Jan 20 09:49:34 2000
+@@ -56,17 +56,11 @@
+ 	attempting to free this memory may result in a core dump.
+ 	The pair of pointers ncalloc and alloc may point to either
+ 	zalloc & zcalloc or zhalloc & hcalloc; permalloc() sets them to the
+-	former, and heapalloc() sets them to the latter. This can be useful.
+-	For example, the dupstruct() routine duplicates a syntax tree,
+-	allocating the new memory for the tree using alloc().  If you want
+-	to duplicate a structure for a one-time use (i.e. to execute the list
+-	in a for loop), call heapalloc(), then dupstruct().  If you want
+-	to duplicate a structure in order to preserve it (i.e. a function
+-	definition), call permalloc(), then dupstruct().
++	former, and heapalloc() sets them to the latter.
+ 
+ 	If possible, the heaps are allocated using mmap() so that the
+ 	(*real*) heap isn't filled up with empty zsh heaps. If mmap()
+-	is not available and zsh's own allocator we use a simple trick
++	is not available and zsh's own allocator is used, we use a simple trick
+ 	to avoid that: we allocate a large block of memory before allocating
+ 	a heap pool, this memory is freed again immediately after the pool
+ 	is allocated. If there are only small blocks on the free list this
+diff -ru ../z.old/Src/parse.c Src/parse.c
+--- ../z.old/Src/parse.c	Thu Jan 20 09:07:20 2000
++++ Src/parse.c	Thu Jan 20 09:43:50 2000
+@@ -1934,6 +1934,8 @@
+ }
+ 
+ #define ec(N) ecomp((struct node *) (N))
++#define ecsave(N) \
++  do { int u = ecused; ec(N); if (u == ecused) ecadd(WCB_END()); } while (0)
+ 
+ #define _Cond(X) ((Cond) (X))
+ #define _Cmd(X) ((Cmd) (X))
+@@ -2024,7 +2026,7 @@
+ 		break;
+ 	    case SUBSH:
+ 		ecadd(WCB_SUBSH());
+-		ec(nn->u.list);
++		ecsave(nn->u.list);
+ 		break;
+ 	    case ZCTIME:
+ 		ecadd(WCB_TIMED(nn->u.pline ? WC_TIMED_PIPE : WC_TIMED_EMPTY));
+@@ -2034,7 +2036,7 @@
+ 	    case FUNCDEF:
+ 		{
+ 		    LinkNode np;
+-		    int num, sbeg, oecu, onp;
++		    int num, sbeg, onp;
+ 		    Eccstr ostrs;
+ 
+ 		    /* Defined functions and their strings are stored
+@@ -2057,10 +2059,7 @@
+ 		    onp = ecnpats;
+ 		    ecnpats = 0;
+ 
+-		    oecu = ecused;
+-		    ec(nn->u.list);
+-		    if (oecu == ecused)
+-			ecadd(WCB_END());
++		    ecsave(nn->u.list);
+ 
+ 		    ecbuf[p + num + 2] = ecused - num - p;
+ 		    ecbuf[p + num + 3] = ecnpats;
+@@ -2088,7 +2087,7 @@
+ 		break;
+ 	    case CURSH:
+ 		ecadd(WCB_CURSH());
+-		ec(nn->u.list);
++		ecsave(nn->u.list);
+ 		break;
+ 	    case CFOR:
+ 		{
+@@ -2118,7 +2117,7 @@
+ 			} else
+ 			    type = WC_FOR_PPARAM;
+ 		    }
+-		    ec(nn->u.forcmd->list);
++		    ecsave(nn->u.forcmd->list);
+ 
+ 		    ecbuf[p] = WCB_FOR(type, ecused - 1 - p);
+ 		}
+@@ -2145,7 +2144,7 @@
+ 		    } else
+ 			type = WC_SELECT_PPARAM;
+ 
+-		    ec(nn->u.forcmd->list);
++		    ecsave(nn->u.forcmd->list);
+ 
+ 		    ecbuf[p] = WCB_SELECT(type, ecused - 1 - p);
+ 		}
+@@ -2160,14 +2159,14 @@
+ 		    for (i = nn->u.ifcmd->ifls, t = nn->u.ifcmd->thenls;
+ 			 *i; i++, t++) {
+ 			p = ecadd(0);
+-			ec(*i);
+-			ec(*t);
++			ecsave(*i);
++			ecsave(*t);
+ 			ecbuf[p] = WCB_IF(type, ecused - 1 - p);
+ 			type = WC_IF_ELIF;
+ 		    }
+ 		    if (*t) {
+ 			p = ecadd(0);
+-			ec(*t);
++			ecsave(*t);
+ 			ecbuf[p] = WCB_IF(WC_IF_ELSE, ecused - 1 - p);
+ 		    }
+ 		    ecbuf[c] = WCB_IF(WC_IF_HEAD, ecused - 1 - c);
+@@ -2185,7 +2184,7 @@
+ 			c = ecadd(0);
+ 			ecstr(*pp + 1);
+ 			ecadd(ecnpats++);
+-			ec(*l);
++			ecsave(*l);
+ 			ecbuf[c] = WCB_CASE((**pp == ';' ?
+ 					     WC_CASE_OR : WC_CASE_AND),
+ 					    ecused - 1 - c);
+@@ -2203,13 +2202,13 @@
+ 	    case CREPEAT:
+ 		p = ecadd(0);
+ 		ecstr((char *) getdata(firstnode(nn->args)));
+-		ec(nn->u.list);
++		ecsave(nn->u.list);
+ 		ecbuf[p] = WCB_REPEAT(ecused - 1 - p);
+ 		break;
+ 	    case CWHILE:
+ 		p = ecadd(0);
+-		ec(nn->u.whilecmd->cont);
+-		ec(nn->u.whilecmd->loop);
++		ecsave(nn->u.whilecmd->cont);
++		ecsave(nn->u.whilecmd->loop);
+ 		ecbuf[p] = WCB_WHILE((nn->u.whilecmd->cond ?
+ 				      WC_WHILE_UNTIL : WC_WHILE_WHILE),
+ 				     ecused - 1 - p);
+diff -ru ../z.old/Src/text.c Src/text.c
+--- ../z.old/Src/text.c	Thu Jan 20 09:07:21 2000
++++ Src/text.c	Thu Jan 20 09:39:54 2000
+@@ -685,7 +685,11 @@
+ 	    taddstr("))");
+ 	    stack = 1;
+ 	    break;
++	case WC_END:
++	    stack = 1;
++	    break;
+ 	default:
++	    DPUTS(1, "unknown word code in gettext2()");
+ 	    return;
+ 	}
+     }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

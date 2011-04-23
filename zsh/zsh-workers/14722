@@ -1,0 +1,98 @@
+From zsh-workers-return-14722-mason-zsh=primenet.com.au@sunsite.dk Tue Jun 05 14:37:06 2001
+Return-Path: <zsh-workers-return-14722-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13164 invoked from network); 5 Jun 2001 14:37:05 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Jun 2001 14:37:05 -0000
+Received: (qmail 1783 invoked by alias); 5 Jun 2001 14:36:49 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14722
+Received: (qmail 1771 invoked from network); 5 Jun 2001 14:36:48 -0000
+Date: Tue, 5 Jun 2001 07:36:55 -0700 (PDT)
+From: Bart Schaefer <schaefer@zanshin.com>
+To: <zsh-workers@sunsite.dk>
+Subject: Re: 4.0.1: problem with sourcing on Solaris (fwd)
+Message-ID: <Pine.LNX.4.33.0106050735180.5253-100000@aztec.zanshin.com>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+(sunsite.dk won't accept my mail because I'm on a dialup IP, and my ISP
+has screwed up my SMTP relay configuration, so I'm sending this by a
+rather roundabout route.)
+
+---------- Forwarded message ----------
+Date: Tue, 5 Jun 2001 14:33:55 +0000
+From: Bart Schaefer <schaefer@candle.brasslantern.com>
+To: schaefer@zanshin.com
+Subject: Re: 4.0.1: problem with sourcing on Solaris
+
+On Jun 4,  2:37pm, Jos Backus wrote:
+} Subject: 4.0.1: problem with sourcing on Solaris
+}
+} 29084:  sigprocmask(SIG_BLOCK, 0x000DABE0, 0x000DABFC)  = 0
+} 29084:  kill(29085, SIG#0)                              = 0
+} 29084:      Received signal #18, SIGCLD, in sigsuspend() [caught]
+} 29084:        siginfo: SIGCLD CLD_EXITED pid=29085 status=0x0000
+} 29084:  sigsuspend(0xFFBEF000)                          Err#4 EINTR
+
+I'm suspicious of the call to dont_queue_signals() in waitforpid(), but I
+can't see precisely how it could break things.  The above looks like the
+child_block() near the top of waitforpid(), followed by child_suspend() in
+the body of the loop, with the handler called during suspend as it should
+be.  Then:
+
+} 29084:  sigprocmask(SIG_BLOCK, 0x000DABE0, 0x000DABFC)  = 0
+} 29084:  sigprocmask(SIG_SETMASK, 0xFFBEEBD8, 0xFFBEEB48) = 0
+} 29084:  waitid(P_ALL, 0, 0xFFBEEAE8, WEXITED|WTRAPPED|WSTOPPED|WNOHANG) = 0
+} 29084:  times(0x000DAB38)                               = 932283769
+} 29084:  waitid(P_ALL, 0, 0xFFBEEAE8, WEXITED|WTRAPPED|WSTOPPED|WNOHANG) Err#10 ECHILD
+} 29084:  setcontext(0xFFBEECE8)
+
+That must be the handler() function running, which is OK if a bit confusing
+with respect to where the sigsuspend() was reported.  Next:
+
+} 29084:  sigprocmask(SIG_BLOCK, 0x000DABE0, 0x000DABFC)  = 0
+} 29084:  kill(29085, SIG#0)                              Err#3 ESRCH
+
+OK, now we're back in waitforpid().  We block the signal again at the
+bottom of the loop, then swing back to the top and do a kill(pid, 0)
+which certainly appears to have failed with ESRCH.  That should break
+us out of the loop.  And yet it does not:
+
+} 29084:  kill(29085, SIGCONT)                            Err#3 ESRCH
+} 29084:  sigsuspend(0xFFBEF000)          (sleeping...)
+
+There's the kill(pid, SIGCONT) followed by child_suspend() in the loop
+body.  You can tell it's the same loop because it's the same PID and
+there was no intervening call to sigprocmask().  And of course once we
+are in sigsuspend() with the child already exited, we hang.
+
+} 29084:      Received signal #2, SIGINT, in sigsuspend() [caught]
+} 29084:  sigsuspend(0xFFBEF000)                          Err#4 EINTR
+
+It would have been nice to see what came after that, but my guess is
+that `errflag' became true and we exited the loop that way.  The real
+question still is, why didn't we see the ESRCH error from kill(pid, 0)?
+
+It's definitely the case that getoutput() assumes that at least SIGCHLD
+remains blocked from the point just before the fork() up until the call
+to child_suspend() in waitforpid().  If dont_queue_signals() may cause
+SIGCHLD to get unblocked -- which come to think of it, it might, because
+a trap might run a job, though that's apparently not what's happening in
+your example -- then it should not be called where it is, neither in
+waitforpid() nor in zwaitjob().
+
+What it should do is *either* dont_queue_signals() *or* child_suspend(),
+the latter only if there are no queued signals to unqueue, and go around
+the loop an extra time if we needed to run signals on the first pass.
+But even that still requires the kill(pid, 0) test to work properly.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net
+

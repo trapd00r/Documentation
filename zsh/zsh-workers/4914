@@ -1,0 +1,367 @@
+From zsh-workers-request@math.gatech.edu Fri Jan 15 12:54:33 1999
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18797 invoked from network); 15 Jan 1999 12:54:31 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 15 Jan 1999 12:54:31 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id HAA29278;
+	Fri, 15 Jan 1999 07:51:25 -0500 (EST)
+Resent-Date: Fri, 15 Jan 1999 07:51:25 -0500 (EST)
+Message-Id: <9901151235.AA14633@ibmth.df.unipi.it>
+To: zsh-workers@math.gatech.edu
+Subject: PATCH: 3.0.5: typeset fix 
+In-Reply-To: "Amol Deshpande"'s message of "Thu, 14 Jan 1999 09:53:53 NFT."
+             <AF4C1F8C5306D111AD5F0000F8662ED30DC2C408@RED-MSG-41> 
+Date: Fri, 15 Jan 1999 13:35:10 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"WBBoG.0.M97.Cdpds"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4914
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Amol Deshpande wrote:
+> is there a simple fix that will work for 3.0.5 ?
+
+I don't think so, because using the same code with and without -m
+requires something of a rewrite.  This patch does that.  The logic is
+different in 3.0.5 but I haven't changed it except expanding out the
+long test like I did before.  For some reason 3.1.5 looks more like
+the pre-3 code I remember.  There are no changes in the features this
+time.
+
+*** Src/builtin.c.typeset	Fri Sep 26 03:42:15 1997
+--- Src/builtin.c	Fri Jan 15 13:26:58 1999
+***************
+*** 2788,2793 ****
+--- 2788,2900 ----
+  
+  /**** parameter builtins ****/
+  
++ /* function to set a single parameter */
++ 
++ /**/
++ int
++ typeset_single(char *cname, char *pname, Param pm, int func, int on, int off, int roff, char *value)
++ {
++     int usepm, tc;
++ 
++     on &= ~PM_ARRAY;
++ 
++     /* use the existing pm? */
++     usepm = pm && !(pm->flags & PM_UNSET);
++ 
++     /* Always use an existing pm if special at current locallevel */
++     if (pm && (pm->flags & PM_SPECIAL) && pm->level == locallevel)
++ 	usepm = 1;
++ 
++     /*
++      * Don't use a non-special existing param if
++      *   - the local level has changed, and
++      *   - the function is not `export'.
++      */
++     if (usepm && !(pm->flags & PM_SPECIAL) &&
++ 	locallevel != pm->level && func != BIN_EXPORT)
++ 	usepm = 0;
++ 
++     /* attempting a type conversion? */
++     if ((tc = usepm && (((off & pm->flags) | (on & ~pm->flags)) & PM_INTEGER)
++ 	 && !(pm->flags & PM_SPECIAL)))
++ 	usepm = 0;
++ 
++     if (usepm) {
++ 	if (pm->flags & PM_SPECIAL) {
++ 	    func = 0;
++ 	    on = (PM_TYPE(pm->flags) == PM_INTEGER) ?
++ 		(on &= ~(PM_LEFT | PM_RIGHT_B | PM_RIGHT_Z | PM_UPPER)) :
++ 		(on & ~PM_INTEGER);
++ 	    off &= ~PM_INTEGER;
++ 	}
++ 	if (pm->level) {
++ 	    if ((on & PM_EXPORTED) && !(on &= ~PM_EXPORTED) && !off)
++ 		return 1;
++ 	}
++ 	if (!on && !roff && !value) {
++ 	    paramtab->printnode((HashNode)pm, 0);
++ 	    return 0;
++ 	}
++ 	if (PM_TYPE(pm->flags) == PM_ARRAY && (on & PM_UNIQUE) &&
++ 	    !(pm->flags & PM_READONLY & ~off))
++ 	    uniqarray((*pm->gets.afn) (pm));
++ 	pm->flags = (pm->flags | on) & ~off;
++ 	/* This auxlen/pm->ct stuff is a nasty hack. */
++ 	if ((on & (PM_LEFT | PM_RIGHT_B | PM_RIGHT_Z | PM_INTEGER)) &&
++ 	    auxlen)
++ 	    pm->ct = auxlen;
++ 	if (PM_TYPE(pm->flags) != PM_ARRAY) {
++ 	    if (pm->flags & PM_EXPORTED) {
++ 		if (!pm->env)
++ 		    pm->env = addenv(pname, value ? value : getsparam(pname));
++ 	    } else if (pm->env) {
++ 		delenv(pm->env);
++ 		zsfree(pm->env);
++ 		pm->env = NULL;
++ 	    }
++ 	    if (value)
++ 		setsparam(pname, ztrdup(value));
++ 	}
++ 	return 0;
++     }
++ 
++     /*
++      * We're here either because we're creating a new parameter,
++      * or we're adding a parameter at a different local level,
++      * or we're converting the type of a parameter.  In the
++      * last case only, we need to delete the old parameter.
++      */
++     if (tc) {
++ 	if (pm->flags & PM_READONLY) {
++ 	    on |= ~off & PM_READONLY;
++ 	    pm->flags &= ~PM_READONLY;
++ 	}
++ 	if (!value)
++ 	    value = dupstring(getsparam(pname));
++ 	/* pname may point to pm->nam which is about to disappear */
++ 	pname = dupstring(pname);
++ 	unsetparam_pm(pm, 0);
++     } else if (locallist && func != BIN_EXPORT) {
++ 	PERMALLOC {
++ 	    addlinknode(locallist, ztrdup(pname));
++ 	} LASTALLOC;
++     }
++     /*
++      * Create a new node for a parameter with the flags in `on' minus the
++      * readonly flag
++      */
++     pm = createparam(ztrdup(pname), on & ~PM_READONLY);
++     DPUTS(!pm, "BUG: parameter not created");
++     pm->ct = auxlen;
++     if (func != BIN_EXPORT)
++ 	pm->level = locallevel;
++     if (value)
++ 	setsparam(pname, ztrdup(value));
++     pm->flags |= (on & PM_READONLY);
++ 
++     return 0;
++ }
++ 
+  /* declare, export, integer, local, readonly, typeset */
+  
+  /**/
+***************
+*** 2799,2805 ****
+      Comp com;
+      char *optstr = "iLRZlurtxU";
+      int on = 0, off = 0, roff, bit = PM_INTEGER;
+!     int initon, initoff, of, i;
+      int returnval = 0, printflags = 0;
+  
+      /* hash -f is really the builtin `functions' */
+--- 2906,2912 ----
+      Comp com;
+      char *optstr = "iLRZlurtxU";
+      int on = 0, off = 0, roff, bit = PM_INTEGER;
+!     int i;
+      int returnval = 0, printflags = 0;
+  
+      /* hash -f is really the builtin `functions' */
+***************
+*** 2845,2851 ****
+--- 2952,2962 ----
+  
+      /* With the -m option, treat arguments as glob patterns */
+      if (ops['m']) {
++ 	MUSTUSEHEAP("typeset -m");
+  	while ((asg = getasg(*argv++))) {
++ 	    LinkList pmlist = newlinklist();
++ 	    LinkNode pmnode;
++ 
+  	    tokenize(asg->name);   /* expand argument */
+  	    if (!(com = parsereg(asg->name))) {
+  		untokenize(asg->name);
+***************
+*** 2853,2985 ****
+  		returnval = 1;
+  		continue;
+  	    }
+! 	    /* If no options or values are given, display all *
+! 	     * parameters matching the glob pattern.          */
+! 	    if (!(on || roff || asg->value)) {
+! 		scanmatchtable(paramtab, com, 0, 0, paramtab->printnode, 0);
+! 		continue;
+! 	    }
+! 	    /* Since either options or values are given, we search   *
+! 	     * through the parameter table and change all parameters *
+! 	     * matching the glob pattern to have these flags and/or  *
+! 	     * value.                                                */
+  	    for (i = 0; i < paramtab->hsize; i++) {
+! 		for (pm = (Param) paramtab->nodes[i]; pm; pm = (Param) pm->next) {
+! 		    if (domatch(pm->nam, com, 0)) {
+! 			/* set up flags if we have any */
+! 			if (on || roff) {
+! 			    if (PM_TYPE(pm->flags) == PM_ARRAY && (on & PM_UNIQUE) &&
+! 				!(pm->flags & PM_READONLY & ~off))
+! 				uniqarray((*pm->gets.afn) (pm));
+! 			    pm->flags = (pm->flags | on) & ~off;
+! 			    if (PM_TYPE(pm->flags) != PM_ARRAY) {
+! 				if ((on & (PM_LEFT | PM_RIGHT_B | PM_RIGHT_Z | PM_INTEGER)) && auxlen)
+! 				    pm->ct = auxlen;
+! 				/* did we just export this? */
+! 				if ((pm->flags & PM_EXPORTED) && !pm->env) {
+! 				    pm->env = addenv(pm->nam, (asg->value) ? asg->value : getsparam(pm->nam));
+! 				} else if (!(pm->flags & PM_EXPORTED) && pm->env) {
+! 				/* did we just unexport this? */
+! 				    delenv(pm->env);
+! 				    zsfree(pm->env);
+! 				    pm->env = NULL;
+! 				}
+! 			    }
+! 			}
+! 			/* set up a new value if given */
+! 			if (asg->value) {
+! 			    setsparam(pm->nam, ztrdup(asg->value));
+! 			}
+! 		    }
+  		}
+  	    }
+  	}
+  	return returnval;
+      }
+  
+-     /* Save the values of on, off, and func */
+-     initon = on;
+-     initoff = off;
+-     of = func;
+- 
+      /* Take arguments literally.  Don't glob */
+      while ((asg = getasg(*argv++))) {
+- 	/* restore the original values of on, off, and func */
+- 	on = initon;
+- 	off = initoff;
+- 	func = of;
+- 	on &= ~PM_ARRAY;
+- 
+  	/* check if argument is a valid identifier */
+  	if (!isident(asg->name)) {
+  	    zerr("not an identifier: %s", asg->name, 0);
+  	    returnval = 1;
+  	    continue;
+  	}
+! 	if ((pm = (Param) paramtab->getnode(paramtab, asg->name))) {
+! 	    if (pm->flags & PM_SPECIAL) {
+! 		func = 0;
+! 		on = (PM_TYPE(pm->flags) == PM_INTEGER) ?
+! 		    (on &= ~(PM_LEFT | PM_RIGHT_B | PM_RIGHT_Z | PM_UPPER)) :
+! 		    (on & ~PM_INTEGER);
+! 		off &= ~PM_INTEGER;
+! 	    }
+! 	    if (pm->level) {
+! 		if ((on & PM_EXPORTED) && !(on &= ~PM_EXPORTED) && !off)
+! 		    return 1;
+! 	    }
+! 	}
+! 	bit = 0;    /* flag for switching int<->not-int */
+! 	if (pm && !(pm->flags & PM_UNSET) && ((((locallevel == pm->level) || func == BIN_EXPORT)
+! 		&& !(bit = ((off & pm->flags) | (on & ~pm->flags)) & PM_INTEGER)) || (pm->flags & PM_SPECIAL))) {
+! 	    /* if no flags or values are given, just print this parameter */
+! 	    if (!on && !roff && !asg->value) {
+! 		paramtab->printnode((HashNode) pm, 0);
+! 		continue;
+! 	    }
+! 	    if (PM_TYPE(pm->flags) == PM_ARRAY && (on & PM_UNIQUE) &&
+! 		!(pm->flags & PM_READONLY & ~off))
+! 		uniqarray((*pm->gets.afn) (pm));
+! 	    pm->flags = (pm->flags | on) & ~off;
+! 	    if ((on & (PM_LEFT | PM_RIGHT_B | PM_RIGHT_Z | PM_INTEGER)) && auxlen)
+! 		pm->ct = auxlen;
+! 	    if (PM_TYPE(pm->flags) != PM_ARRAY) {
+! 		if (pm->flags & PM_EXPORTED) {
+! 		    if (!pm->env)
+! 			pm->env = addenv(asg->name, (asg->value) ? asg->value : getsparam(asg->name));
+! 		} else if (pm->env) {
+! 		    delenv(pm->env);
+! 		    zsfree(pm->env);
+! 		    pm->env = NULL;
+! 		}
+! 		if (asg->value)
+! 		    setsparam(asg->name, ztrdup(asg->value));
+! 	    }
+! 	} else {
+! 	    if (bit) {
+! 		if (pm->flags & PM_READONLY) {
+! 		    on |= ~off & PM_READONLY;
+! 		    pm->flags &= ~PM_READONLY;
+! 		}
+! 		if (!asg->value)
+! 		    asg->value = dupstring(getsparam(asg->name));
+! 		unsetparam(asg->name);
+! 	    } else if (locallist && func != BIN_EXPORT) {
+! 		PERMALLOC {
+! 		    addlinknode(locallist, ztrdup(asg->name));
+! 		} LASTALLOC;
+! 	    }
+! 	    /* create a new node for a parameter with the *
+! 	     * flags in `on' minus the readonly flag      */
+! 	    pm = createparam(ztrdup(asg->name), on & ~PM_READONLY);
+! 	    DPUTS(!pm, "BUG: parameter not created");
+! 	    pm->ct = auxlen;
+! 	    if (func != BIN_EXPORT)
+! 		pm->level = locallevel;
+! 	    if (asg->value)
+! 		setsparam(asg->name, ztrdup(asg->value));
+! 	    pm->flags |= (on & PM_READONLY);
+! 	}
+      }
+      return returnval;
+  }
+--- 2964,3005 ----
+  		returnval = 1;
+  		continue;
+  	    }
+! 	    /*
+! 	     * Search through the parameter table and change all parameters
+! 	     * matching the glob pattern to have these flags and/or value.
+! 	     * Bad news:  if the parameter gets altered, e.g. by
+! 	     * a type conversion, then paramtab can be shifted around,
+! 	     * so we need to store the parameters to alter on a separate
+! 	     * list for later use.	     
+! 	     */
+  	    for (i = 0; i < paramtab->hsize; i++) {
+! 		for (pm = (Param) paramtab->nodes[i]; pm;
+! 		     pm = (Param) pm->next) {
+! 		    if (domatch(pm->nam, com, 0))
+! 			addlinknode(pmlist, pm);
+  		}
+  	    }
++ 	    for (pmnode = firstnode(pmlist); pmnode; incnode(pmnode)) {
++ 		pm = (Param) getdata(pmnode);
++ 		if (typeset_single(name, pm->nam, pm, func, on, off, roff,
++ 				   asg->value))
++ 		    returnval = 1;
++ 	    }
+  	}
+  	return returnval;
+      }
+  
+      /* Take arguments literally.  Don't glob */
+      while ((asg = getasg(*argv++))) {
+  	/* check if argument is a valid identifier */
+  	if (!isident(asg->name)) {
+  	    zerr("not an identifier: %s", asg->name, 0);
+  	    returnval = 1;
+  	    continue;
+  	}
+! 	typeset_single(name, asg->name,
+! 		       (Param) paramtab->getnode(paramtab, asg->name),
+! 		       func, on, off, roff, asg->value);
+      }
+      return returnval;
+  }
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

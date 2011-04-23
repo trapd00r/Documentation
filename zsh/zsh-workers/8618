@@ -1,0 +1,193 @@
+From zsh-workers-return-8618-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Nov 11 10:45:15 1999
+Return-Path: <zsh-workers-return-8618-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29387 invoked from network); 11 Nov 1999 10:45:10 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 Nov 1999 10:45:10 -0000
+Received: (qmail 27146 invoked by alias); 11 Nov 1999 10:24:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8618
+Received: (qmail 27139 invoked from network); 11 Nov 1999 10:24:44 -0000
+Date: Thu, 11 Nov 1999 11:24:31 +0100 (MET)
+Message-Id: <199911111024.LAA28735@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: New configuration -- should we...
+
+
+[Maybe you'll all think that I have now gone competely mad...]
+
+I was hacking away happily on the new configuration stuff yesterday
+(namely my version of conf2) and thinking about how all this could be
+improved when we move it into C-code and make it read from a
+file/stdin. That made me think about things like quoting which in turn 
+made me think about how we could use existing code for that. Then I
+had the feeling that this somehow went wrong, looked again at the
+examples for calling that configuration function and  then came to a
+sudden halt. It just sounded far too familiar.
+
+Bart once said that if you have a programming language, don't inplment 
+a second one -- and somehow the new completion system came into
+existence.
+
+Well, the configuration stuff is already quite complicated (a.k.a.
+powerful). And what's worse, the internals are quite messy.
+
+So, for the moment forget everything I ever said about the new
+configuration stuff... (some of the following should probably be clear 
+by now, I just want to give the full picture again).
+
+
+The completion system finds out the context in which completion is
+attempted. This is a process in multiple steps, the overall context is 
+found using the `#compdef' stuff. The function thus then probably
+knows about other finer-grained contexts. In each of these contexts
+one or more types of matches can be generated. This is the place where 
+`_tags' is used. The function calls it to say which types of matches
+(represented by the tags) are sensible in the current context. After
+that, `_tags' is called repeatedly and says which tags are to be used
+first, second, etc.
+
+Instead of using some internally held configuration state we could
+simply make `_tags' call a user-supplied function which gets the tags
+supported in the current context and then has to `sort' them. I.e. it
+says things like `first try glob, then paths, then files'. So `_tags'
+would only be a wrapper around this function, setting up some
+parameters (and probably other stuff?) that makes the user's life
+easier when (s)he writes h(er|is) own config function.
+There are two ways how we could make that function be called. Either
+we do it only on the first call to `_tags' or on every call. The
+latter would probably be more general but the first one presumably
+would be easier when writing such a config function.
+
+A default config function would be supplied by us, setting those
+things up that we think are good ideas. Users could, of course, then
+just copy and modify that function once they feel the need. Obviously
+we could also build a default implementation for the function that
+works together with something like `conf2' but I'm not particularly
+happy with that idea.
+
+For the way how the config function says which tags are to be used I
+currently see two possibilities (well, more than two, but these are
+the easiest I see). In both cases the config function is only called
+when `_tags' is called with the tags for the current state as
+arguments, not when it is called to get the next set of tags to try.
+
+1) The config function sets up a bunch of arrays containing the tags
+   to try. E.g.:
+
+    compconfig() {
+      tags1=( arguments 'values[description]')
+      tags2=( 'options[description,hidden-prefix]')
+
+      case "$command" in
+      *dvi*)
+        tags3=( glob paths )
+	tags4=( files )
+	tags5=( "$@" )
+        ;;
+      *)
+        tags3=( glob )
+        tags4=( paths )
+        tags5=( files )
+	tags6=( "$@" )
+	;;
+      esac
+    }
+
+   `$command' is set up by `_tags' and so is `$context' (the latter
+   for the context in the current completion function. The names for
+   the arrays could probably be better. Assigning `( "$@" )' at the
+   end ensures that all tags not explicitly sorted are used anyway,
+   but only after all the named tags are tried. `_tags' could easily
+   remove the tags that were not requested from the arrays.
+
+   After calling `compconfig', `_tags' would get all those `tags*'
+   arrays and store them internally (before calling `compconfig' there 
+   were cleared).
+   Later, when `_tags' is called to retrieve the tags to try, it would 
+   use the contents of the arrays one after another.
+
+   There are some uglinesses with this, though. the first one is that
+   this requires many array-copies. The second one is that we can't
+   move much of it into C-code, trying to make things faster.
+
+2) The second way is based on support from `computil' (in a first
+   implemention-to-play-with it could be entirely in shell code).
+   Instead of setting up arrays, the config function calls a builtin
+   multiple times. E.g.:
+
+    compconfig() {
+      comptry arguments value -description
+      comptry options -description -hidden-prefix
+
+      case "$command" in
+      *dvi*)
+        comptry glob paths
+	comptry files
+	;;
+      *)
+        comptry glob
+        comptry paths
+        comptry files
+	;;
+      esac
+
+      comptry "$@"
+    }
+
+   (Note that I made styles look a bit like options -- another syntax
+   would be possible -- again I don't know what users would like to
+   have, but maybe making styles look like options for tags isn't that 
+   bad a way to think about them?).
+
+   `comptry' (or should it be `comptags'?) would store the tag-sets
+   (one set per call) internally and functions like `_requested' would
+   use it with options saying how they want to access the data stored
+   for the previous call to `_tags'. The "$@" and the comment about
+   tags which are set but not really used in this context: same as in
+   the first example.
+
+   There could also be support to easliy set the pure config-tags,
+   i.e. the pseudo tags we add as a replacement for the config keys we 
+   have now. I haven't yet thought too much about that part. Only so
+   much: with support by C-code it would almost certainly be easy
+   enough to allow really arbitrary types for them. E.g. we could make 
+   them be reported as strings, arrays, and assocs. With that it would
+   even be possible to use the same mechanism to replace some (or
+   all?) of the parameters we use now. This is especially interesting
+   for things like the `COMMAND_hosts_ports_user' because for the
+   `COMMAND' part we could use the context-switching this
+   configuration stuff is all about anyway. I /think/ this would make
+   it easier for users.
+
+   Since much of the stuff could be written in C, performance
+   shouldn't be too bad anyway, but doing it as in the example would
+   also allow us to use aggressive caching.
+
+
+Ok, the more I think about this, the more I like it. It is much
+cleaner than my preevious suggestions, I think. It is arbitrarily
+extensible if need be. Together with some C-code magic it should be
+fast and it allows user not only to say what they want to have
+completed, but also on what this decision should be based (i.e. what
+they want to test). So, if you want to stop me, please do it now ;-)
+
+Also, someone please tell me if this is too complicated for the average 
+user. Is something like `conf2' really easier to understand?
+
+Or does anyone have suggestions for, e.g. builtins or helper functions 
+that would allow us to make the config funcs better readable or
+understandable?
+
+
+Bye
+ Sven
+
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,228 @@
+From hzoli@cs.elte.hu Tue Jul  9 11:53:06 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id LAA10824 for <mason@werple.mira.net.au>; Tue, 9 Jul 1996 11:53:04 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id VAA16618; Mon, 8 Jul 1996 21:45:15 -0400 (EDT)
+Resent-Date: Mon, 8 Jul 1996 21:45:15 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199607090132.DAA01331@hzoli.ppp.cs.elte.hu>
+Subject: Re: Remaining zsh3.0-pre2 bugs
+To: schaefer@nbn.com
+Date: Tue, 9 Jul 1996 03:32:41 +0200 (MET DST)
+Cc: A.Main@dcs.warwick.ac.uk, zsh-workers@math.gatech.edu
+In-Reply-To: <960708014900.ZM8172@candle.brasslantern.com> from Bart Schaefer at "Jul 8, 96 01:48:57 am"
+X-Mailer: ELM [version 2.4ME+ PL17 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"OwQrZ2.0.Y34.gcRun"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1584
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 6131
+Status: OR
+
+Bart and Zefram discussing a loop in get_comp_string:
+> } >Anyway, cs decrements down to 8 because of the two \230 in qword; but
+> } >"echo 'a;b'" of course has 10 characters.
+> } 
+> } Bingo.  That loop has special code for handling backslashes, but not
+> } quotes.  I think it needs to handle quotes too.
+
+There is nothing wrong with get_comp_string here.  It works well if there
+is just one line containing embeded newlines and quotes etc.  The problem
+starts when we are in a multi-line command structure.
+
+[...]
+> But that doesn't work for completions with embedded newlines, even when
+> a successful completion is possible:
+> 
+> zagzig<4> touch c'
+> > 'dfoo
+> zagzig<5> echo c'
+> > 'd<TAB>			<-- fails to complete
+> 
+> I suspect it fails because newline is the only character that can never
+> be escaped with a backslash.
+
+It fails because zsh sees that the current word starts in the previous
+already entered line.  In that case zsh simply gives up the completion
+attempt, restores the original line and returns.  Unfortunately the cursor
+position is not always restored correctly.  The patch below fixes that.
+
+The other problem is this:
+
+hzoli /l/src/zsh-RCS % echo '
+quote> ' a' 'b<TAB>
+
+hzoli /l/src/zsh-RCS % echo '
+quote> ' a\ bfoo 'b            <-- cursor is under the quote preceeding `b'
+
+That is because the changes made by get_comp_string are destroyed.
+
+> And it's broken even for completions with spaces in some circumstances:
+> 
+> zagzig<6> echo a' '<TAB>
+> zagzig<6> echo a\ bfo o		<-- cursor is over the second `o'
+
+And that's a third problem caused by that code:
+
+-     /* When completing between words, the contents *
+-      * of wb and we may be garbled.                */
+-     if (we > wb && iblank(line[we - 1]) && 
+- 	(we < 2 || (line[we - 2] != '\\' && line[we - 2] != STOUC(Meta))))
+- 	we--;
+
+I do not know what it meant to fix but I hope it is no longer necessary.
+This should be handled in get_comp_string.  get_comp_string changed a lot
+since 2.5 so I think it's best to remove this.
+
+And there is one more bug when push-line-or-edit is used:
+
+hzoli /l/src/zsh-RCS % echo '
+quote>'<push-line-or-edit>
+hwget called with no words.
+hzoli /l/src/zsh-RCS % echo '
+'
+
+The debug message above only appears after my recent here-document patch.
+That is fixed by the one-line patch to lex.c below.
+
+Zoltan
+
+
+*** Src/zle_tricky.c	1996/07/06 18:17:13	2.56
+--- Src/zle_tricky.c	1996/07/09 01:00:32
+***************
+*** 497,503 ****
+  docomplete(int lst)
+  {
+      char *s, *ol;
+!     int olst = lst, chl = 0, ne = noerrs;
+  
+      /* If we are doing a menu-completion... */
+  
+--- 497,503 ----
+  docomplete(int lst)
+  {
+      char *s, *ol;
+!     int olst = lst, chl = 0, ne = noerrs, ocs;
+  
+      /* If we are doing a menu-completion... */
+  
+***************
+*** 529,534 ****
+--- 529,535 ----
+  	char *p, *q;
+  
+  	ol = dupstring((char *)line);
++ 	ocs = cs;
+  	/* Make sure that chline is zero-terminated. */
+  	*hptr = '\0';
+  	/* Calculate the length of chline. */
+***************
+*** 550,571 ****
+  	    }
+  	    *q++ = *p;
+  	}
+! 	/* Put a zero byte after it and append the original line contents. */
+! 	*q = '\0';
+! 	strcat((char *)line, ol);
+! 	/* Finally remove quoted newlines and replace non-quoted newlines *
+! 	 * with semicolons.  This second thing isn't really correct (e.g. *
+! 	 * if the command separated by the newlines were actually         *
+! 	 * connected with a pipe), but the effect in the completion code  *
+! 	 * is the same.                                                   */
+! 	for (p = (char *)line; *p; p++)
+! 	    if (*p == '\n')
+! 		if (p > (char *) line && p[-1] == '\\')
+! 		    p[-1] = *p = ' ';
+! 		else
+! 		    *p = ';';
+! 	/* Now make sure that the cursor position variable and the *
+! 	 * line length stored in ll are correct.                   */
+  	cs += chl;
+  	ll = strlen((char *)line);
+      }
+--- 551,558 ----
+  	    }
+  	    *q++ = *p;
+  	}
+! 	/* Append the original line contents. */
+! 	strcpy(q, ol);
+  	cs += chl;
+  	ll = strlen((char *)line);
+      }
+***************
+*** 577,587 ****
+      noerrs = 1;
+      s = get_comp_string();
+      noerrs = ne;
+-     /* When completing between words, the contents *
+-      * of wb and we may be garbled.                */
+-     if (we > wb && iblank(line[we - 1]) && 
+- 	(we < 2 || (line[we - 2] != '\\' && line[we - 2] != STOUC(Meta))))
+- 	we--;
+      /* For vi mode, reset the start-of-insertion pointer to the beginning *
+       * of the word being completed, if it is currently later.  Vi itself  *
+       * would never change the pointer in the middle of an insertion, but  *
+--- 564,569 ----
+***************
+*** 591,605 ****
+  	viinsbegin = ztrsub((char *) line + wb, (char *) line);
+      /* If we added chline to the line buffer, reset the original contents. */
+      if (ol) {
+- 	strcpy((char *) line, ol);
+- 	ll = strlen((char *) line);
+  	cs -= chl;
+  	wb -= chl;
+  	we -= chl;
+! 	if (wb < 0 || we < 0) {
+  	    unmetafy_line();
+  	    return;
+  	}
+      }
+      freeheap();
+      /* Save the lexer state, in case the completion code uses the lexer *
+--- 573,592 ----
+  	viinsbegin = ztrsub((char *) line + wb, (char *) line);
+      /* If we added chline to the line buffer, reset the original contents. */
+      if (ol) {
+  	cs -= chl;
+  	wb -= chl;
+  	we -= chl;
+! 	if (wb < 0 || we < 0 || cs < 0) {
+! 	    strcpy((char *) line, ol);
+! 	    ll = strlen((char *) line);
+! 	    cs = ocs;
+  	    unmetafy_line();
+  	    return;
+  	}
++ 	ocs = cs;
++ 	cs = 0;
++ 	foredel(chl);
++ 	cs = ocs;
+      }
+      freeheap();
+      /* Save the lexer state, in case the completion code uses the lexer *
+*** Src/lex.c	1996/07/08 01:56:51	2.32
+--- Src/lex.c	1996/07/08 23:54:52
+***************
+*** 180,186 ****
+  	return;
+      do
+  	tok = gettok();
+!     while (tok != ENDINPUT && exalias());
+      if (tok == NEWLIN || tok == ENDINPUT) {
+  	while (hdocs) {
+  	    struct heredocs *next = hdocs->next;
+--- 180,186 ----
+  	return;
+      do
+  	tok = gettok();
+!     while (tok != ENDINPUT && !errflag && exalias());
+      if (tok == NEWLIN || tok == ENDINPUT) {
+  	while (hdocs) {
+  	    struct heredocs *next = hdocs->next;
+
+

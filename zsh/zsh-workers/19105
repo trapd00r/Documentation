@@ -1,0 +1,136 @@
+From zsh-workers-return-19105-mason-zsh=primenet.com.au@sunsite.dk Fri Sep 19 18:19:47 2003
+Return-Path: <zsh-workers-return-19105-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2071 invoked from network); 19 Sep 2003 18:19:46 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 19 Sep 2003 18:19:46 -0000
+Received: (qmail 20525 invoked by alias); 19 Sep 2003 18:19:40 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19105
+Received: (qmail 20515 invoked from network); 19 Sep 2003 18:19:40 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 19 Sep 2003 18:19:40 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.183.235] by sunsite.dk (MessageWall 1.0.8) with SMTP; 19 Sep 2003 18:19:39 -0000
+Received: from EXCHANGE02.csr.com (unverified) by MAILSWEEPER01.cambridgesiliconradio.com
+ (Content Technologies SMTPRS 4.3.10) with ESMTP id <T64c7b28600c0a88d01354@MAILSWEEPER01.cambridgesiliconradio.com> for <zsh-workers@sunsite.dk>;
+ Fri, 19 Sep 2003 19:18:15 +0100
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.5329);
+	 Fri, 19 Sep 2003 19:21:40 +0100
+To: zsh-workers@sunsite.dk
+Subject: Re: Bang completion kills zsh in emacs process buffer 
+In-reply-to: ""Dwight Shih""'s message of "Fri, 19 Sep 2003 12:54:43 CDT."
+             <20030919175443.B24767835C@smtp.us2.messagingengine.com> 
+Date: Fri, 19 Sep 2003 19:19:23 +0100
+Message-ID: <1183.1063995563@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 19 Sep 2003 18:21:40.0933 (UTC) FILETIME=[DF35EF50:01C37EDA]
+
+"Dwight Shih" wrote:
+> But grepping about the
+> source shows that shout is often treated as synonymous with interactive.
+> For example, checkrmall will silently succeed if shout is null. Command
+> correction (setopt correct) also just writes to shout. I think that we'd
+> be better off setting shout whenever we have an interactive shell.
+
+As long as we can rely on things not testing shout to see if there
+terminal is set up... usually SHTTY is used for that purpose, so maybe
+this is OK, but possibly we are increasing the danger from the existing
+conflict of purposes between the various options, SHTTY and shout.
+
+Other bits of the code seemd to think stderr rather than stdout was a
+better substitute for shout, which is probably true.
+
+It looks like the only place we need to be careful when closing shout is
+the one in init, below.
+
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.35
+diff -u -r1.35 init.c
+--- Src/init.c	3 Sep 2003 10:15:36 -0000	1.35
++++ Src/init.c	19 Sep 2003 18:13:57 -0000
+@@ -379,7 +379,13 @@
+ #endif
+ 
+     if (shout) {
+-	fclose(shout);
++	/*
++	 * Check if shout was set to stderr, if so don't close it.
++	 * We do this if we are interactive but don't have a
++	 * terminal.
++	 */
++	if (shout != stderr)
++	    fclose(shout);
+ 	shout = 0;
+     }
+     if (SHTTY != -1) {
+@@ -448,9 +454,9 @@
+ 
+     /* We will only use zle if shell is interactive, *
+      * SHTTY != -1, and shout != 0                   */
+-    if (interact && SHTTY != -1) {
++    if (interact) {
+ 	init_shout();
+-	if(!shout)
++	if(!SHTTY || !shout)
+ 	    opts[USEZLE] = 0;
+     } else
+ 	opts[USEZLE] = 0;
+@@ -475,6 +481,14 @@
+ init_shout(void)
+ {
+     static char shoutbuf[BUFSIZ];
++
++    if (SHTTY == -1)
++    {
++	/* Since we're interative, it's nice to have somewhere to write. */
++	shout = stderr;
++	return;
++    }
++
+ #if defined(JOB_CONTROL) && defined(TIOCSETD) && defined(NTTYDISC)
+     int ldisc = NTTYDISC;
+ 
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.21
+diff -u -r1.21 jobs.c
+--- Src/jobs.c	2 May 2003 10:25:33 -0000	1.21
++++ Src/jobs.c	19 Sep 2003 18:13:57 -0000
+@@ -322,8 +322,9 @@
+ 	}
+     }
+ 
+-    if (shout && !ttyfrozen && !jn->stty_in_env && !zleactive &&
+-	job == thisjob && !somestopped && !(jn->stat & STAT_NOSTTY))
++    if (shout && shout != stderr && !ttyfrozen && !jn->stty_in_env &&
++	!zleactive && job == thisjob && !somestopped &&
++	!(jn->stat & STAT_NOSTTY)) 
+ 	gettyinfo(&shttyinfo);
+ 
+     if (isset(MONITOR)) {
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

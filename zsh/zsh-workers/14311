@@ -1,0 +1,102 @@
+From zsh-workers-return-14311-mason-zsh=primenet.com.au@sunsite.dk Fri May 11 08:48:40 2001
+Return-Path: <zsh-workers-return-14311-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20818 invoked from network); 11 May 2001 08:48:31 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 May 2001 08:48:31 -0000
+Received: (qmail 4231 invoked by alias); 11 May 2001 08:47:58 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14311
+Received: (qmail 4220 invoked from network); 11 May 2001 08:47:57 -0000
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+Date: Fri, 11 May 2001 10:47:39 +0200 (MET DST)
+Message-Id: <200105110847.KAA06216@beta.informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+Subject: Re: Odd job-reporting buglet (Re: Change in suspend behavior)
+In-Reply-To: <1010511042149.ZM27456@candle.brasslantern.com>
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> Change that loop just a little bit and some really strange things happen:
+> 
+> schaefer[501] for i in bar foo; do cat & wait; done
+> [2] 27451
+> [2]  + suspended (tty input)  cat
+> [1] 27452
+> [1]  + suspended (tty input)  cat
+> zsh: suspended (tty input)  cat | 
+> zsh: running                for i in bar foo; do; cat & wait; done
+> 
+> Eh?  It thinks "cat" has been piped to the for loop!  Also, how did job
+> number 2 get a smaller process ID than job number 1?
+> 
+> schaefer[502] jobs -l
+> [1]  + 27452 suspended (tty input)  cat | 
+>        27453 running                for i in bar foo; do; cat & wait; done
+> [2]  - 27451 suspended (tty input)  cat
+
+Aaarrrrggghhh!
+
+The reason is pretty clear (to some): the sub-job returns and is
+stopped, so execpline() things it has to do all that super/sub-job
+handling it does when the sub-job was suspended with ^Z.
+
+One way to try to fix this is to make execpline() check if the sub-job
+really was suspended because of a ^Z (SIGTSTP).  And only then create a
+super-job and whatnot.
+
+The other way to try to fix this would be to check if the sub-job was
+ASYNC (i.e. it had a `&' at the end), pass that information up to (the
+right) execpline() and there decide to not wrap it into a super-job.
+
+The patch below (not committed and certainly not to be committed before
+we've discussed this some more) does the first for me (check for SIGTSTP).
+
+I think both solutions have their pros and cons.  Opinions?
+
+Bye
+  Sven
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.26
+diff -u -r1.26 exec.c
+--- Src/exec.c	2001/03/30 16:51:54	1.26
++++ Src/exec.c	2001/05/11 08:47:30
+@@ -1064,11 +1064,26 @@
+ 		    jn->stat & STAT_DONE &&
+ 		    lastval2 & 0200)
+ 		    killpg(mypgrp, lastval2 & ~0200);
++#if 0
++                /* This does the wrong thing if the sub-job was stopped
++                 * for some other reason than the user hitting ^Z.  In that
++                 * case we don't want it to put the whole loop (or whatever)
++                 * into a super-job. */
+ 		if (!list_pipe_child && !lpforked && !subsh && jobbing &&
+ 		    (list_pipe || last1 || pline_level) &&
+ 		    ((jn->stat & STAT_STOPPED) ||
+ 		     (list_pipe_job && pline_level &&
+ 		      (jobtab[list_pipe_job].stat & STAT_STOPPED)))) {
++#endif
++		if (!list_pipe_child && !lpforked && !subsh && jobbing &&
++		    (list_pipe || last1 || pline_level) &&
++		    (((jn->stat & STAT_STOPPED) &&
++                      WIFSTOPPED(jn->procs->status) &&
++                      WSTOPSIG(jn->procs->status) == SIGTSTP) ||
++		     (list_pipe_job && pline_level &&
++		      (jobtab[list_pipe_job].stat & STAT_STOPPED) &&
++                      WIFSTOPPED(jobtab[list_pipe_job].procs->status) &&
++                      WSTOPSIG(jobtab[list_pipe_job].procs->status) == SIGTSTP))) {
+ 		    pid_t pid;
+ 		    int synch[2];
+ 
+
+-- 
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,469 @@
+From zsh-workers-return-10294-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Mar 28 11:41:03 2000
+Return-Path: <zsh-workers-return-10294-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28730 invoked from network); 28 Mar 2000 11:40:59 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 Mar 2000 11:40:59 -0000
+Received: (qmail 15025 invoked by alias); 28 Mar 2000 11:40:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10294
+Received: (qmail 15008 invoked from network); 28 Mar 2000 11:40:42 -0000
+Date: Tue, 28 Mar 2000 13:40:32 +0200 (MET DST)
+Message-Id: <200003281140.NAA14963@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 27 Mar 2000 16:48:51 +0000
+Subject: Re: autoload +X[zk]
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> } I'm not sure about this because it also changes ksh-style autoloading
+> } with `autoload +X' (independent if it's done because of giving the new 
+> } -k flag or because KSH_AUTOLOAD is set) to execute the file loaded to
+> } get at the function definition. And `autoload +X' has been around for
+> } some time...
+> 
+> Here's what I'd *like* for it to do, and you tell me how hard it is ...
+> 
+> I'd like autoload +X on a ksh-autoloaded function `foo' to behave "as if"
+> the user had executed
+> 
+> 	f=($^fpath/foo(|)(N))
+> 	eval "function foo { ${$(< $f[1])};"' foo "$@" }'
+
+Here's the patch for it, as far as I can see (in other words: please
+test it and tell me if it's ok for you).
+
+This works by storing a flag in the eprog for the file read that will
+make doshfunc() recurse to execute the function once again on the
+first call. Most of the patch just turns the `alloc' field of the
+eprog struct into a `flags' field and ensures that the call to the
+function (which isn't really in the wordcode) is printed at the end.
+
+Note also the handling of the positional parameters. For the first
+call (i.e.: when the init code from the file is executed) they are not 
+set. Only for the appended function call are they set up. This is the
+behaviour the ksh I have here shows.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Doc/Zsh/builtins.yo Doc/Zsh/builtins.yo
+--- ../z.old/Doc/Zsh/builtins.yo	Tue Mar 28 11:13:28 2000
++++ Doc/Zsh/builtins.yo	Tue Mar 28 13:28:45 2000
+@@ -96,9 +96,11 @@
+ The flag tt(+X) may be combined with either tt(-k) or tt(-z) to make
+ the function be loaded using ksh-style or zsh-style autoloading,
+ respectively. If neither is given, the current setting of the
+-tt(KSH_AUTOLOAD) options determines how the function is loaded. Note
+-that with ksh-style autoloading the contents of the loaded file is
+-executed to make the function be defined.
++tt(KSH_AUTOLOAD) options determines how the function is loaded. With
++ksh-style autoloading, the contents of the file will not be executed
++immediatly. Instead, the function created will contain the contents of 
++the file plus a call to the function itself appended to it, thus given 
++normal ksh autoloading behaviour on the first call to the function.
+ 
+ With the tt(-w) flag, the var(name)s are taken as names of files compiled
+ with the tt(zcompile) builtin, and all functions defined in them are
+diff -ru ../z.old/Src/Modules/parameter.c Src/Modules/parameter.c
+--- ../z.old/Src/Modules/parameter.c	Tue Mar 28 11:13:26 2000
++++ Src/Modules/parameter.c	Tue Mar 28 13:26:09 2000
+@@ -451,9 +451,18 @@
+ 				((shf->flags & PM_TAGGED) ? "Ut" : "U") :
+ 				((shf->flags & PM_TAGGED) ? "t" : "")));
+ 	} else {
+-	    char *t = getpermtext(shf->funcdef, NULL), *h;
++	    char *t = getpermtext(shf->funcdef, NULL), *n, *h;
+ 
+-	    h = dupstring(t);
++	    if (shf->funcdef->flags & EF_RUN) {
++		n = nicedupstring(name);
++		h = (char *) zhalloc(strlen(t) + strlen(n) + 9);
++		h[0] = '\t';
++		strcpy(h + 1, t);
++		strcat(h, "\n\t");
++		strcat(h, n);
++		strcat(h, " \"$@\"");
++	    } else
++		h = dyncat("\t", t);
+ 	    zsfree(t);
+ 	    unmetafy(h, NULL);
+ 
+@@ -513,9 +522,18 @@
+ 				    ((shf->flags & PM_TAGGED) ? "Ut" : "U") :
+ 				    ((shf->flags & PM_TAGGED) ? "t" : "")));
+ 		    } else {
+-			char *t = getpermtext(((Shfunc) hn)->funcdef, NULL);
++			char *t = getpermtext(((Shfunc) hn)->funcdef, NULL), *n;
+ 
+-			pm.u.str = dupstring(t);
++			if (((Shfunc) hn)->funcdef->flags & EF_RUN) {
++			    n = nicedupstring(hn->nam);
++			    pm.u.str = (char *) zhalloc(strlen(t) + strlen(n) + 9);
++			    pm.u.str[0] = '\t';
++			    strcpy(pm.u.str + 1, t);
++			    strcat(pm.u.str, "\n\t");
++			    strcat(pm.u.str, n);
++			    strcat(pm.u.str, " \"$@\"");
++			} else
++			    pm.u.str = dyncat("\t", t);
+ 			unmetafy(pm.u.str, NULL);
+ 			zsfree(t);
+ 		    }
+diff -ru ../z.old/Src/builtin.c Src/builtin.c
+--- ../z.old/Src/builtin.c	Tue Mar 28 11:13:15 2000
++++ Src/builtin.c	Tue Mar 28 12:39:50 2000
+@@ -2016,7 +2016,7 @@
+ 	return bin_eval(name, fargv, ops, func);
+     }
+ 
+-    return !loadautofn(shf, (ops['k'] ? 2 : (ops['z'] ? 0 : 1)));
++    return !loadautofn(shf, (ops['k'] ? 2 : (ops['z'] ? 0 : 1)), 1);
+ }
+ 
+ /* Display or change the attributes of shell functions.   *
+@@ -2160,7 +2160,7 @@
+     p->shf = shf;
+     p->npats = 0;
+     p->pats = NULL;
+-    p->alloc = EA_REAL;
++    p->flags = EF_REAL;
+     p->dump = NULL;
+ 
+     p->prog[0] = WCB_LIST((Z_SYNC | Z_END), 0);
+diff -ru ../z.old/Src/cond.c Src/cond.c
+--- ../z.old/Src/cond.c	Tue Mar 28 11:13:15 2000
++++ Src/cond.c	Tue Mar 28 12:37:48 2000
+@@ -206,7 +206,7 @@
+ 						  &htok));
+ 		if (htok)
+ 		    singsub(&right);
+-		save = (state->prog->alloc != EA_HEAP &&
++		save = (!(state->prog->flags & EF_HEAP) &&
+ 			!strcmp(opat, right) && pprog != dummy_patprog2);
+ 
+ 		if (!(pprog = patcompile(right, (save ? PAT_ZDUP : PAT_STATIC),
+diff -ru ../z.old/Src/exec.c Src/exec.c
+--- ../z.old/Src/exec.c	Tue Mar 28 11:13:15 2000
++++ Src/exec.c	Tue Mar 28 13:38:15 2000
+@@ -3066,14 +3066,14 @@
+ 	prog->npats = npats;
+ 	prog->len = len;
+ 	if (state->prog->dump) {
+-	    prog->alloc = EA_MAP;
++	    prog->flags = EF_MAP;
+ 	    incrdumpcount(state->prog->dump);
+ 	    prog->pats = pp = (Patprog *) zalloc(npats * sizeof(Patprog));
+ 	    prog->prog = state->pc;
+ 	    prog->strs = state->strs + sbeg;
+ 	    prog->dump = state->prog->dump;
+ 	} else {
+-	    prog->alloc = EA_REAL;
++	    prog->flags = EF_REAL;
+ 	    prog->pats = pp = (Patprog *) zalloc(len);
+ 	    prog->prog = (Wordcode) (prog->pats + npats);
+ 	    prog->strs = (char *) (prog->prog + nprg);
+@@ -3168,7 +3168,7 @@
+ {
+     Shfunc shf;
+ 
+-    if (!(shf = loadautofn(state->prog->shf, 1)))
++    if (!(shf = loadautofn(state->prog->shf, 1, 0)))
+ 	return 1;
+ 
+     execode(shf->funcdef, 1, 0);
+@@ -3177,7 +3177,7 @@
+ 
+ /**/
+ Shfunc
+-loadautofn(Shfunc shf, int fksh)
++loadautofn(Shfunc shf, int fksh, int autol)
+ {
+     int noalias = noaliases, ksh = 1;
+     Eprog prog;
+@@ -3199,18 +3199,29 @@
+     if (!prog)
+ 	prog = &dummy_eprog;
+     if (ksh == 2 || (ksh == 1 && isset(KSHAUTOLOAD))) {
+-	VARARR(char, n, strlen(shf->nam) + 1);
+-	strcpy(n, shf->nam);
+-	execode(prog, 1, 0);
+-	shf = (Shfunc) shfunctab->getnode(shfunctab, n);
+-	if (!shf || (shf->flags & PM_UNDEFINED)) {
+-	    zerr("%s: function not defined by file", n, 0);
+-	    popheap();
+-	    return NULL;
++	if (autol) {
++	    prog->flags |= EF_RUN;
++
++	    freeeprog(shf->funcdef);
++	    if (prog->flags & EF_MAP)
++		shf->funcdef = prog;
++	    else
++		shf->funcdef = dupeprog(prog, 0);
++	    shf->flags &= ~PM_UNDEFINED;
++	} else {
++	    VARARR(char, n, strlen(shf->nam) + 1);
++	    strcpy(n, shf->nam);
++	    execode(prog, 1, 0);
++	    shf = (Shfunc) shfunctab->getnode(shfunctab, n);
++	    if (!shf || (shf->flags & PM_UNDEFINED)) {
++		zerr("%s: function not defined by file", n, 0);
++		popheap();
++		return NULL;
++	    }
+ 	}
+     } else {
+ 	freeeprog(shf->funcdef);
+-	if (prog->alloc == EA_MAP)
++	if (prog->flags & EF_MAP)
+ 	    shf->funcdef = stripkshdef(prog, shf->nam);
+ 	else
+ 	    shf->funcdef = dupeprog(stripkshdef(prog, shf->nam), 0);
+@@ -3230,13 +3241,18 @@
+  * value (lastval) to its value before the shell function   *
+  * was executed.                                            */
+ {
+-    char **tab, **x, *oargv0 = NULL;
++    char **tab, **x, *oargv0;
+     int oldzoptind, oldlastval, oldoptcind;
+-    char saveopts[OPT_SIZE], *oldscriptname;
+-    int obreaks = breaks;
++    char saveopts[OPT_SIZE], *oldscriptname, *fname = dupstring(name);
++    int obreaks;
+     struct funcstack fstack;
+ 
+     pushheap();
++
++ rec:
++
++    oargv0 = NULL;
++    obreaks = breaks;;
+     if (trapreturn < 0)
+ 	trapreturn--;
+     oldlastval = lastval;
+@@ -3259,44 +3275,48 @@
+     if (flags & PM_TAGGED)
+ 	opts[XTRACE] = 1;
+     opts[PRINTEXITVALUE] = 0;
+-    if (doshargs) {
+-	LinkNode node;
++    if (!(prog->flags & EF_RUN)) {
++	if (doshargs) {
++	    LinkNode node;
+ 
+-	node = doshargs->first;
+-	pparams = x = (char **) zcalloc(((sizeof *x) *
++	    node = doshargs->first;
++	    pparams = x = (char **) zcalloc(((sizeof *x) *
+ 					 (1 + countlinknodes(doshargs))));
+-	if (isset(FUNCTIONARGZERO)) {
+-	    oargv0 = argzero;
+-	    argzero = ztrdup((char *) node->dat);
+-	}
+-	node = node->next;
+-	for (; node; node = node->next, x++)
+-	    *x = ztrdup((char *) node->dat);
+-    } else {
+-	pparams = (char **) zcalloc(sizeof *pparams);
+-	if (isset(FUNCTIONARGZERO)) {
+-	    oargv0 = argzero;
+-	    argzero = ztrdup(argzero);
++	    if (isset(FUNCTIONARGZERO)) {
++		oargv0 = argzero;
++		argzero = ztrdup((char *) node->dat);
++	    }
++	    node = node->next;
++	    for (; node; node = node->next, x++)
++		*x = ztrdup((char *) node->dat);
++	} else {
++	    pparams = (char **) zcalloc(sizeof *pparams);
++	    if (isset(FUNCTIONARGZERO)) {
++		oargv0 = argzero;
++		argzero = ztrdup(argzero);
++	    }
+ 	}
+     }
+     fstack.name = dupstring(name);
+     fstack.prev = funcstack;
+     funcstack = &fstack;
+-    runshfunc(prog, wrappers, fstack.name);
++    runshfunc(prog, ((prog->flags & EF_RUN) ? NULL : wrappers), fstack.name);
+     funcstack = fstack.prev;
+     if (retflag) {
+ 	retflag = 0;
+ 	breaks = obreaks;
+     }
+-    freearray(pparams);
+-    if (oargv0) {
+-	zsfree(argzero);
+-	argzero = oargv0;
++    if (!(prog->flags & EF_RUN)) {
++	freearray(pparams);
++	if (oargv0) {
++	    zsfree(argzero);
++	    argzero = oargv0;
++	}
++	pparams = tab;
+     }
+     optcind = oldoptcind;
+     zoptind = oldzoptind;
+     scriptname = oldscriptname;
+-    pparams = tab;
+ 
+     if (isset(LOCALOPTIONS)) {
+ 	/* restore all shell options except PRIVILEGED and RESTRICTED */
+@@ -3316,6 +3336,23 @@
+ 	trapreturn++;
+     if (noreturnval)
+ 	lastval = oldlastval;
++
++    if (prog->flags & EF_RUN) {
++	Shfunc shf;
++
++	prog->flags &= ~EF_RUN;
++
++	if (!(shf = (Shfunc) shfunctab->getnode(shfunctab,
++						(name = fname)))) {
++	    zerr("%s: function not defined by file", name, 0);
++	    if (!noreturnval)
++		lastval = 1;
++	    popheap();
++	    return;
++	}
++	prog = shf->funcdef;
++	goto rec;
++    }
+     popheap();
+ }
+ 
+@@ -3437,7 +3474,7 @@
+ 	plen = nprg * sizeof(wordcode);
+ 	len = plen + (npats * sizeof(Patprog)) + nstrs;
+ 
+-	if (prog->alloc == EA_MAP) {
++	if (prog->flags & EF_MAP) {
+ 	    ret = prog;
+ 	    free(prog->pats);
+ 	    ret->pats = pp = (Patprog *) zalloc(npats * sizeof(Patprog));
+@@ -3445,7 +3482,7 @@
+ 	    ret->strs = prog->strs + sbeg;
+ 	} else {
+ 	    ret = (Eprog) zhalloc(sizeof(*ret));
+-	    ret->alloc = EA_HEAP;
++	    ret->flags = EF_HEAP;
+ 	    ret->pats = pp = (Patprog *) zhalloc(len);
+ 	    ret->prog = (Wordcode) (ret->pats + npats);
+ 	    ret->strs = (char *) (ret->prog + nprg);
+diff -ru ../z.old/Src/hashtable.c Src/hashtable.c
+--- ../z.old/Src/hashtable.c	Tue Mar 28 11:13:15 2000
++++ Src/hashtable.c	Tue Mar 28 13:10:17 2000
+@@ -890,6 +890,11 @@
+ 	if (f->flags & PM_TAGGED)
+ 	    printf("%c traced\n\t", hashchar);
+ 	zputs(t, stdout);
++	if (f->funcdef && (f->funcdef->flags & EF_RUN)) {
++	    printf("\n\t");
++	    quotedzputs(f->nam, stdout);
++	    printf(" \"$@\"");
++	}
+ 	printf("\n}\n");
+ 	zsfree(t);
+     } else {
+diff -ru ../z.old/Src/loop.c Src/loop.c
+--- ../z.old/Src/loop.c	Tue Mar 28 11:13:17 2000
++++ Src/loop.c	Tue Mar 28 12:36:44 2000
+@@ -526,7 +526,7 @@
+ 
+ 	    opat = pat = ecgetstr(state, EC_DUP, NULL);
+ 	    singsub(&pat);
+-	    save = (state->prog->alloc != EA_HEAP &&
++	    save = (!(state->prog->flags & EF_HEAP) &&
+ 		    !strcmp(pat, opat) && *spprog != dummy_patprog2);
+ 
+ 	    pat2 = dupstring(pat);
+@@ -550,7 +550,7 @@
+ 						state->pc - 2, &htok));
+ 		if (htok)
+ 		    singsub(&pat);
+-		save = (state->prog->alloc != EA_HEAP &&
++		save = (!(state->prog->flags & EF_HEAP) &&
+ 			!strcmp(pat, opat) && *spprog != dummy_patprog2);
+ 	    }
+ 	    if (!(pprog = patcompile(pat, (save ? PAT_ZDUP : PAT_STATIC),
+diff -ru ../z.old/Src/parse.c Src/parse.c
+--- ../z.old/Src/parse.c	Tue Mar 28 11:13:18 2000
++++ Src/parse.c	Tue Mar 28 13:00:31 2000
+@@ -387,7 +387,7 @@
+     ret->prog = (Wordcode) (ret->pats + ecnpats);
+     ret->strs = (char *) (ret->prog + ecused);
+     ret->shf = NULL;
+-    ret->alloc = EA_HEAP;
++    ret->flags = EF_HEAP;
+     ret->dump = NULL;
+     for (l = 0; l < ecnpats; l++)
+ 	ret->pats[l] = dummy_patprog1;
+@@ -1990,7 +1990,7 @@
+ 	return p;
+ 
+     r = (heap ? (Eprog) zhalloc(sizeof(*r)) : (Eprog) zalloc(sizeof(*r)));
+-    r->alloc = EA_REAL;
++    r->flags = (heap ? EF_HEAP : EF_REAL) | (p->flags & EF_RUN);
+     r->dump = NULL;
+     r->len = p->len;
+     r->npats = p->npats;
+@@ -2895,7 +2895,7 @@
+ 	    Patprog *pp;
+ 	    int np;
+ 
+-	    prog->alloc = EA_MAP;
++	    prog->flags = EF_MAP;
+ 	    prog->len = h->len;
+ 	    prog->npats = np = h->npats;
+ 	    prog->pats = pp = (Patprog *) zalloc(np * sizeof(Patprog));
+@@ -2946,7 +2946,7 @@
+ 
+ 	    prog = (Eprog) zalloc(sizeof(*prog));
+ 
+-	    prog->alloc = EA_REAL;
++	    prog->flags = EF_REAL;
+ 	    prog->len = h->len + po;
+ 	    prog->npats = np = h->npats;
+ 	    prog->pats = pp = (Patprog *) d;
+diff -ru ../z.old/Src/zsh.h Src/zsh.h
+--- ../z.old/Src/zsh.h	Tue Mar 28 11:13:20 2000
++++ Src/zsh.h	Tue Mar 28 12:34:43 2000
+@@ -496,7 +496,7 @@
+ };
+ 
+ struct eprog {
+-    int alloc;			/* EA_* below */
++    int flags;			/* EF_* below */
+     int len;			/* total block length */
+     int npats;			/* Patprog cache size */
+     Patprog *pats;		/* the memory block, the patterns */
+@@ -506,9 +506,10 @@
+     FuncDump dump;		/* dump file this is in */
+ };
+ 
+-#define EA_REAL 0
+-#define EA_HEAP 1
+-#define EA_MAP  2
++#define EF_REAL 1
++#define EF_HEAP 2
++#define EF_MAP  4
++#define EF_RUN  8
+ 
+ typedef struct estate *Estate;
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

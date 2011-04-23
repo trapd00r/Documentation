@@ -1,0 +1,976 @@
+From zsh-workers-return-8603-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Nov 09 12:08:18 1999
+Return-Path: <zsh-workers-return-8603-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2096 invoked from network); 9 Nov 1999 12:08:15 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 9 Nov 1999 12:08:15 -0000
+Received: (qmail 21091 invoked by alias); 9 Nov 1999 12:08:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8603
+Received: (qmail 21083 invoked from network); 9 Nov 1999 12:08:01 -0000
+Date: Tue, 9 Nov 1999 13:07:59 +0100 (MET)
+Message-Id: <199911091207.NAA21115@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: completion grouping (yes, again)
+
+
+
+I've hacked a bit more, trying to make things easier to use and
+configure...
+
+
+First, the completion function side:
+
+`_tags' has been simplified. The `-i' isn't needed anymore, functions
+that only want to check if a tag (or at least one of a set of tags) is 
+requested at all only need to do `_tags tag... || return 1'.
+
+Then I also removed the `-f' option (which was used to give the name
+of the completion function to test for). Function names are not tested 
+anymore, i.e. the context-patterns are only compared to the command
+name from the line.
+
+I also added a bit of parameter magic, so that functions using `_tags' 
+don't need to define the `tags' parameter locally. In other words,
+completion function don't have to define *any* local parameter
+anymore.
+
+The I added the functions `_requested' which gets names of tags and
+returns zero if at least one of these tags was requested.
+
+So, to use tags one can now simply do something like:
+
+  local ret=1
+
+  _tags job process   # say which types of matches we can add
+
+  while _tags; do     # get the next set of tags to try
+
+    _requested job     && _jobs && ret=0
+    _requested process && _pids && ret=0
+
+    (( ret )) || return 0
+  done
+
+  return 1
+
+But there is also the new function `_alternative' (please someone who
+actually can speak English tell me a better name), which basically
+implements such a loop. Its arguments are of the form
+`<tag>:<descr>:<action>', which should look familiar. The tags are
+given to `_tags' and then a loop executes the actions of the requested 
+tags. This also means that there is a small difference to `_arguments' 
+and friends: the `->state' style for actions is not supported (because 
+`_alternative' may have to execute more than one action).
+
+With this functions like `_wait' only have to do:
+
+  _alternative 'job:: _jobs' 'process:: _pids'
+
+(Empty descriptions because they are not used -- the actions start
+with spaces and we use the descriptions added by `_jobs' and `_pids'.)
+
+Then I added some more support for styles. The function `_style' can
+be used to test if a certain style of completion is requested and to
+get the string of the style. As a reminder: styles are intended for
+things like the old `describe_options' config key. The suggested
+syntax is that in the `comptags' assoc the styles are given in
+brackets after the priority, seperated by commas and if they have a
+value, the value is given after an equal sign. E.g. `[s1,s2=foo,s3]'.
+But never mind, I've have also two suggestions for a better
+configuration interface (described below) both of which make this very 
+simple.
+
+`_style' has four modes:
+  - _style tag style
+    this returns zero if the `style' is set for the `tag'
+  - _style -g tag name
+    this stores the style-string for the `tag' defined by the user in
+    the parameter `name'
+  - _style tag style value
+    this checks if the `style' for the `tag' has the given `value'
+  - _style -g tag style name
+    and this stores the value of the `style' for the `tag' in the
+    parameter `name'
+
+Currently only the first mode is used and maybe we should split the
+function in two: one for testing, one for getting the style/value. Or
+maybe we'll find out that we don't really need to support values here.
+
+What I was thinking about is this: if we integrate the config stuff
+into the tags mechanism I see two ways we can go:
+
+1) Add `pseudo'-tags, named after the config keys they replace and
+   just use the style defined for them as the replacement for what is
+   now the value of config key. This looks like a good thing to do for 
+   keys like `ps_args' and many others.
+2) Add new tags which, too, are only used to get information about
+   user definitions, but which also group config keys. For example we
+   could replace the `path_expand'/`path_cursor' pair by making
+   `_path_files' look at the styles for the `pathname' tag (I would
+   hope to find a better name than). `_path_files' would look at the
+   styles `expand' and `cursor' for this tag and the values of these
+   styles are then used like the values of the config keys.
+
+
+I quite like the grouping done by 2), but for some config keys this
+looks like overkill.
+
+One last comment about `_style': currently the arguments are tested
+literally. We could easily change that so that they are interpreted as 
+patterns. If we ever start using this, it may turn out that we want
+that...
+
+
+Ok, now for the last part: contexts. The problem is that for some
+commands there are different places where the same tags are
+used. E.g. the command `dvips' gets dvi files but any file name after
+the `-o' option. If we let users define the tags they want to try only 
+based on the command name, cases like this will often show the wrong
+behaviour. So we would want to be able to say that completion
+functions generate matches for different contexts and let users define 
+tags differently for these. Back to the example: here we could have a
+`input' and a `output' context.
+
+I have already change `_tags' and `_alternative' to support the
+`-C <context>' option that allows one to give the name of the context
+we are completing for. If such a context is given (currently no
+functions uses them), `_tags' will compare the patterns from the
+`comptags' assoc with a string of the form `cmd-name/context'. It
+could be changed so that a user definition without a slash would
+affect all contexts.
+
+One problem is to decide when we should use such contexts: always? Or
+only if a command uses the same tag(s) in more than one place? The
+first one looks cleaner but that would mean that completion function
+writers would always have to give such a context name. This is
+particularly ugly because 1) we would have to change all completion
+functions and 2) we would have to change functions like `_arguments'
+so that their arguments also contain these context names. Alternatively
+we could change `_arguments' so that they build default context names
+if users don't define them. For `_arguments' this could, for example,
+use names like `-o' and `arg-1' (for options getting multiple
+arguments this would have to be `-foo-1'). Or maybe we use `arg/1',
+making it look like a (sub-)sub-context. But, of course, the problem
+with this is that in many cases the names would be ugly (`infile' is
+certainly more user-friendly than `arg/1').
+
+Ok, anyone got any ideas about this?
+
+
+And now for the other part: the configuration interface.
+
+As I said above, I have implemented two suggestions. The functions
+are `conf1' and `conf2' in `compinit'. They are not yet in their final 
+form (e.g. they can't list the configuration, only set it, you can
+look at the result with `comptag'), I just wanted to give you a way to
+play with them. In the end one or both of them will be removed,
+renamed and so on...
+
+
+`conf1' is tag-centered, its arguments implement what I would call a
+mini-language:
+
+  conf1 <def> ...
+
+  <def>     = tag <spec> ... |
+              tag 'is' style
+  <spec>    = [ <context> ] <prio>
+  <context> = 'in' pattern |
+              'else'
+  <prio>    = '=' 'never' |
+              '=' number [ <style> ... ]
+  <style>   = 'with' style
+
+where `style' may be `foo=bar' (i.e. a style with a value).
+
+Example:
+
+  conf1 \
+    argument = 1 \
+    value    = 1 with describe \
+    option   = 2 with describe and hide \
+    file     = 3 \
+    path in   '*dvi*' = 1 \
+         else         = 2 \
+    glob     = 1 \
+    job      = never
+
+This means that arguments and values have a high priority, and options 
+have a lower one. Values and options will be shown with descriptions
+(aside: if we ever use such a syntax the names of the styles should be
+changed to nouns) and options will be displayed without the option
+character prefixes. Then files have a low priority and glob patterns a
+high priority. The entry for paths shows how to set different
+priorities for commands matching `*dvi*' and for all other command
+(the `else' is syntactic sugar for `in "*"'). Finally the `never' for
+the `job' tag means that jobs will never be used as possible matches.
+
+The `is'-form would be used for replacing config keys as in:
+
+  conf1 completer is '_complete:_correct'
+
+There are some problems with this. The biggest one is that users are
+still exposed to the priorities, i.e. users have to take care that the 
+numbers are chosen so that the tags are tried in the right order for
+all commands affected. Also, I'm not sure that users would really
+think in terms of tags. I think they find it easier to think about
+commands. These problems are addressed by my second suggested
+function (`conf2'). Again, a small language:
+
+  conf2 <def> ...
+  <def>      = 'for' pat 'do' <spec> |
+               'else' 'do' <spec> |
+	       'always' do <spec>
+  <spec>     = <or-list> |
+               'no' <no-list> |
+               'no' <no-list> 'but' <or-list>
+  <no-list>  = tag | tag 'and' <no-list>
+  <or-list>  = <and-list> |
+               <and-list> 'or' <or-list>
+  <and-list> = <tag> |
+               <tag> 'and' <and-list>
+  <tag>      = tag [ <styles> ]
+  <styles>   = 'with' style | <styles> 'and' 'with' style
+
+Example:
+
+  conf2 \
+    for '*dvi*' do \
+      glob and path or \
+      file \
+    else do \
+      glob or \
+      path or \
+      file \
+    for '*p[bgpn]m*' do \
+      argument and option with describe and with hide \
+    else do \
+      argument or \
+      value with describe or \
+      option with describe \
+    for 'kill' do \
+      no job but \
+      process \
+    else do \
+      process and job
+
+This says that for `*dvi*' commands first both the glob pattern and
+directories should be generated and if that fails all files. For all
+other commands (the `else') first the glob pattern is tried (if any),
+if that fails, directories and if that fails, all files.
+The definition for `*p[bgpn]m*' shows how to give styles to use. The
+example for the `kill' command finally shows how to say that one
+doesn't want to use a tag (`job') at all.
+The `always' in the description above is just a synonym for `else' for 
+places where that is easier to read. E.g.:
+
+  conf2 always do completer with '_complete:_correct'
+
+(Although in this case one would probably also wish to be able to
+write something else than `do ... with').
+
+I quite like this second example function, there is only one small
+problem (the first function has the same): users still have to be
+carefull to describe things in the right order because the command
+patterns are tested in the order in which they are defined. We can't
+get around that entirely, but I think if this gets accepted that we
+should change it so that non-pattern commands (the `kill' example) are
+sorted before all patterns and the default things (`else' and
+`always') are put at the end. The function will also have to make sure 
+that a newer description for the same pattern/tag pair replaces an
+older one.
+
+Ok, that's it for now. Comments?
+
+Bye
+ Sven
+
+diff -u -r oldcompletion/Base/_arguments Completion/Base/_arguments
+--- oldcompletion/Base/_arguments	Tue Nov  9 13:03:22 1999
++++ Completion/Base/_arguments	Tue Nov  9 10:06:10 1999
+@@ -154,14 +154,14 @@
+ if comparguments -i "$compconfig[autodescribe_options]" "$@"; then
+   local nm="$compstate[nmatches]" action noargs aret expl local
+   local next direct odirect equal single match matched ws tmp1 tmp2
+-  local tags opts
++  local opts
+ 
+   if comparguments -D descr action; then
+     if comparguments -O next direct odirect equal; then
+       opts=yes
+-      _tags -f "$funcstack[2]" argument option
++      _tags argument option
+     else
+-      _tags -f "$funcstack[2]" argument
++      _tags argument
+     fi
+   else
+     if comparguments -a; then
+@@ -172,12 +172,12 @@
+     comparguments -O next direct odirect equal || return 1
+ 
+     opts=yes
+-    _tags -f "$funcstack[2]" option
++    _tags option
+   fi
+ 
+   while _tags; do
+     while true; do
+-      if [[ "$tags" = *:argument* ]]; then
++      if [[ -n "$matched" ]] || _requested argument; then
+         _description expl "$descr"
+ 
+         if [[ "$action" = -\>* ]]; then
+@@ -207,7 +207,7 @@
+ 
+             eval ws\=\( "${action[3,-3]}" \)
+ 
+-            _describe -c "$cmd" -f "$funcstack[2]" "$descr" ws -M "$match"
++            _describe -c "$cmd" "$descr" ws -M "$match"
+ 
+           elif [[ "$action" = \(*\) ]]; then
+ 
+@@ -234,8 +234,8 @@
+           fi
+         fi
+       fi
+-      if [[ "$tags" = *:option* &&
+-            ( "$tags" != *\[*prefix*\]* || "$PREFIX" = [-+]* ) ]]; then
++      if [[ -z "$matched" ]] && _requested option &&
++          { ! _style option prefix || [[ "$PREFIX" = [-+]* ]] } ; then
+         comparguments -M match
+ 
+         if comparguments -s single; then
+@@ -253,20 +253,21 @@
+ 	    tmp1=( "${(M@)tmp1:#[-+]?(|:*)}" )
+ 	    tmp2=( "${PREFIX}${(@M)^${(@)${(@)tmp1%%:*}#[-+]}:#?}" )
+ 
+-            _describe -o -c "$cmd" -f "$funcstack[2]" option \
++            _describe -o -c "$cmd" option \
+                       tmp1 tmp2 -Q -S ''
+           fi
+           single=yes
+         else
+           next=( "$next[@]" "$odirect[@]" )
+-          _describe -o -c "$cmd" -f "$funcstack[2]" option \
++          _describe -o -c "$cmd" option \
+             next -Q -M "$match" -- \
+             direct -QS '' -M "$match" -- \
+             equal -QqS= -M "$match"
+         fi
+       fi
+-      if [[ -n "$opts" && -z "$aret$matched" && nm -ne compstate[nmatches] &&
+-            "$tags" = *:argument* ]]; then
++      if [[ -n "$opts" && -z "$aret$matched" &&
++            nm -ne compstate[nmatches] ]] &&
++          _requested argument; then
+ 
+         local prefix suffix
+ 
+@@ -282,7 +283,6 @@
+ 	  IPREFIX="${IPREFIX}${equal[1]%%:*}="
+ 	  matched=yes
+ 	  comparguments -L "$equal[1]" descr action
+-	  tags=argument
+ 	  continue
+         fi
+       fi
+diff -u -r oldcompletion/Base/_describe Completion/Base/_describe
+--- oldcompletion/Base/_describe	Tue Nov  9 13:03:22 1999
++++ Completion/Base/_describe	Tue Nov  9 10:06:10 1999
+@@ -2,19 +2,16 @@
+ 
+ # This can be used to add options or values with descriptions as matches.
+ 
+-local cmd func opt expl tmps tmpd tmpmd tmpms ret=1 showd _nm hide
+-local tags type=value
++local cmd opt expl tmps tmpd tmpmd tmpms ret=1 showd _nm hide
++local type=value
+ 
+ cmd="$words[1]"
+-func="$funcstack[2]"
+ 
+ # Get the options.
+ 
+-while getopts 'oc:f:' opt; do
++while getopts 'oc:' opt; do
+   if [[ "$opt" = o ]]; then
+     type=option
+-  elif [[ "$opt" = f ]]; then
+-    func="$OPTARG"
+   else
+     cmd="$OPTARG"
+   fi
+@@ -23,9 +20,9 @@
+ 
+ # Do the tests. `showd' is set if the descriptions should be shown.
+ 
+-_tags -i -c "$cmd" -f "$func" "$type" || return 1
++_tags -c "$cmd" "$type" || return 1
+ 
+-[[ "$tags" = *:${type}\[*describe*\]* ]] && showd=yes
++_style "$type" describe && showd=yes
+ 
+ _description expl "$1"
+ shift
+@@ -36,7 +33,7 @@
+   compdescribe -i "$@"
+ fi
+ 
+-[[ "$type" = option && "$tags" = *:option\[*hide*\]* ]] && hide=yes
++[[ "$type" = option ]] && _style option hide && hide=yes
+ 
+ while compdescribe -g args tmpd tmpmd tmps tmpms; do
+ 
+diff -u -r oldcompletion/Base/_values Completion/Base/_values
+--- oldcompletion/Base/_values	Tue Nov  9 13:03:22 1999
++++ Completion/Base/_values	Tue Nov  9 10:06:10 1999
+@@ -2,11 +2,11 @@
+ 
+ if compvalues -i "$@"; then
+ 
+-  local tags noargs args opts descr action expl sep
++  local noargs args opts descr action expl sep
+ 
+   if ! compvalues -D descr action; then
+ 
+-    _tags -i value || return 1
++    _tags value || return 1
+ 
+     compvalues -V noargs args opts
+ 
+@@ -42,7 +42,7 @@
+         sep=()
+       fi
+ 
+-      _describe -f "$funcstack[2]" "$descr" \
++      _describe "$descr" \
+         noargs "$sep[@]" -M 'r:|[_-]=* r:|=*' -- \
+         args -S= -M 'r:|[_-]=* r:|=*' -- \
+         opts -qS= -M 'r:|[_-]=* r:|=*'
+@@ -51,7 +51,7 @@
+     fi
+   fi
+ 
+-  _tags -i argument || return 1
++  _tags argument || return 1
+ 
+   _description expl "$descr"
+ 
+@@ -85,7 +85,7 @@
+ 
+       eval ws\=\( "${action[3,-3]}" \)
+ 
+-      _describe -f "$funcstack[2]" "$descr" ws -M 'r:|[_-]=* r:|=*'
++      _describe "$descr" ws -M 'r:|[_-]=* r:|=*'
+ 
+     elif [[ "$action" = \(*\) ]]; then
+ 
+diff -u -r oldcompletion/Builtins/_kill Completion/Builtins/_kill
+--- oldcompletion/Builtins/_kill	Tue Nov  9 13:03:22 1999
++++ Completion/Builtins/_kill	Tue Nov  9 10:06:11 1999
+@@ -1,23 +1,13 @@
+ #compdef kill
+ 
+-local tags list expl
++local list expl
+ 
+ if compset -P 1 -; then
+ 
+-  _tags -i signal || return 1
++  _tags signal || return 1
+ 
+   _description expl signal
+   compadd "$expl[@]" $signals[1,-3]
+ else
+-  local ret=1
+-  
+-  _tags job process
+-  
+-  while _tags; do
+-    [[ "$tags" = *:job:*     ]] && _jobs && ret=0
+-    [[ "$tags" = *:process:* ]] && _pids && ret=0
+-    (( ret )) || break
+-  done
+-
+-  return ret
++  _alternative 'job:: _jobs' 'process:: _pids'
+ fi
+diff -u -r oldcompletion/Builtins/_wait Completion/Builtins/_wait
+--- oldcompletion/Builtins/_wait	Tue Nov  9 13:03:22 1999
++++ Completion/Builtins/_wait	Tue Nov  9 10:06:11 1999
+@@ -1,13 +1,3 @@
+ #compdef wait
+ 
+-local tags ret=1
+-  
+-_tags job process
+-  
+-while _tags; do
+-  [[ "$tags" = *:job:*     ]] && _jobs && ret=0
+-  [[ "$tags" = *:process:* ]] && _pids && ret=0
+-  (( ret )) || break
+-done
+-
+-return ret
++_alternative 'job:: _jobs' 'process:: _pids'
+diff -u -r oldcompletion/Core/_alternative Completion/Core/_alternative
+--- oldcompletion/Core/_alternative	Tue Nov  9 13:03:22 1999
++++ Completion/Core/_alternative	Tue Nov  9 10:46:05 1999
+@@ -0,0 +1,70 @@
++#autoload
++
++local tags def expl descr action mesgs nm="$compstack[nmatches]"
++local context
++
++if [[ "$1" = -C?* ]]; then
++  context="${1[3,-1]}"
++  shift
++elif [[ "$1" = -C ]]; then
++  context="$2"
++  shift 2
++fi
++
++mesgs=()
++
++_tags -C "$context" "${(@)argv%%:*}"
++
++while _tags; do
++  for def; do
++    if _requested "${def%%:*}"; then
++      descr="${${def#*:}%%:*}"
++      action="${def#*:*:}"
++
++      _description expl "$descr"
++
++      if [[ "$action" = \ # ]]; then
++
++        # An empty action means that we should just display a message.
++
++        mesgs=( "$mesgs[@]" "$descr")
++      elif [[ "$action" = \(\(*\)\) ]]; then
++        local ws
++
++        # ((...)) contains literal strings with descriptions.
++
++        eval ws\=\( "${action[3,-3]}" \)
++
++        _describe "$descr" ws -M 'r:|[_-]=* r:|=*'
++      elif [[ "$action" = \(*\) ]]; then
++
++        # Anything inside `(...)' is added directly.
++
++        compadd "$expl[@]" - ${=action[2,-2]}
++      elif [[ "$action" = \{*\} ]]; then
++
++        # A string in braces is evaluated.
++
++        eval "$action[2,-2]"
++      elif [[ "$action" = \ * ]]; then
++
++        # If the action starts with a space, we just call it.
++
++        ${(e)=~action}
++      else
++
++        # Otherwise we call it with the description-arguments built above.
++
++        action=( $=action )
++        ${(e)action[1]} "$expl[@]" ${(e)~action[2,-1]}
++      fi
++    fi
++  done
++  [[ nm -ne compstate[nmatches] ]] && return 0
++done
++
++for descr in "$mesgs[@]"; do
++  _message "$descr"
++done
++
++return 1
+diff -u -r oldcompletion/Core/_files Completion/Core/_files
+--- oldcompletion/Core/_files	Tue Nov  9 13:03:22 1999
++++ Completion/Core/_files	Tue Nov  9 13:02:38 1999
+@@ -1,6 +1,6 @@
+ #autoload
+ 
+-local opts opt type=file tags
++local opts opt type=file
+ 
+ opts=()
+ while getopts "P:S:qr:R:W:F:J:V:X:f/g:M:" opt; do
+@@ -13,15 +13,24 @@
+ done
+ 
+ case "$type" in
+-file) _tags -f "$funcstack[2]" file           ;;
+-dir)  _tags -f "$funcstack[2]" path file      ;;
+-*)    _tags -f "$funcstack[2]" glob path file ;;
++file) _tags file           ;;
++dir)  _tags path file      ;;
++*)    _tags glob path file ;;
+ esac
+ 
+ while _tags; do
+-  [[ "$tags" = *:file:* ]] && { _path_files "$opts[@]" -f         ;  return   }
+-  [[ "$tags" = *:path:* ]] &&   _path_files "$opts[@]" -/         && return 0
+-  [[ "$tags" = *:glob:* ]] &&   _path_files "$opts[@]" -g "$type" && return 0
++  if _requested file; then
++    _path_files "$opts[@]" -f
++    return
++  elif _requested path; then
++    if _requested glob; then
++      _path_files "$opts[@]" -/g "$type" && return 0
++    else
++      _path_files "$opts[@]" -/g "$type" && return 0
++    fi
++  elif _requested glob; then
++    _path_files "$opts[@]" -g "$type" && return 0
++  fi
+ done
+ 
+ return 1
+diff -u -r oldcompletion/Core/_main_complete Completion/Core/_main_complete
+--- oldcompletion/Core/_main_complete	Tue Nov  9 13:03:22 1999
++++ Completion/Core/_main_complete	Tue Nov  9 10:06:53 1999
+@@ -17,9 +17,9 @@
+ # state than the global one for which you are completing.
+ 
+ 
+-local comp post ret=1 _compskip tags _prio_num=1
++local comp post ret=1 _compskip _prio_num=1
+ typeset -U _offered_tags _tried_tags _failed_tags _used_tags _unused_tags
+-typeset -A _prio_names
++typeset -A _prio_names _cur_tags
+ 
+ _offered_tags=()
+ _tried_tags=()
+diff -u -r oldcompletion/Core/_requested Completion/Core/_requested
+--- oldcompletion/Core/_requested	Tue Nov  9 13:03:22 1999
++++ Completion/Core/_requested	Tue Nov  9 13:02:41 1999
+@@ -0,0 +1,9 @@
++#autoload
++
++local tag tname="$funcstack[2,-1]"
++
++for tag; do
++  [[ "${_cur_tags[${tname}]}" = *:${tag}(:|\[*\]:)* ]] && return 0
++done
++
++return 1
+diff -u -r oldcompletion/Core/_style Completion/Core/_style
+--- oldcompletion/Core/_style	Tue Nov  9 13:03:22 1999
++++ Completion/Core/_style	Tue Nov  9 10:06:12 1999
+@@ -0,0 +1,45 @@
++#autoload
++
++local tags get i
++
++if [[ "$1" = -g ]]; then
++  get=yes
++  shift
++fi
++
++if (( ${+_cur_tags[${funcstack[2,-1]}]} )); then
++  tags="${_cur_tags[${funcstack[2,-1]}]}"
++else
++  tags="${_cur_tags[${funcstack[3,-1]}]}"
++fi
++
++if [[ "$tags" = *:${1}\[*\]:* ]]; then
++
++  tags="${${tags#*:${1}\[}%%\]*}"
++
++  if [[ $# -eq 2 ]]; then
++    if [[ -n "$get" ]]; then
++      eval "${2}=\"$tags\""
++      return 0
++    fi
++
++    [[ "$tags" = (|*,)${2}(|,*) ]]
++    return
++  fi
++
++  [[ "$tags" = (|*,)${2}(|(\=|,)*) ]] || return 1
++
++  if [[ -n "$get" ]]; then
++    if [[ "$tags" = (|*,)${2}\=* ]]; then
++      eval "${3}=\"${${tags#(|*,)${2}\=}%%,*}\""
++    else
++      eval "${3}=''"
++    fi
++    return 0
++  fi
++
++  [[ "$tags" = (|*,)${2}\=(|[^,]#,)${3}(|,*) ]] 
++  return
++fi
++
++return 1
+diff -u -r oldcompletion/Core/_tags Completion/Core/_tags
+--- oldcompletion/Core/_tags	Tue Nov  9 13:03:22 1999
++++ Completion/Core/_tags	Tue Nov  9 10:06:12 1999
+@@ -1,19 +1,21 @@
+ #autoload
+ 
++local tname="$funcstack[2,-1]"
++
+ if (( $# )); then
+-  local cmd="$words[1]" func="$funcstack[2]" defs i ttags tag pat style prio
+-  local trynow
++  local cmd="$words[1]" defs i ttags tag pat style prio context opt
+ 
+-  while getopts 'c:f:i' i; do
+-    case "$i" in
+-    c) cmd="$OPTARG"  ;;
+-    f) func="$OPTARG" ;;
+-    i) trynow=yes     ;;
+-    esac
++  while getopts 'c:C:' opt; do
++    if [[ "$opt" = c ]]; then
++      cmd="$OPTARG"
++    else
++      context="$OPTARG"
++    fi
+   done
+-
+   shift OPTIND-1
+ 
++  [[ -n "$context" ]] && context="/$context"
++
+   defs=( "${(@M)argv:#${(kj:|:)~override_tags[(R)(|+*)]}}" )
+   (( $#defs )) && set -- "$defs[@]"
+ 
+@@ -42,8 +44,7 @@
+   for i in "$defs[@]"; do
+     tag="${i%%:*}"
+     for pat in "${(s.:.)i#*:}"; do
+-      if [[ ( "$pat" = _* && "$func" = ${~pat%%\=*} ) ||
+-            "$cmd" = ${~pat%%\=*} ]]; then
++      if [[ "$cmd$context" = ${~pat%%\=*} ]]; then
+         prio="${pat#*\=}"
+ 	[[ "$prio" = -* ]] && continue 2
+ 
+@@ -65,22 +66,24 @@
+   done
+ 
+   prio="_prio_arr$(( _prio_num++ ))"
+-  _prio_names[$funcstack]="$prio"
+-  eval "${prio}=( \"\${(@)ttags:#}\" )"
++  _prio_names[$tname]="$prio"
++  ttags=( "${(@)ttags:#}" )
++  eval "${prio}=( \"\$ttags[@]\" )"
+ 
+-  [[ -z "$trynow" ]] && return 0
++  return \!$#ttags
+ fi
+ 
+-local prios="$_prio_names[$funcstack]"
++local prios="$_prio_names[$tname]"
+ 
+-_failed_tags=( "$_failed_tags[@]" "$_last_tags[@]" )
++_failed_tags=( "$_failed_tags[@]" "$_last_tags" )
+ 
+ (( ${(P)#prios} )) || return 1
+ 
+-tags="${${(@P)prios}[1]}:"
+-shift 1 "$prios"
++_cur_tags[$tname]="${(@)${(@P)prios}[1]}:"
+ 
+-_last_tags=( "${(@s.:.)${${tags#:}%:}}" )
++_last_tags=( "${(@)${(@s.:.)${(@P)prios}[1]}:#}" )
+ _tried_tags=( "$_tried_tags[@]" "$_last_tags[@]" )
++
++shift 1 "$prios"
+ 
+ return 0
+diff -u -r oldcompletion/Core/compinit Completion/Core/compinit
+--- oldcompletion/Core/compinit	Tue Nov  9 13:03:22 1999
++++ Completion/Core/compinit	Tue Nov  9 13:06:14 1999
+@@ -446,6 +446,177 @@
+   fi
+ }
+ 
++# First suggested function for new configuration interface.
++#
++# Example:
++#
++#   conf1 \
++#     argument = 1 \
++#     value    = 1 with describe \
++#     option   = 2 with describe and hide \
++#     file     = 3 \
++#     path in   '*dvi*' = 1 \
++#          else         = 2 \
++#     glob     = 1 \
++#     job      = never
++
++conf1() {
++  local tag pat prio
++
++  while (( $# )); do
++
++    tag="$1"
++    shift
++
++    while (( $# )); do
++
++      if [[ "$1" = in ]]; then
++        pat="$2"
++	shift 2
++      else
++        pat='*'
++	[[ "$1" = else ]] && shift
++      fi
++
++      style=''
++
++      if [[ "$1" = is ]]; then
++        prio=0
++	style="[${2}]"
++	shift 2
++      elif [[ "$1" = \= ]]; then
++        if [[ "$2" = n(o|ever) ]]; then
++          prio=-1
++	  shift 2
++        else
++          prio="$2"
++	  shift 2
++
++	  if [[ "$1" = with ]]; then
++	    while [[ "$1" = (with|and) ]]; do
++	      style="${style},${2}"
++	      shift 2
++            done
++            style="[${style[2,-1]}]"
++          fi
++        fi
++      else
++        echo "$0: missing priority: $1"
++	return 1
++      fi
++      if [[ -n "$comptags[$tag]" ]]; then
++        comptags[$tag]="${comptags[$tag]}:${pat}=${prio}${style}"
++      else
++        comptags[$tag]="${pat}=${prio}${style}"
++      fi
++
++      [[ "$1" = (in|else|\=) ]] || break
++
++    done
++  done
++
++  return 0
++}
++
++# Second suggested function for new configuration interface.
++#
++# Example:
++#
++#   conf2 \
++#     for '*dvi*' do \
++#       glob and path or \
++#       file \
++#     else do \
++#       glob or \
++#       path or \
++#       file \
++#     for '*p[bgpn]m*' do \
++#       argument and option with describe and with hide \
++#     else do \
++#       argument or \
++#       value with describe or \
++#       option with describe \
++#     for 'kill' do \
++#       no job but \
++#       process \
++#     else do \
++#       process and job
++
++conf2() {
++  local pat prio tag style
++
++  while (( $# )); do
++
++    if [[ "$1" = for ]]; then
++      pat="$2"
++      shift 2
++    elif [[ "$1" = (else|always) ]]; then
++      pat="*"
++      shift
++    else
++      echo "$0: missing context: $1"
++      return 1
++    fi
++
++    shift 1
++
++    prio=1
++
++    while (( $# )); do
++
++      if [[ "$1" = no ]]; then
++        while [[ "$1" != (but|for|else|always) ]]; do
++	  if [[ -n "$comptags[$2]" ]]; then
++	    comptags[$2]="${comptags[$2]}:${pat}=-1"
++          else
++	    comptags[$2]="${pat}=-1"
++	  fi
++
++	  shift 2
++	done
++
++	[[ "$1" != but ]] && break
++
++	shift
++      fi
++
++      while (( $# )); do
++
++        tag="$1"
++	shift
++
++	style=''
++	if [[ "$1" = with ]]; then
++	  shift
++	  while true; do
++	    style="${style},${1}"
++	    [[ "$2" != and || "$3" != with ]] && break
++	    shift 3
++          done
++	  shift
++        fi
++
++	[[ -n "$style" ]] && style="[${style[2,-1]}]"
++
++	if [[ -n "$comptags[$tag]" ]]; then
++	  comptags[$tag]="${comptags[$tag]}:${pat}=${prio}${style}"
++        else
++	  comptags[$tag]="${pat}=${prio}${style}"
++        fi
++
++	[[ "$1" != and ]] && break
++
++	shift
++      done
++
++      [[ "$1" != or ]] && break
++
++      (( prio++ ))
++      shift
++    done
++  done
++}
++
+ # Utility function to call a function if it exists.
+ #
+ # Usage: funcall <return> <name> [ <args> ... ]
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

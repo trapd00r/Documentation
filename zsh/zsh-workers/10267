@@ -1,0 +1,683 @@
+From zsh-workers-return-10267-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Mar 27 09:42:29 2000
+Return-Path: <zsh-workers-return-10267-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2275 invoked from network); 27 Mar 2000 09:42:26 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Mar 2000 09:42:26 -0000
+Received: (qmail 13226 invoked by alias); 27 Mar 2000 09:42:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10267
+Received: (qmail 13211 invoked from network); 27 Mar 2000 09:42:00 -0000
+Date: Mon, 27 Mar 2000 11:41:56 +0200 (MET DST)
+Message-Id: <200003270941.LAA03795@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: file-patterns, tag-order, tag-aliases
+
+
+[ This is relative to Bart's 10263 which I've just received. ]
+
+
+The main problem was the file-patterns style. I didn't spent enough
+time thinking about it -- and I wanted to keep any style setting for
+tag-order with globbed-files/directories/all-files valid. I think that 
+was wrong.
+
+For one, the tags offered by _files (taken from file-patterns or the
+default ones) have to be tried one after another, different from the
+other completion function offering more than one tag. Second, the
+file-patterns style already allows to sort the tags in the order one
+wants to have them tried, no need to allow to re-order them with the
+tag-order style.
+
+Also, using `*' in a tag-order value was a problem with _files,
+because it made all tags offered by it be used at the same time, so
+some of the examples in the docs, if used for insufficiently specific
+contexts made file completion behave differently.
+
+So, if everyone agrees, I'd like to suggest the patch below (and it
+will hopefully my last change to all this tags business, at least the
+last one changing the style behaviour here). It makes _files offer the 
+tags from the file-patterns style one after another, i.e. only one at
+a time. This means that one can't do
+
+  zstyle ... tag-order 'globbed-files directories' all-files
+
+any more. This can now be done using only the file-patterns style:
+
+  zstyle ':completion:*' file-patterns '%p *(-/):globbed-files' '*:all-files'
+
+The `%p' is replaced by the patterns given by the completion function
+(another change this patch makes). It is documented, the docs contain
+this example,... does anyone think this is too complicated for our
+users?
+
+
+The other thing I wasn't too happy about was the tag-aliases style. It 
+was mainly intended as a optimisation (and to avoid the need for the
+`*' pattern in tag-order, see above), but with the cleaned-up _files
+handling, I don't see any real need for it anymore, so the patch
+removes it.
+
+
+And then it moves some of the stuff from _tags into C-code, namely
+bin_comptry(): the pattern handling for the tag-order style.
+
+
+Ok, with this, I'm quite happy with the all the tag stuff. Uff.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Completion/Builtins/_zstyle Completion/Builtins/_zstyle
+--- ../z.old/Completion/Builtins/_zstyle	Mon Mar 27 10:53:05 2000
++++ Completion/Builtins/_zstyle	Mon Mar 27 11:07:11 2000
+@@ -60,7 +60,6 @@
+   stop			 c:stop
+   subst-glob-only        c:
+   substitute		 c:
+-  tag-aliases            c:tag
+   tag-order		 c:tag
+   users			 c:_users
+   users-hosts		 c:user-host
+diff -ru ../z.old/Completion/Commands/_next_tags Completion/Commands/_next_tags
+--- ../z.old/Completion/Commands/_next_tags	Mon Mar 27 10:53:06 2000
++++ Completion/Commands/_next_tags	Mon Mar 27 11:28:47 2000
+@@ -46,71 +46,46 @@
+ # Helper function for sorting tags. Most of this is copied from _tags.
+ 
+ _next_tags_sort() {
+-  local order tags tag nodef tmp tmp2
++  local order tags tag nodef tmp
+ 
+-  if ! zstyle -a ":completion:${curcontext}:" tag-order order; then
+-    if (( $+_comp_default_tags )); then
+-      order=( "$_comp_default_tags[@]" )
+-    else
+-      order=( 'arguments values' options )
+-    fi
+-  fi
++  zstyle -a ":completion:${curcontext}:" tag-order order ||
++      order=('arguments values' options)
+ 
+   # But we also remove the tags we've already tried...
+ 
+-  tags=( "${(@)order:#(${(j:|:)~${=_next_tags_not}})}" )
++  tags=( "${(@)order:#(${(j:|:)~${=_next_tags_not}})(|:*)}" )
+ 
+   # ... unless that would remove all offered tags.
+ 
+-  [[ $#tags -ne $#order && "$tags" != *(${(j:|:)~argv})* ]] &&
+-    tags=( $order ) _next_tags_not=
+-
++  if [[ $funcstack[4] = _files ]]; then
++    if zstyle -a ":completion:${curcontext}:" file-patterns tmp; then
++      [[ "$tags" = *${${tmp[-1]##[^\\]:}%:*}* ]] &&
++          tags=( $order ) _next_tags_not=
++    else
++      [[ "$tags" = *all-files* ]] && tags=( $order ) _next_tags_not=
++    fi
++  else
++     [[ $#tags -ne $#order && "$tags" != *(${(j:|:)~argv})* ]] &&
++        tags=( $order ) _next_tags_not=
++  fi
+   for tag in $tags; do
+     case $tag in
+     -)     nodef=yes;;
+     *\(\)) "${${tag%%[ 	]#\(\)}##[ 	]#}" "$@";;
+     \!*)   comptry "${(@)argv:#(${(j:|:)~${=~tag[2,-1]}})}";;
+-    ?*)    tmp=( ${${(s: :)${tag//\\\\ /$'\0'}}//$'\0'/ } ) tmp2=() tmp3=()
+-           for tag in "$tmp[@]"; do
+-	     if [[ "$tag" = *:* ]]; then
+-	       tmp2=( "$tmp2[@]" "${(@M)^argv:#${~tag%%:*}}:${tag#*:}" )
+-	     else
+-	       for atag in "${(@M)argv:#${~tag}}"; do
+-	         if zstyle -a ":completion:${curcontext}:${atag}" tag-aliases als; then
+-		   tmp3=( "$tmp3[@]" "$als[@]" )
+-		   tmp=( "${(@)tmp:#${atag}}" )
+-                 else
+-	           tmp2=( "$tmp2[@]" "$atag" )
+-		 fi
+-	       done
+-	     fi
+-	   done
+-
+-	   comptry "${(@)tmp2:#(${(j:|:)~${(q)tmp%%:*}})}" "$tmp3[@]" "$tmp[@]"
+-	   ;;
++    ?*)    comptry -m "$tag";;
+     esac
+   done
+ 
+   if [[ -z "$nodef" ]]; then
+-    if (( $+_comp_default_tags )); then
+-      for tag in "$_comp_default_tags[@]"; do
+-        if zstyle -a ":completion:${curcontext}:${tag}" tag-aliases als; then
+-          comptry "$als[@]"
+-        else
+-          comptry "$tag"
+-	fi
+-      done
+-    else
+-      tmp2=()
+-      for tag; do
+-	if zstyle -a ":completion:${curcontext}:${tag}" tag-aliases als; then
+-	  tmp2=( "$tmp2[@]" "$als[@]" )
+-        else
+-	  tmp2=( "$tmp2[@]" "$tag" )
+-	fi
+-      done
+-      comptry "$tmp2[@]"
++    if [[ $funcstack[4] = _files ]]; then
++      if zstyle -a ":completion:${curcontext}:" file-patterns tmp; then
++        [[ "$argv" = *${${tmp[-1]##[^\\]:}%:*}* ]] && _next_tags_not=
++      else
++        [[ "$argv" = *all-files* ]] && _next_tags_not=
++      fi
+     fi
++    comptry "${(@)argv:#(${(j:|:)~${=_next_tags_not}})(|:*)}"
+   fi
+ }
+ 
+diff -ru ../z.old/Completion/Core/_files Completion/Core/_files
+--- ../z.old/Completion/Core/_files	Mon Mar 27 10:53:08 2000
++++ Completion/Core/_files	Mon Mar 27 11:23:42 2000
+@@ -1,7 +1,6 @@
+ #autoload
+ 
+-local opts tmp glob pats tags expl tag ret=1 i pat descr minus
+-local _comp_default_tags
++local opts tmp glob pats expl tag i pat descr minus
+ 
+ zparseopts -a opts \
+     '/=tmp' 'f=tmp' 'g+:-=tmp' q n 1 2 P: S: r: R: W: X+: M+: F: J+: V+:
+@@ -11,7 +10,7 @@
+ 
+ if zstyle -a ":completion:${curcontext}:" file-patterns pats; then
+   [[ "$type" = */* ]] && glob="$glob *(-/)"
+-  pats=( \ ${(M)^${pats/#:/ ${glob:-\*}:}:#*[^\\]:*} )
++  pats=( \ ${(M)^${pats//\\%p/ ${glob:-\*} }:#*[^\\]:*} )
+ else
+   if [[ "$type" = *g* ]]; then
+     if [[ "$type" = */* ]]; then
+@@ -27,35 +26,24 @@
+   fi
+ fi
+ 
+-tags=( "${(@)${(@)pats#*[^\\]:}%%:*}" )
+-_comp_default_tags=( "$tags[@]" )
++for tag in "${(@)${(@)pats#*[^\\]:}%%:*}"; do
+ 
+-_tags "$tags[@]"
++  i="$pats[(I)*[^\\\\]:${tag}(|:*)]"
++  pat="${${pats[i]%%:${tag}*}//\\\\:/:}"
+ 
+-while _tags; do
+-
+-  for tag in "$tags[@]"; do
+-
+-    if _requested "$tag"; then
+-
+-      i="$pats[(I)*[^\\\\]:${tag}(|:*)]"
+-      pat="${${pats[i]%%:${tag}*}//\\\\:/:}"
+-
+-      if [[ i -gt 0 && "$pat" != \ # ]]; then
+-        if [[ "$pats[i]" = *:${tag}:* ]]; then
+-          descr="${pats[i]#*:${tag}:}"
+-          minus=()
+-        else
+-          descr=file
+-	  minus=(-)
+-        fi
+-        _loop "$tag" expl "$descr" \
+-            _path_files -g "$pat" "$opts[@]" "$minus[@]" && ret=0
+-      fi
++  if [[ i -gt 0 && "$pat" != \ # ]]; then
++    if [[ "$pats[i]" = *:${tag}:* ]]; then
++      descr="${pats[i]#*:${tag}:}"
++      minus=()
++    else
++      descr=file
++      minus=(-)
+     fi
+-  done
++  fi
++
++  _wanted "$tag" expl "$descr" \
++      _path_files -g "$pat" "$opts[@]" "$minus[@]" && return 0
+ 
+-  (( ret )) || return 0
+ done
+ 
+ return 1
+diff -ru ../z.old/Completion/Core/_tags Completion/Core/_tags
+--- ../z.old/Completion/Core/_tags	Mon Mar 27 10:53:10 2000
++++ Completion/Core/_tags	Mon Mar 27 10:58:40 2000
+@@ -16,7 +16,7 @@
+ 
+   # We have arguments: the tags supported in this context.
+ 
+-  local curcontext="$curcontext" order tag nodef tmp tmp2 tmp3 als atag
++  local curcontext="$curcontext" order tag nodef tmp
+ 
+   if [[ "$1" = -C?* ]]; then
+     curcontext="${curcontext%:*}:${1[3,-1]}"
+@@ -53,11 +53,7 @@
+     "$_sort_tags" "$@"
+   else
+     zstyle -a ":completion:${curcontext}:" tag-order order ||
+-      if [[ "$*" = *(arguments|values)* || "$*" = *options* ]] ;then
+-        order=( 'arguments values' options )
+-      else
+-        order=()
+-      fi
++        order=('arguments values' options)
+ 
+     for tag in $order; do
+       case $tag in
+@@ -68,48 +64,11 @@
+              fi
+              ;;
+       \!*)   comptry "${(@)argv:#(${(j:|:)~${=~tag[2,-1]}})}";;
+-      ?*)    tmp=( ${${(s: :)${tag//\\\\ /$'\0'}}//$'\0'/ } ) tmp2=() tmp3=()
+-             for tag in "$tmp[@]"; do
+-	       if [[ "$tag" = *:* ]]; then
+-	         tmp2=( "$tmp2[@]" "${(@M)^argv:#${~tag%%:*}}:${tag#*:}" )
+-	       else
+-	         for atag in "${(@M)argv:#${~tag}}"; do
+-	           if zstyle -a ":completion:${curcontext}:${atag}" tag-aliases als; then
+-		     tmp3=( "$tmp3[@]" "$als[@]" )
+-		     tmp=( "${(@)tmp:#${atag}}" )
+-                   else
+-	             tmp2=( "$tmp2[@]" "$atag" )
+-		   fi
+-		 done
+-	       fi
+-	     done
+-
+-	     comptry "${(@)tmp2:#(${(j:|:)~${(q)tmp%%:*}})}" "$tmp3[@]" "$tmp[@]"
+-	     ;;
++      ?*)    comptry -m "$tag";;
+       esac
+     done
+ 
+-    if [[ -z "$nodef" ]]; then
+-      if (( $+_comp_default_tags )); then
+-        for tag in "$_comp_default_tags[@]"; do
+-	  if zstyle -a ":completion:${curcontext}:${tag}" tag-aliases als; then
+-            comptry "$als[@]"
+-          else
+-            comptry "$tag"
+-	  fi
+-        done
+-      else
+-        tmp2=()
+-	for tag; do
+-	  if zstyle -a ":completion:${curcontext}:${tag}" tag-aliases als; then
+-	    tmp2=( "$tmp2[@]" "$als[@]" )
+-          else
+-	    tmp2=( "$tmp2[@]" "$tag" )
+-	  fi
+-	done
+-        comptry "$tmp2[@]"
+-      fi
+-    fi
++    [[ -z "$nodef" ]] && comptry "$@"
+   fi
+ 
+   # Return non-zero if at least one set of tags should be used.
+diff -ru ../z.old/Doc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- ../z.old/Doc/Zsh/compsys.yo	Mon Mar 27 11:04:07 2000
++++ Doc/Zsh/compsys.yo	Mon Mar 27 11:03:09 2000
+@@ -901,23 +901,23 @@
+ item(tt(file-patterns))(
+ In most places where filenames are completed, the function tt(_files)
+ is used which can be configured with this style. If the style is
+-unset, tt(_files) offers up to three tags: tt(globbed-files),
++unset, tt(_files) offers, one after another, up to three tags:
++tt(globbed-files),
+ tt(directories) and tt(all-files), depending on the types of files
+-expected by the caller of tt(_files). Using the tt(tag-order) style
+-described below it is possible to specify when which type of files
+-should be tried.
++expected by the caller of tt(_files).
+ 
+ If the tt(file-patterns) style is set, the default tags are not
+ used. Instead, the value of the style says which tags and which
+ patterns are to be offered. The strings in the value are of the form
+ `var(patterns)tt(:)var(tag)'. The var(patterns) gives one or more glob 
+ patterns separated by spaces that are to be used to generate
+-filenames. If it is the empty string, i.e. the string starts with a
+-colon, then the glob patterns supplied by the completion function will 
+-be used. Colons in the pattern have to be preceded by a backslash to
++filenames. If it contains the sequence `tt(%p)', that is replaced by
++the pattern(s) given by the calling function.
++Colons in the pattern have to be preceded by a backslash to
+ make them distinguishable from the colon before the var(tag). The
+ var(tag)s of all strings in the value will be offered by tt(_files)
+-and used when looking up other styles. The var(tag) may also be
++(again, one after another) and used when looking up other styles. The
++var(tag) may also be
+ followed by an optional second colon and a description. If that is
+ given, this description will be used for the `tt(%d)' in the value of
+ the tt(format) style (if that is set) instead of the default
+@@ -930,7 +930,17 @@
+ the string on the line, one would do:
+ 
+ example(zstyle ':completion:*:*:rm:*' file-patterns \ 
+-  '*.o:object-files' ':all-files')
++    '*.o:object-files' '%p:all-files')
++
++Another interesting example is to change the default behaviour that
++makes completion first offer files matching the patterns given by the
++calling function, then the directories and then all files. Many people 
++prefer to get both the files matching the given patterns and the
++directories in the first try and all files as the second try. To
++achieve this, one could do:
++
++example(zstyle ':completion:*' file-patterns \
++    '%p *(-/):globbed-files' '*:all-files')
+ 
+ Note also that during the execution of completion functions, the
+ tt(EXTENDED_GLOB) option is in effect, so the characters `tt(#)',
+@@ -1531,34 +1541,6 @@
+ substitution will be performed only if given an explicit numeric
+ argument other than `tt(1)', as by typing `tt(ESC 2 TAB)'.
+ )
+-item(tt(tag-aliases))(
+-This allows to give aliases for tags that are to be used whenever the
+-tag this style is set for is used (see the tt(tag-order) style below
+-for a description of tag aliases).
+-
+-The value is a list of strings of the same form used by the
+-tt(tag-order) style: `var(tag)tt(:)var(alias)', optionally followed by 
+-a second colon and a description.
+-
+-The effect of using this style is that the var(tag) is offered more
+-than once, once for each alias. For example, together with the
+-tt(ignored-patterns) style this allows to split the matches for the
+-tag into different groups, as in:
+-
+-example(zstyle ':completion:*:options' tag-aliases \
+-    'options:-long:long options' \
+-    'options:-short:short options' \
+-    'options:-single-letter:single letter options'
+-
+-zstyle ':completion:*:options-long' ignored-patterns '[-+](|-|[^-]*)'
+-zstyle ':completion:*:options-short' ignored-patterns '--*' '[-+]?'
+-zstyle ':completion:*:options-single-letter' ignored-patterns '???*')
+-
+-With the tt(group-names) style set, this makes options beginning with
+-`tt(-)tt(-)', options beginning with a single `tt(-)' or `tt(+)' but
+-containing multiple characters and single-letter options be displayed
+-in separate groups with different descriptions.
+-)
+ kindex(tag-order, completion style)
+ item(tt(tag-order))(
+ This provides a mechanism for sorting how the tags available in a
+@@ -1568,15 +1550,16 @@
+ The tags in each value will be tried at the same time; if no match is
+ found, the next value is used.
+ 
+-For example (with the tt(file-patterns) style not set for tt(gunzip)),
++For example:
+ 
+ example(zstyle ':completion:*:complete:gunzip:*' tag-order \ 
+-    'globbed-files directories' all-files)
++    arguments options)
+ 
+-specifies that, when completing arguments of the command tt(gunzip),
+-files generated by patterns (in this case, those ending in tt(.gz)) and
+-any directories will be presented first, and if that fails, any other files
+-will be tried.  A string starting with an exclamation mark (`tt(!)')
++specifies that, many completion functions offer both completions for
++arguments and options immediately instead of offering first arguments
++and then option as usual.
++
++A string starting with an exclamation mark (`tt(!)')
+ specifies names of tags that are not to be used -- the effect will be
+ the same as if all other possible tags for the context had been
+ listed.  If any string in the value consists of only a hyphen
+@@ -1640,9 +1623,26 @@
+ tt(ignored-patterns) style will not be used and all function names
+ will be considered.
+ 
++Of course, this can also be used to split the matches for one tag into 
++different groups. For example:
++
++example(zstyle ':completion:*:options' tag-order \
++    'options:-long:long options
++     options:-short:short options
++     options:-single-letter:single letter options'
++
++zstyle ':completion:*:options-long' ignored-patterns '[-+](|-|[^-]*)'
++zstyle ':completion:*:options-short' ignored-patterns '--*' '[-+]?'
++zstyle ':completion:*:options-single-letter' ignored-patterns '???*')
++
++With the tt(group-names) style set, this makes options beginning with
++`tt(-)tt(-)', options beginning with a single `tt(-)' or `tt(+)' but
++containing multiple characters and single-letter options be displayed
++in separate groups with different descriptions.
++
+ The second interesting use of patterns is the case where one wants to
+ try multiple match specifications one after another. The
+-tt(atcher-list) style offers something similar, but it is tested very
++tt(matcher-list) style offers something similar, but it is tested very
+ early in the completion system and hence can't be set for single
+ commands or even more specific contexts. So, to make completion for
+ the arguments of the command tt(foo) and only for this command first
+@@ -1684,12 +1684,7 @@
+ 
+ If no style has been defined for a context, the strings tt(arguments
+ values) and tt(options) plus all tags offered by the completion
+-function will be used to provide a sensible default behavior. The tags 
+-given used by the tt(_files) function (either the default tags
+-tt(globbed-files), tt(directories) and tt(all-files) or the tags
+-specified by the tt(file-patterns) style) will be added one-by-one so
+-that the different patterns represented by them will be tried one
+-after another.
++function will be used to provide a sensible default behavior.
+ )
+ kindex(use-compctl, completion style)
+ item(tt(use-compctl))(
+@@ -3105,8 +3100,9 @@
+ 
+ Every call to the tt(comptry) function (actually a builtin
+ command defined by the tt(zsh/computil) module) gives a
+-set of tags to use; as soon as tt(comptry) produces some matches,
+-subsequent calls have no effect.  Hence in the example
++set of tags to use; as soon as one of the completion system produces
++some matches for one set,
++subsequent sets have no effect.  Hence in the example
+ this means that for the tt(dvips) command on the first attempt the
+ names of DVI files and directories will be generated (first call to
+ tt(comptry)). If none of those names match the string from the command
+@@ -3181,6 +3177,11 @@
+ tt(processes) tag in a call to tt(comptry). The immediate call to
+ tt(return) then makes sure that the default tt(comptry) at the end is
+ not executed.
++
++With the tt(-s) option, each tag given to tt(comptry) will be put in a 
++separate set. With the tt(-m) option, the arguments are treated in the 
++same way as the the values for the tt(tag-order) style (except for the 
++`tt(!...)', `tt(-)' and `tt(foo())' forms).
+ )
+ 
+ enditem()
+diff -ru ../z.old/Src/Zle/computil.c Src/Zle/computil.c
+--- ../z.old/Src/Zle/computil.c	Mon Mar 27 10:52:43 2000
++++ Src/Zle/computil.c	Mon Mar 27 10:58:37 2000
+@@ -2394,38 +2394,136 @@
+ 	return 1;
+     }
+     if (*args) {
+-	char **p, **q, **all;
+-
+-	args = arrdup(args);
+-
+-	for (p = q = args, all = comptags[lasttaglevel]->all; *p; p++)
+-	    if (arrcontains(all, *p, 1)) {
+-		Ctset s;
+-
+-		for (s = comptags[lasttaglevel]->sets; s; s = s->next)
+-		    if (arrcontains(s->tags, *p, 0))
+-			break;
+-
+-		if (!s)
+-		    *q++ = *p;
++	if (!strcmp(*args, "-m")) {
++	    char *s, *p, *q, *c, **all = comptags[lasttaglevel]->all;
++	    LinkList list = newlinklist();
++	    LinkNode node;
++	    int num = 0;
++	    Ctset set;
++
++	    while ((s = *++args)) {
++		while (*s) {
++		    while (*s && iblank(*s))
++			s++;
++		    for (p = q = s, c = NULL; *s && !iblank(*s); s++) {
++			if (!c && *s == ':')
++			    c = p;
++			if (*s == '\\' && s[1])
++			    s++;
++			*p++ = *s;
++		    }
++		    if (*s)
++			s++;
++		    *p = '\0';
++		    if (*q) {
++			char *qq = dupstring(q);
++			if (c)
++			    *c = '\0';
++
++			tokenize(qq);
++			if (haswilds(qq)) {
++			    Patprog prog;
++
++			    if ((prog = patcompile(qq, PAT_STATIC, NULL))) {
++				char **a, *n;
++				int l = (c ? strlen(c + 1) + 2 : 1), al;
++
++				for (a = all; *a; a++) {
++				    if (pattry(prog, *a)) {
++					n = (char *) zhalloc((al = strlen(*a)) + l);
++					strcpy(n, *a);
++					if (c) {
++					    n[al] = ':';
++					    strcpy(n + al + 1, c + 1);
++					}
++					addlinknode(list, n);
++					num++;
++				    }
++				}
++			    }
++			} else if (arrcontains(all, q, 0)) {
++			    for (set = comptags[lasttaglevel]->sets; set;
++				 set = set->next)
++				if (arrcontains(set->tags, q, 0))
++				    break;
++			    if (!set) {
++				addlinknode(list, q);
++				num++;
++			    }
++			}
++			if (c)
++			    *c = ':';
++		    }
++		}
++		if (num) {
++		    char **a;
++		    Ctset l;
++
++		    set = (Ctset) zalloc(sizeof(*set));
++
++		    a = set->tags = (char **) zalloc((num + 1) * sizeof(char *));
++		    for (node = firstnode(list); node; incnode(node))
++			*a++ = ztrdup((char *) getdata(node));
++
++		    *a = NULL;
++		    set->next = NULL;
++		    set->ptr = NULL;
++		    set->tag = NULL;
++
++		    if ((l = comptags[lasttaglevel]->sets)) {
++			while (l->next)
++			    l = l->next;
++
++			l->next = set;
++		    } else
++			comptags[lasttaglevel]->sets = set;
++		}
++	    }
++	} else {
++	    char **p, **q, **all;
++	    int sep = 0;
++
++	    if ((sep = !strcmp(*args, "-s")))
++		args++;
++
++	    for (p = q = args, all = comptags[lasttaglevel]->all; *p; p++)
++		if (arrcontains(all, *p, 1)) {
++		    Ctset s;
++
++		    for (s = comptags[lasttaglevel]->sets; s; s = s->next)
++			if (arrcontains(s->tags, *p, 0))
++			    break;
++
++		    if (!s)
++			*q++ = *p;
++		}
++	    *q = NULL;
++
++	    if (*args) {
++		char *dummy[2];
++
++		do {
++		    Ctset s = (Ctset) zalloc(sizeof(*s)), l;
++
++		    if (sep) {
++			dummy[0] = *args++;
++			dummy[1] = NULL;
++			s->tags = zarrdup(dummy);
++		    } else
++			s->tags = zarrdup(args);
++		    s->next = NULL;
++		    s->ptr = NULL;
++		    s->tag = NULL;
++
++		    if ((l = comptags[lasttaglevel]->sets)) {
++			while (l->next)
++			    l = l->next;
++
++			l->next = s;
++		    } else
++			comptags[lasttaglevel]->sets = s;
++		} while (sep && *args);
+ 	    }
+-	*q = NULL;
+-
+-	if (*args) {
+-	    Ctset s = (Ctset) zalloc(sizeof(*s)), l;
+-
+-	    s->tags = zarrdup(args);
+-	    s->next = NULL;
+-	    s->ptr = NULL;
+-	    s->tag = NULL;
+-
+-	    if ((l = comptags[lasttaglevel]->sets)) {
+-		while (l->next)
+-		    l = l->next;
+-
+-		l->next = s;
+-	    } else
+-		comptags[lasttaglevel]->sets = s;
+ 	}
+     }
+     return 0;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

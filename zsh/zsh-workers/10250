@@ -1,0 +1,420 @@
+From zsh-workers-return-10250-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Mar 25 20:39:39 2000
+Return-Path: <zsh-workers-return-10250-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12193 invoked from network); 25 Mar 2000 20:39:37 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Mar 2000 20:39:37 -0000
+Received: (qmail 23495 invoked by alias); 25 Mar 2000 20:39:31 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10250
+Received: (qmail 23458 invoked from network); 25 Mar 2000 20:39:27 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000325203922.ZM26353@candle.brasslantern.com>
+Date: Sat, 25 Mar 2000 20:39:22 +0000
+In-Reply-To: <E12YbFr-0003N4-00.2000-03-24-21-04-27@mail12.svr.pol.co.uk>
+Comments: In reply to Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+        "endianness of wordcode" (Mar 23,  9:04pm)
+References: <E12YbFr-0003N4-00.2000-03-24-21-04-27@mail12.svr.pol.co.uk>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: Re: endianness of wordcode
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Mar 23,  9:04pm, Peter Stephenson wrote:
+} Subject: endianness of wordcode
+}
+} I'm a little doubtful about the necessity of having doubled wordcode files
+} for different endianness.  [...]  I wonder whether it would be
+} better always to dump in the native format, check if the order is swapped
+} when reading, and if so swap it back on the fly.
+
+At one point I think the wordcode files were always mmap'd, which meant
+they couldn't be unswapped.  Now that Sven has written the code to read
+the files when mmap isn't available, it should be possible to recognize
+swapped files and switch to reading them -- but it'll be a little messy,
+as swapped-ness won't be detected until after the file is mmap'd.
+
+} I think the zcompile documentation, and maybe other places where wordcode
+} is mentioned, could be friendlier [...]
+
+Yes.
+
+We'd also discussed changing -r/-m to -R/-M and changing -M to -m, but this
+patch doesn't do that yet.
+
+Sven, please check the accuracy of my edits to func.yo.  In particular
+I'm not sure how to explain what happens if you do
+
+	zcompile -c foo foo bar frob ding
+	fpath=($PWD)
+	autoload foo
+	foo
+
+And I'm even more confused by
+
+	zcompile -c foo -k foo bar frob ding
+	fpath=($PWD)
+	autoload foo
+	foo
+
+which first executes "foo" successfully and then prints
+
+	foo:3: foo: function not defined by file
+
+leaving "foo" as an undefined (but marked autoloaded) function.
+
+Index: Doc/Zsh/builtins.yo
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Doc/Zsh/builtins.yo,v
+retrieving revision 1.57
+diff -u -r1.57 builtins.yo
+--- builtins.yo	2000/03/17 18:48:50	1.57
++++ builtins.yo	2000/03/25 19:22:08
+@@ -23,21 +23,19 @@
+ item(tt(.) var(file) [ var(arg) ... ])(
+ Read commands from var(file) and execute them in the current shell
+ environment.
+-If var(file) does not contain a slash, or if tt(PATH_DIRS)
+-is set, the shell looks in the components of tt($path) to find the
+-directory containing var(file).
+-Files in the current directory are not read unless `tt(.)' appears
+-somewhere in tt($path).
+ 
++If var(file) does not contain a slash, or if tt(PATH_DIRS) is set,
++the shell looks in the components of tt($path) to find the directory
++containing var(file).  Files in the current directory are not read
++unless `tt(.)' appears somewhere in tt($path).  If a file named
++`var(file)tt(.zwc)' is found, is newer than var(file), and is the
++compiled form (created with the tt(zcompile) builtin) of var(file),
++then commands are read from that file instead of var(file).
++
+ If any arguments var(arg) are given,
+ they become the positional parameters; the old positional
+ parameters are restored when the var(file) is done executing.
+ The exit status is the exit status of the last command executed.
+-
+-If a file named `var(file)tt(.zwc)' exists, is newer than var(file)
+-and is a wordcode created with the tt(zcompile) builtin containing the 
+-contents of var(file), that file will be used. This allows to speed up 
+-processing of scripts by creating pre-compiled wordcode files for them.
+ )
+ findex(NOTRANS(:))
+ cindex(expanding parameters)
+@@ -1298,76 +1296,96 @@
+ xitem(tt(zcompile) [ tt(-U) ] [ tt(-z) | tt(-k) ] [ tt(-r) | tt(-m) ] var(file) [ var(name) ... ])
+ xitem(tt(zcompile) tt(-c) [ tt(-M) ] [ tt(-z) | tt(-k) ] [ tt(-r) | tt(-m) ] var(file) [ var(name) ... ])
+ item(tt(zcompile -t) var(file) [ var(name) ... ])(
+-This builtin command can be used to create and display files
+-containing the wordcode for functions or scripts. In the first form, a wordcode
+-file is created. If called with only the var(file) argument, the
+-wordcode file has the name `var(file)tt(.zwc)' and will be placed in
+-the same directory as the var(file). This will make the wordcode file
+-be loaded instead of the normal function file when the function is
+-autoloaded (see
++This builtin command can be used to compile functions or scripts and
++store the compiled form in a file, and to examine files containing
++the compiled form.  This allows faster autoloading of functions and
++execution of scripts by avoiding parsing of the text when the files
++are read.
++
++The first form (without the tt(-c) or tt(-t) options) creates a
++compiled file.  If only the var(file) argument is provided, the
++output file has the name `var(file)tt(.zwc)' and will be placed in
++the same directory as the var(file).  This will make the compiled
++file be loaded instead of the normal function file when the function
++is autoloaded (see
+ ifzman(\
+ the section `Autoloading Functions' in zmanref(zshfunc)
+ )\
+ ifnzman(\
+ noderef(Functions)
+ )\
+-for a description of how autoloaded functions are searched).
++for a description of how autoloaded functions are searched).  The
++extension tt(.zwc) stands for `zsh word codes'.
+ 
+-If there is at least one var(name) argument, the wordcode for all
+-these files will be put in the created wordcode var(file) (if that 
+-name does not end in tt(.zwc), this extension is automatically
+-appended). Such digest files are intended to be used as elements of
+-the tt(FPATH)/tt(fpath) special array.
+-
+-If the tt(-U) option is given, aliases in the var(name)d files will not
+-be expanded. If the tt(-r) option is given, the wordcode in the
+-file will be read and copied into the shell's memory when they are
+-used. If the tt(-m) option is given instead, the wordcode file
+-will be mapped into the shell's memory. This is done in such a way
+-that multiple instances of the shell running on the same host will
+-share this mapped file. If neither tt(-r) nor tt(-m) are given,
+-the tt(zcompile) builtin decides which style is used based on the size 
+-of the resulting wordcode file. On some systems it is impossible to
+-map wordcode files into memory. On such systems, the wordcode will
+-only be read from the file, independent on the mode selected when the 
+-file was created.
+-
+-The tt(-z) and tt(-k) options are used when the wordcode file contains
+-functions and these functions are autoloaded. If tt(-z) is given, the
+-function will be autoloaded as if the tt(KSHAUTOLOAD) option weren't
+-set, even if it is. The tt(-k) makes the function be loaded as if
+-tt(KASHAUTOLOAD) were set and if neither of these options is given,
+-the function will be loaded as determined by the setting of the
+-tt(KSHAUTOLOAD) option at the time the function is loaded. These
+-options may also be given in the lists of var(name)s and make all
+-following functions be loaded as described.
+-
+-When creating wordcode files for scripts instead of functions, it is
+-often better to use the tt(-r) option. Otherwise the whole wordcode
+-file will remain mapped if the script defined one or more functions
+-even if the rest of the file will not be used again.
+-
+-In every case, the created file contains two versions of the wordcode, 
+-one for big-endian machines and one for small-endian machines. The
+-upshot of this is that the wordcode file is machine independent and if 
+-it is read or mapped, only one half of the file will really be used
+-(and mapped).
+-
+-If given the tt(-c) option, the names have to be names currently
+-defined in the shell or marked as autoloaded. The definitions for all
+-these functions will be written into the wordcode var(file). If the
++If there is at least one var(name) argument, all those named files
++are compiled into one output var(file).  If var(file) does not end
++in tt(.zwc), this extension is automatically appended.  Files
++containing multiple compiled functions are called `digest' files,
++and are intended to be used as elements of the tt(FPATH)/tt(fpath)
++special array.
++
++The second form, with the tt(-c) option, writes the definitions for
++all the named functions into var(file).  The names must be functions
++currently defined in the shell or marked for autoloading.  If the
+ tt(-M) option is given, too, the var(name)s are used as patterns and
+ all functions whose names match one of these patterns will be
+ written. If no var(name) is given, the definitions of all functions
+-currently defined or marked as autoloaded will be written. 
++currently defined or marked as autoloaded will be written.
++
++The third form, with the tt(-t) option, examines an existing
++compiled file.  Without further arguments, the names of the original
++files compiled into it are listed.  The first line of output tells
++the version of the shell which compiled the file and how the file
++will be used (mapping or reading the file).  With arguments, nothing
++is output and the return value is set to zero if em(all) var(name)s
++name files contained in the wordcode file, and non-zero if at least
++one var(name) is not contained in it.
++
++Other options:
++
++startitem()
++item(tt(-U))(
++Aliases are not expanded when compiling the var(name)d files.
++)
++item(tt(-r))(
++When the compiled file is read, its contents are copied into the
++shell's memory, rather than memory-mapped (see tt(-m)).  This
++happens automatically on systems that do not support memory mapping.
++
++When compiling scripts instead of autoloadable functions, it is
++often desirable to use this option. Otherwise the whole file will
++remain mapped if the script has defined one or more functions, even
++if the rest of the file will not be used again.
++)
++item(tt(-m))(
++The compiled file is mapped into the shell's memory when read. This
++is done in such a way that multiple instances of the shell running
++on the same host will share this mapped file.  If neither tt(-r) nor
++tt(-m) is given, the tt(zcompile) builtin decides what to do based
++on the size of the compiled file.
++)
++xitem(tt(-k))
++item(tt(-z))(
++These options are used when the compiled file contains functions and
++those functions are to be autoloaded. If tt(-z) is given, the
++function will be autoloaded as if the tt(KSHAUTOLOAD) option is
++em(not) set, even if it is set at the time the compiled file is
++read. The tt(-k) makes the function be loaded as if tt(KASHAUTOLOAD)
++em(is) set.  If neither of these options is given, the function will
++be loaded as determined by the setting of the tt(KSHAUTOLOAD) option
++at the time the compiled file is read.
++
++These options may also be repeated among the listed var(name)s to
++specify the loading style of all following functions, up to the next
++tt(-k) or tt(-z).
++)
++enditem()
+ 
+-In the third form, with the tt(-t) option, an existing wordcode file is
+-tested. Without further arguments, the names of the original files
+-used for it are listed. The first line tells the version of the shell
+-the file was created with and how the file will be used (mapping or
+-reading the file). With arguments, only the return value is set
+-to zero if all var(name)s name files contained in the wordcode file and
+-non-zero if at least one var(name) is not contained in it.
++The created file always contains two versions of the compiled
++format, one for big-endian machines and one for small-endian
++machines. The upshot of this is that the compiled file is machine
++independent and if it is read or mapped, only one half of the file
++is actually used (and mapped).
+ )
+ findex(zmodload)
+ cindex(modules, loading)
+Index: Doc/Zsh/files.yo
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Doc/Zsh/files.yo,v
+retrieving revision 1.9
+diff -u -r1.9 files.yo
+--- files.yo	2000/03/10 11:28:59	1.9
++++ files.yo	2000/03/25 19:28:06
+@@ -46,7 +46,14 @@
+ be executed when zsh is invoked with the `tt(-f)' option.
+ ifnzman(includefile(Zsh/filelist.yo))
+ 
+-For all of these files pre-compiled wordcode files may be created with
+-the tt(zcompile) builtin command. If such a files exists (names like
+-the original file plus the tt(.zwc) extension) and it is younger than
+-the original file, the wordcode file will be used instead.
++Any of these files may be pre-compiled with the tt(zcompile) builtin
++command (
++ifzman(\
++see zmanref(zshbuiltins)
++)\
++ifnzman(\
++noderef(Shell Builtin Commands)
++)\
++).  If a compiled file exists (named for the original file plus the
++tt(.zwc) extension) and it is newer than the original file, the compiled
++file will be used instead.
+Index: Doc/Zsh/func.yo
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Doc/Zsh/func.yo,v
+retrieving revision 1.8
+diff -u -r1.8 func.yo
+--- func.yo	2000/03/10 11:28:59	1.8
++++ func.yo	2000/03/25 20:28:28
+@@ -31,62 +31,64 @@
+ findex(autoload, use of)
+ cindex(autoloading functions)
+ cindex(functions, autoloading)
++
+ A function can be marked as em(undefined) using the tt(autoload) builtin
+ (or `tt(functions -u)' or `tt(typeset -fu)').  Such a function has no
+-body.  When the function is first executed, the definition for it will 
+-be searched using the elements of the tt(fpath) variable. For each
+-element, the shell looks for three files: the element plus the
+-extension tt(.zwc), a file named after the function plus the extension 
+-tt(.zwc) in a directory named by the element of tt(fpath) and the name 
+-of the function without the extension in the same directory. The
+-youngest of these files will be used to get the definition for the
+-function. The files with the tt(.zwc) extension should be wordcode
+-files created with the tt(zcompile) builtin command. The first one
+-(with the name of the element from tt(fpath) plus the extension) is
+-normally used to contain the definitions for all functions in the
+-directory. The latter is intended to be used for individual wordcode
+-files for single functions. But of course it is also possible to
+-create any number of wordcode files and put their names (including the 
+-extension) in the tt(fpath) variable. In that case these files will be 
+-searched for the definition of the function directly without comparing 
+-its age to that of other files.
+-
+-The usual alias expansion during reading will be suppressed
+-if the tt(autoload) builtin or its equivalent is given the option
+-tt(-U), for wordcode files this has to be decided when creating the
+-file with the tt(-U) option of the tt(zcompile) builtin command;
+-this is recommended for the use of functions supplied with the zsh
+-distribution.  Thus to define functions for autoloading, a typical sequence
+-is:
++body.  When the function is first executed, the shell searches for its
++definition using the elements of the tt(fpath) variable.  Thus to define
++functions for autoloading, a typical sequence is:
+ 
+ example(fpath=(~/myfuncs $fpath)
+ autoload myfunc1 myfunc2 ...)
+ 
+-The elements of the tt(fpath) array may also name wordcode files
+-directly. The names of these files must have the tt(.zwc) extension
+-but in tt(fpath) the names may be given with or without it. This is
+-mostly useful for wordcode files containing multiple 
+-functions, in which case the file is treated like a directory
+-containing files for functions and will be searched for the definition 
+-of the function.
++The usual alias expansion during reading will be suppressed if the
++tt(autoload) builtin or its equivalent is given the option tt(-U).  For
++functions precompiled with the tt(zcompile) builtin command, this has to
++be decided when creating the file; this is recommended for the use of
++functions supplied with the zsh distribution.
++
++For each var(element) in tt(fpath), the shell looks for three files, the
++newest of which is used to load the definition for the function:
++
++startitem()
++item(var(element)tt(.zwc))(
++A file created with the tt(zcompile) builtin command, expected to
++contain the definitions for all functions in the directory named
++var(element).  The file is treated like a directory containing files for
++functions and is searched for the definition of the function; the search
++goes on to the next two files if the definition is not found.
++
++If var(element) already includes a tt(.zwc) extension, var(element) is
++searched for the definition of the function without comparing its age to
++that of other files.
++)
++item(var(element)tt(/)var(function)tt(.zwc))(
++A file created with tt(zcompile), expected to contain the definition for
++var(function).  It may include other function definitions as well, but
++those are neither loaded nor executed; a file found in this way is
++searched em(only) for the definition of var(function).
++)
++item(var(element)tt(/)var(function))(
++A file of zsh command text, taken to be the definition for var(function).
++)
++enditem()
+ 
+ pindex(KSH_AUTOLOAD, use of)
+-If the tt(KSH_AUTOLOAD) option is set, or the file contains only a simple
+-definition of the function, the file's contents will be
+-executed.  It will normally define the function in question, but may
+-also perform initialization:  this
+-is executed in the context of the function
+-execution, and may therefore define local parameters.  It is an error if
+-the function is not defined by loading the file.
++If the tt(KSH_AUTOLOAD) option is set, or the file contains only a
++simple definition of the function, the file's contents will be executed.
++This will normally define the function in question, but may also perform
++initialization; such initialization is executed in the context of the
++function execution, and may therefore define local parameters.  It is an
++error if the function is not defined by loading the file.
+ 
+ Otherwise, the function is defined such that its body is the complete
+-contents of the file.  This form allows the file to be used directly as an
+-executable shell script.  If processing of the file results in the function
+-being re-defined, the function itself is not re-executed. To force the
+-function to perform initialization and be called, the file should contain
+-initialization code (which will be discarded) in addition to a complete
+-function definition (which will be retained for subsequent calls to the
+-function), and a call to the shell function at the end.
++contents of the file.  This form allows the file to be used directly as
++an executable shell script.  If processing of the file results in the
++function being re-defined, the function itself is not re-executed. To
++force the function to perform initialization and be called, the file
++should contain initialization code (which will be discarded) in addition
++to a complete function definition (which will be retained for subsequent
++calls to the function), and a call to the shell function at the end.
+ 
+ For example, suppose the autoload file tt(func) contains
+ 
+@@ -110,7 +112,7 @@
+ 
+ In fact, the tt(functions) command outputs `tt(builtin autoload -X)' as
+ the body of an autoloaded function.  A true autoloaded function can be
+-identifed by the presence of the comment `tt(# undefined)' in the body,
++identified by the presence of the comment `tt(# undefined)' in the body,
+ because all comments are discarded from defined functions.  This is done
+ so that
+ 
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

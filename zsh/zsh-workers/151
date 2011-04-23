@@ -1,0 +1,282 @@
+From zsh-workers-request@math.gatech.edu  Wed Jul  5 23:07:21 1995
+Received: from gatech.edu (gatech.edu [130.207.244.244]) by werple.mira.net.au (8.6.12/8.6.9) with SMTP id XAA06709 for <mason@werple.mira.net.au>; Wed, 5 Jul 1995 23:07:11 +1000
+Received: from math (math.skiles.gatech.edu) by gatech.edu with SMTP id AA21177
+  (5.65c/Gatech-10.0-IDA for <mason@werple.mira.net.au>); Wed, 5 Jul 1995 09:07:31 -0400
+Received: by math (5.x/SMI-SVR4)
+	id AA18190; Wed, 5 Jul 1995 09:03:41 -0400
+Resent-Date: Wed, 5 Jul 1995 14:04:26 +0100 (BST)
+Old-Return-Path: <zefram@dcs.warwick.ac.uk>
+From: Zefram <A.Main@dcs.warwick.ac.uk>
+Message-Id: <15147.199507051304@stone.dcs.warwick.ac.uk>
+Subject: Another completion patch
+To: zsh-workers@math.gatech.edu (Z Shell workers mailing list)
+Date: Wed, 5 Jul 1995 14:04:26 +0100 (BST)
+X-Loop: zefram@dcs.warwick.ac.uk
+X-Stardate: [-31]5932.72
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-Id: <"lLU2g3.0.8S4.ise-l"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/151
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+The patch below makes ZLE keep a completion list fully visible on the
+screen if it is still valid (i.e. applicable to the current situation)
+and fits on the screen (only if ALWAYS_LAST_PROMPT is set, of course).
+This is most obvious when doing menu completion that wraps round onto a
+new line; the list will be redisplayed from a lower line.
+
+If the redisplay or clear-screen function is called, the list (if still
+valid) will be redisplayed immediately below the edit buffer, possibly
+moving it up a line.  If that happens, then further menu completion
+could cause it to move down again.  (clear-screen gets the ZLE_MENUCMP
+flag in one of the hunks below.)
+
+This patch also fixes two list-related bugs: doing a completion into a
+list that added more than one line to the buffer would not properly
+clear lines after the first added one, and listmatches() didn't move
+the cursor up far enough when listing anything longer than a line
+because it didn't take the wraparound into account.
+
+This patch relies heavily on my recent patch to avoid the completion
+list being worked out unnecessarily.
+
+ -zefram
+
+      *** Src/zle.h.old	Wed Jul  5 07:18:31 1995
+      --- Src/zle.h	Wed Jul  5 13:18:44 1995
+      ***************
+      *** 70,75 ****
+      --- 70,80 ----
+        /* number of lines displayed */
+        ZLEXTERN int nlnct;
+        
+      + /* most lines of the buffer we've shown at once with the current list showing.
+      + == 0 if there is no list.  == -1 if a new list has just been put on the screen.
+      + == -2 if refresh() needs to put up a new list. */
+      + ZLEXTERN int showinglist;
+      + 
+        /* flags associated with last command */
+        ZLEXTERN int lastcmd;
+        
+      *** Src/zle_bindings.c.old	Wed Jul  5 13:10:26 1995
+      --- Src/zle_bindings.c	Wed Jul  5 13:10:45 1995
+      ***************
+      *** 50,56 ****
+            {"beginning-of-line", beginningofline, ZLE_MOVEMENT},
+            {"beginning-of-line-hist", beginningoflinehist, ZLE_MOVEMENT},
+            {"capitalize-word", capitalizeword, 0},
+      !     {"clear-screen", clearscreen, 0},
+            {"complete-word", completeword, ZLE_MENUCMP},
+            {"copy-prev-word", copyprevword, 0},
+            {"copy-region-as-kill", copyregionaskill, ZLE_KILL},
+      --- 50,56 ----
+            {"beginning-of-line", beginningofline, ZLE_MOVEMENT},
+            {"beginning-of-line-hist", beginningoflinehist, ZLE_MOVEMENT},
+            {"capitalize-word", capitalizeword, 0},
+      !     {"clear-screen", clearscreen, ZLE_MENUCMP},
+            {"complete-word", completeword, ZLE_MENUCMP},
+            {"copy-prev-word", copyprevword, 0},
+            {"copy-region-as-kill", copyregionaskill, ZLE_KILL},
+      *** Src/zle_refresh.c.old	Wed Jul  5 07:16:50 1995
+      --- Src/zle_refresh.c	Wed Jul  5 13:16:40 1995
+      ***************
+      *** 105,110 ****
+      --- 105,112 ----
+        
+            vcs = pptw;
+            olnct = nlnct = 0;
+      +     if(showinglist > 0)
+      + 	showinglist = -2;
+        }
+        
+        /**/
+      ***************
+      *** 158,163 ****
+      --- 160,166 ----
+        void
+        refresh(void)
+        {
+      +     static int inlist;		/* avoiding recursion                        */
+            int ln = 0,			/* current line we're working on	     */
+        	nvcs = 0, nvln = -1,	/* video cursor column and line		     */
+        	rpw,                    /* right-prompt width 			     */
+      ***************
+      *** 168,173 ****
+      --- 171,181 ----
+        	*scs = line + cs;	/* pointer to cursor position in real buffer */
+            char **qbuf;		/* tmp					     */
+        
+      +     /* if this is called from listmatches(), and that was called from the end
+      +     of refresh(), then we don't need to do anything */
+      +     if(inlist)
+      + 	return;
+      + 
+        #ifdef HAVE_SELECT
+            cost = 0;			/* reset */
+        #endif
+      ***************
+      *** 299,305 ****
+        
+            for (ln = 0; !clearf && (ln < nlnct); ln++) {
+        	/* if we have more lines than last time, clear the newly-used lines */
+      ! 	if (ln == olnct)
+        	    cleareol = 1;
+        
+            /* if old line and new line are different,
+      --- 307,313 ----
+        
+            for (ln = 0; !clearf && (ln < nlnct); ln++) {
+        	/* if we have more lines than last time, clear the newly-used lines */
+      ! 	if (ln >= olnct)
+        	    cleareol = 1;
+        
+            /* if old line and new line are different,
+      ***************
+      *** 399,404 ****
+      --- 407,423 ----
+            if (nlnct > vmaxln)
+        	vmaxln = nlnct;
+            fflush(shout);		/* make sure everything is written out */
+      + 
+      +     /* if we have a new list showing, note it; if part of the list has been
+      +     overwritten, redisplay it. */
+      +     if(showinglist == -2 || (showinglist > 0 && showinglist < nlnct)) {
+      + 	inlist = 1;
+      + 	listmatches();
+      + 	inlist = 0;
+      + 	refresh();
+      +     }
+      +     if(showinglist == -1)
+      + 	showinglist = nlnct;
+        }
+        
+        #define tcinscost(X)   (tccan(TCMULTINS) ? tclen[TCMULTINS] : (X)*tclen[TCINS])
+      *** Src/zle_tricky.c.old	Wed Jul  5 07:12:25 1995
+      --- Src/zle_tricky.c	Wed Jul  5 13:45:43 1995
+      ***************
+      *** 3072,3081 ****
+        void
+        invalidatelist(void)
+        {
+      -     if(menucmp)
+      - 	menucmp = 0;
+            if(validlist) {
+      - 	validlist = 0;
+        	freearray(amatches);
+        	zsfree(rpre);
+        	zsfree(rsuf);
+      --- 3072,3078 ----
+      ***************
+      *** 3091,3096 ****
+      --- 3088,3094 ----
+        	if (ccmain != &cc_dummy)
+        	    freecompctl(ccmain);
+            }
+      +     menucmp = showinglist = validlist = 0;
+        }
+        
+        /* Get the words from a variable or a compctl -k list. */
+      ***************
+      *** 3549,3554 ****
+      --- 3547,3553 ----
+            /* Set the cursor below the prompt. */
+            trashzle();
+            ct = nmatches;
+      +     showinglist = 0;
+        
+            clearflag = (isset(USEZLE) && termok &&
+        		 (isset(ALWAYSLASTPROMPT) && mult == 1)) ||
+      ***************
+      *** 3567,3580 ****
+        	longest++;
+        
+            fct = (columns - 1) / (longest + 2);
+      !     if (fct == 0)
+        	fct = 1;
+      !     else
+        	fw = (columns - 1) / fct;
+      !     colsz = (ct + fct - 1) / fct;
+        
+      -     up = colsz + nlnct - clearflag;
+      - 
+            /* Print the explanation string, if any. */
+            if (expl)
+        	up += printfmt(expl, ct, 0);
+      --- 3566,3585 ----
+        	longest++;
+        
+            fct = (columns - 1) / (longest + 2);
+      !     if (fct == 0) {
+        	fct = 1;
+      ! 	colsz = ct;
+      ! 	up = colsz + nlnct - clearflag;
+      ! 	for (ap = arr; *ap; ap++)
+      ! 	    up += (strlen(*ap + off) - boff + of +
+      ! 		(ispattern ? 0 :
+      ! 		(!(haswhat & HAS_MISC) ? fpl + fsl : lpl + lsl))) / columns;
+      !     } else {
+        	fw = (columns - 1) / fct;
+      ! 	colsz = (ct + fct - 1) / fct;
+      ! 	up = colsz + nlnct - clearflag;
+      !     }
+        
+            /* Print the explanation string, if any. */
+            if (expl)
+        	up += printfmt(expl, ct, 0);
+      ***************
+      *** 3671,3679 ****
+            if (clearflag)
+        	/* Move the cursor up to the prompt, if always_last_prompt is set
+        	   and all that... */
+      ! 	if (up < lines)
+        	    tcmultout(TCUP, TCMULTUP, up);
+      ! 	else
+        	    clearflag = 0, putc('\n', shout);
+        
+            shownexpl = 1;
+      --- 3676,3685 ----
+            if (clearflag)
+        	/* Move the cursor up to the prompt, if always_last_prompt is set
+        	   and all that... */
+      ! 	if (up < lines) {
+        	    tcmultout(TCUP, TCMULTUP, up);
+      ! 	    showinglist = -1;
+      ! 	} else
+        	    clearflag = 0, putc('\n', shout);
+        
+            shownexpl = 1;
+      ***************
+      *** 3691,3704 ****
+      --- 3697,3713 ----
+            char *lp = lpre, *ls = lsuf;
+            int nm = nmatches;
+            char **am = amatches;
+      +     char *ex = expl;
+        
+            haswhat = HAS_MISC;
+            ispattern = 0;
+            lpre = lsuf = "";
+      +     expl = NULL;
+        
+            makearray(l);
+            listmatches();
+        
+      +     expl = ex;
+            amatches = am;
+            nmatches = nm;
+            lpre = lp;
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.i
+
+iQBVAgUBL/qNZmWJ8JfKi+e9AQEW+gIAugp0ZHxpHWSglL6L7IdM3CdsIz4vjCxq
+V6+6JbjFY8fOYVnX+5wo0XTbpeswrvwZi5okhGmjrjwDDxIt98IVoQ==
+=X6UN
+-----END PGP SIGNATURE-----
+

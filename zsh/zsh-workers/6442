@@ -1,0 +1,151 @@
+From zsh-workers-return-6442-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jun 03 04:00:45 1999
+Return-Path: <zsh-workers-return-6442-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20657 invoked from network); 3 Jun 1999 04:00:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Jun 1999 04:00:44 -0000
+Received: (qmail 3729 invoked by alias); 3 Jun 1999 04:00:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6442
+Received: (qmail 3722 invoked from network); 3 Jun 1999 04:00:32 -0000
+Date: Thu, 3 Jun 1999 00:00:30 -0400
+From: Clint Adams <schizo@debian.org>
+To: zsh-workers@sunsite.auc.dk
+Subject: MAIL, MAILPATH and maildir support
+Message-ID: <19990603000030.A20027@dman.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+X-Mailer: Mutt 0.95.4i
+
+This patch is from Miquel van Smoorenburg <miquels@cistron.nl>.
+
+It corrects the treatment of maildir-format mailbox directories
+in MAILPATH.
+
+-----
+diff -ruN zsh-3.1.5.pws19.b4/Src/mailstat.c zsh-3.1.5.pws19/Src/mailstat.c
+--- zsh-3.1.5.pws19.b4/Src/mailstat.c	Thu Jan  1 01:00:00 1970
++++ zsh-3.1.5.pws19/Src/mailstat.c	Wed Jun  2 12:29:32 1999
+@@ -0,0 +1,98 @@
++/*
++ *	Stat a file. If it's a maildir, check all messages
++ *	in the maildir and present the grand total as a file.
++ *	The fields in the 'struct stat' are from the mail directory.
++ *	The following fields are emulated:
++ *
++ *	st_nlink	always 1
++ *	st_size		total number of bytes in all files
++ *	st_blocks	total number of messages
++ *	st_atime	access time of newest file in maildir
++ *	st_mtime	modify time of newest file in maildir
++ *	st_mode		S_IFDIR changed to S_IFREG
++ *
++ *	This is good enough for most mail-checking applications.
++ */
++int
++mailstat(char *path, struct stat *st)
++{
++	DIR			*dd;
++	struct			dirent *fn;
++	struct stat		st_ret, st_tmp;
++	static struct stat	st_new_last, st_ret_last;
++	char			dir[PATH_MAX * 2];
++	char			file[PATH_MAX * 2];
++	int			i, l;
++	time_t			atime = 0, mtime = 0;
++
++	/* First see if it's a directory. */
++	if ((i = stat(path, st)) != 0 || !S_ISDIR(st->st_mode))
++		return i;
++	if (strlen(path) > sizeof(dir) - 5) {
++		errno = ENAMETOOLONG;
++		return -1;
++	}
++
++	st_ret = *st;
++	st_ret.st_nlink = 1;
++	st_ret.st_size  = 0;
++	st_ret.st_blocks  = 0;
++	st_ret.st_mode  &= ~S_IFDIR;
++	st_ret.st_mode  |= S_IFREG;
++
++	/* See if cur/ is present */
++	sprintf(dir, "%s/cur", path);
++	if (stat(dir, &st_tmp) || !S_ISDIR(st_tmp.st_mode)) return 0;
++	st_ret.st_atime = st_tmp.st_atime;
++
++	/* See if tmp/ is present */
++	sprintf(dir, "%s/tmp", path);
++	if (stat(dir, &st_tmp) || !S_ISDIR(st_tmp.st_mode)) return 0;
++	st_ret.st_mtime = st_tmp.st_mtime;
++
++	/* And new/ */
++	sprintf(dir, "%s/new", path);
++	if (stat(dir, &st_tmp) || !S_ISDIR(st_tmp.st_mode)) return 0;
++	st_ret.st_mtime = st_tmp.st_mtime;
++
++	/* Optimization - if new/ didn't change, nothing else did. */
++	if (st_tmp.st_dev == st_new_last.st_dev &&
++	    st_tmp.st_ino == st_new_last.st_ino &&
++	    st_tmp.st_atime == st_new_last.st_atime &&
++	    st_tmp.st_mtime == st_new_last.st_mtime) {
++		*st = st_ret_last;
++		return 0;
++	}
++	st_new_last = st_tmp;
++
++	/* Loop over new/ and cur/ */
++	for (i = 0; i < 2; i++) {
++		sprintf(dir, "%s/%s", path, i ? "cur" : "new");
++		sprintf(file, "%s/", dir);
++		l = strlen(file);
++		if ((dd = opendir(dir)) == NULL)
++			return 0;
++		while ((fn = readdir(dd)) != NULL) {
++			if (fn->d_name[0] == '.' ||
++			    strlen(fn->d_name) + l >= sizeof(file))
++				continue;
++			strcpy(file + l, fn->d_name);
++			if (stat(file, &st_tmp) != 0)
++				continue;
++			st_ret.st_size += st_tmp.st_size;
++			st_ret.st_blocks++;
++			if (st_tmp.st_atime != st_tmp.st_mtime &&
++			    st_tmp.st_atime > atime)
++				atime = st_tmp.st_atime;
++			if (st_tmp.st_mtime > mtime)
++				mtime = st_tmp.st_mtime;
++		}
++		closedir(dd);
++	}
++
++	if (atime) st_ret.st_atime = atime;
++	if (mtime) st_ret.st_mtime = mtime;
++
++	*st = st_ret_last = st_ret;
++	return 0;
++}
+diff -ruN zsh-3.1.5.pws19.b4/Src/utils.c zsh-3.1.5.pws19/Src/utils.c
+--- zsh-3.1.5.pws19.b4/Src/utils.c	Sun May 16 17:32:15 1999
++++ zsh-3.1.5.pws19/Src/utils.c	Wed Jun  2 12:30:03 1999
+@@ -29,6 +29,7 @@
+ 
+ #include "zsh.mdh"
+ #include "utils.pro"
++#include "mailstat.c"
+ 
+ /* Print an error */
+ 
+@@ -711,7 +712,7 @@
+ 	if (**s == 0) {
+ 	    *v = c;
+ 	    zerr("empty MAILPATH component: %s", *s, 0);
+-	} else if (stat(unmeta(*s), &st) == -1) {
++	} else if (mailstat(unmeta(*s), &st) == -1) {
+ 	    if (errno != ENOENT)
+ 		zerr("%e: %s", *s, errno);
+ 	} else if (S_ISDIR(st.st_mode)) {
+

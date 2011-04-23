@@ -1,0 +1,172 @@
+From zsh-workers-return-15106-mason-zsh=primenet.com.au@sunsite.dk Wed Jun 27 06:28:45 2001
+Return-Path: <zsh-workers-return-15106-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22204 invoked from network); 27 Jun 2001 06:28:44 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Jun 2001 06:28:44 -0000
+Received: (qmail 7187 invoked by alias); 27 Jun 2001 06:27:54 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15106
+Received: (qmail 7158 invoked from network); 27 Jun 2001 06:27:53 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010627062637.ZM4464@candle.brasslantern.com>
+Date: Wed, 27 Jun 2001 06:26:37 +0000
+In-Reply-To: <200106260802.KAA23650@beta.informatik.hu-berlin.de>
+Comments: In reply to Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+        "Re: [zsh 4.0.1 bug] filename completion" (Jun 26, 10:02am)
+References: <200106260802.KAA23650@beta.informatik.hu-berlin.de>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.dk
+Subject: PATCH (?) Re: [zsh 4.0.1 bug] filename completion
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Jun 26, 10:02am, Sven Wischnowsky wrote:
+}
+} So my comment is that I don't understand the code in _cd at all.
+
+I was afraid you were going to say that.
+
+} Why do we test for cdablevars only if `$#cdpath -ne 0'?  It works without.
+
+Venturing deep into the archives, we find ...
+
+That test dates all the way from workers/5628, a patch by PWS, and at the
+time the only code in that `if' branch was `_path_files -W cdpath -/', so
+it made sense then.
+
+Most of the rest of the code in that block crawled in at workers/6970,
+also by PWS, attempting to fix (gasp) cdablevars behavior.  There's no
+hint in that message about why the cdablevars code only applies inside
+the cdpath branch.
+
+} And then the test for when cdablevars should be used: it's obviously
+} wrong (that's the real reason for the bug).  We should complete
+} parameter names[1]
+
+The comment, also there since 6970: "In that case we could also complete
+variable names, but it hardly seems worth it."
+
+} [1] Or user names.  Urgh.
+
+There's code in _tilde to handle most of this.  The change to _cd that I
+was not very happy with, involved invoking _tilde when we might have a
+cdablevar.  I've still got that, but I've improved it a little.
+
+} Otherwise we could check if there is no directory matching
+} the string before the first slash but a parameter with that name -- and
+} only in that case should we trick _path_files into completing a word
+} with the parameter name replaced by the value of the parameter.
+} 
+} Otherwise completing `soft/f<TAB>' might surprise users who would expect
+} it to complete to `software/foo'.
+
+Shouldn't it simply do -both-, e.g. offering two possible completions if
+there exists both a ~soft/f* and a software/f* ?
+
+Anyway, here's a patch for assorted changes related to this.  Tell me if
+I've gone wildly astray here.  There appeared to be a whole lot of excess
+locals in _tilde (leftover from extricating _directory_stack, I think).
+
+diff -x CVS -ru zsh-forge/current/Completion/Zsh/Command/_cd zsh-4.0/Completion/Zsh/Command/_cd
+--- zsh-forge/current/Completion/Zsh/Command/_cd	Thu Jun 21 02:28:01 2001
++++ zsh-4.0/Completion/Zsh/Command/_cd	Tue Jun 26 23:12:04 2001
+@@ -5,7 +5,7 @@
+ #    and the string doesn't begin with ~, /, ./ or ../.
+ #  - In the second argument to cd for the form `cd old new', completes
+ #    possible `new' strings by examining `old' and $PWD.
+-#  - After - or +, completes numbers, but the listing
++#  - After - or +, _directory_stack completes numbers, but the listing
+ #    gives you the list of directories to complete.  This turns on
+ #    menu-completion and lists the possibilities automatically, otherwise
+ #    it's not a lot of use.  If you don't type the + or - it will
+@@ -24,31 +24,45 @@
+   rep=(${${rep#${PWD%%$words[2]*}}%${PWD#*$words[2]}})
+   (( $#rep )) && _wanted -C replacement strings expl replacement compadd -a rep
+ else
+-  [[ CURRENT -gt 1 ]] && _directory_stack && ret=0
+-
+-  if [[ $PREFIX != (\~|/|./|../)* && $#cdpath -ne 0 ]]; then
+-    local tdir tdir2
+-
+-    # With cdablevars, we can convert foo/bar/... to ~foo/bar/... if
+-    # there is no directory foo.  In that case we could also complete
+-    # variable names, but it hardly seems worth it.
+-    # Note we need a tilde because cdablevars also allows user home
+-    # directories, hence we also need nonomatch to suppress error messages.
+-    if [[ -o cdablevars && -n "$PREFIX" && ! -d ${tdir::=${PREFIX%%/*}} &&
+-          -d ${~tdir2::="~$tdir"} ]]; then
+-      PREFIX="~$PREFIX"
+-      _wanted directories expl directory _path_files -/ && ret=0
+-    else
+-      local tmpcdpath
++  # Complete directory stack entries with ~ or when not in command position
++  # (the rest of this test is optimization for the _tilde call below)
++  if [[ "$PREFIX" == (#b)(\~|)[^/]# &&
++      ( -n "$match[1]" || ( CURRENT -gt 1 && ! -o cdablevars ) ) ]]; then
++    _directory_stack && ret=0
++  fi
+ 
+-      tmpcdpath=(${${(@)cdpath:#.}:#$PWD})
+-      _alternative \
+-          'local-directories:local directories:_path_files -/' \
+-	  "path-directories:directories in cdpath:_path_files -W tmpcdpath -/" && ret=0
++  if [[ $PREFIX != (\~|/|./|../)* ]]; then
++    local tmpcdpath
++    tmpcdpath=(${${(@)cdpath:#.}:#$PWD})
++
++    # With cdablevars, we can complete foo as if ~foo/
++    if [[ -o cdablevars && -n "$PREFIX" ]]; then
++      if [[ "$PREFIX" != */* ]]; then
++        _tilde && ret=0
++      else
++	# Note we need a tilde because cdablevars also allows user home
++	# directories, hence nonomatch (above) to suppress error messages.
++        PREFIX="~$PREFIX"
++        _wanted named-directories expl 'directories after cdablevar' \
++	    _path_files -/ && ret=0
++        PREFIX="$PREFIX[2,-1]"
++      fi
++    fi
++    if [[ $#tmpcdpath -ne 0 ]]; then
++      # Don't complete local directories in command position, that's
++      # already handled by _command_names (see _autocd)
++      if [[ CURRENT -eq 1 ]]; then
++	_wanted path-directories expl 'directories in cdpath' \
++	  _path_files -W tmpcdpath -/ && ret=0
++      else
++        _alternative \
++	  'local-directories:local directories:_path_files -/' \
++	  "path-directories:directories in cdpath:_path_files -W tmpcdpath -/" && ret=2
++      fi
++      return ret
+     fi
+-  else
+-    _wanted directories expl directory _path_files -/ && ret=0
+   fi
++  _wanted directories expl directory _path_files -/ && ret=0
+ 
+   return ret
+ fi
+diff -x CVS -ru zsh-forge/current/Completion/Zsh/Context/_tilde zsh-4.0/Completion/Zsh/Context/_tilde
+--- zsh-forge/current/Completion/Zsh/Context/_tilde	Mon Apr  2 04:24:49 2001
++++ zsh-4.0/Completion/Zsh/Context/_tilde	Tue Jun 26 22:25:59 2001
+@@ -6,7 +6,7 @@
+ 
+ [[ -n "$compstate[quote]" ]] && return 1
+ 
+-local expl suf dirs list lines revlines i ret disp nm="$compstate[nmatches]"
++local expl suf ret
+ 
+ if [[ "$SUFFIX" = */* ]]; then
+   ISUFFIX="/${SUFFIX#*/}$ISUFFIX"
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

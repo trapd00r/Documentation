@@ -1,0 +1,113 @@
+From zsh-workers-return-16016-mason-zsh=primenet.com.au@sunsite.dk Fri Oct 12 05:04:18 2001
+Return-Path: <zsh-workers-return-16016-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1977 invoked from network); 12 Oct 2001 05:04:16 -0000
+Received: from unknown (HELO sunsite.dk) (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 12 Oct 2001 05:04:16 -0000
+Received: (qmail 8047 invoked by alias); 12 Oct 2001 05:04:05 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16016
+Received: (qmail 8014 invoked from network); 12 Oct 2001 05:04:02 -0000
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-Id: <1011012050227.ZM19535@candle.brasslantern.com>
+Date: Fri, 12 Oct 2001 05:02:27 +0000
+In-Reply-To: <OFFE2ABA9E.2332FF4A-ON80256AE2.0038ACE5@uk.jpmorgan.com>
+Comments: In reply to martin.ebourne@arcordia.com
+        "Very odd behaviour with zsh, maybe corruption bug" (Oct 11, 11:57am)
+References: <OFFE2ABA9E.2332FF4A-ON80256AE2.0038ACE5@uk.jpmorgan.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: martin.ebourne@arcordia.com, zsh-workers@sunsite.dk
+Subject: Re: Very odd behaviour with zsh, maybe corruption bug
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Oct 11, 11:57am, martin.ebourne@arcordia.com wrote:
+}
+} _down_fn() {
+}   setopt local_options
+}   set -x
+}   if [[ ${LASTWIDGET} == ${_searching} ]]
+}   then
+}     _searching=$WIDGET
+}     zle .history-beginning-search-forward
+}   else
+}     if [[ $RBUFFER == *$'\n'* ]]
+}     then
+}       _searching=''
+}       zle .down-line-or-history
+}     else
+}       _searching=$WIDGET
+}       zle .history-beginning-search-forward
+}     fi
+}   fi
+} }
+} 
+} Here is an example trace where it has gone wrong (once the bug had been
+} 'activated' I just pressed up followed by down to get this):
+} 
+} gdd-odybin2% +_down_fn:3> [[ new-up == new-up ]]
+} +_down_fn:8> [[ "abc
+} def" == *
+} * ]]
+} +_down_fn:10> _searching=
+} +_down_fn:11> zle .down-line-or-history
+
+I've gotten a bit closer to what's going on here, but I'm still not sure
+exactly what's happening.
+
+In evalcond(), there's this fragment:
+
+	    int test, npat = state->pc[1];
+	    Patprog pprog = state->prog->pats[npat];
+
+	    if (pprog == dummy_patprog1 || pprog == dummy_patprog2) {
+		char *opat;
+		int save;
+
+		right = opat = dupstring(ecrawstr(state->prog, state->pc,
+						  &htok));
+		if (htok)
+		    singsub(&right);
+		save = (!(state->prog->flags & EF_HEAP) &&
+			!strcmp(opat, right) && pprog != dummy_patprog2);
+
+		if (!(pprog = patcompile(right, (save ? PAT_ZDUP : PAT_STATIC),
+					 NULL)))
+		    zerr("bad pattern: %s", right, 0);
+		else if (save)
+		    state->prog->pats[npat] = pprog;
+	    }
+
+On the *next* call to _down_fn *after* the call which executes
+}       _searching=''
+}       zle .down-line-or-history
+
+The C code above gets into this state:
+
+(gdb) p opat
+$21 = 0x4011b220 ""
+(gdb) p right
+$22 = 0x4011b230 ""
+
+Thus `save' is true, so we execute `state->prog->pats[npat] = pprog;' and
+thereafter the test at _down_fn:3 can never succeed again.  The problem
+is that before calling `singsub(&right);', the string is not empty:
+
+(gdb) p ecrawstr(state->prog, state->pc, &htok)
+$26 = 0x8140d5f "\205\215_searching\216"
+
+Hence `save' should not have become true, but it did.
+
+This *must* be a bug in prefork() called via singsub(); it must be zeroing
+`right' (and thus also zeroing `opat') before copying the string.  But I
+just can't seem to catch it happening.
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

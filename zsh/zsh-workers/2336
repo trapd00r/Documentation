@@ -1,0 +1,758 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Fri Nov  8 23:47:54 1996
+Return-Path: zsh-workers-request@euclid.skiles.gatech.edu
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id XAA23544 for <mason@primenet.com.au>; Fri, 8 Nov 1996 23:47:44 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA26104; Fri, 8 Nov 1996 07:25:54 -0500 (EST)
+Resent-Date: Fri, 8 Nov 1996 07:25:54 -0500 (EST)
+From: Geoff Wing <gwing@primenet.com.au>
+Message-Id: <199611081224.XAA23477@coral.primenet.com.au>
+Subject: Re: 4 bugs (1 more fixed)
+To: zsh-workers@math.gatech.edu (zsh-workers)
+Date: Fri, 8 Nov 1996 23:24:15 +1100 (EST)
+In-Reply-To: <199610300048.LAA17530@coral.primenet.com.au> from "Geoff Wing" at Oct 30, 96 11:48:16 am
+X-Mailer: ELM [version 2.4 PL25]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"G9IL6.0.oN6.HRoWo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2336
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I wrote:
+:  just some bugs:
+:2. There's still a refresh bug that I'll look into - it looks like one I
+:  thought I got rid off - relating to both delete & insert done on a line
+
+There's a mixed bag of changes here: only affects init.c & zle_refresh.c
+They are diffs to 3.0.1
+
+1 ) Old line cropping should now be correct with insert, so if a delete
+    follows an insert, the line should be correct.
+2a) Multiple right movement capability is used as first preference.
+2b) Hard tabs are used next if the tty settings aren't set to expand tabs as
+    spaces - this could use some checking by people who have old sgtty stuff.
+3 ) cost calculations for select() calls have been amalgamated with the 
+    actual output calls.  This is a minor inefficiency (processor not output),
+    but makes it much easier to read the code and should be accurate, where
+    the old way was easily prone to error.
+
+
+I was also planning to change the display manner of greater than screen high
+lines/multi-lines.  If the last bindkey setting was emacs style than have
+emacs style scrolling, otherwise vi style scrolling.  Any comments welcome.
+This is going to take quite a bit of planning so it'll be a while before
+it comes along.
+
+
+
+
+*** init.c	1996/10/15 20:16:35	2.46
+--- init.c	1996/11/08 11:48:00
+***************
+*** 425,432 ****
+  	    if (!(pp = tgetstr(tccapnams[t0], &pp)))
+  		tcstr[t0] = NULL, tclen[t0] = 0;
+  	    else {
+! 		tcstr[t0] = (char *) zalloc(tclen[t0] = strlen(pp) + 1);
+! 		memcpy(tcstr[t0], pp, tclen[t0]);
+  	    }
+  	}
+  
+--- 425,433 ----
+  	    if (!(pp = tgetstr(tccapnams[t0], &pp)))
+  		tcstr[t0] = NULL, tclen[t0] = 0;
+  	    else {
+! 		tclen[t0] = strlen(pp);
+! 		tcstr[t0] = (char *) zalloc(tclen[t0] + 1);
+! 		memcpy(tcstr[t0], pp, tclen[t0] + 1);
+  	    }
+  	}
+  
+
+
+*** zle_refresh.c	1996/10/15 20:16:35	2.19
+--- zle_refresh.c	1996/11/08 11:48:41
+***************
+*** 34,41 ****
+--- 34,45 ----
+  
+  #ifdef HAVE_SELECT
+  #define SELECT_ADD_COST(X)	cost += X
++ #define zputc(a, b)		putc(a, b), cost++
++ #define zwrite(a, b, c, d)	fwrite(a, b, c, d), cost += (b * c)
+  #else
+  #define SELECT_ADD_COST(X)
++ #define zputc(a, b)		putc(a, b)
++ #define zwrite(a, b, c, d)	fwrite(a, b, c, d)
+  #endif
+  
+  /* Oct/Nov 94: <mason> some code savagely redesigned to fix several bugs -
+***************
+*** 186,192 ****
+      clearf = 0,			/* alwayslastprompt used immediately before */
+      hasam;			/* terminal should have auto-margin	    */
+  static int put_rpmpt,		/* whether we should display right-prompt   */
+!     oput_rpmpt;			/* whether displayed right-prompt last time */
+  extern int clearflag;		/* set to non-zero if alwayslastprompt used */
+  
+  /**/
+--- 190,197 ----
+      clearf = 0,			/* alwayslastprompt used immediately before */
+      hasam;			/* terminal should have auto-margin	    */
+  static int put_rpmpt,		/* whether we should display right-prompt   */
+!     oput_rpmpt,			/* whether displayed right-prompt last time */
+!     oxtabs;			/* oxtabs - tabs expand to spaces if set    */
+  extern int clearflag;		/* set to non-zero if alwayslastprompt used */
+  
+  /**/
+***************
+*** 214,219 ****
+--- 219,242 ----
+  #ifdef HAVE_SELECT
+      cost = 0;			/* reset */
+  #endif
++ 
++ /* Nov 96: <mason>  This looks ugly and I haven't checked how complete it is.
++    sgtty stuff may or may not work */
++ #if defined(HAVE_TERMIOS_H) || defined(HAVE_TERMIO_H)
++     oxtabs = (shttyinfo.tio.c_oflag &
++ #else	/* we're using sgtty */
++     oxtabs = (shttyinfo.sgttyb.sg_flags &
++ #endif
++ # ifdef TAB3
++ 				 	TAB3) == TAB3;
++ # else
++ #  ifdef OXTABS
++ 					OXTABS) == OXTABS;
++ #  else
++ 					XTABS) == XTABS;
++ #  endif
++ # endif
++ 
+      cleareol = 0;		/* unset */
+      more_start = more_end = 0;	/* unset */
+      if (resetneeded) {
+***************
+*** 237,253 ****
+              olnct = t0;
+          if (isset(SINGLELINEZLE) || termok != TERM_OK)
+              vcs = 0;
+!         else if (!clearflag && lpptlen) {
+!             fwrite(lpptbuf, lpptlen, 1, shout);
+! 	    SELECT_ADD_COST(lpptlen);
+! 	    fflush(shout);
+! 	}
+  	if (clearflag) {
+! 	    putc('\r', shout);
+! 	    SELECT_ADD_COST(1);
+  	    vcs = 0;
+  	    moveto(0, pptw);
+  	}
+  	clearf = clearflag;
+      } else if (winw != columns)
+  	resetvideo();
+--- 260,273 ----
+              olnct = t0;
+          if (isset(SINGLELINEZLE) || termok != TERM_OK)
+              vcs = 0;
+!         else if (!clearflag && lpptlen)
+!             zwrite(lpptbuf, lpptlen, 1, shout);
+  	if (clearflag) {
+! 	    zputc('\r', shout);
+  	    vcs = 0;
+  	    moveto(0, pptw);
+  	}
++ 	fflush(shout);
+  	clearf = clearflag;
+      } else if (winw != columns)
+  	resetvideo();
+***************
+*** 400,406 ****
+      /* output the right-prompt if appropriate */
+  	if (put_rpmpt && !ln && !oput_rpmpt) {
+  	    moveto(0, winw - 1 - rpw);
+! 	    fwrite(rpptbuf, rpptlen, 1, shout);
+  	    vcs = winw - 1;
+  	/* reset character attributes to that set by the main prompt */
+  	    txtchange = pmpt_attr;
+--- 420,426 ----
+      /* output the right-prompt if appropriate */
+  	if (put_rpmpt && !ln && !oput_rpmpt) {
+  	    moveto(0, winw - 1 - rpw);
+! 	    zwrite(rpptbuf, rpptlen, 1, shout);
+  	    vcs = winw - 1;
+  	/* reset character attributes to that set by the main prompt */
+  	    txtchange = pmpt_attr;
+***************
+*** 507,513 ****
+  	&& tccan(TCCLEAREOL)) {
+  	moveto(ln, 0);
+  	tcout(TCCLEAREOL);
+- 	SELECT_ADD_COST(tclen[TCCLEAREOL]);
+  	return;	
+      }
+  
+--- 527,532 ----
+***************
+*** 559,567 ****
+      if (hasam && vcs == winw) {
+  	vln++, vcs = 1;
+          if (nbuf[vln]  && *nbuf[vln])
+! 	    putc(*nbuf[vln], shout);
+  	else
+! 	    putc(' ', shout);            /* I don't think this should happen */
+  	nl++;
+  	if (*ol)
+  	    ol++;
+--- 578,586 ----
+      if (hasam && vcs == winw) {
+  	vln++, vcs = 1;
+          if (nbuf[vln]  && *nbuf[vln])
+! 	    zputc(*nbuf[vln], shout);
+  	else
+! 	    zputc(' ', shout);            /* I don't think this should happen */
+  	nl++;
+  	if (*ol)
+  	    ol++;
+***************
+*** 598,604 ****
+      /* if we can finish quickly, do so */
+  	if ((col_cleareol >= 0) && (ccs >= col_cleareol)) {
+  	    tcout(TCCLEAREOL);
+- 	    SELECT_ADD_COST(tclen[TCCLEAREOL]);
+  	    return;
+  	}
+  
+--- 617,622 ----
+***************
+*** 608,617 ****
+  	    if (tccan(TCDEL) && (tcdelcost(i) <= i + 1))
+  		tc_delchars(i);
+  	    else {
+- 		SELECT_ADD_COST(i);
+  		vcs += i;
+  		while (i-- > 0)
+! 		    putc(' ', shout);
+  	    }
+  	    return;
+  	}
+--- 626,634 ----
+  	    if (tccan(TCDEL) && (tcdelcost(i) <= i + 1))
+  		tc_delchars(i);
+  	    else {
+  		vcs += i;
+  		while (i-- > 0)
+! 		    zputc(' ', shout);
+  	    }
+  	    return;
+  	}
+***************
+*** 621,633 ****
+  	if (!*ol) {
+  	    i = (col_cleareol >= 0) ? col_cleareol : nllen;
+  	    i -= ccs;
+! 	    fwrite(nl, i, 1, shout);
+! 	    SELECT_ADD_COST(i);
+  	    vcs += i;
+! 	    if (col_cleareol >= 0) {
+  		tcout(TCCLEAREOL);
+- 		SELECT_ADD_COST(tclen[TCCLEAREOL]);
+- 	    }
+  	    return;
+  	}
+  
+--- 638,647 ----
+  	if (!*ol) {
+  	    i = (col_cleareol >= 0) ? col_cleareol : nllen;
+  	    i -= ccs;
+! 	    zwrite(nl, i, 1, shout);
+  	    vcs += i;
+! 	    if (col_cleareol >= 0)
+  		tcout(TCCLEAREOL);
+  	    return;
+  	}
+  
+***************
+*** 640,654 ****
+  	   eg. oldline: hifoobar \ hopefully cheaper here to delete two
+  	       newline: foobar	 / characters, then we have six matches */
+  	    if (tccan(TCDEL)) {
+! 		for (i = 1, p1 = ol + 1; *p1; p1++, i++)
+! 		    if (tcdelcost(i) < pfxlen(p1, nl)) {
+  			tc_delchars(i);
+! 			SELECT_ADD_COST(i);
+! 			ol = p1;
+  			char_ins -= i;
+  			break;
+  		    }
+! 		if (*p1)
+  		    continue;
+  	    }
+  	/* inserting characters - characters pushed off the right should be
+--- 654,668 ----
+  	   eg. oldline: hifoobar \ hopefully cheaper here to delete two
+  	       newline: foobar	 / characters, then we have six matches */
+  	    if (tccan(TCDEL)) {
+! 		for (i = 1; *(ol + i); i++)
+! 		    if (tcdelcost(i) < pfxlen(ol + i, nl)) {
+  			tc_delchars(i);
+! 			ol += i;
+  			char_ins -= i;
++ 			i = 0;
+  			break;
+  		    }
+! 		if (!i)
+  		    continue;
+  	    }
+  	/* inserting characters - characters pushed off the right should be
+***************
+*** 656,685 ****
+  	   undesired scrolling occurs due to `illegal' characters on screen */
+  
+  	    if (tccan(TCINS) && (vln != lines - 1)) {	/* not on last line */
+! 		for (i = 1, p1 = nl + 1; *p1; p1++, i++)
+! 		    if (tcinscost(i) < pfxlen(p1, ol)) {
+  			tc_inschars(i);
+! 			SELECT_ADD_COST(2 * i);
+! 			fwrite(nl, i, 1, shout);
+! 			ccs = (vcs += i);
+! 			nl = p1;
+  			char_ins += i;
+  		    /* if we've pushed off the right, truncate oldline */
+! 			for (j = ccs - i, p1 = ol; *p1 && j + char_ins < winw;
+! 			     p1++, j++);
+! 			if (j + char_ins == winw)
+! 			    *p1 = '\0';
+! 			p1 = ol;
+  			break;
+  		    }
+! 		if (*p1)
+  		    continue;
+  	    }
+  	}
+      /* we can't do any fancy tricks, so just dump the single character
+         and keep on trying */
+! 	putc(*nl, shout);
+! 	SELECT_ADD_COST(1);
+  	nl++, ol++;
+  	ccs++, vcs++;
+      }
+--- 670,696 ----
+  	   undesired scrolling occurs due to `illegal' characters on screen */
+  
+  	    if (tccan(TCINS) && (vln != lines - 1)) {	/* not on last line */
+! 		for (i = 1; *(nl + i); i++)
+! 		    if (tcinscost(i) < pfxlen(nl + i, ol)) {
+  			tc_inschars(i);
+! 			zwrite(nl, i, 1, shout);
+! 			nl += i;
+  			char_ins += i;
++ 			ccs = (vcs += i);
+  		    /* if we've pushed off the right, truncate oldline */
+! 			for (i = 0; *(ol + i) && i < winw - ccs; i++);
+! 			if (i == winw - ccs)
+! 			    *(ol + i) = '\0';
+! 			i = 0;
+  			break;
+  		    }
+! 		if (!i)
+  		    continue;
+  	    }
+  	}
+      /* we can't do any fancy tricks, so just dump the single character
+         and keep on trying */
+! 	zputc(*nl, shout);
+  	nl++, ol++;
+  	ccs++, vcs++;
+      }
+***************
+*** 695,712 ****
+      if (vcs == winw) {
+  	vln++, vcs = 0;
+  	if (!hasam) {
+! 	    putc('\r', shout);
+! 	    putc('\n', shout);
+  	} else {
+  	    if ((vln < nlnct) && nbuf[vln] && *nbuf[vln])
+! 		putc(*nbuf[vln], shout);
+  	    else
+! 		putc(' ', shout);
+! 	    putc('\r', shout);
+  	    if ((vln < olnct) && obuf[vln] && *obuf[vln])
+  		*obuf[vln] = *nbuf[vln];
+  	}
+- 	SELECT_ADD_COST(2);
+      }
+  
+      if (ln == vln && cl == vcs)
+--- 706,722 ----
+      if (vcs == winw) {
+  	vln++, vcs = 0;
+  	if (!hasam) {
+! 	    zputc('\r', shout);
+! 	    zputc('\n', shout);
+  	} else {
+  	    if ((vln < nlnct) && nbuf[vln] && *nbuf[vln])
+! 		zputc(*nbuf[vln], shout);
+  	    else
+! 		zputc(' ', shout);
+! 	    zputc('\r', shout);
+  	    if ((vln < olnct) && obuf[vln] && *obuf[vln])
+  		*obuf[vln] = *nbuf[vln];
+  	}
+      }
+  
+      if (ln == vln && cl == vcs)
+***************
+*** 732,742 ****
+  		vln = ln;
+  		continue;
+  	    }
+! 	putc('\r', shout), vcs = 0; /* safety precaution */
+! 	SELECT_ADD_COST(1);
+  	while (ln > vln) {
+! 	    putc('\n', shout);
+! 	    SELECT_ADD_COST(1);
+  	    vln++;
+  	}
+      }
+--- 742,750 ----
+  		vln = ln;
+  		continue;
+  	    }
+! 	zputc('\r', shout), vcs = 0; /* safety precaution */
+  	while (ln > vln) {
+! 	    zputc('\n', shout);
+  	    vln++;
+  	}
+      }
+***************
+*** 747,754 ****
+  /* choose cheapest movements for ttys without multiple movement capabilities -
+     do this now because it's easier (to code) */
+      if (cl <= vcs / 2) {
+! 	putc('\r', shout);
+! 	SELECT_ADD_COST(1);
+  	vcs = 0;
+      }
+      if (vcs < cl)
+--- 755,761 ----
+  /* choose cheapest movements for ttys without multiple movement capabilities -
+     do this now because it's easier (to code) */
+      if (cl <= vcs / 2) {
+! 	zputc('\r', shout);
+  	vcs = 0;
+      }
+      if (vcs < cl)
+***************
+*** 762,773 ****
+  int
+  tcmultout(int cap, int multcap, int ct)
+  {
+!     if (tccan(multcap) && (!tccan(cap) || tclen[multcap] < tclen[cap] * ct)) {
+  	tcoutarg(multcap, ct);
+- 	SELECT_ADD_COST(tclen[multcap]);
+  	return 1;
+      } else if (tccan(cap)) {
+- 	SELECT_ADD_COST((tclen[cap] * ct));
+  	while (ct--)
+  	    tcout(cap);
+  	return 1;
+--- 769,778 ----
+  int
+  tcmultout(int cap, int multcap, int ct)
+  {
+!     if (tccan(multcap) && (!tccan(cap) || tclen[multcap] <= tclen[cap] * ct)) {
+  	tcoutarg(multcap, ct);
+  	return 1;
+      } else if (tccan(cap)) {
+  	while (ct--)
+  	    tcout(cap);
+  	return 1;
+***************
+*** 780,816 ****
+  tc_rightcurs(int cl)
+  {
+      int ct,			/* number of characters to move across	    */
+! 	horz_tabs = 0,		/* number of horizontal tabs if we do them  */
+  	i = vcs,		/* cursor position after initial movements  */
+! 	j;			/* number of chars outputted		    */
+      char *t;
+  
+!     j = ct = cl - vcs;
+  
+! /* calculate how many horizontal tabs it would take, if we can do them -
+!    tabs are assumed to be 8 spaces */
+!     if (tccan(TCNEXTTAB) && ((vcs | 7) < cl)) {
+! 	horz_tabs = 1;
+! 	i = (vcs | 7) + 1;
+! 	for (; i + 8 <= cl; i += 8)
+! 	    horz_tabs++;
+! 	j = cl - i;		/* number of chars after last tab */
+! 	j += (horz_tabs * tclen[TCNEXTTAB]); /* # of chars if we use tabs */
+!     }
+! 
+! /* do a multright if we can - if it's cheaper or we can't use other tricks */
+!     if (tccan(TCMULTRIGHT)
+! 	&& (!tccan(TCNEXTTAB) || (tclen[TCMULTRIGHT] <= j)
+! 	    || (vln == 0 && i < pptw))) {
+  	tcoutarg(TCMULTRIGHT, ct);
+- 	SELECT_ADD_COST(tclen[TCMULTRIGHT]);
+  	return;
+      }
+  
+! /* try to go with tabs if a multright is not feasible/convenient */
+!     if (horz_tabs) {
+! 	SELECT_ADD_COST((tclen[TCNEXTTAB] * horz_tabs));
+! 	for (; horz_tabs--;)
+  	    tcout(TCNEXTTAB);
+  	if ((ct = cl - i) == 0) /* number of chars still to move across */
+  	    return;
+--- 785,808 ----
+  tc_rightcurs(int cl)
+  {
+      int ct,			/* number of characters to move across	    */
+! 	horz_tabs,		/* number of horizontal tabs if we do them  */
+  	i = vcs,		/* cursor position after initial movements  */
+! 	j;
+      char *t;
+  
+!     ct = cl - vcs;
+  
+! /* do a multright if we can - it's the most reliable */
+!     if (tccan(TCMULTRIGHT)) {
+  	tcoutarg(TCMULTRIGHT, ct);
+  	return;
+      }
+  
+! /* try tabs if tabs are non destructive and multright is not possible */
+!     if (!oxtabs && tccan(TCNEXTTAB) && ((vcs | 7) < cl)) {
+! 	horz_tabs = 1;
+! 	i = (vcs | 7) + 1;
+! 	for ( ; i + 8 <= cl; i += 8)
+  	    tcout(TCNEXTTAB);
+  	if ((ct = cl - i) == 0) /* number of chars still to move across */
+  	    return;
+***************
+*** 820,854 ****
+     if we're anywhere in the prompt, goto the left column and write the whole
+     prompt out unless lpptlen == pptw : we can cheat then */
+      if (vln == 0 && i < pptw) {
+! 	if (lpptlen == pptw) {
+! 	    SELECT_ADD_COST(lpptlen - i);
+! 	    fwrite(lpptbuf + i, lpptlen - i, 1, shout);
+! 	} else if (tccan(TCRIGHT) && (tclen[TCRIGHT] * ct < lpptlen)) {
+  	    /* it is cheaper to send TCRIGHT than reprint the whole prompt */
+- 	    SELECT_ADD_COST(ct);
+  	    for ( ; ct--; )
+  		tcout(TCRIGHT);
+!         } else {
+! 	    if (i != 0) {
+! 		SELECT_ADD_COST(1);
+! 		putc('\r', shout);
+! 	    }
+! 	    SELECT_ADD_COST(lpptlen);
+! 	    fwrite(lpptbuf, lpptlen, 1, shout);
+  	}
+  	i = pptw;
+  	ct = cl - i;
+      }
+  
+-     SELECT_ADD_COST(ct);
+      if (nbuf[vln]) {
+  	for (j = 0, t = nbuf[vln]; *t && (j < i); j++, t++);
+  	if (j == i)
+  	    for ( ; *t && ct; ct--, t++)
+! 		putc(*t, shout);
+      }
+      while (ct--)
+! 	putc(' ', shout);	/* not my fault your terminal can't go right */
+  }
+  
+  /**/
+--- 812,840 ----
+     if we're anywhere in the prompt, goto the left column and write the whole
+     prompt out unless lpptlen == pptw : we can cheat then */
+      if (vln == 0 && i < pptw) {
+! 	if (lpptlen == pptw)
+! 	    zwrite(lpptbuf + i, lpptlen - i, 1, shout);
+! 	else if (tccan(TCRIGHT) && (tclen[TCRIGHT] * ct <= lpptlen))
+  	    /* it is cheaper to send TCRIGHT than reprint the whole prompt */
+  	    for ( ; ct--; )
+  		tcout(TCRIGHT);
+!         else {
+! 	    if (i != 0)
+! 		zputc('\r', shout);
+! 	    zwrite(lpptbuf, lpptlen, 1, shout);
+  	}
+  	i = pptw;
+  	ct = cl - i;
+      }
+  
+      if (nbuf[vln]) {
+  	for (j = 0, t = nbuf[vln]; *t && (j < i); j++, t++);
+  	if (j == i)
+  	    for ( ; *t && ct; ct--, t++)
+! 		zputc(*t, shout);
+      }
+      while (ct--)
+! 	zputc(' ', shout);	/* not my fault your terminal can't go right */
+  }
+  
+  /**/
+***************
+*** 858,867 ****
+      int ret = 0;
+  
+      if (ct && !tcmultout(TCDOWN, TCMULTDOWN, ct)) {
+- 	SELECT_ADD_COST(ct + 1);
+  	while (ct--)
+! 	    putc('\n', shout);
+! 	putc('\r', shout), ret = -1;
+      }
+      return ret;
+  }
+--- 844,852 ----
+      int ret = 0;
+  
+      if (ct && !tcmultout(TCDOWN, TCMULTDOWN, ct)) {
+  	while (ct--)
+! 	    zputc('\n', shout);
+! 	zputc('\r', shout), ret = -1;
+      }
+      return ret;
+  }
+***************
+*** 871,883 ****
+  tcout(int cap)
+  {
+      tputs(tcstr[cap], 1, putshout);
+  }
+  
+  /**/
+  void
+  tcoutarg(int cap, int arg)
+  {
+!     tputs(tgoto(tcstr[cap], arg, arg), 1, putshout);
+  }
+  
+  /**/
+--- 856,873 ----
+  tcout(int cap)
+  {
+      tputs(tcstr[cap], 1, putshout);
++     SELECT_ADD_COST(tclen[cap]);
+  }
+  
+  /**/
+  void
+  tcoutarg(int cap, int arg)
+  {
+!     char *result;
+! 
+!     result = tgoto(tcstr[cap], arg, arg);
+!     tputs(result, 1, putshout);
+!     SELECT_ADD_COST(strlen(result));
+  }
+  
+  /**/
+***************
+*** 894,900 ****
+  redisplay(void)
+  {
+      moveto(0, pptw);
+!     putc('\r', shout);
+      resetneeded = 1;
+      clearflag = 0;
+  }
+--- 884,890 ----
+  redisplay(void)
+  {
+      moveto(0, pptw);
+!     zputc('\r', shout);
+      resetneeded = 1;
+      clearflag = 0;
+  }
+***************
+*** 980,986 ****
+  
+  	if (!*refreshop) {
+  	    if ((t0 = strlen(vp)))
+! 		fwrite(vp, t0, 1, shout);
+  	    vcs += t0;
+  	    break;
+  	}
+--- 970,976 ----
+  
+  	if (!*refreshop) {
+  	    if ((t0 = strlen(vp)))
+! 		zwrite(vp, t0, 1, shout);
+  	    vcs += t0;
+  	    break;
+  	}
+***************
+*** 989,998 ****
+  		tcout(TCCLEAREOL);
+  	    else
+  		for (; *refreshop++; vcs++)
+! 		    putc(' ', shout);
+  	    break;
+  	}
+! 	putc(*vp, shout);
+  	vcs++, t0++;
+  	vp++, refreshop++;
+      }
+--- 979,988 ----
+  		tcout(TCCLEAREOL);
+  	    else
+  		for (; *refreshop++; vcs++)
+! 		    zputc(' ', shout);
+  	    break;
+  	}
+! 	zputc(*vp, shout);
+  	vcs++, t0++;
+  	vp++, refreshop++;
+      }
+***************
+*** 1012,1018 ****
+      if (pos == vcs)
+  	return;
+      if (pos <= vcs / 2) {
+! 	putc('\r', shout);
+  	vcs = 0;
+      }
+      if (pos < vcs) {
+--- 1002,1008 ----
+      if (pos == vcs)
+  	return;
+      if (pos <= vcs / 2) {
+! 	zputc('\r', shout);
+  	vcs = 0;
+      }
+      if (pos < vcs) {
+***************
+*** 1024,1030 ****
+  	    vcs = pos;
+  	else
+  	    while (pos > vcs) {
+! 		putc(nbuf[0][vcs], shout);
+  		vcs++;
+  	    }
+      }
+--- 1014,1020 ----
+  	    vcs = pos;
+  	else
+  	    while (pos > vcs) {
+! 		zputc(nbuf[0][vcs], shout);
+  		vcs++;
+  	    }
+      }
+
+-- 
+Geoff Wing [gwing@primenet.com.au]   Technical Manager
+  Phone    : +61-3-9818 2977	     PrimeNet - Internet Consultancy
+  Facsimile: +61-3-9819 3788	     Web : <URL:http://www.primenet.com.au/>
+  Mobile   : 0412 162 441
+

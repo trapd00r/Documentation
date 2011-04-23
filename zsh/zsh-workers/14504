@@ -1,0 +1,188 @@
+From zsh-workers-return-14504-mason-zsh=primenet.com.au@sunsite.dk Mon May 28 09:22:48 2001
+Return-Path: <zsh-workers-return-14504-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28253 invoked from network); 28 May 2001 09:22:47 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 May 2001 09:22:47 -0000
+Received: (qmail 8133 invoked by alias); 28 May 2001 09:22:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14504
+Received: (qmail 7980 invoked from network); 28 May 2001 09:22:23 -0000
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+Date: Mon, 28 May 2001 11:21:30 +0200 (MET DST)
+Message-Id: <200105280921.LAA06136@beta.informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+Subject: Re: About zmodload test segfaults
+In-Reply-To: <1010523165140.ZM9483@candle.brasslantern.com>
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> Please check whether this takes care of the zmodload test segfaults on
+> various architectures.
+
+That patch took care of the chatty loader under Tru64 Unix, of course.
+
+The patch below takes care of the floating point exception I was seeing
+when trying to unload the zprof module.  It makes the wrapper function
+zprof registers be more careful, effectively avoiding most of the code
+if the zprof module is currently being unloaded.  Which is a good thing
+to do anyway.
+
+Now I get a `all tests successful' for V01 here, too.
+
+Bye
+  Sven
+
+Index: Src/Modules/zprof.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/zprof.c,v
+retrieving revision 1.2
+diff -u -r1.2 zprof.c
+--- Src/Modules/zprof.c	2001/03/20 09:35:48	1.2
++++ Src/Modules/zprof.c	2001/05/28 09:17:54
+@@ -68,6 +68,7 @@
+ static Parc arcs;
+ static int narcs;
+ static Sfunc stack;
++static Module zprof_module;
+ 
+ static void
+ freepfuncs(Pfunc f)
+@@ -216,6 +217,7 @@
+ static int
+ zprof_wrapper(Eprog prog, FuncWrap w, char *name)
+ {
++    int active = 0;
+     struct sfunc sf, *sp;
+     Pfunc f;
+     Parc a = NULL;
+@@ -223,56 +225,64 @@
+     struct timezone dummy;
+     double prev, now;
+ 
+-    if (!(f = findpfunc(name))) {
+-	f = (Pfunc) zalloc(sizeof(*f));
+-	f->name = ztrdup(name);
+-	f->calls = 0;
+-	f->time = f->self = 0.0;
+-	f->next = calls;
+-	calls = f;
+-	ncalls++;
++    if (zprof_module && !(zprof_module->flags & MOD_UNLOAD)) {
++        active = 1;
++        if (!(f = findpfunc(name))) {
++            f = (Pfunc) zalloc(sizeof(*f));
++            f->name = ztrdup(name);
++            f->calls = 0;
++            f->time = f->self = 0.0;
++            f->next = calls;
++            calls = f;
++            ncalls++;
++        }
++        if (stack) {
++            if (!(a = findparc(stack->p, f))) {
++                a = (Parc) zalloc(sizeof(*a));
++                a->from = stack->p;
++                a->to = f;
++                a->calls = 0;
++                a->time = a->self = 0.0;
++                a->next = arcs;
++                arcs = a;
++                narcs++;
++            }
++        }
++        sf.prev = stack;
++        sf.p = f;
++        stack = &sf;
++
++        f->calls++;
++        tv.tv_sec = tv.tv_usec = 0;
++        gettimeofday(&tv, &dummy);
++        sf.beg = prev = ((((double) tv.tv_sec) * 1000.0) +
++                         (((double) tv.tv_usec) / 1000.0));
+     }
+-    if (stack) {
+-	if (!(a = findparc(stack->p, f))) {
+-	    a = (Parc) zalloc(sizeof(*a));
+-	    a->from = stack->p;
+-	    a->to = f;
+-	    a->calls = 0;
+-	    a->time = a->self = 0.0;
+-	    a->next = arcs;
+-	    arcs = a;
+-	    narcs++;
+-	}
+-    }
+-    sf.prev = stack;
+-    sf.p = f;
+-    stack = &sf;
+-
+-    f->calls++;
+-    tv.tv_sec = tv.tv_usec = 0;
+-    gettimeofday(&tv, &dummy);
+-    sf.beg = prev = ((((double) tv.tv_sec) * 1000.0) +
+-		     (((double) tv.tv_usec) / 1000.0));
+     runshfunc(prog, w, name);
+-    tv.tv_sec = tv.tv_usec = 0;
+-    gettimeofday(&tv, &dummy);
+-
+-    now = ((((double) tv.tv_sec) * 1000.0) +
+-	   (((double) tv.tv_usec) / 1000.0));
+-    f->self += now - sf.beg;
+-    for (sp = sf.prev; sp && sp->p != f; sp = sp->prev);
+-    if (!sp)
+-	f->time += now - prev;
+-    if (a) {
+-	a->calls++;
+-	a->self += now - sf.beg;
+-    }
+-    stack = sf.prev;
+-
+-    if (stack) {
+-	stack->beg += now - prev;
+-	if (a)
+-	    a->time += now - prev;
++    if (active) {
++        if (zprof_module && !(zprof_module->flags & MOD_UNLOAD)) {
++            tv.tv_sec = tv.tv_usec = 0;
++            gettimeofday(&tv, &dummy);
++
++            now = ((((double) tv.tv_sec) * 1000.0) +
++                   (((double) tv.tv_usec) / 1000.0));
++            f->self += now - sf.beg;
++            for (sp = sf.prev; sp && sp->p != f; sp = sp->prev);
++            if (!sp)
++                f->time += now - prev;
++            if (a) {
++                a->calls++;
++                a->self += now - sf.beg;
++            }
++            stack = sf.prev;
++
++            if (stack) {
++                stack->beg += now - prev;
++                if (a)
++                    a->time += now - prev;
++            }
++        } else
++            stack = sf.prev;
+     }
+     return 0;
+ }
+@@ -289,6 +299,7 @@
+ int
+ setup_(Module m)
+ {
++    zprof_module = m;
+     return 0;
+ }
+ 
+
+-- 
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

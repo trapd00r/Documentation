@@ -1,0 +1,793 @@
+From zsh-workers-return-5677-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Mar 08 10:53:58 1999
+Return-Path: <zsh-workers-return-5677-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 854 invoked from network); 8 Mar 1999 10:53:24 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 Mar 1999 10:53:24 -0000
+Received: (qmail 28127 invoked by alias); 8 Mar 1999 10:04:32 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5677
+Received: (qmail 28115 invoked from network); 8 Mar 1999 10:04:30 -0000
+Date: Mon, 8 Mar 1999 11:03:38 +0100 (MET)
+Message-Id: <199903081003.LAA11713@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: _long_options
+
+
+This mainly adds the file `User/_long_options' (I /think/ it should
+be in `User', even though it is a helper function).
+
+`_long_options' is an attempt to do what `_configure' and `_tar' did
+in a rather ad hoc way in a more general fashion. It is a kind of
+table driven, automated completion for command that support long
+format options (`--foo') with arguments behind an equal sign.
+
+To do this, it calls the command with `--help', parses the output into 
+a couple of arrays, and then starts completing the options. The
+arguments are pairs of patterns and actions. The patterns are compared 
+to the option descriptions and the actions say what to complete after
+an equal sign for the options matched by the pattern. The action may
+be a list of words inside `[...]' or `(...)' which means that these
+words are the possible completions (the first form means that the
+equal sign and the following string is optional). If the action is not 
+such a list, it should be a string (probably containing more than one
+word) that is executed to get the completions, e.g.:
+
+  _long_options '*=FILE*' '_files' \
+                '*=PATH*' '_files -/' \
+                '--foo*'  '(hello world)'
+
+completes files after options that are described like `--bar=FILE',
+paths after options described like `--baz=PATH', and `hello' and
+`world' after the option `--foo'. Of course, the function also tries
+to automatically detect optional arguments, making the `='
+auto-removable. `_long_options' also has some patterns built in: for
+`FILE' and `(PATH|DIR)'.
+
+The patch also changes `_configure', `_a2ps', and `_tar' to use this
+function and does a bit of fixing in `_multi_parts' and `_path_files'.
+
+There are some questions:
+
+- I only seldom use long options and hence don't know if there are
+  conventions for argument descriptions (does `PATH' always
+  mean...). If so, we probably could add some more builtin patterns.
+- Also, I'd like ask if someone knows of more patterns we should use
+  in the functions using `_long_options'.
+- With this function it should be relatively easy to add more
+  completion functions for GNU tools (the hairiest part should be easy 
+  to get now). Anyone have some time? ;-)
+
+Some more comments about `_tar': it not only uses `_long_options' now, 
+I also changed it some more. It now tries harder to get the name of
+the tar-file and the options to use to extract the files when
+completing inside the archive (please test with your prefered tar
+options usage). I also added a leading underscore to the cache
+parameters (now they are `hidden' ;-), and, btw, `_long_options' uses
+a cache, too. I also added a function `_tar_archive' to complete the
+names of the archive files, since it is used in more than one place
+now and users may change this (supporting `host:file' or whatever).
+
+Finally, some general remarks: when writing this I was reminded of the 
+discussion that once started all this new completion stuff, where
+people said they wanted to have completion functions (compctls at that 
+time) to be automatically created from command descriptions.
+`_long_options' may be a step in that direction. I was also reminded
+of Bart's `testing-functions-call-match-generating-functions'
+suggestions. This is actually part of what `_long_options' does,
+although the tests are rather complicated.
+
+
+Bye
+ Sven
+
+diff -u -r ooc/Core/_multi_parts Completion/Core/_multi_parts
+--- ooc/Core/_multi_parts	Mon Mar  8 10:30:51 1999
++++ Completion/Core/_multi_parts	Mon Mar  8 10:31:24 1999
+@@ -8,7 +8,7 @@
+ # separator character are then completed independently.
+ 
+ local sep matches patstr orig matchflags pref i tmp1 tmp2 nm
+-local group expl
++local group expl menu
+ 
+ _match_test _multi_parts || return 1
+ 
+@@ -42,8 +42,7 @@
+ fi
+ 
+ # Now build the pattern from what we have on the line. We also save
+-# the original string in `orig'. The `eval' is used to replace our
+-# separator character by `*<sep>'.
++# the original string in `orig'.
+ 
+ if [[ $#compstate[pattern_match] -ne 0 ]]; then
+   patstr="${PREFIX}*${SUFFIX}*"
+@@ -52,12 +51,15 @@
+ fi
+ orig="${PREFIX}${SUFFIX}"
+ 
++[[ $compstate[insert] = *menu ||
++   ( $#compstate[pattern_match] -ne 0 &&
++     "$orig" != "${orig:q}" ) ]] && menu=yes
++
+ matchflags=""
+ _match_pattern _path_files patstr matchflags
+ [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+ 
+ patstr="${${patstr//$sep/*$sep}//\*##/*}"
+-#eval patstr\="\$patstr:gs-${sep}-\*${sep}-:gs/\*\*/\*/"
+ 
+ # First we will skip over those parts of the matches for which we have 
+ # exact substrings on the line. In `pref' we will build the
+@@ -70,7 +72,7 @@
+   # `matches' that match the prefix we have and the exact substring in 
+   # the array `tmp1'.
+ 
+-  pat="${${${patstr#*${sep}}%${sep}*}//\*/[^${sep}]#}${patstr##*${sep}}"
++  pat="${${${patstr#*${sep}}%${sep}*}//\*/[^${sep}]#}"
+   tmp1=( "${(@M)matches:#${~matchflags}${orig%%${sep}*}${sep}${~pat}}" )
+ 
+   # If there are no words matching the exact substring, stop.
+@@ -78,11 +80,12 @@
+   (( $#tmp1 )) || break
+ 
+   # Otherwise add the part to the prefix, remove it from the matches
+-  # (which will also remove all words not matching the string at all), 
+-  # and set `patstr' and `orig' to the next component.
++  # (and also remove all words not matching the string at all), and
++  # set `patstr' and `orig' to the next component.
+ 
+-  pref="$pref${orig%%${sep}*}${sep}"
+-  matches=( "${(@)${(@)matches#${orig%%${sep}*}${sep}}:#}" )
++  tmp1="${orig%%${sep}*}${sep}"
++  pref="$pref$tmp1"
++  matches=("${${(@)${(@M)matches:#${tmp1}*}#$tmp1}:#}")
+   orig="${orig#*${sep}}"
+   patstr="${patstr#*${sep}}"
+ done
+@@ -99,7 +102,7 @@
+ 
+ if (( $#tmp1 )); then
+ 
+-  # There are words that are matched, put them int `matches' and then
++  # There are words that are matched, put them into `matches' and then
+   # move all unambiguous components from the beginning into `pref'.
+ 
+   matches=( "$tmp1[@]" )
+@@ -131,15 +134,19 @@
+ 
+   if [[ -z "$orig" && "$PREFIX$SUFFIX" != "$pref$orig" ]]; then
+     compadd -QU  "$group[@]" "$expl[@]" -i "$IPREFIX" -S '' - "${pref}${orig}"
+-  elif [[ $compstate[insert] = *menu ||
+-          $#compstate[pattern_match] -ne 0 ]]; then
++  elif [[ -n "$menu" ]]; then
++    if [[ "$orig" = *${sep}* ]]; then
++      orig="${sep}${orig#*${sep}}"
++    else
++      orig=''
++    fi
+     for i in "$matches[@]" ; do
+       if [[ "$i" = *${sep}* ]]; then
+         compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" \
+-	        -p "$pref" -qS "$sep" - "${i%%${sep}*}"
++	        -p "$pref" -qS "$sep" -s "$orig" - "${i%%${sep}*}"
+       else
+         compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" \
+-	        -p "$pref" - "${i%%${sep}*}"
++	        -p "$pref" -s "$orig" - "${i%%${sep}*}"
+       fi
+     done
+   else
+diff -u -r ooc/Core/_path_files Completion/Core/_path_files
+--- ooc/Core/_path_files	Mon Mar  8 10:30:51 1999
++++ Completion/Core/_path_files	Mon Mar  8 10:31:25 1999
+@@ -20,7 +20,7 @@
+ 
+ local nm prepaths str linepath realpath donepath patstr prepath testpath rest
+ local tmp1 collect tmp2 suffixes i ignore matchflags opt group sopt pats gopt
+-local addpfx addsfx expl orig ostr nm=$compstate[nmatches]
++local addpfx addsfx expl orig ostr nm=$compstate[nmatches] menu
+ 
+ setopt localoptions nullglob rcexpandparam globdots extendedglob
+ unsetopt markdirs globsubst shwordsplit nounset
+@@ -89,7 +89,7 @@
+ fi
+ 
+ # str holds the whole string from the command line with a `*' between
+-# the prefix and the suffix.
++# the prefix and the suffix. Then we see if we will do menucompletion.
+ 
+ if [[ $#compstate[pattern_match] -ne 0 ]]; then
+   str="${PREFIX}*${SUFFIX}"
+@@ -98,6 +98,11 @@
+ fi
+ orig="${PREFIX}${SUFFIX}"
+ 
++[[ $compstate[insert] = *menu ||
++   ( $#compstate[pattern_match] -ne 0 &&
++     "$orig" != "${orig:q}" ) ]] && menu=yes
++
++
+ # We will first try normal completion called with `compgen', but only if we
+ # weren't given a `-F' option.
+ 
+@@ -282,10 +287,10 @@
+ 	# these are file names and that `fignore' should be used as usual
+ 	# (the `-f' and `-F' options).
+ 
+-	if [[ $compstate[insert] = *menu ||
+-	      $#compstate[pattern_match] -ne 0 ]]; then
++	if [[ -n "$menu" ]]; then
+           compadd -QU "$addpfx[@]" "$addsfx[@]" "$group[@]" "$expl[@]" \
+-                  -i "$IPREFIX" -p "${linepath:q}${testpath:q}" -S "/${ostr#*/}" \
++                  -i "$IPREFIX" -p "${linepath:q}${testpath:q}" \
++		  -S "/${ostr#*/}" \
+ 		  -W "$tmp1" -f "$ignore[@]" - "${(@)${(@)collect%%/*}:q}"
+ 	else
+           for i in $collect; do
+diff -u -r ooc/User/_a2ps Completion/User/_a2ps
+--- ooc/User/_a2ps	Mon Mar  8 10:30:52 1999
++++ Completion/User/_a2ps	Mon Mar  8 10:31:25 1999
+@@ -1,26 +1,8 @@
+ #defcomp a2ps
+ 
+-local ret=1
++# This is for the GNU version of a2ps.
+ 
+-if [[ "$PREFIX[1,2]" = -- ]]; then
+-  _comp_parts '(--borders --compact --truncate-lines --interpret
+-                --print-anyway --delegate)' '=' '(yes no)' && ret=0
+-  _comp_parts '(--major)' '=' '(rows columns)' && ret=0
+-  _comp_parts '(--end-of-line)' '=' '(r n nr rn any)' && ret=0
+-
+-  compgen -S= -k '(--medium --columns --rows --line-numbers
+-                   --font-size --lines-per-page --chars-per-line
+- 		   --tabsize --non-printable-format --encoding
+-		   --title --stdin --prologue --highlight-level
+-		   --strip-level --output --version-control --suffix
+-		   --printer --copies --sides --page-prefeed
+-		   --no-page-prefeed)' && ret=0
+-  compgen -qS= -k '(--margin --header --underlay --left-title
+-                    --right-title --left-footer --footer --right-footer
+-		    --pages --pretty-print)' && ret=0
+-  compgen -k '(--landscape --portrait --catman --no-header)' && ret=0
+-
+-  return ret
+-else
+-  _files -F fignore -g "*~*.ps"
+-fi
++_long_options -t '*\*'         '(yes no)' \
++                 '*=DIRECTION' '(rows columns)' \
++                 '*=TYPE'      '(r n nr rn any)' ||
++    _files -F fignore -g '*~*.(ps|PS|eps|EPS)'
+diff -u -r ooc/User/_configure Completion/User/_configure
+--- ooc/User/_configure	Mon Mar  8 10:30:52 1999
++++ Completion/User/_configure	Mon Mar  8 10:33:02 1999
+@@ -1,36 +1,3 @@
+ #defcomp configure
+ 
+-setopt localoptions extendedglob
+-
+-if [[ $PREFIX = *=* ]]; then
+-  # Complete filenames after e.g. --prefix=
+-  IPREFIX=${PREFIX%%=*}=
+-  PREFIX=${PREFIX#*=}
+-  _files
+-else
+-  # Generate a list of options from configure --help
+-  local -a pars
+-  local i ret=1
+-  pars=($($words[1] --help | awk '$1 ~ /--[a-z]*.*/ {print $1}'))
+-  for i in $pars
+-  do
+-    case $i in
+-      (--(((en|dis)able-FEATURE)|(with(out|)-PACKAGE))*)
+-        : Skip standard help output
+-      ;;
+-      --enable)
+-        : Skip standard help output
+-      ;;
+-      --*\[=* )
+-        compadd -M 'r:|-=* r:|=*' -q -S = -- ${i%%\[=*} && ret=0
+-      ;;
+-      --*=* )
+-        compadd -M 'r:|-=* r:|=*' -S = -- ${i%%=*} && ret=0
+-      ;;
+-      * )
+-        compadd -M 'r:|-=* r:|=*' -- $i && ret=0
+-      ;;
+-    esac
+-  done
+-  return ret
+-fi
++_long_options
+diff -u -r ooc/User/_long_options Completion/User/_long_options
+--- ooc/User/_long_options	Mon Mar  8 10:32:02 1999
++++ Completion/User/_long_options	Mon Mar  8 10:31:24 1999
+@@ -0,0 +1,299 @@
++#autoload
++
++# This function tries to automatically complete long option names. For 
++# this it invokes the command from the line with the `--help' option
++# and then parses the output to find possible option names. For
++# options that get an argument after a `=', the function also tries to 
++# automatically find out what should be complete as the argument.
++# The possible completions for option-arguments can be described with
++# the arguments to this function. This is done by giving pairs of
++# patterns and actions as consecutive arguments. The actions specify
++# what should be done to complete arguemts of those options that match 
++# the pattern. The action may be a list of words in brackets or in
++# parentheses, separated by spaces. A list in brackets denotes
++# possible values for an optional argument, a list in parentheses
++# gives words to complete for mandatory arguments. If the action does
++# not start with a bracket or parentheses, it should be the name of a
++# command (probably with arguments) that should be invoked to complete 
++# after the equal sign. E.g.:
++#
++#  _long_options '*\*'     '(yes no)' \
++#                '*=FILE*' '_files' \
++#                '*=DIR*'  '_files -/'
++#
++# This makes `yes' and `no' be completed as the argument of options
++# whose description ends in a star, file names for options that
++# contain the substring `=FILE' in the description, and paths for
++# options whose description contains `=DIR'. Note the last two
++# patterns are not needed since this function always completes files
++# for option descriptions containing `=FILE' and paths for option
++# descriptions that contain `=DIR' or `=PATH'. These builtin patterns
++# can be overridden by patterns given as arguments, though.
++#
++# This function also accepts the `-X', `-J', and `-V' options which
++# are given to `compadd'. Finally, it accepts the option `-t'. If this 
++# is given, completion is only done on words starting with two hyphens.
++
++local opt expl group test i name action ret=1 tmp suffix
++
++setopt extendedglob
++
++# Get the options.
++
++group=()
++expl=()
++while getopts "J:V:X:t" opt; do
++  case "$opt" in
++  [JV]) group=("-$opt" "$OPTARG");;
++  X)    expl=(-X "$OPTARG");;
++  t)    test=yes;;
++  esac
++done
++shift OPTIND-1
++
++# Test if we are completing after `--' if we were asked to do so.
++
++[[ -n "$test" && "$PREFIX" != --* ]] && return 1
++
++# We cache the information about options and the command name, see if
++# we can use the cache.
++
++if [[ "$words[1]" != $_lo_cache_cmd ]]; then
++
++  # No, store the new command name and clear the old parameters.
++
++  _lo_cache_cmd="$words[1]"
++  (( $+_lo_cache_actions )) && unset ${_lo_cache_actions%% *} _lo_cache_actions
++
++  local opts pattern anum=1 tmpo str
++
++  # Now get the long option names by calling the command with `--help'.
++  # The parameter expansion trickery first gets the lines as separate
++  # array elements. Then we select all lines whose first non-blank
++  # character is a hyphen. Since some commands document more than one
++  # option per line, separated by commas, we convert commas int
++  # newlines and then split the result again at newlines after joining 
++  # the old array elements with newlines between them. Then we select
++  # those elements that start with two hyphens, remove anything up to
++  # those hyphens and anything from the space or comma after the
++  # option up to the end. Finally all elements with option strings
++  # that contain uppercase letters are removed.
++
++  opts=("--${^${${${(M)${(@ps:\n:j:\n:)${(@)${(M)${(@f)$($words[1] --help)}:#[ 	]#-*}//,/
++}}:#*--*}#*--}%%[, ]*}:#(*-[A-Z]*|)}")
++
++  # The interpretation of the options is completely table driven. We
++  # use the positional parameters we were given and a few standard
++  # ones. Then we loop through this table.
++
++  set "$@" '*=FILE*' '_files' '*=(DIR|PATH)*' '_files -/' '*' ''
++
++  while [[ $# -gt 1 ]]; do
++
++    # First, we get the pattern and the action to use and take them
++    # from the positional parameters.
++
++    pattern="$1"
++    action="$2"
++    shift 2
++
++    # We get all options matching the pattern and take them from the
++    # list we have built. If no option matches the pattern, we
++    # continue with the next.
++
++    tmp=("${(@M)opts:#$~pattern}")
++    opts=("${(@)opts:#$~pattern}")
++
++    (( $#tmp )) || continue
++
++    # Now we collect the options for the pattern in an array. We also
++    # check if the options take an argument after a `=', and if this
++    # argument is optional. The name of the array built contains
++    # `_arg_' for mandatory arguments, `_optarg_' for optional
++    # arguments, and `_simple_' for options that don't get an
++    # argument. In `_lo_cache_actions' we save the names of these
++    # arrays together with the associated action (Separated by a
++    # space).
++
++    # If the action is a list of words in brackets, this denotes
++    # options that get an optional argument. If the action is a list
++    # of words in parentheses, the option has to get an argument.
++    # In both cases we just build the array name to use.
++
++    if [[ "$action[1]" = '[' ]]; then
++      name="_lo_cache_optarg_$anum"
++    elif [[ "$action[1]" = '(' ]]; then
++      name="_lo_cache_arg_$anum"
++    else
++
++      # If there are option strings with a `[=', we take make these
++      # get an optional argument...
++
++      tmpo=("${(@M)tmp:#*\[\=*}")
++      if (( $#tmpo )); then
++
++        # ...by removing them from the option list and storing them in 
++	# an array.
++
++        tmp=("${(@)tmp:#*\[\=*}")
++        tmpo=("${${(@)tmpo%%\=*}//[^a-z0-9-]}")
++        _lo_cache_actions[anum]="_lo_cache_optarg_$anum $action"
++        eval "_lo_cache_optarg_${anum}=(\"\$tmpo[@]\")"
++	(( anum++ ))
++      fi
++
++      # Now we do the same for option strings containing `=', these
++      # are options getting an argument.
++
++      tmpo=("${(@M)tmp:#*\=*}")
++      if (( $#tmpo )); then
++        tmp=("${(@)tmp:#*\=*}")
++        tmpo=("${${(@)tmpo%%\=*}//[^a-z0-9-]}")
++        _lo_cache_actions[anum]="_lo_cache_arg_$anum $action"
++        eval "_lo_cache_arg_${anum}=(\"\$tmpo[@]\")"
++	(( anum++ ))
++      fi
++
++      # The name for the options without arguments, if any.
++
++      name="_lo_cache_simple_$anum"
++    fi
++    # Now filter out any option strings we don't like and stuff them
++    # in an array, if there are still some.
++
++    tmp=("${${(@)tmp%%\=*}//[^a-z0-9-]}")
++    if (( $#tmp )); then
++      _lo_cache_actions[anum]="$name $action"
++      eval "${name}=(\"\$tmp[@]\")"
++      (( anum++ ))
++    fi
++  done
++fi
++
++# We get the string from the line and and see if it already contains a 
++# equal sign.
++[[ compstate[matcher] -ne 1 ]] && return
++
++str="$PREFIX$SUFFIX"
++
++if [[ "$str" = *\=* ]]; then
++
++  # It contains a `=', now we ignore anything up to it, but first save 
++  # the old contents of the special parameters we change.
++
++  local oipre opre osuf pre parto parta pat patflags
++
++  oipre="$IPREFIX"
++  opre="$PREFIX"
++  osuf="$SUFFIX"
++
++  pre="${str%%\=*}"
++  IPREFIX="${IPREFIX}${pre}="
++  PREFIX="${str#*\=}"
++  SUFFIX=""
++
++  # We will chech if the arrays contain an option matching what's on
++  # the line. To do this good, we build a pattern.
++
++  pat="${pre}*"
++  patflags=''
++  _match_pattern _long_options pat patflags
++  [[ -n "$_comp_correct" ]] && patflags="$patflags(#a$_comp_correct)"
++
++  # Then we walk through the array names. For each array we test if it 
++  # contains the option string. If so, we `invoke' the action stored
++  # with the name. If the action is a list of words, we just add them, 
++  # otherwise we invoke the command or function named.
++
++  for i in "$_lo_cache_actions[@]"; do
++    name="${i%% *}"
++    action="${i#* }"
++    if (( ${${(@P)name}[(I)$pre]} )); then
++      if [[ "$action[1]" = (\[|\() ]]; then
++        compadd - ${=action[2,-2]}
++      elif (( $#action )); then
++        $=action
++      fi
++
++      # We found the option string, return.
++
++      return
++    fi
++
++    # The array did not contain the full option string, see if it
++    # contains a string matching the string from the line.
++    # If there is one, we store the option string in `parto' and the
++    # element from `_lo_actions' in `parta'. If we find more than one
++    # such option or if we already had one, we set `parto' to `-'.
++
++    tmp=("${(@M)${(@P)name}:#${~pat}}")
++    if [[ $#tmp -eq 1 ]]; then
++      if [[ -z "$parto" ]]; then
++        parto="$tmp[1]"
++	parta="$i"
++      else
++        parto=-
++      fi
++    elif (( $#tmp )); then
++      parto=-
++    fi
++  done
++
++  # If we found only one matching option, we accept it and immediatly
++  # try to complete the string after the `='.
++
++  if [[ -n "$parto" && "$parto" != - ]]; then
++    name="${parta%% *}"
++    action="${parta#* }"
++    IPREFIX="${parto}="
++
++    if (( $#action )); then
++      if [[ "$action[1]" = (\[|\() ]]; then
++        compadd - ${=action[2,-2]}
++      else
++        $=action
++      fi
++    else
++      compadd -S '' - "$PREFIX"
++    fi
++    return
++  fi
++
++  # The option string was not found, restore the special parameters.
++
++  IPREFIX="$oipre"
++  PREFIX="$opre"
++  SUFFIX="$osuf"
++fi
++
++# The string on the line did not contain a `=', or we couldn't
++# complete the option string since there were more than one matching
++# what's on the line. So we just ad the option string as possible
++# matches, giving the string from the `=' on as a suffix.
++
++if [[ "$str" = *\=* ]]; then
++  str="=${str#*\=}"
++  PREFIX="${PREFIX%%\=*}"
++  suffix=()
++else
++  str=""
++  suffix=('-S=')
++fi
++
++for i in "$_lo_cache_actions[@]"; do
++  name="${i%% *}"
++  action="${i#* }"
++
++  if [[ "$name" = *_optarg_* ]]; then
++    compadd -M 'r:|-=* r:|=*' -Qq "$suffix[@]" -s "$str" - \
++            "${(@P)name}" && ret=0
++  elif [[ "$name" = *_arg_* ]]; then
++    compadd -M 'r:|-=* r:|=*' -Q "$suffix[@]" -s "$str" - \
++            "${(@P)name}" && ret=0
++  elif [[ -z "$str" ]]; then
++    compadd -M 'r:|-=* r:|=*' -Q -s "$str" - \
++            "${(@P)name}" && ret=0
++  fi
++done
++
++return ret
+diff -u -r ooc/User/_tar Completion/User/_tar
+--- ooc/User/_tar	Mon Mar  8 10:30:53 1999
++++ Completion/User/_tar	Mon Mar  8 11:03:22 1999
+@@ -1,72 +1,94 @@
+ #defcomp tar
+ 
+ # Tar completion.  Features:
+-#  - Assumes tar commands are in second position, tar archive is in third
+-#    e.g. tar xvzf zsh-3.0.5.tar.gz ...
+-#    Could search better.  Send me the patch.
++#  - Tries to collect tar commands from second position, single letter
++#    option, and long options.
+ #  - `tar' can be called anything, will use the correct name
+-#  - Preferentially completes *.tar and *.TAR files in third position
+-#  - unless z or Z appears in the commands, in which case prefer *.tar.gz
+-#    and similar (GNU tar).
+-#  - From fourth position on, if command is x or t, completes files inside
+-#    archive.  This is supposed to look pretty much as if the files are
+-#    in an ordinary directory hierarchy.  Handles extraction from compressed
+-#    archives (GNU tar).
++#  - Uses the function `_tar_archive' to complete archive files.
++#  - Tries to find out if compressed archives should be used.
++#  - Completes files inside archive.  This is supposed to look pretty
++#    much as if the files are in an ordinary directory hierarchy.
++#    Handles extraction from compressed archives (GNU tar).
+ #  - Anywhere -- appears, gets a list of long options to complete from
+-#    tar itself (GNU tar); this needs perl.  If you have GNU tar but not
+-#    perl:  your system manager is weird.
++#    tar itself (GNU tar)
+ #  - Things like --directory=... are also completed correctly.
+ 
+ emulate -LR zsh
+ setopt extendedglob
+ 
+-local nm=$NMATCHES tcmd="$words[2]" tf="$words[3]"
++local _tar_cmd tf tmp
+ 
+-if [[ $PREFIX = *=* ]]; then
+-  # For GNU tar arguments like --directory=
+-  IPREFIX=${PREFIX%%\=*}=
+-  PREFIX=${PREFIX#*=}
+-  if [[ $IPREFIX = --directory* ]]; then
+-    _path_files -/
+-  else
+-    _files
++# First we collect in `_tar_cmd' single letter options describing what
++# should be done with the archive and if it is compressed. This
++# collected from options arguments that start with only one hyphen,
++# from some of the possible long options, and from the second word if
++# that does not start with a hyphen.
++
++tmp=("${(@M)words:#-[^-]*}")
++_tar_cmd="${(j::)tmp#-}"
++
++(( $words[(I)--(un|)gzip] ))     && _tar_cmd="z$_tar_cmd"
++(( $words[(I)--(un|)compress] )) && _tar_cmd="Z$_tar_cmd"
++(( $words[(I)--list] ))          && _tar_cmd="t$_tar_cmd"
++(( $words[(I)--(extract|get)] )) && _tar_cmd="x$_tar_cmd"
++(( $words[(I)--create] ))        && _tar_cmd="c$_tar_cmd"
++[[ "$words[2]" != -* ]]          && _tar_cmd="$words[2]$_tar_cmd"
++
++# Next, we try to find the archive name and store it in `tf'. The name 
++# is searched after a `--file=' long option, in the third word if the
++# second one didn't start with a hyphen but contained a `f', and after 
++# an option argument starting with only one hyphen and containing a `f'.
++
++tmp="$words[(I)--file=*]"
++if (( tmp )); then
++  tf="${words[tmp][8,-1]}"
++  _tar_cmd="f$_tar_cmd"
++elif [[ "$words[2]" != -* && "$words[2]" = *f* ]]; then
++  tf="$words[3]"
++  _tar_cmd="f$_tar_cmd"
++else
++  tmp="${${(@M)words:#-[^-]*}[(I)*f*]}"
++  if (( tmp )); then
++    tf="$words[tmp+1]"
++    _tar_cmd="f$_tar_cmd"
+   fi
+-elif [[ $PREFIX = --* ]]; then
+-  # gnu tar, generate completions from --help
+-  # ones followed by = get that as a suffix
+-  local -a ownlist eqlist
+-  local comp ret=1
+-
+-  $words[1] --help |
+-  perl -ne 'while (/--[^[\s,='\'']+=?/g) { print "$&\n"; }' |
+-  while read comp; do
+-    if [[ $comp = *= ]]; then
+-      eqlist[$#eqlist+1]=${comp%=}
+-    else
+-      ownlist[$#ownlist+1]=$comp
+-    fi
+-  done
+-  compgen -S '=' -k eqlist && ret=0
+-  compgen -k ownlist && ret=0
+-
+-  return ret
+-elif [[ "$tcmd" = *[tx]*f* && $CURRENT -ge 4 ]] then
+-  # Listing or extracting a particular file.  We run `tar t...'
+-  # on the file, keeping the list of filenames cached, plus the
+-  # name of the tarfile so we know if it changes.
++fi
++
++# Now we complete...
++
++if [[ "$PREFIX" = --* ]]; then
++
++  # ...long options after `--'.
++
++  _long_options '--owner*'          "_tilde" \
++                '*=(PROG|COMMAND)*' "_command_names" \
++		'*=ARCHIVE*'        "_tar_archive" \
++		'*=CONTROL*'        "[t numbered nil existing never simple]"
++
++elif [[ ( CURRENT -gt 2 && "$words[CURRENT-1]" = -*f* &&
++          "$words[CURRENT-1]" != --* ) ||
++        ( CURRENT -eq 3 && "$words[2]" = *f* && "$words[2]" != -* ) ]]; then
++
++  # ...archive files if we think they are wanted here.
++
++  _tar_archive
++
++elif [[ -n "$_tar_cmd" && -n "$tf" ]]; then
++
++  # ...and files from the archive if we found an archive name and tar
++  # commands. We run `tar t...' on the file, keeping the list of
++  # filenames cached, plus the name of the tarfile so we know if it
++  # changes.
++
+   local largs=-tf
+ 
+-  [[ $words[2] = *z* ]] && largs=-tzf
+-  [[ $words[2] = *Z* ]] && largs=-tZf
+-  if [[ $tf != $tar_cache_name ]]; then
+-    tar_cache_list=("${(@f)$($words[1] $largs $tf)}")
+-    tar_cache_name=$tf
++  [[ $_tar_cmd = *z* ]] && largs=-tzf
++  [[ $_tar_cmd = *Z* ]] && largs=-tZf
++
++  if [[ $tf != $_tar_cache_name ]]; then
++    _tar_cache_list=("${(@f)$($words[1] $largs $tf)}")
++    _tar_cache_name=$tf
+   fi
+-  _multi_parts / tar_cache_list
+-elif [[ "$tcmd" = *c*f* && $CURRENT -ge 4 ]] then
+-  _files
+-elif [[ "$tcmd" = *[zZ]*f* && $CURRENT -eq 3 ]] then
+-  _files -g '*.((tar|TAR).(gz|Z)|.tgz)'
+-elif [[ "$tcmd" = *f* && $CURRENT -eq 3 ]] then
+-  _files -g '*.(tar|TAR)'
++
++  _multi_parts / _tar_cache_list
+ fi
+diff -u -r ooc/User/_tar_archive Completion/User/_tar_archive
+--- ooc/User/_tar_archive	Mon Mar  8 10:32:02 1999
++++ Completion/User/_tar_archive	Mon Mar  8 10:31:34 1999
+@@ -0,0 +1,20 @@
++#autoload
++
++# This is used to generate filenames usable as a tar archive. This may
++# get one argument, a collection of tar option characters that may be
++# used to find out what kind of filename is needed. If no argument is
++# given but the parameter `_tar_cmd' is set, that is used.
++# If your version of `tar' supports this you may want to complete
++# things like `host:file' or `user@host:file' here.
++
++[[ $# -eq 0 && $+_tar_cmd -ne 0 ]] && set "$_tar_cmd"
++
++if [[ "$1" = *[tx]* ]]; then
++  if [[ "$1" = *[zZ]* ]]; then
++    _files -g '*.((tar|TAR).(gz|GZ|Z)|.tgz)'
++  else
++    _files -g '*.(tar|TAR)'
++  fi
++else
++  _files
++fi
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

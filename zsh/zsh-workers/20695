@@ -1,0 +1,209 @@
+From zsh-workers-return-20695-mason-zsh=primenet.com.au@sunsite.dk Wed Jan 12 12:15:36 2005
+Return-Path: <zsh-workers-return-20695-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15231 invoked from network); 12 Jan 2005 12:15:35 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 12 Jan 2005 12:15:35 -0000
+Received: (qmail 34498 invoked from network); 12 Jan 2005 12:15:25 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 12 Jan 2005 12:15:25 -0000
+Received: (qmail 6489 invoked by alias); 12 Jan 2005 12:15:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 20695
+Received: (qmail 6474 invoked from network); 12 Jan 2005 12:15:10 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 12 Jan 2005 12:15:10 -0000
+Received: (qmail 34123 invoked from network); 12 Jan 2005 12:15:10 -0000
+Received: from mailhost1.csr.com (HELO MAILSWEEPER01.csr.com) (81.105.217.43)
+  by a.mx.sunsite.dk with SMTP; 12 Jan 2005 12:15:07 -0000
+Received: from exchange03.csr.com (unverified [10.100.137.60]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T6e7340c6f80a6c8d012dc@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Wed, 12 Jan 2005 12:13:47 +0000
+Received: from news01.csr.com ([10.103.143.38]) by exchange03.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Wed, 12 Jan 2005 12:17:20 +0000
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.13.1/8.12.11) with ESMTP id j0CCF5Zi023351
+	for <zsh-workers@sunsite.dk>; Wed, 12 Jan 2005 12:15:05 GMT
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.13.1/8.13.1/Submit) with ESMTP id j0CCF5x1023348
+	for <zsh-workers@sunsite.dk>; Wed, 12 Jan 2005 12:15:05 GMT
+Message-Id: <200501121215.j0CCF5x1023348@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: module parameter problems on Cygwin
+Date: Wed, 12 Jan 2005 12:15:04 +0000
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 12 Jan 2005 12:17:20.0936 (UTC) FILETIME=[AA54DA80:01C4F8A0]
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.0 required=6.0 tests=none autolearn=no version=2.63
+X-Spam-Hits: 0.0
+
+Looks like no one's compiled under Cygwin for a while...  I updated the
+version to 4.2.2 and tried to compile under Cygwin and it blew up.
+
+It seems Cygwin won't let you initialise a value at compile time from
+the pointer to a variable imported into a DLL.  Presumably this value
+needs some code to fix it up after the import.  This came in with the
+pseudo-vtable for the get/set/unset methods of parameters.
+
+Luckily, the damage is a good deal less than I first thought.  It would
+be nicer to have a way of indicating that you would like to use a
+particular standard GSU class at compile time, but zsh/parameter and
+zsh/zleparameter use their own ad-hoc initialisation methods and it
+doesn't seem worth fixing up for one class in each case.
+
+I also spotted a bug in zsh.h: INTPARAMDEF was using the wrong GSU
+class.  This would only show up with the exint parameter in the example
+module.  Whole civilizations could have gone by before anybody noticed.
+It would probably be sensible to add tests for the example module, since
+it will pick up interface problems like this.
+
+Index: Src/module.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/module.c,v
+retrieving revision 1.16
+diff -u -r1.16 module.c
+--- Src/module.c	7 Dec 2004 16:55:03 -0000	1.16
++++ Src/module.c	12 Jan 2005 12:09:38 -0000
+@@ -1894,7 +1894,31 @@
+ 
+     pm->level = 0;
+     pm->u.data = d->var;
+-    pm->gsu.i = (GsuInteger) d->gsu;
++    if (d->gsu)
++	pm->gsu.i = (GsuInteger) d->gsu;
++    else {
++	/*
++	 * If no get/set/unset class, use the appropriate
++	 * variable type.
++	 */
++	switch (PM_TYPE(pm->flags)) {
++	case PM_SCALAR:
++	    pm->gsu.s = &varscalar_gsu;
++	    break;
++
++	case PM_INTEGER:
++	    pm->gsu.i = &varinteger_gsu;
++	    break;
++
++	case PM_ARRAY:
++	    pm->gsu.a = &vararray_gsu;
++	    break;
++
++	default:
++	    unsetparam_pm(pm, 0, 1);
++	    return 1;
++	}
++    }
+ 
+     return 0;
+ }
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.67
+diff -u -r1.67 zsh.h
+--- Src/zsh.h	7 Dec 2004 16:55:10 -0000	1.67
++++ Src/zsh.h	12 Jan 2005 12:09:38 -0000
+@@ -1316,12 +1316,17 @@
+ 
+ #define PARAMDEF(name, flags, var, gsu) \
+     { name, flags, (void *) var, (void *) gsu, }
++/*
++ * Note that the following definitions are appropriate for defining
++ * parameters that reference a variable (var).  Hence the get/set/unset
++ * methods used will assume var needs dereferencing to get the value.
++ */
+ #define INTPARAMDEF(name, var) \
+-    { name, PM_INTEGER, (void *) var, (void *) &stdinteger_gsu }
++    { name, PM_INTEGER, (void *) var, NULL }
+ #define STRPARAMDEF(name, var) \
+-    { name, PM_SCALAR, (void *) var, (void *) &varscalar_gsu }
++    { name, PM_SCALAR, (void *) var, NULL }
+ #define ARRPARAMDEF(name, var) \
+-    { name, PM_ARRAY, (void *) var, (void *) &vararray_gsu }
++    { name, PM_ARRAY, (void *) var, NULL }
+ 
+ #define setsparam(S,V) assignsparam(S,V,0)
+ #define setaparam(S,V) assignaparam(S,V,0)
+Index: Src/Modules/parameter.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/parameter.c,v
+retrieving revision 1.31
+diff -u -r1.31 parameter.c
+--- Src/Modules/parameter.c	7 Dec 2004 16:55:10 -0000	1.31
++++ Src/Modules/parameter.c	12 Jan 2005 12:09:38 -0000
+@@ -1812,6 +1812,13 @@
+     Param pm;
+ };
+ 
++/*
++ * This is a duplicate of nullsethash_gsu.  On some systems
++ * (such as Cygwin) we can't put a pointer to an imported variable
++ * in a compile-time initialiser, so we use this instead.
++ */
++static const struct gsu_hash pmnullsethash_gsu =
++{ hashgetfn, nullsethashfn, NULL };
+ static const struct gsu_hash pmcommands_gsu =
+ { hashgetfn, setpmcommands, stdunsetfn };
+ static const struct gsu_hash pmfunctions_gsu =
+@@ -1848,7 +1855,7 @@
+ 
+ static struct pardef partab[] = {
+     { "parameters", PM_READONLY,
+-      getpmparameter, scanpmparameters, &nullsethash_gsu,
++      getpmparameter, scanpmparameters, &pmnullsethash_gsu,
+       NULL, NULL },
+     { "commands", 0,
+       getpmcommand, scanpmcommands, &pmcommands_gsu,
+Index: Src/Zle/zleparameter.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zleparameter.c,v
+retrieving revision 1.4
+diff -u -r1.4 zleparameter.c
+--- Src/Zle/zleparameter.c	7 Dec 2004 16:55:12 -0000	1.4
++++ Src/Zle/zleparameter.c	12 Jan 2005 12:09:38 -0000
+@@ -167,12 +167,19 @@
+     Param pm;
+ };
+ 
++/*
++ * This is a duplicate of stdhash_gsu.  On some systems
++ * (such as Cygwin) we can't put a pointer to an imported variable
++ * in a compile-time initialiser, so we use this instead.
++ */
++static const struct gsu_hash zlestdhash_gsu =
++{ hashgetfn, hashsetfn, stdunsetfn };
+ static const struct gsu_array keymaps_gsu =
+ { keymapsgetfn, arrsetfn, stdunsetfn };
+ 
+ static struct pardef partab[] = {
+     { "widgets", PM_READONLY,
+-      getpmwidgets, scanpmwidgets, &stdhash_gsu,
++      getpmwidgets, scanpmwidgets, &zlestdhash_gsu,
+       NULL, NULL },
+     { "keymaps", PM_ARRAY|PM_SPECIAL|PM_READONLY,
+       NULL, NULL, NULL,
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

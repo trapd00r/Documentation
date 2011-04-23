@@ -1,0 +1,205 @@
+From zsh-workers-return-14605-mason-zsh=primenet.com.au@sunsite.dk Thu May 31 09:36:05 2001
+Return-Path: <zsh-workers-return-14605-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3774 invoked from network); 31 May 2001 09:36:04 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 May 2001 09:36:04 -0000
+Received: (qmail 11550 invoked by alias); 31 May 2001 09:35:56 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14605
+Received: (qmail 11538 invoked from network); 31 May 2001 09:35:55 -0000
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+Date: Thu, 31 May 2001 11:34:58 +0200 (MET DST)
+Message-Id: <200105310934.LAA12256@beta.informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+Subject: Re: zsh and autoconf-2.50
+In-Reply-To: <1010531072201.ZM5601@candle.brasslantern.com>
+
+Bart Schaefer wrote:
+
+> On May 30, 11:22pm, Jos Backus wrote:
+> }
+> } I have attached the Purify results of a ``gmake check'', hopefully that's OK
+> 
+> Grepping "leaked" from all those files shows a whopping 3 bytes lost from 
+> parse_cadef() during the entire testing process.  I'd say we're doing
+> pretty well.  Thanks, Josh.
+
+Yes, thanks.
+
+That memory leak happened with a _arguments-spec of the form `-+foo'.
+
+> There are a few array over-reads:
+> 
+> purify.zsh.8428.out:ABR: Array bounds read:
+> purify.zsh.8428.out-  * This is occurring while in:
+> purify.zsh.8428.out-    parse_class    [complete.c:405]
+> purify.zsh.8428.out-    parse_pattern  [complete.c:358]
+> --
+> purify.zsh.8428.out:ABR: Array bounds read:
+> purify.zsh.8428.out-  * This is occurring while in:
+> purify.zsh.8428.out-    parse_pattern  [complete.c:359]
+> purify.zsh.8428.out-    parse_cmatcher [complete.c:298]
+
+These two are actually the same.  parse_pattern() uses the out-of-bound
+pointer returned by parse_class().  The test in the latter was wrong for
+badly formed classes like "{0-".
+
+> purify.zsh.8841.out:ABR: Array bounds read:
+> purify.zsh.8841.out-  * This is occurring while in:
+> purify.zsh.8841.out-    get_cadef      [computil.c:1032]
+> purify.zsh.8841.out-    bin_comparguments [computil.c:1789]
+
+Oops, better first test the counter and then `*p'.
+
+> No over-writes.  Also a few uninitialized reads, all in the same place:
+> 
+> purify.zsh.7241.out:UMR: Uninitialized memory read:
+> purify.zsh.7241.out-  * This is occurring while in:
+> purify.zsh.7241.out-    paramsubst     [subst.c:1183]
+> purify.zsh.7241.out-    stringsubst    [subst.c:129]
+>
+> ...
+> 
+> The uninitialized memory is deep in a zsh heap block, so the data about
+> where it was allocated doesn't help at all.
+
+That line is:
+
+		fwidth = v->pm->ct ? v->pm->ct : strlen(val);
+
+So I guess someone was heap-allocating a param struct without fully
+initialising it.
+
+The patch contains some hunks for defensive programming for this.
+
+And there was another leak:
+
+purify.zsh.7649.out:MLK: 5 bytes leaked at 0x39dc38
+  * This memory was allocated from:
+	malloc         [rtlib.o]
+	zalloc         [mem.c:490]
+	ztrdup         [string.c:52]
+	addvars        [exec.c:1536]
+
+It's the line that ztrdup()s a string before calling the assignment
+function, so I guess one of the set-functions doesn't free the string it
+gets when not using it.  I found only one such functions, the one for
+$USERNAME, but that isn't assigned in the test suite.  Hm.
+
+
+Bye
+  Sven
+
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.47
+diff -u -r1.47 params.c
+--- Src/params.c	2001/05/20 09:20:46	1.47
++++ Src/params.c	2001/05/31 09:29:17
+@@ -704,7 +704,7 @@
+ 	if (isset(ALLEXPORT) && !(flags & PM_HASHELEM))
+ 	    flags |= PM_EXPORTED;
+     } else {
+-	pm = (Param) zhalloc(sizeof *pm);
++	pm = (Param) hcalloc(sizeof *pm);
+ 	pm->nam = nulstring;
+     }
+     pm->flags = flags & ~PM_LOCAL;
+@@ -727,6 +727,7 @@
+      * with sets.?fn() usage).
+      */
+     tpm->flags = pm->flags;
++    tpm->ct = pm->ct;
+     if (!toplevel)
+ 	tpm->flags &= ~PM_SPECIAL;
+     switch (PM_TYPE(pm->flags)) {
+@@ -2551,6 +2552,7 @@
+ 	}
+     }
+ #endif /* HAVE_SETUID && HAVE_GETPWNAM */
++    zsfree(x);
+ }
+ 
+ /* Function to get value for special parameter `UID' */
+Index: Src/Modules/parameter.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/parameter.c,v
+retrieving revision 1.19
+diff -u -r1.19 parameter.c
+--- Src/Modules/parameter.c	2000/11/02 08:12:45	1.19
++++ Src/Modules/parameter.c	2001/05/31 09:29:17
+@@ -60,6 +60,7 @@
+     pm->sets.hfn = hashsetfn;
+     pm->unsetfn = stdunsetfn;
+     pm->u.hash = ht = newhashtable(0, name, NULL);
++    pm->ct = 0;
+ 
+     ht->hash        = hasher;
+     ht->emptytable  = (TableFunc) shempty;
+Index: Src/Zle/complete.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complete.c,v
+retrieving revision 1.15
+diff -u -r1.15 complete.c
+--- Src/Zle/complete.c	2001/01/11 10:06:50	1.15
++++ Src/Zle/complete.c	2001/05/31 09:29:18
+@@ -403,7 +403,7 @@
+ 
+     n = !n;
+     while (*s && (k || *s != e)) {
+-	if (s[1] == '-' && s[2] != e) {
++	if (s[1] == '-' && s[2] && s[2] != e) {
+ 	    /* a run of characters */
+ 	    for (j = (int) *s; j <= (int) s[2]; j++)
+ 		p->tab[j] = (eq ? i++ : n);
+Index: Src/Zle/computil.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/computil.c,v
+retrieving revision 1.55
+diff -u -r1.55 computil.c
+--- Src/Zle/computil.c	2001/05/10 08:52:31	1.55
++++ Src/Zle/computil.c	2001/05/31 09:29:19
+@@ -819,8 +819,9 @@
+ 	    if (!multi) {
+ 		if (!xor) {
+ 		    xor = (char **) zalloc(2 * sizeof(char *));
+-		    xor[1] = NULL;
++		    xor[0] = xor[1] = NULL;
+ 		}
++                zsfree(xor[xnum]);
+ 		xor[xnum] = ztrdup(rembslashcolon(name));
+ 	    }
+ 	    if (c == ':') {
+@@ -1029,7 +1030,7 @@
+     Cadef *p, *min, new;
+     int i, na = arrlen(args);
+ 
+-    for (i = MAX_CACACHE, p = cadef_cache, min = NULL; *p && i; p++, i--)
++    for (i = MAX_CACACHE, p = cadef_cache, min = NULL; i && *p; p++, i--)
+ 	if (*p && na == (*p)->ndefs && arrcmp(args, (*p)->defs)) {
+ 	    (*p)->lastt = time(0);
+ 
+Index: Src/Zle/zleparameter.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zleparameter.c,v
+retrieving revision 1.1.1.10
+diff -u -r1.1.1.10 zleparameter.c
+--- Src/Zle/zleparameter.c	2000/02/23 15:18:49	1.1.1.10
++++ Src/Zle/zleparameter.c	2001/05/31 09:29:19
+@@ -55,6 +55,7 @@
+     pm->sets.hfn = hashsetfn;
+     pm->unsetfn = stdunsetfn;
+     pm->u.hash = ht = newhashtable(0, name, NULL);
++    pm->ct = 0;
+ 
+     ht->hash        = hasher;
+     ht->emptytable  = (TableFunc) shempty;
+
+-- 
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

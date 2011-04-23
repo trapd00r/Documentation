@@ -1,0 +1,135 @@
+From zsh-workers-return-18243-mason-zsh=primenet.com.au@sunsite.dk Fri Feb 14 18:57:26 2003
+Return-Path: <zsh-workers-return-18243-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23702 invoked from network); 14 Feb 2003 18:57:26 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 14 Feb 2003 18:57:26 -0000
+Received: (qmail 4226 invoked by alias); 14 Feb 2003 18:57:15 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 18243
+Received: (qmail 4219 invoked from network); 14 Feb 2003 18:57:15 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 14 Feb 2003 18:57:15 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.183.235] by sunsite.dk (MessageWall 1.0.8) with SMTP; 14 Feb 2003 18:57:14 -0000
+Received: from exchange01.csr.com (unverified) by 
+ (Content Technologies SMTPRS 4.2.1) with ESMTP id <T606a216d6fc0a88d01354@> for <zsh-workers@sunsite.dk>;
+ Fri, 14 Feb 2003 19:03:56 +0000
+Received: from csr.com (tinky-winky.csr.com [192.168.144.127]) by exchange01.csr.com with SMTP (Microsoft Exchange Internet Mail Service Version 5.5.2650.21)
+	id DQ47M5NA; Fri, 14 Feb 2003 18:57:47 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: Poll tty before selecting on Solaris
+Date: Fri, 14 Feb 2003 18:57:15 +0000
+Message-ID: <24638.1045249035@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+This extravaganza is necessary on Solaris when you use select() with the
+terminal and there is already typeahead --- it doesn't see it, you need
+to use a read with the termios poll mechanism.  You wouldn't typically
+see this unless you use the zle -F mechanism to wait for other output;
+unfortunately I use this all day to talk to BlueCore.
+
+If anyone can tell me what it is I'm doing wrong in order to avoid this,
+that would be a relief.
+
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.29
+diff -u -r1.29 zle_main.c
+--- Src/Zle/zle_main.c	27 Jan 2003 14:54:53 -0000	1.29
++++ Src/Zle/zle_main.c	14 Feb 2003 18:51:13 -0000
+@@ -348,13 +348,12 @@
+ {
+     long exp100ths;
+     int ret;
++#ifdef HAS_TIO
++    struct ttyinfo ti;
++#endif
+ #ifndef HAVE_POLL
+ # ifdef HAVE_SELECT
+     fd_set foofd;
+-# else
+-#  ifdef HAS_TIO
+-    struct ttyinfo ti;
+-#  endif
+ # endif
+ #endif
+ 
+@@ -379,9 +378,40 @@
+ 	    int i, errtry = 0, selret;
+ # ifdef HAVE_POLL
+ 	    int poll_timeout;
+-	    int nfds = keytmout ? 1 : 1 + nwatch;
++	    int nfds;
++	    struct pollfd *fds;
++# else
++	    int fdmax;
++	    struct timeval *tvptr;
++	    struct timeval expire_tv;
++# endif
++# if defined(HAS_TIO) && defined(sun)
++	    /*
++	     * Yes, I know this is complicated.  Yes, I know we
++	     * already have three bits of code to poll the terminal
++	     * down below.  No, I don't want to do this either.
++	     * However, it turns out on certain OSes, specifically
++	     * Solaris, that you can't poll typeahead for love nor
++	     * money without actually trying to read it.  But
++	     * if we are trying to select (and we need to if we
++	     * are watching other fd's) we won't pick that up.
++	     * So we just try and read it without blocking in
++	     * the time-honoured (i.e. absurdly baroque) termios
++	     * fashion.
++	     */
++	    gettyinfo(&ti);
++	    ti.tio.c_cc[VMIN] = 0;
++	    settyinfo(&ti);
++	    ret = read(SHTTY, cptr, 1);
++	    ti.tio.c_cc[VMIN] = 1;
++	    settyinfo(&ti);
++	    if (ret > 0)
++		return 1;
++# endif
++# ifdef HAVE_POLL
++	    nfds = keytmout ? 1 : 1 + nwatch;
+ 	    /* First pollfd is SHTTY, following are the nwatch fds */
+-	    struct pollfd *fds = zalloc(sizeof(struct pollfd) * nfds);
++	    fds = zalloc(sizeof(struct pollfd) * nfds);
+ 	    if (exp100ths)
+ 		poll_timeout = exp100ths * 10;
+ 	    else
+@@ -400,9 +430,8 @@
+ 		}
+ 	    }
+ # else
+-	    int fdmax = SHTTY;
+-	    struct timeval *tvptr = NULL;
+-	    struct timeval expire_tv;
++	    fdmax = SHTTY;
++	    tvptr = NULL;
+ 	    if (exp100ths) {
+ 		expire_tv.tv_sec = exp100ths / 100;
+ 		expire_tv.tv_usec = (exp100ths % 100) * 10000L;
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

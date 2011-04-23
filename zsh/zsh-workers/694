@@ -1,0 +1,244 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Fri Dec 15 19:39:35 1995
+Received: from euclid.skiles.gatech.edu (euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with ESMTP id TAA13933 for <mason@werple.mira.net.au>; Fri, 15 Dec 1995 19:39:26 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id DAA17425; Fri, 15 Dec 1995 03:04:50 -0500 (EST)
+Resent-Date: Fri, 15 Dec 1995 03:04:50 -0500 (EST)
+From: Zefram <A.Main@dcs.warwick.ac.uk>
+Message-Id: <29073.199512150805@stone.dcs.warwick.ac.uk>
+Subject: Re: bugs in zsh 2.6b12?
+To: zsh-workers@math.gatech.edu (Z Shell workers mailing list)
+Date: Fri, 15 Dec 1995 08:05:02 +0000 (GMT)
+Cc: apaul@got.net
+In-Reply-To:  <9512140939.aa11178@apaul.got.net> from "Adam Paul" at Dec 14, 95 09:39:43 am
+X-Loop: zefram@dcs.warwick.ac.uk
+X-Stardate: [-31]6746.68
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"Mcodz1.0.8G4.XmIqm"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/694
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+This patch fixes the double listing bug noted by Adam R. Paul
+<apaul@got.net>, that manifests itself when an unambiguous portion of
+an ambiguous completion is inserted and a list must also be generated,
+which can only happen when LIST_AMBIGUOUS is unset.  (Mr Paul, it's a
+cool option, I suggest you use it.  :-})
+
+The problem is that in that case, listmatches() is called from
+invalidatelist().  That code was essentially added to cope with this
+type of case.  listmatches(), in the normal course of events, calls
+trashzle(), which calls refresh(), which in that case will call
+listmatches().  The recursion goes round again, and is stopped by
+refresh()'s inlist, which was added to avoid this recursion.  That is
+why one gets two lists in that case.  In other cases, listmatches() is
+first called from refresh(), so inlist stops the recursion with only
+one call to listmatches() on the stack.
+
+A possible solution would be to set showinglist to 0 very early in
+listmatches(), before trashzle() is called.  That would work fairly
+well.  I rejected that for two reasons: firstly, it would still be a
+special-purpose kludge to avoid infinite recursion.  Secondly, a better
+solution is available:
+
+The solution I have chosen is to modify trashzle(), so that it
+temporarily sets showinglist to 0 when it calls refresh().  This makes
+a great deal of sense: trashzle() doesn't want the list at all, it only
+wants the main editor lines, and in fact I think it clears the rest of
+the screen.  This also means that we won't get extraneous update of the
+list when calling trashzle() from anywhere else.
+
+Note that I leave the inlist code as it is.  It is now unnecessary, but
+it does cut down the number of refreshes by 1 in the vast majority of
+cases of listing.
+
+While trying to track down this bug, I recoded most of do_ambiguous(),
+and added lots of comments explaining the logic in a few places.  I've
+left these changes in this patch, because I think they're useful.
+
+ -zefram
+
+ *** 1.2	1995/12/12 22:18:05
+ --- Src/zle_main.c	1995/12/15 07:03:27
+ ***************
+ *** 1149,1155 ****
+ --- 1149,1163 ----
+   trashzle(void)
+   {
+       if (zleactive) {
+ + 	/* This refresh() is just to get the main editor display right and *
+ + 	 * get the cursor in the right place.  For that reason, we disable *
+ + 	 * list display (which would otherwise result in infinite          *
+ + 	 * recursion [at least, it would if refresh() didn't have its      *
+ + 	 * extra `inlist' check]).                                         */
+ + 	int sl = showinglist;
+ + 	showinglist = 0;
+   	refresh();
+ + 	showinglist = sl;
+   	moveto(nlnct, 0);
+   	if (clearflag && tccan(TCCLEAREOD)) {
+   	    tcout(TCCLEAREOD);
+ *** 1.2	1995/12/04 17:30:36
+ --- Src/zle_refresh.c	1995/12/15 07:06:47
+ ***************
+ *** 168,175 ****
+   	*scs = line + cs;	/* pointer to cursor position in real buffer */
+       char **qbuf;		/* tmp					     */
+   
+ !     /* if this is called from listmatches(), and that was called from the end
+ !     of refresh(), then we don't need to do anything */
+       if(inlist)
+   	return;
+   
+ --- 168,177 ----
+   	*scs = line + cs;	/* pointer to cursor position in real buffer */
+       char **qbuf;		/* tmp					     */
+   
+ !     /* If this is called from listmatches() (indirectly via trashzle()), and *
+ !      * that was called from the end of refresh(), then we don't need to do   *
+ !      * anything.  All this `inlist' code is actually unnecessary, but it     *
+ !      * improves speed a little in a common case.                             */
+       if(inlist)
+   	return;
+   
+ *** 1.1	1995/11/23 06:07:30
+ --- Src/zle_tricky.c	1995/12/15 07:10:26
+ ***************
+ *** 371,378 ****
+   
+   #define IN_ENV     4
+   
+ ! /* Non-zero if the last completion done was ambiguous (used to find out 
+ !    if automenu should start). */
+   
+   static int lastambig;
+   
+ --- 371,383 ----
+   
+   #define IN_ENV     4
+   
+ ! /* Non-zero if the last completion done was ambiguous (used to find   *
+ !  * out if AUTOMENU should start).  More precisely, it's nonzero after *
+ !  * successfully doing any completion, unless the completion was       *
+ !  * unambiguous and did not cause the display of a completion list.    *
+ !  * From the other point of view, it's nonzero iff AUTOMENU (if set)   *
+ !  * should kick in on another completion (provided the text isn't      *
+ !  * changed in the meantime... AAAAAAAAAAUUUUGGGHH!).                  */
+   
+   static int lastambig;
+   
+ ***************
+ *** 3214,3253 ****
+   
+       menucmp = 0;
+   
+ !     /* If we have to insert the first match, call do_single(). */
+       if (shortest && shortl == 0 && isset(RECEXACT) &&
+   	(usemenu == 0 || unset(AUTOMENU))) {
+   	do_single(shortest);
+   	invalidatelist();
+       } else {
+ ! 	lastambig = 1;
+ ! 	if (p)
+ ! 	    /* Otherwise we have to do menu-completion... */
+ ! 	    do_ambig_menu();
+ ! 	else {
+ ! 	    /* Or to insert the minimal common prefix and suffix, and
+ ! 	    invalidate the match list. */
+ ! 	    complexpect = 0;
+ ! 	    if (ab)
+ ! 		inststrlen(firstm, 1, ab);
+ ! 	    if (ae && !atend)
+ ! 		inststrlen(firstm + strlen(firstm) - ae, 0, ae);
+ ! 	    if(ab || (ae && !atend))
+ ! 		inv = 1;
+ ! 	    if (isset(LISTAMBIGUOUS) && (ab || (ae && !atend))) {
+ ! 		invalidatelist();
+ ! 		lastambig = 0;
+ ! 		return;
+ ! 	    }
+ ! 	}
+ ! 	if (unset(NOLISTBEEP))
+ ! 	    feep();
+ ! 	/* And finally list the matches if needed (and requested). */
+ ! 	if (isset(AUTOLIST) && !amenu && !showinglist)
+ ! 	    showinglist = -2;
+ ! 	if(inv)
+   	    invalidatelist();
+       }
+   }
+   
+   /* This is a stat that ignores backslashes in the filename (the second
+ --- 3219,3275 ----
+   
+       menucmp = 0;
+   
+ !     /* If we have to insert the first match, call do_single().  This is *
+ !      * how REC_EXACT takes effect.  We effectively turn the ambiguous   *
+ !      * completion into an unambiguous one.                              */
+       if (shortest && shortl == 0 && isset(RECEXACT) &&
+   	(usemenu == 0 || unset(AUTOMENU))) {
+   	do_single(shortest);
+   	invalidatelist();
+ + 	return;
+ +     }
+ +     /* Setting lastambig here means that the completion is ambiguous and *
+ +      * AUTO_MENU might want to start a menu completion next time round,  *
+ +      * but this might be overridden below if we can complete an          *
+ +      * unambiguous prefix.                                               */
+ +     lastambig = 1;
+ +     if(p) {
+ + 	/* p is set if we are in a position to start using menu completion *
+ + 	 * due to one of the menu completion options, or due to the        *
+ + 	 * menu-complete-word command, or due to using GLOB_COMPLETE which *
+ + 	 * does menu-style completion regardless of the setting of the     *
+ + 	 * normal menu completion options.                                 */
+ + 	do_ambig_menu();
+       } else {
+ ! 	/* Sort-of general case: we have an ambiguous completion, and aren't *
+ ! 	 * starting menu completion or doing anything really weird.  We need *
+ ! 	 * to insert any unambiguous prefix and suffix, if possible.         */
+ ! 	complexpect = 0;
+ ! 	if(ab)
+ ! 	    inststrlen(firstm, 1, ab);
+ ! 	if(ae && !atend)
+ ! 	    inststrlen(firstm + strlen(firstm) - ae, 0, ae);
+ ! 	if(ab || (ae && !atend))
+ ! 	    inv = 1;
+ ! 	/* If the LIST_AMBIGUOUS option (meaning roughly `show a list only *
+ ! 	 * if the completion is completely ambiguous') is set, and some    *
+ ! 	 * prefix was inserted, return now, bypassing the list-displaying  *
+ ! 	 * code.  On the way, invalidate the list and note that we don't   *
+ ! 	 * want to enter an AUTO_MENU imediately.                          */
+ ! 	if(isset(LISTAMBIGUOUS) && inv) {
+   	    invalidatelist();
+ + 	    lastambig = 0;
+ + 	    return;
+ + 	}
+       }
+ +     /* At this point, we might want a completion listing.  Show the listing *
+ +      * if it is needed.                                                     */
+ +     if (unset(NOLISTBEEP))
+ + 	feep();
+ +     if (isset(AUTOLIST) && !amenu && !showinglist)
+ + 	showinglist = -2;
+ +     if(inv)
+ + 	invalidatelist();
+   }
+   
+   /* This is a stat that ignores backslashes in the filename (the second
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.i
+
+iQCVAgUBMNEmyHD/+HJTpU/hAQHbCQP/RPExnHE5/sKMB48xpCdfyeEpGp4q68Ie
+QFirA6zoTeDtN4LKxUC1oVzD/015GDZyNU9aBBtq8GNGDOXsvD8yLTUWQcasUZHw
+SX9s6Gt1hnAqTd4ESLttez07wCOF+YVl4azZPosh8ZsHU0jsPn8Uh+UdAfXNMOYQ
+ihiVm3H7cFE=
+=qWYf
+-----END PGP SIGNATURE-----
+

@@ -1,0 +1,1616 @@
+From zsh-workers-return-7533-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Aug 30 08:56:06 1999
+Return-Path: <zsh-workers-return-7533-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26782 invoked from network); 30 Aug 1999 08:55:59 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 30 Aug 1999 08:55:59 -0000
+Received: (qmail 16846 invoked by alias); 30 Aug 1999 08:55:50 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7533
+Received: (qmail 16838 invoked from network); 30 Aug 1999 08:55:46 -0000
+Date: Mon, 30 Aug 1999 10:55:43 +0200 (MET DST)
+Message-Id: <199908300855.KAA19951@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: _arguments and friends
+
+
+Various things:
+
+- In `_arguments', option descriptions like `-opt=:...' are now
+  treated a bit more as they were in `_long_options': the `=' isn't
+  shown in the list, it will be auto-removed and the argument may come 
+  in the next word. I.e. it is comparable to `-opt+:...', only plus
+  the special treatment of a `=' on the line.
+  I don't know if it is good to always allow the argument to come in
+  the next word -- maybe there are commands which don't allow this? In 
+  that case we should either make it behave like `-opt-:...' (i.e. allow
+  the argument only in the same word) or we should implement `-opt=-'
+  and `-opt=+' to have both forms. This raises the question how
+  `_long_options' like automatically generated options should work.
+- In `_arguments' it allows `-+opt' and `+-opt' to easily define
+  options which may be preceded by either a minus or a plus sign. It
+  also changes all the functions using `_arguments' to use this.
+- It makes `option_prefix' be tested only for empty/non-empty.
+- (The biggest part of the patch.) It merges `_long_options' into
+  `_arguments'. The syntax stays the same, its just that the pattern
+  descriptions for the long options are now interpreted by
+  `_arguments' itself (including the call to `cmd --help'). Internally 
+  this just builds normal option description arguments and later uses
+  these together with those supplied by the user.
+  It also changes all functions that used `_long_options', so
+  `_long_options' can now be removed.
+- Then there are a few new functions for some commands, most notably a 
+  directory `Rpm' containing the functions for `rpm'. I had some
+  problems with this, because on the Linux I have the description in
+  the manual didn't match the output of `rpm --help'. I used the
+  latter, but neither of the two really described the differences
+  between the different types of arguments, so I'm not sure if I got
+  all the argument completions right. I'd be thankful if someone who
+  actually uses `rpm' could have a look at it.
+
+Bye
+ Sven
+
+diff -u -r oc/Base/_arguments Completion/Base/_arguments
+--- oc/Base/_arguments	Sun Aug 29 22:06:50 1999
++++ Completion/Base/_arguments	Sun Aug 29 13:54:43 1999
+@@ -5,7 +5,7 @@
+ 
+ setopt localoptions extendedglob
+ 
+-local long args rest ws cur nth def nm expl descr action opt arg tmp
++local args rest ws cur nth def nm expl descr action opt arg tmp
+ local single uns ret=1 soptseq soptseq1 sopts prefix line
+ local beg optbeg argbeg nargbeg inopt fromrest
+ 
+@@ -22,7 +22,7 @@
+   unset _args_cache_{opts,dopts,odopts,oneshot}
+   typeset -gA _args_cache_{opts,dopts,odopts,oneshot}
+ 
+-  unset _args_cache_{long,single,rest,args,sopts,soptseq,soptseq1}
++  unset _args_cache_{long,longcmd,single,rest,args,sopts,soptseq,soptseq1}
+ 
+   # See if we are using single-letter options.
+ 
+@@ -35,10 +35,149 @@
+ 
+   nth=$argv[(I)--]
+   if (( nth )); then
+-    _args_cache_long=( "${(@)argv[nth+1,-1]}" )
+-    _args_cache_long_nth=$(( nth - 1 ))
+-  else
+-    _args_cache_long=()
++    local tmpargv
++
++    if [[ nth -eq 1 ]]; then
++      tmpargv=()
++    else
++      tmpargv=( "${(@)argv[1,nth-1]}" )
++    fi
++
++    if [[ "$words[1]" = /* ]]; then
++      tmp="$words[1]"
++    else
++      tmp="$PWD/$words[1]"
++    fi
++
++    if [[ "$tmp" != "$_args_cache_longcmd" ]]; then
++      local iopts pattern tmpo
++      typeset -U lopts
++
++      _args_cache_longcmd="$tmp"
++
++      # We have to build the long-option cache anew, get the `-i' and
++      # `-s' options.
++
++      iopts=()
++      sopts=()
++      while [[ "$1" = -[is]* ]]; do
++        if [[ "$1" = -??* ]]; then
++	  tmp="${1[3,-1]}"
++	  cur=1
++        else
++          tmp="$2"
++	  cur=2
++        fi
++	if [[ "$tmp[1]" = '(' ]]; then
++	  tmp=( ${=tmp[2,-2]} )
++        else
++	  tmp=( "${(@P)tmp}" )
++        fi
++	if [[ "$1" = -i* ]]; then
++          iopts=( "$iopts[@]" "$tmp[@]" )
++        else
++          sopts=( "$sopts[@]" "$tmp[@]" )
++        fi
++	shift cur
++      done
++
++      # Now get the long option names by calling the command with `--help'.
++      # The parameter expansion trickery first gets the lines as separate
++      # array elements. Then we select all lines whose first non-blank
++      # character is a hyphen. Since some commands document more than one
++      # option per line, separated by commas, we convert commas int
++      # newlines and then split the result again at newlines after joining 
++      # the old array elements with newlines between them. Then we select
++      # those elements that start with two hyphens, remove anything up to
++      # those hyphens and anything from the space or comma after the
++      # option up to the end. 
++
++      lopts=("--${(@)^${(@)${(@)${(@M)${(@ps:\n:j:\n:)${(@)${(@M)${(@f)$("$words[1]" --help 2>&1)//\[--/
++--}:#[ 	]#-*}//,/
++}}:#[ 	]#--*}#*--}%%[, ]*}:#}")
++
++      # Now remove all ignored options ...
++
++      while (( $#iopts )); do
++        lopts=( ${lopts:#$~iopts[1]} )
++        shift iopts
++      done
++
++      # ... and add "same" options
++
++      while (( $#sopts )); do
++        lopts=( $lopts ${opts/$sopts[1]/$sopts[2]} )
++        shift 2 sopts
++      done
++
++      # Then we walk through the descriptions plus a few builtin ones.
++
++      set -- "${(@)argv[nth+1,-1]}" '*=FILE*:file:_files' \
++             '*=(DIR|PATH)*:directory:_files -/' '*:unknown:'
++
++      while (( $# )); do
++
++        # First, we get the pattern and the action to use and take them
++        # from the positional parameters.
++
++        pattern="${${${(M)1#*[^\\]:}[1,-2]}//\\\\:/:}"
++        descr="${1#${pattern}}"
++        shift
++
++        # We get all options matching the pattern and take them from the
++        # list we have built. If no option matches the pattern, we
++        # continue with the next.
++
++        tmp=("${(@M)lopts:##$~pattern}")
++        lopts=("${(@)lopts:##$~pattern}")
++
++        (( $#tmp )) || continue
++
++        opt=''
++
++        # If there are option strings with a `[=', we take these get an
++        # optional argument.
++
++        tmpo=("${(@M)tmp:#*\[\=*}")
++        if (( $#tmpo )); then
++          tmp=("${(@)tmp:#*\[\=*}")
++          tmpo=("${(@)${(@)tmpo%%\=*}//[^a-z0-9-]}")
++
++	  if [[ "$descr" = ::* ]]; then
++	    _args_cache_long=( "$_args_cache_long[@]"
++	                       "${(@)^tmpo}=${descr}" )
++          else
++	    _args_cache_long=( "$_args_cache_long[@]"
++	                       "${(@)^tmpo}=:${descr}" )
++          fi
++        fi
++
++	# Descriptions with `=': mandatory argument.
++
++        tmpo=("${(@M)tmp:#*\=*}")
++        if (( $#tmpo )); then
++          tmp=("${(@)tmp:#*\=*}")
++          tmpo=("${(@)${(@)tmpo%%\=*}//[^a-z0-9-]}")
++
++	  if [[ "$descr" = ::* ]]; then
++	    _args_cache_long=( "$_args_cache_long[@]"
++	                       "${(@)^tmpo}=${descr[2,-1]}" )
++          else
++	    _args_cache_long=( "$_args_cache_long[@]"
++	                       "${(@)^tmpo}=${descr}" )
++          fi
++        fi
++
++	# Everything else is just added as a option without arguments.
++
++        if (( $#tmp )); then
++          tmp=("${(@)tmp//[^a-zA-Z0-9-]}")
++	  _args_cache_long=( "$_args_cache_long[@]" "$tmp[@]" )
++	fi
++      done
++    fi
++
++    set -- "$tmpargv[@]" "$_args_cache_long[@]"
+   fi
+ 
+   # Now parse the arguments...
+@@ -47,51 +186,71 @@
+   nth=1
+   while (( $# )); do
+ 
+-    # This describes a one-shot option.
++    # Description for both the `-foo' and `+foo' form?
+ 
+-    if [[ "$1" = [-+]* ]]; then
+-      if [[ "$1" = *:* ]]; then
++    if [[ "$1" = (\*|)(-+|+-)* ]]; then
+ 
+-        # If the option name ends in a `-', the first argument comes
+-        # directly after the option, if it ends in a `+', the first
+-        # argument *may* come directly after the option, otherwise it
+-        # is in the next word.
+-
+-        if [[ "$1" = [^:]##-:* ]]; then
+-  	  tmp="${${1%%:*}[1,-2]}"
+-          _args_cache_dopts[$tmp]="${1#*:}"
+-        elif [[ "$1" = [^:]##+:* ]]; then
+-  	  tmp="${${1%%:*}[1,-2]}"
+-          _args_cache_odopts[$tmp]="${1#*:}"
+-        else
+-          tmp="${1%%:*}"
+-          _args_cache_opts[$tmp]="${1#*:}"
+-        fi
++      # With a `*' at the beginning, the option may appear more than
++      # once.
++
++      if [[ "$1" = \** ]]; then
++        tmp="${1[4,-1]%%:*}"
++        [[ "$tmp" = *[-+] ]] && tmp="$tmp[1,-2]"
++        unset "_args_cache_oneshot[-$tmp]" "_args_cache_oneshot[+$tmp]"
+       else
+-        tmp="$1"
+-        _args_cache_opts[$tmp]=''
++        tmp="${1[3,-1]%%:*}"
++        [[ "$tmp" = *[-+] ]] && tmp="$tmp[1,-2]"
++        _args_cache_oneshot[-$tmp]=yes
++        _args_cache_oneshot[+$tmp]=yes
++      fi
++
++      # If the option name ends in a `-', the first argument comes
++      # directly after the option, if it ends in a `+', the first
++      # argument *may* come directly after the option, otherwise it
++      # is in the next word.
++
++      if [[ "$1" = [^:]##-:* ]]; then
++        _args_cache_dopts[-$tmp]="${1#*:}"
++        _args_cache_dopts[+$tmp]="${1#*:}"
++      elif [[ "$1" = [^:]##[+=]:* ]]; then
++        _args_cache_odopts[-$tmp]="${1#*:}"
++        _args_cache_odopts[+$tmp]="${1#*:}"
++      elif [[ "$1" = *:* ]]; then
++        _args_cache_opts[-$tmp]="${1#*:}"
++        _args_cache_opts[+$tmp]="${1#*:}"
++      else
++        _args_cache_opts[-$tmp]=''
++        _args_cache_opts[+$tmp]=''
+       fi
+-      _args_cache_oneshot[$tmp]=yes
+-    elif [[ "$1" = \*[-+]* ]]; then
++    elif [[ "$1" = (\*|)[-+]* ]]; then
+ 
+-      # The same for options that may appear more than once.
++      # With a `*' at the beginning, the option may appear more than
++      # once.
+ 
+-      if [[ "$1" = *:* ]]; then
+-        if [[ "$1" = [^:]##-:* ]]; then
+-          tmp="${${1[2,-1]%%:*}[1,-2]}"
+-          _args_cache_dopts[$tmp]="${1#*:}"
+-        elif [[ "$1" = [^:]##+:* ]]; then
+-          tmp="${${1[2,-1]%%:*}[1,-2]}"
+-          _args_cache_odopts[$tmp]="${1#*:}"
+-        else
+-          tmp="${1[2,-1]%%:*}"
+-          _args_cache_opts[$tmp]="${1#*:}"
+-        fi
++      if [[ "$1" = \** ]]; then
++        tmp="${1[2,-1]%%:*}"
++        [[ "$tmp" = *[-+] ]] && tmp="$tmp[1,-2]"
++        unset "_args_cache_oneshot[$tmp]"
++      else
++        tmp="${1%%:*}"
++        [[ "$tmp" = *[-+] ]] && tmp="$tmp[1,-2]"
++        _args_cache_oneshot[$tmp]=yes
++      fi
++
++      # If the option name ends in a `-', the first argument comes
++      # directly after the option, if it ends in a `+', the first
++      # argument *may* come directly after the option, otherwise it
++      # is in the next word.
++
++      if [[ "$1" = [^:]##-:* ]]; then
++        _args_cache_dopts[$tmp]="${1#*:}"
++      elif [[ "$1" = [^:]##[+=]:* ]]; then
++        _args_cache_odopts[$tmp]="${1#*:}"
++      elif [[ "$1" = *:* ]]; then
++        _args_cache_opts[$tmp]="${1#*:}"
+       else
+-        tmp="${1[2,-1]}"
+         _args_cache_opts[$tmp]=''
+       fi
+-      unset "_args_cache_oneshot[$tmp]"
+     elif [[ "$1" = \*::* ]]; then
+ 
+       # This is `*:...', describing `all other arguments', with argument 
+@@ -131,7 +290,7 @@
+       _args_cache_soptseq=''
+       _args_cache_soptseq1=''
+     fi
+-    _args_cache_sopts="${(@j::)${(@M)${(@k)_args_cache_opts}:#[-+]?}#[-+]}${(@j::)${(@M)${(@k)_args_cache_dopts}:#[-+]?}#[-+]}${(@j::)${(@M)${(@k)_args_cache_odopts}:#[-+]?}#[-+]}"
++    _args_cache_sopts="${(@j::)${(@)${(@M)${=:-${(k)_args_cache_opts} ${(k)_args_cache_dopts} ${(k)_args_cache_odopts}}:#[-+]?(|=)}#?}%\=}"
+   else
+     _args_cache_soptseq=''
+     _args_cache_soptseq1=''
+@@ -149,9 +308,6 @@
+ odopts=( "${(@kv)_args_cache_odopts}" )
+ oneshot=( "${(@kv)_args_cache_oneshot}" )
+ single="$_args_cache_single"
+-long=( "$_args_cache_long[@]" )
+-
+-argv=( "${(@)argv[1,_args_cache_long_nth]}" )
+ 
+ # Parse the command line...
+ 
+@@ -200,16 +356,10 @@
+     fi
+   elif [[ -z "$def" ]]; then
+ 
+-    # If it is empty, and the word starts with `--' and we should
+-    # complete long options, just ignore this word, otherwise make sure
+-    # we test for options below and handle normal arguments.
+-
+-    if [[ $#long -eq 0 || "$ws[1]" != --* ]]; then
+-      opt=yes
+-      arg=yes
+-    else
+-      def=''
+-    fi
++    # Make sure we test for options below and handle normal arguments.
++
++    opt=yes
++    arg=yes
+   fi
+ 
+   if [[ -n "$opt" ]]; then
+@@ -287,7 +437,7 @@
+         fi
+       fi
+       if [[ -n "$opt" && $#odopts -ne 0 ]]; then
+-	tmp=( "${(@k)odopts}" )
++	tmp=( "${(@k)odopts%\=}" )
+ 	while (( $#tmp )); do
+           if [[ -n "$sopts" && $tmp[1] = [-+]? ]]; then
+ 	    if [[ "$ws[1]" = ${tmp[1][1]}${~soptseq}${tmp[1][2]}* ]]; then
+@@ -303,6 +453,7 @@
+ 	if (( $#tmp )); then
+ 	  opt=''
+ 	  def="$odopts[$tmp[1]]"
++          [[ -z "$def" ]] && def="$odopts[$tmp[1]=]"
+ 	  optbeg="$beg"
+ 	  argbeg="$beg"
+ 	  inopt=yes
+@@ -362,132 +513,101 @@
+ 
+ # Now generate the matches.
+ 
+-if [[ $#long -ne 0 && "$PREFIX" = --* ]]; then
+-
+-  # If the current words starts with `--' and we should use long
+-  # options, just call...
+-
+-  _long_options "$long[@]"
++nm="$compstate[nmatches]"
+ 
+-else
++if [[ -z "$def" || "$def" = :* ]]; then
++  local pre="$PREFIX"
+ 
+-  nm="$compstate[nmatches]"
++  uns=''
+ 
+-  if [[ -z "$def" || "$def" = :* ]]; then
+-      local pre="$PREFIX"
++  # We either don't have a description for an argument of an option
++  # or we have a description for a optional argument.
+ 
+-      uns=''
++  if [[ -z "$def" ]]; then
+ 
+-    # We either don't have a description for an argument of an option
+-    # or we have a description for a optional argument.
++    # If we have none at all, use the one for this argument position.
+ 
++    def="$args[nth]"
+     if [[ -z "$def" ]]; then
+-
+-      # If we have none at all, use the one for this argument position.
+-
+-      def="$args[nth]"
+-      if [[ -z "$def" ]]; then
+-        def="$rest"
+-	optbeg="$nargbeg"
+-	argbeg="$nargbeg"
+-	fromrest=yes
+-      fi
++      def="$rest"
++      optbeg="$nargbeg"
++      argbeg="$nargbeg"
++      fromrest=yes
+     fi
++  fi
+ 
+-    # In any case, we have to complete option names here, but we may
+-    # be in a string that starts with an option name and continues with
+-    # the first argument, test that (again, two loops).
+-
+-    opt=yes
+-    if (( $#dopts )); then
+-
+-      # Get the option names.
++  # In any case, we have to complete option names here, but we may
++  # be in a string that starts with an option name and continues with
++  # the first argument, test that (again, two loops).
++
++  opt=yes
++  if (( $#dopts )); then
++
++    # Get the option names.
++
++    tmp=( "${(@k)dopts}" )
++    prefix="$PREFIX"
++    while (( $#tmp )); do
++      if [[ -n "$sopts" && $tmp[1] = [-+]? ]] && compset -P "${tmp[1][1]}${~soptseq}${tmp[1][2]}"; then
++        def="$dopts[$tmp[1]]"
++	opt=''
++	uns="${prefix[2,-1]%%${tmp[1][2]}*}${tmp[1][2]}"
++	break
++      elif compset -P "$tmp[1]"; then
++
++	# The current string starts with the option name, so ignore
++	# that and complete the rest of the string.
++
++	def="$dopts[$tmp[1]]"
++	opt=''
++	break
++      fi
++      shift 1 tmp
++    done
++  fi
++  if [[ -n "$opt" && $#odopts -ne 0 ]]; then
++    tmp=( "${(@k)odopts}" )
++    prefix="$PREFIX"
++    while (( $#tmp )); do
++      if [[ -n "$sopts" && $tmp[1] = [-+]?(|=) ]] && compset -P "${tmp[1][1]}${~soptseq}${tmp[1][2]}${tmp[1][3]}"; then
++        def="$odopts[$tmp[1]]"
++	opt=''
++	uns="${prefix[2,-1]%%${tmp[1][2]}*}${tmp[1][2]}"
++	break
++      elif compset -P "$tmp[1]"; then
++	def="$odopts[$tmp[1]]"
++	opt=''
++	break
++      fi
++      shift 1 tmp
++    done
++  fi
+ 
+-      tmp=( "${(@k)dopts}" )
+-      prefix="$PREFIX"
+-      while (( $#tmp )); do
+-        if [[ -n "$sopts" && $tmp[1] = [-+]? ]] && compset -P "${tmp[1][1]}${~soptseq}${tmp[1][2]}"; then
+-          def="$dopts[$tmp[1]]"
+-	  opt=''
+-	  uns="${prefix[2,-1]%%${tmp[1][2]}*}${tmp[1][2]}"
+-	  break
+-        elif compset -P "$tmp[1]"; then
++  [[ -n "$sopts" && -n "$opt" && "$PREFIX" = [-+]${~soptseq}[$sopts] ]] && \
++      uns="${PREFIX[2,-1]}"
+ 
+-	  # The current string starts with the option name, so ignore
+-	  # that and complete the rest of the string.
++  if [[ -n "$uns" ]]; then
++    uns="${(j::)${(@k)oneshot[(I)${ws[1][1]}[$uns]]#[-+]}}"
++    tmp=(
++      "opts[${(@)^opts[(I)${pre[1]}[$uns]]}]"
++      "dopts[${(@)^dopts[(I)${pre[1]}[$uns]]}]"
++      "odopts[${(@)^odopts[(I)${pre[1]}[$uns](|=)]}]"
++    )
++    (( $#tmp )) && unset "$tmp[@]"
++  fi
+ 
+-	  def="$dopts[$tmp[1]]"
+-	  opt=''
+-	  break
+-        fi
+-	shift 1 tmp
+-      done
+-    fi
+-    if [[ -n "$opt" && $#odopts -ne 0 ]]; then
+-      tmp=( "${(@k)odopts}" )
+-      prefix="$PREFIX"
+-      while (( $#tmp )); do
+-        if [[ -n "$sopts" && $tmp[1] = [-+]? ]] && compset -P "${tmp[1][1]}${~soptseq}${tmp[1][2]}"; then
+-          def="$odopts[$tmp[1]]"
+-	  opt=''
+-	  uns="${prefix[2,-1]%%${tmp[1][2]}*}${tmp[1][2]}"
+-	  break
+-        elif compset -P "$tmp[1]"; then
+-	  def="$odopts[$tmp[1]]"
+-	  opt=''
+-	  break
+-        fi
+-	shift 1 tmp
+-      done
+-    fi
++  # If we aren't in an argument directly after a option name, all option
++  # names are possible matches.
+ 
+-    [[ -n "$sopts" && -n "$opt" && "$PREFIX" = [-+]${~soptseq}[$sopts] ]] && \
+-        uns="${PREFIX[2,-1]}"
++  [[ -z "$opt" || ( "$def" = \** &&
++                    ( -z "$fromrest" || CURRENT -ne argbeg+1 ) ) ]] && opt=''
++else
++  opt=''
++fi
+ 
+-    if [[ -n "$uns" ]]; then
+-      uns="${(j::)${(@k)oneshot[(I)${ws[1][1]}[$uns]]#[-+]}}"
+-      tmp=(
+-	"opts[${(@)^opts[(I)${pre[1]}[$uns]]}]"
+-	"dopts[${(@)^dopts[(I)${pre[1]}[$uns]]}]"
+-	"odopts[${(@)^odopts[(I)${pre[1]}[$uns]]}]"
+-      )
+-      (( $#tmp )) && unset "$tmp[@]"
+-    fi
+-
+-    if [[ -n "$opt" && ( "$def" != \** ||
+-                         ( -n "$fromrest" && CURRENT -eq argbeg+1 ) ) ]]; then
+-
+-      # We aren't in an argument directly after a option name, so
+-      # all option names are possible matches.
+-
+-      if [[ "$compconfig[option_prefix]" != *(short|all)* ||
+-            "$PREFIX" = [-+]* ]]; then
+-        _description expl option
+-	if [[ -n "$sopts" && -n "$PREFIX" && "$PREFIX" = [-+]${~soptseq}[$sopts] ]]; then
+-	  if [[ "$PREFIX" = [-+]${~soptseq1} ]]; then
+-	    compadd "$expl[@]" -Q -M 'r:|_=* r:|=*' \
+-                    -y "( ${(j: :)${(@M)${(@k)opts}:#[-+]?}} ${(j: :)${(@M)${(@k)dopts}:#[-+]?}} ${(j: :)${(@M)${(@k)odopts}:#[-+]?}} )" - \
+-                    "${PREFIX}${(@k)^opts[(I)${PREFIX[1]}?]#?}" \
+-		    "${PREFIX}${(@k)^dopts[(I)${PREFIX[1]}?]#?}" \
+-		    "${PREFIX}${(@k)^odopts[(I)${PREFIX[1]}?]#?}" && ret=0
+-	  else
+-	    # The last option takes an argument in the next word.
+-	    compadd "$expl[@]" -Q  -M 'r:|_=* r:|=*' - "${PREFIX}" && ret=0
+-	  fi
+-	else
+-          compadd "$expl[@]" -Q -M 'r:|_=* r:|=*' - \
+-                  "${(@k)opts}" "${(@k)odopts}" && ret=0
+-	  compadd "$expl[@]" -QS '' -M 'r:|_=* r:|=*' - "${(@k)dopts}" && ret=0
+-        fi
+-      fi
+-      [[ $#long -ne 0 &&
+-         ( "$compconfig[option_prefix]" != *(long|all)* ||
+-           "$PREFIX" = --* ) ]] && \
+-	  _long_options "$long[@]" && ret=0
+-    fi
+-  fi
++# Now add the matches from the description, if any.
+ 
+-  # Now add the matches from the description, if any.
++while true; do
+ 
+   if [[ -n "$def" ]]; then
+ 
+@@ -503,20 +623,20 @@
+         if [[ "$def" = ::* ]]; then
+           def="$def[3,-1]"
+ 	  beg=$argbeg
+-	else
++        else
+ 	  def="$def[2,-1]"
+ 	  beg=$optbeg
+-	fi
++        fi
+ 
+-	[[ beg -ge $#words ]] && beg=$(( $#words - 1 ))
++        [[ beg -ge $#words ]] && beg=$(( $#words - 1 ))
+ 
+-	shift beg words
+-	(( CURRENT -= beg ))
++        shift beg words
++        (( CURRENT -= beg ))
+ 
+-	if [[ -n "$tmp" ]]; then
++        if [[ -n "$tmp" ]]; then
+           tmp="$words[(ib:CURRENT:)${~tmp}]"
+ 	  [[ tmp -le $#words ]] && words=( "${(@)words[1,tmp-1]}" )
+-	fi
++        fi
+       fi
+     fi
+ 
+@@ -536,7 +656,7 @@
+       # An empty action means that we should just display a message.
+ 
+       _message "$descr"
+-      return ret
++      break
+ 
+     elif [[ "$action" = \(\(*\)\) ]]; then
+ 
+@@ -587,7 +707,56 @@
+     fi
+   fi
+ 
+-  # Set the return value.
++  if [[ nm -eq compstate[nmatches] && $#_args_cache_long -ne 0 &&
++        "$PREFIX" = --*=* ]]; then
++    local suffix
++
++    tmp=( "${(@Mk)odopts:#--[^:]#\=}" )
++    prefix="${PREFIX#*\=}"
++    suffix="$SUFFIX"
++    PREFIX="${PREFIX%%\=*}"
++    SUFFIX=''
++    compadd -M 'r:|[_-]=* r:|=*' -D tmp - "${(@)tmp%\=}"
++
++    if [[ $#tmp -eq 1 ]]; then
++      def="$odopts[$tmp[1]]"
++      PREFIX="$prefix"
++      SUFFIX="$suffix"
++      IPREFIX="$tmp[1]"
++      continue
++    fi
++  fi
++  break
++done
++
++# Probably add the option names.
+ 
+-  [[ nm -ne "$compstate[nmatches]" ]]
++if [[ -n "$opt" &&
++      ( nm -eq compstate[nmatches] ||
++        -z "$compconfig[option_prefix]" || "$PREFIX" = [-+]* ) ]]; then
++  _description expl option
++  if [[ -n "$sopts" && -n "$PREFIX" &&
++    "$PREFIX" = [-+]${~soptseq}[$sopts] ]]; then
++    if [[ "$PREFIX" = [-+]${~soptseq1} ]]; then
++      compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' \
++              -y "( ${(j: :)${(@)${(@M)${=:-${(k)opts} ${(k)dopts} ${(k)odopts}}:#[-+]?(|=)}#?}%=} )" - \
++              "${PREFIX}${(@k)^opts[(I)${PREFIX[1]}?]#?}" \
++	      "${PREFIX}${(@k)^dopts[(I)${PREFIX[1]}?]#?}" \
++	      "${PREFIX}${(@)^${(@k)odopts[(I)${PREFIX[1]}?(|=)]#?}%=}" && ret=0
++    else
++      # The last option takes an argument in the next word.
++
++      compadd "$expl[@]" -Q  -M 'r:|[_-]=* r:|=*' - "${PREFIX}" && ret=0
++    fi
++  else
++    compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' - \
++            "${(@k)opts}" "${(@k)odopts[(I)*[^=]]}" && ret=0
++    compadd "$expl[@]" -Q -M 'r:|[_-]=* r:|=*' -qS= - \
++            "${(@k)odopts[(I)*=]%=}" && ret=0
++    compadd "$expl[@]" -QS '' -M 'r:|[_-]=* r:|=*' - "${(@k)dopts}" && ret=0
++  fi
+ fi
++
++# Set the return value.
++
++[[ nm -ne "$compstate[nmatches]" ]]
+diff -u -r oc/Rpm/_rpm Completion/Rpm/_rpm
+--- oc/Rpm/_rpm	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm	Sun Aug 29 13:57:34 1999
+@@ -0,0 +1,15 @@
++#compdef rpm
++
++_rpm_arguments \
++  '-q:*:query: _rpm_query' \
++  -{V,y,-{setperms,setugids,querytags,initdb,showrc}} \
++  '-pipe:*:pipe command:_command_names -e' \
++  '--verify:*:verify: _rpm_verify' \
++  -{i,-install}':*:install: _rpm_install' \
++  -{U,-upgrade}':*:upgrade: _rpm_upgrade' \
++  -{e,-erase}':*:uninstall: _rpm_uninstall' \
++  -'b+:build stage:((p\:execute\ \%prep\ stage l\:do\ a\ list\ check c\:execute\ build\ stage i\:execute\ install\ stage b\:build\ a\ binary\ package a\:build\ binary\ and\ source\ packages)):*:build: _rpm_build -b' \
++  -'t+:build stage:((p\:execute\ \%prep\ stage l\:do\ a\ list\ check c\:execute\ build\ stage i\:execute\ install\ stage b\:build\ a\ binary\ package a\:build\ binary\ and\ source\ packages)):*:build: _rpm_build -t' \
++  --{rebuild,rmsource,recompile,resign,addsign}':*:RPM package: _rpm_package' \
++  -{K,-checksig}':*:sigcheck: _rpm_sigcheck' \
++  '--rebuilddb:*:rebuild: _rpm_rebuild'
+diff -u -r oc/Rpm/_rpm_arguments Completion/Rpm/_rpm_arguments
+--- oc/Rpm/_rpm_arguments	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_arguments	Sun Aug 29 13:22:45 1999
+@@ -0,0 +1,8 @@
++#autoload
++
++_arguments \
++  -{v,vv} \
++  '-rcfile:resource file:_files' \
++  '--ftpproxy:FTP proxy server:_hosts' \
++  '--ftpport:FTP port number:' \
++  "$@"
+diff -u -r oc/Rpm/_rpm_build Completion/Rpm/_rpm_build
+--- oc/Rpm/_rpm_build	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_build	Sun Aug 29 13:47:55 1999
+@@ -0,0 +1,16 @@
++#autoload
++
++local args
++
++if [[ "$1" = -b ]]; then
++  args='*:RPM package:_rpm_package'
++else
++  args='*:tar file:_files -g \*.\(\#i\)tar\(.\*\|\)'
++fi
++
++_rpm_arguments \
++  --{short-circuit,clean,rmsource,sign,test} \
++  '--buildroot:build root directory:_files -/' \
++  '--buildarch:architecture for which to build:' \
++  '--buildos:ositecture for which to build:' \
++  '--timecheck:time check (seconds):' "$args"
+diff -u -r oc/Rpm/_rpm_capability Completion/Rpm/_rpm_capability
+--- oc/Rpm/_rpm_capability	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_capability	Sun Aug 29 12:52:35 1999
+@@ -0,0 +1,3 @@
++#autoload
++
++_message 'RPM capability'
+diff -u -r oc/Rpm/_rpm_install Completion/Rpm/_rpm_install
+--- oc/Rpm/_rpm_install	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_install	Sun Aug 29 13:39:55 1999
+@@ -0,0 +1,10 @@
++#autoload
++
++_rpm_arguments \
++  "$@" \
++  -{-{badreloc,excludedocs,force,hash,allfiles,ignorearch,ignoreos,includedocs,justdb,nodeps,noorder,noscripts,notriggers,percent,replacefiles,replacepkgs,test},h} \
++  '--relocate:relocate:_rpm_relocate' \
++  '--prefix:package prefix directory:_files -/' \
++  '--root:RPM root directory:_files -/' \
++  '--dbpath:RPM database path:_files -/' \
++  '*:pkg file:_rpm_pkg_file'
+diff -u -r oc/Rpm/_rpm_package Completion/Rpm/_rpm_package
+--- oc/Rpm/_rpm_package	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_package	Sun Aug 29 12:56:15 1999
+@@ -0,0 +1,6 @@
++#autoload
++
++local expl
++
++_description expl 'RPM package'
++compadd "$expl[@]" -M 'r:|-=* r:|=*' - $(rpm -qa)
+diff -u -r oc/Rpm/_rpm_pkg_file Completion/Rpm/_rpm_pkg_file
+--- oc/Rpm/_rpm_pkg_file	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_pkg_file	Sun Aug 29 13:03:49 1999
+@@ -0,0 +1,7 @@
++#autoload
++
++if compset -P ftp:; then
++  _hosts -S/
++else
++  _files -g '*.(#i)rpm'
++fi
+diff -u -r oc/Rpm/_rpm_pkg_or_file Completion/Rpm/_rpm_pkg_or_file
+--- oc/Rpm/_rpm_pkg_or_file	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_pkg_or_file	Sun Aug 29 13:33:29 1999
+@@ -0,0 +1,8 @@
++#autoload
++
++local ret=1
++
++_rpm_package && ret=0
++_rpm_pkg_file && ret=0
++
++return ret
+diff -u -r oc/Rpm/_rpm_query Completion/Rpm/_rpm_query
+--- oc/Rpm/_rpm_query	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_query	Sun Aug 29 13:32:35 1999
+@@ -0,0 +1,12 @@
++#autoload
++
++_rpm_arguments \
++  '--root:RPM root directory:_files -/' \
++  '--dbpath:RPM database path:_files -/' \
++  '--queryformat:RPM query format:_rpm_tags' \
++  '-f:file:_files' \
++  '-p:RPM package file:_rpm_pkg_file' \
++  '--triggeredby:RPM package:_rpm_package' \
++  '--whatprovides:RPM capability:_rpm_capability' \
++  '--whatrequires:RPM capability:_rpm_capability' \
++  '*:RPM package:_rpm_pkg_or_file'
+diff -u -r oc/Rpm/_rpm_rebuild Completion/Rpm/_rpm_rebuild
+--- oc/Rpm/_rpm_rebuild	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_rebuild	Sun Aug 29 13:52:03 1999
+@@ -0,0 +1,6 @@
++#autoload
++
++_rpm_arguments \
++  '--root:RPM root directory:_files -/' \
++  '--dbpath:RPM database path:_files -/' \
++  '*:RPM source package file:_rpm_pkg_file'
+diff -u -r oc/Rpm/_rpm_rebuilddb Completion/Rpm/_rpm_rebuilddb
+--- oc/Rpm/_rpm_rebuilddb	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_rebuilddb	Sun Aug 29 12:48:12 1999
+@@ -0,0 +1,3 @@
++#autoload
++
++_rpm_arguments
+diff -u -r oc/Rpm/_rpm_relocate Completion/Rpm/_rpm_relocate
+--- oc/Rpm/_rpm_relocate	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_relocate	Sun Aug 29 13:35:35 1999
+@@ -0,0 +1,11 @@
++#autoload
++
++local expl
++
++if compset -P '*\='; then
++  _description expl 'new path'
++else
++  _description expl 'old path'
++fi
++
++_files "$expl[@]" -/
+diff -u -r oc/Rpm/_rpm_resign Completion/Rpm/_rpm_resign
+--- oc/Rpm/_rpm_resign	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_resign	Sun Aug 29 12:47:26 1999
+@@ -0,0 +1,4 @@
++#autoload
++
++_rpm_arguments \
++  '*:RPM binary package file:_rpm_pkg_file'
+diff -u -r oc/Rpm/_rpm_sigcheck Completion/Rpm/_rpm_sigcheck
+--- oc/Rpm/_rpm_sigcheck	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_sigcheck	Sun Aug 29 13:50:45 1999
+@@ -0,0 +1,5 @@
++#autoload
++
++_rpm_arguments \
++  --no{pgp,md5} \
++  '*:RPM package file:_rpm_pkg_or_file'
+diff -u -r oc/Rpm/_rpm_tags Completion/Rpm/_rpm_tags
+--- oc/Rpm/_rpm_tags	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_tags	Sun Aug 29 13:58:47 1999
+@@ -0,0 +1,11 @@
++#autoload
++
++if compset -P '*\{'; then
++  local expl
++
++  _description expl 'RPM tag'
++  compadd "$expl[@]" -M 'm:{a-z}={A-Z}' -S '}' - \
++          "${(@)${(@f)$(rpm --querytags)}#RPMTAG_}"
++else
++  _message 'RPM format'
++fi
+diff -u -r oc/Rpm/_rpm_uninstall Completion/Rpm/_rpm_uninstall
+--- oc/Rpm/_rpm_uninstall	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_uninstall	Sun Aug 29 13:42:28 1999
+@@ -0,0 +1,7 @@
++#autoload
++
++_rpm_arguments \
++  --{allmatches,justdb,nodeps,noorder,noscripts,notriggers} \
++  '--root:RPM root directory:_files -/' \
++  '--dbpath:RPM database path:_files -/' \
++  '*:RPM package:_rpm_package'
+diff -u -r oc/Rpm/_rpm_upgrade Completion/Rpm/_rpm_upgrade
+--- oc/Rpm/_rpm_upgrade	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_upgrade	Sun Aug 29 13:40:10 1999
+@@ -0,0 +1,3 @@
++#autoload
++
++_rpm_install --oldpackage
+diff -u -r oc/Rpm/_rpm_verify Completion/Rpm/_rpm_verify
+--- oc/Rpm/_rpm_verify	Sun Aug 29 22:05:26 1999
++++ Completion/Rpm/_rpm_verify	Sun Aug 29 13:31:07 1999
+@@ -0,0 +1,7 @@
++#autoload
++
++_rpm_arguments \
++  --no{deps,md5,files} \
++  '--root:RPM root directory:_files -/' \
++  '--dbpath:RPM database path:_files -/' \
++  '*:RPM package:_rpm_package'
+diff -u -r oc/User/_a2ps Completion/User/_a2ps
+--- oc/User/_a2ps	Sun Aug 29 22:05:53 1999
++++ Completion/User/_a2ps	Sat Aug 28 21:55:17 1999
+@@ -22,18 +22,18 @@
+   )
+ fi
+ 
+-_long_options -t '*\*:toggle:(yes no)' \
+-                 '*=DIRECTION:direction:(rows columns)' \
+-                 '*=TYPE:type:(r n nr rn any)' \
+-		 '--highlight-level*:highlight:(none normal heavy)' \
+-		 '--version-control*:version control:(none off t numbered nil 
+-		                        existing never simple)' \
+-	         "--pretty-print*:style:[${_a2ps_cache_values[1]}]" \
+-	         "--encoding*:encoding:(${_a2ps_cache_values[2]})" \
+-	         "--medium*:medium:[${_a2ps_cache_values[3]}]" \
+-	         "--prologue*:prologue:[${_a2ps_cache_values[4]}]" \
+-	         "--ppd*:printer description:[${_a2ps_cache_values[5]}]" \
+-	         "--printer*:printer:[${_a2ps_cache_values[6]}]" \
+-	         "--user-option*:user option:[${_a2ps_cache_values[7]}]" \
+-	         "--variable*:variable:[${_a2ps_cache_values[8]}]" ||
+-    _files -F fignore -g '*~*.(ps|PS|eps|EPS)'
++_arguments '*:text file:_files -g \*\~\*.\(\#i)\(ps\|eps\)' -- \
++           '*\*:toggle:(yes no)' \
++           '*=DIRECTION:direction:(rows columns)' \
++           '*=TYPE:type:(r n nr rn any)' \
++	   '--highlight-level*:highlight:(none normal heavy)' \
++	   '--version-control*:version control:(none off t numbered nil 
++		                                existing never simple)' \
++	   "--pretty-print*::style:(${_a2ps_cache_values[1]})" \
++	   "--encoding*:encoding:(${_a2ps_cache_values[2]})" \
++	   "--medium*::medium:(${_a2ps_cache_values[3]})" \
++	   "--prologue*::prologue:(${_a2ps_cache_values[4]})" \
++	   "--ppd*::printer description:(${_a2ps_cache_values[5]})" \
++	   "--printer*::printer:(${_a2ps_cache_values[6]})" \
++	   "--user-option*::user option:(${_a2ps_cache_values[7]})" \
++	   "--variable*::variable:(${_a2ps_cache_values[8]})"
+diff -u -r oc/User/_configure Completion/User/_configure
+--- oc/User/_configure	Sun Aug 29 22:05:53 1999
++++ Completion/User/_configure	Sat Aug 28 21:53:21 1999
+@@ -1,9 +1,9 @@
+ #compdef configure
+ 
+-_long_options -i '(--(disable|enable)-FEATURE* --(with|without)-PACKAGE*)' \
++_arguments -- -i '(--(disable|enable)-FEATURE* --(with|without)-PACKAGE*)' \
+               -s '(#--disable- --enable-
+ 	           #--enable- --disable-
+ 		   #--with- --without-
+ 		   #--without- --with-)' \
+ 	      '*=(E|)PREFIX*:prefix directory:_files -/' \
+-              '*=PROGRAM*:program:_command_names'
++              '*=PROGRAM*:program:_command_names -e'
+diff -u -r oc/User/_dvi Completion/User/_dvi
+--- oc/User/_dvi	Sun Aug 29 22:05:53 1999
++++ Completion/User/_dvi	Sun Aug 29 00:13:13 1999
+@@ -1,3 +1,3 @@
+-#compdef xdvi dvips dvibook dviconcat dvicopy dvidvi dviselect dvitodvi dvitype
++#compdef dvips dvibook dviconcat dvicopy dvidvi dviselect dvitodvi dvitype
+ 
+ _files -g '*.(dvi|DVI)'
+diff -u -r oc/User/_gdb Completion/User/_gdb
+--- oc/User/_gdb	Sun Aug 29 22:05:53 1999
++++ Completion/User/_gdb	Sat Aug 28 21:53:04 1999
+@@ -5,9 +5,10 @@
+ 
+ local cur="$words[CURRENT]" prev w list ret=1 expl
+ 
+-_long_options -t '*=(CORE|SYM)FILE:core file:_files' \
+-		 '*=EXECFILE:executable:_files *(*)' \
+-		 '*=TTY:terminal device:compadd /dev/tty*' && return 0
++[[ "$PREFIX" = --* ]] &&
++    _arguments -- '*=(CORE|SYM)FILE:core file:_files' \
++		  '*=EXECFILE:executable:_files \*\(\*\)' \
++		  '*=TTY:terminal device:compadd /dev/tty\*' && return 0
+ 
+ if compset -P '-(cd|directory)='; then
+   _files -/
+diff -u -r oc/User/_gs Completion/User/_gs
+--- oc/User/_gs	Sun Aug 29 22:05:53 1999
++++ Completion/User/_gs	Sun Aug 29 15:21:06 1999
+@@ -0,0 +1,19 @@
++#compdef gs ghostscript
++
++if compset -N --; then
++  if [[ CURRENT -eq 1 ]]; then
++    _ps
++  else
++    _message 'userdict ARGUMENTS'
++    return 1
++  fi
++else
++  _x_options \
++    -q \
++    '-g-:device size (<width>x<height>):' \
++    '-r-:resolution (<val> or <x>x<y>):' \
++    '-I:search paths:_dir_list' \
++    \*-{d,D}'-:def: _gs_name -d' \
++    \*-{s,S}'-:def: _gs_name -s' \
++    '*:PostScript file:_ps'
++fi
+diff -u -r oc/User/_gs_name Completion/User/_gs_name
+--- oc/User/_gs_name	Sun Aug 29 22:05:53 1999
++++ Completion/User/_gs_name	Sun Aug 29 15:17:07 1999
+@@ -0,0 +1,31 @@
++#autoload
++
++local expl
++
++if [[ "$1" = -d ]]; then
++  if [[ "$PREFIX" = *\=* ]]; then
++    _message 'systemdict definition value'
++  else
++    _description expl 'systemdict definition name'
++    compadd "$expl[@]" -M 'm:{a-z}={A-Z}' - \
++            DISKFONTS NOCACHE NOBIND NODISPLAY NOPAUSE PLATFONTS SAFER \
++            WRITESYSTEMDICT
++  fi
++elif compset -P '*\='; then
++  case "$IPREFIX" in
++  *DEVICE\=)
++    _description expl 'ghostscript device'
++    compadd "$expl[@]" - "${(@)${=${$(gs -h)##* devices:}%%Search path:*}:#}"
++    ;;
++  *OutputFile\=)
++    _description expl 'output file'
++    _files
++    ;;
++  *)
++    _message 'systemdict value'
++    return 1
++  esac
++else
++  _description expl 'systemdict name'
++  compadd "$expl[@]" -S\= -M 'm:{a-z}={A-Z}' - DEVICE OutputFile
++fi
+diff -u -r oc/User/_patch Completion/User/_patch
+--- oc/User/_patch	Sun Aug 29 22:05:53 1999
++++ Completion/User/_patch	Fri Aug 27 20:19:45 1999
+@@ -3,21 +3,17 @@
+ _arguments -s \
+   '-p+:number:(0)' \
+   '-F+:lines:' \
+-  '-l' '-c' '-e' '-n' '-u' '-N' '-R' \
++  -{l,c,e,n,u,N,R,E,Z,T,b,t,f,s,v} \
+   '-i+:patch file:_files' \
+   '-o+:output file:_files' \
+   '-r+:reject file:_files' \
+   '-D+:name:' \
+-  '-E' '-Z' '-T' \
+-  '-b' \
+   '-V+:version control style:(simple numbered existing)' \
+   '-B+:backup path prefix:' \
+   '-Y+:backup basename prefix:_files' \
+   '-z+:backup file suffix:(.bak)' \
+   '-g+:NUM:' \
+-  '-t' '-f' '-s' \
+   '-d+:chdir to:_files -/' \
+-  '-v' \
+   ':original file:_files' \
+   ':patch file:_files' \
+   -- \
+diff -u -r oc/User/_pspdf Completion/User/_pspdf
+--- oc/User/_pspdf	Sun Aug 29 22:05:53 1999
++++ Completion/User/_pspdf	Sun Aug 29 15:15:10 1999
+@@ -1,11 +1,12 @@
+-#compdef gs gsbj gsdj gsdj500 gslj gslp gsnd ps2ascii ghostview gv gview mgv ggv pstoedit pstotgif
++#compdef gsbj gsdj gsdj500 gslj gslp gsnd ps2ascii ghostview mgv ggv pstoedit pstotgif
+ 
+-local ret=1
++local ret=1 expl
+ 
+ # ghostscript:
+ #  gs gsbj gsdj gsdj500 gslj gslp gsnd ps2ascii
+ 
+ _ps && ret=0
+-_pdf && ret=0
++_description expl 'PDF file'
++_path_files "$expl[@]" -g '*.(#i)pdf'
+ 
+ return ret
+diff -u -r oc/User/_tar Completion/User/_tar
+--- oc/User/_tar	Sun Aug 29 22:05:53 1999
++++ Completion/User/_tar	Sat Aug 28 21:56:04 1999
+@@ -72,11 +72,11 @@
+ 
+   # ...long options after `--'.
+ 
+-  _long_options '--owner*:user:_users' \
+-                '*=(PROG|COMMAND)*:program:_command_names' \
+-		'*=ARCHIVE*:archive: _tar_archive' \
+-		'*=NAME*:file:_files' \
+-		'*=CONTROL*:version control:[t numbered nil existing never simple]'
++  _arguements -- '--owner*:user:_users' \
++                 '*=(PROG|COMMAND)*:program:_command_names -e' \
++		 '*=ARCHIVE*:archive: _tar_archive' \
++		 '*=NAME*:file:_files' \
++		 '*=CONTROL*::version control:(t numbered nil existing never simple)'
+ 
+ elif [[ ( CURRENT -gt 2 && "$words[CURRENT-1]" = -*f* &&
+           "$words[CURRENT-1]" != --* ) ||
+diff -u -r oc/User/_use_lo Completion/User/_use_lo
+--- oc/User/_use_lo	Sun Aug 29 22:05:53 1999
++++ Completion/User/_use_lo	Sat Aug 28 21:52:03 1999
+@@ -3,4 +3,6 @@
+ # This is for GNU-like commands which understand the --help option,
+ # but which do not otherwise require special completion handling.
+ 
+-_long_options -t || _default
++[[ "$PREFIX" = --* ]] && _arguments -- && return 0
++
++_default
+diff -u -r oc/User/_xfig Completion/User/_xfig
+--- oc/User/_xfig	Sun Aug 29 22:05:53 1999
++++ Completion/User/_xfig	Fri Aug 27 20:30:01 1999
+@@ -1,42 +1,23 @@
+ #compdef xfig
+ 
+ _x_options \
+-  '-help' \
+-  '-Landscape' \
+-  '-Portrait' \
++  -{help,Landscape,Portrait,debug,dontswitchcmap,flushleft,inches,inverse,latexfonts,left,metric,monochrome,multiple,noscalablefonts,notrack,right,scalablefonts,showallbuttons,single,specialtext,tablet,track} \
+   '-bold:bold font:_x_font' \
+   '-button:button font:_x_font' \
+   '-but_per_row:number of buttons:' \
+   '-cbg:canvas background color:_colors' \
+   '-cfg:canvas foreground color:_colors' \
+-  '-debug' \
+   '-depth:visual depth:_x_visdepth' \
+-  '-dontswitchcmap' \
+   '-exportlanguage:export language:(box latex epic eepic eepicemu pictex ibmgl eps ps pstex textyl tpic pic mf acad pcx png gif jpeg tiff ppm xbm xpm)' \
+-  '-flushleft' \
+   '-iconGeometry:icon geometry:_x_geometry' \
+-  '-inches' \
+   '-internalBW:internal border width:' \
+-  '-inverse' \
+   '-keyfile:compose key file:_files' \
+-  '-latexfonts' \
+-  '-left' \
+   '-magnification:magnification factor:' \
+   '-max_image_colors:maximum number of colors:' \
+-  '-metric' \
+-  '-monochrome' \
+-  '-multiple' \
+   '-normal:normal font:_x_font' \
+-  '-noscalablefonts' \
+-  '-notrack' \
+   '-papersize:output paper size:((Letter\:8.5\"\ x\ 11\" Legal\:8.5\"\ x\ 14\" Ledger\:17\"\ x\ 11\" Tabloid\:11\"\ x\ 17\" A\:8.5\"\ x\ 11\" B\:11\"\ x\ 17\" C\:17\"\ x\ 22\" D\:22\"\ x\ 34\" E\:34\"\ x\ 44\" A4\:21\ cm\ x\ 29.7\ cm A3\:29.7\ cm\ x\ 42\ cm A2\:42\ cm\ x\ 59.4\ cm A1\:59.4\ cm\ x\ 84.1\ cm A0\:84.1\ cm\ x\ 118.9\ cm B%\:18.2\ cm\ x\ 25.7\ cm))' \
+   '-pheight:canvas height:' \
+   '-pwidth:canvas width:' \
+-  '-right' \
+-  '-scalablefonts' \
+-  '-showallbuttons' \
+-  '-single' \
+-  '-specialtext' \
+   '-spellcheckcommand:program: _command_names -e' \
+   '-startfillstyle:fill style (-1 to 21):' \
+   '-startfontsize:font size (in points):' \
+@@ -46,8 +27,6 @@
+   '-startposnmode:positioning mode:((0\:any 1\:1/16\ inch\ or\ 1\ mm 2\:1/4\ inch\ or\ 5\ mm 3\:1/2\ inch\ or\ 1\ cm 4\:1\ inch\ or\ 2\ cm))' \
+   '-startpsfont:postscript font:' \
+   '-starttextstep:text step:' \
+-  '-tablet' \
+-  '-track' \
+   '-userscale:scale factor:' \
+   '-userunit:unit string:' \
+   '-visual:visual:(TrueColor StaticColor DirectColor StaticGray GrayScale PseudoColor)' \
+diff -u -r oc/User/_xsetroot Completion/User/_xsetroot
+--- oc/User/_xsetroot	Sun Aug 29 22:05:53 1999
++++ Completion/User/_xsetroot	Fri Aug 27 20:30:34 1999
+@@ -1,16 +1,12 @@
+ #compdef xsetroot
+ 
+ _x_options \
+-  '-help' \
+-  '-def' \
++  -{help,def,gray,grey,rv} \
+   '-cursor:cursor file:_files -g \*.\(\#i\)\(xbm\|curs\(\|or\)\):mask file:_files -g \*.\(\#i\)\(xbm\|curs\(\|or\)\|mask\)' \
+   '-cursor_name:cursor name:_cursors' \
+   '-bitmap:bitmap file:_files -g \*.\(\#i\)xbm' \
+   '-mod:x grid distance (1-16): :y grid distance (1-16):' \
+-  '-gray' \
+-  '-grey' \
+   '-fg:foreground color:_colors' \
+   '-bg:background color:_colors' \
+-  '-rv' \
+   '-solid:screen solid color:_colors' \
+   '-name:root window name:'
+diff -u -r oc/User/_xterm Completion/User/_xterm
+--- oc/User/_xterm	Sun Aug 29 22:05:53 1999
++++ Completion/User/_xterm	Fri Aug 27 20:25:22 1999
+@@ -1,60 +1,24 @@
+ #compdef xterm
+ 
+ _xt_arguments \
+-  '-version' \
+-  '-help' \
+-  '-132' \
+-  '-ah' '+ah' \
+-  '-ai' '+ai' \
+-  '-aw' '+aw' \
++  -+{ah,ai,aw,bc,bdc,cb,cm,cn,cu,dc,hf,ie,im,j,ls,mb,nul,pc,rw,s,sb,sf,si,sk,sp,t,u8,ulc,ut,vb,wc,wf,samename} \
++  -{version,help,132,leftbar,rightbar,C} \
+   '-b:inner border size:' \
+-  '-bc' '+bc' \
+   '-bcf:time text cursor is off when blinking (milliseconds):' \
+   '-bcn:time text cursor is on when blinking (milliseconds):' \
+-  '-bdc' '+bdc' \
+-  '-cb' '+cb' \
+   '-cc:character class:' \
+-  '-cm' '+cm' \
+-  '-cn' '+cn' \
+   '-cr:text cursor color:_colors' \
+-  '-cu' '+cu' \
+-  '-dc' '+dc' \
+   '-e:program: _command_names -e:*::program arguments: _normal' \
+   '-fb:bold font:_x_font' \
+   '-fi:icon font:_x_font' \
+   '-hc:background color for highlighted text:_colors' \
+-  '-hf' '+hf' \
+-  '-ie' '+ie' \
+-  '-im' '+im' \
+-  '-j' '+j' \
+-  '-leftbar' \
+-  '-ls' '+ls' \
+-  '-mb' '+mb' \
+   '-mc:multi-click threshold (milliseconds):' \
+   '-ms:pointer cursor color:_colors' \
+   '-nb:margin bell number:' \
+-  '-nul' '+nul' \
+-  '-pc' '+pc' \
+-  '-rightbar' \
+-  '-rw' '+rw' \
+-  '-s' '+s' \
+-  '-samename' '+samename' \
+-  '-sb' '+sb' \
+-  '-sf' '+sf' \
+-  '-si' '+si' \
+-  '-sk' '+sk' \
+   '-sl:save lines:' \
+-  '-sp' '+sp' \
+-  '-t' '+t' \
+   '-ti:terminal ID:(vt52 vt100 vt101 vt102 vt220)' \
+   '-tm:terminal setting:' \
+   '-tn:terminal type:' \
+-  '-u8' '+u8' \
+-  '-ulc' '+ulc' \
+-  '-ut' '+ut' \
+-  '-vb' '+vb' \
+-  '-wc' '+wc' \
+-  '-wf' '+wf' \
+   '-ziconbeep:iconbeep (percent):' \
+   '-C' \
+-  '-S-:pseudo-terminal and file descriptor:' \
++  '-S-:pseudo-terminal and file descriptor:'
+diff -u -r oc/X/_gv Completion/X/_gv
+--- oc/X/_gv	Sun Aug 29 22:06:09 1999
++++ Completion/X/_gv	Sun Aug 29 14:38:45 1999
+@@ -0,0 +1,14 @@
++#compdef gv gview
++
++_xt_arguments \
++  -{,no}{safer,quiet,center,swap,antialias,dsc,eof,pixmap,watch,resize} \
++  -{monochrome,grayscale,color,portrait,landscape,upsidedown,seascape,h,help,v,spartan} \
++
++  '-arguments:ghostscript arguments:' \
++  '-page:label of first page:' \
++  '-media:page size:(Letter Legal Statement Tabloid Ledger Folio Quarto 10x14 Executive A3 A4 A5 B4 B5)' \
++  '-scale:scale entry:' \
++  '-scalebase:scale base:' \
++  '-ad:resource file:_files' \
++  '-style:resource file:_files'
++  '*:file:_pspdf'
+diff -u -r oc/X/_xdvi Completion/X/_xdvi
+--- oc/X/_xdvi	Sun Aug 29 22:06:09 1999
++++ Completion/X/_xdvi	Sun Aug 29 00:12:36 1999
+@@ -0,0 +1,30 @@
++#compdef xdvi
++
++_xt_arguments \
++  -+{allowshell,copy,expert,hush{,chars,checksums,specials},keep,l,no{ghostscript,grey,gssafer,makepk,postscript,scan},safer,thorough,underlink,version} \
++  +{altfont,base,browser,cr,debug,density,gamma,gspalette,hl,icongeometry,interpreter,margin,mfmode,offsets,p,paper,shrink,S,sidemargin,topmargin,xoffset,yoffset,grid{1,2,3},mgs{,1,2,3,4,5}} \
++  '-altfont:default font:' \
++  '-base:base URL:' \
++  '-browser:WWW browser:_command_names -e' \
++  '-cr:cursor color:_colors' \
++  '-debug:debugging bitmask:((1\:bitmaps 2\:dvi\ translation 4\:pk\ reading 8\:batch\ operation 16\:events 32\:file\ opening 64\:PostScript\ communication 128\:Kpathsea\ statistics 256\:Kpathsea\ hash\ table\ lookups 512\:Kpathsea\ path\ definitions 1024\:Kpathsea\ path\ expansion 2048\:Kpathsea\ searches))' \
++  '-density:font shrink density:' \
++  '-gamma:anti-aliasing factor (default 1.0):' \
++  -grid{1,2,3}':grid color:_colors' \
++  '-gspalette:Ghostscript palette:(Color Greyscale Monochrome)' \
++  '-hl:page highlight color:_colors' \
++  '-icongeometry:icon geometry:_x_geometry' \
++  '-interpreter:Ghostscript program:_command_names -e' \
++  '-margin:margin size:' \
++  '-mfmode:metafont string:' \
++  -mgs{,1,2,3,4,5}':magnifier size:' \
++  '-offsets:offset size:' \
++  '-p:font size (pixel per inch):' \
++  '-paper:paper size (<width>x<height> or ...):(us usr legal foolscap a1 a2 a3 a4 a5 a6 a7 b1 b2 b3 b4 b5 b6 b7 c1 c2 c3 c4 c5 c6 c7 a1r a2r a3r a4r a5r a6r a7r)' \
++  '-shrink:shrink factor:' \
++  '-S:font shrink density:' \
++  '-sidemargin:side margin:' \
++  '-topmargin:top margin:' \
++  '-xoffset:horizontal offset:' \
++  '-yoffset:vertical offset:' \
++  '*:DVI file:_files -g \*.\(\#i\)dvi'
+diff -u -r oc/X/_xt_arguments Completion/X/_xt_arguments
+--- oc/X/_xt_arguments	Sun Aug 29 22:06:09 1999
++++ Completion/X/_xt_arguments	Sat Aug 28 23:55:55 1999
+@@ -21,8 +21,8 @@
+ # cf. XrmParseCommand(3X11), X11R6.4/xc/lib/Xt/Initialize.c, X(5)
+ 
+ _arguments \
+-  '+rv' '-rv' '-reverse' \
+-  '+synchronous' '-synchronous' \
++  -+{rv,synchronous} \
++  -{reverse,iconic} \
+   '-background:background color:_colors' \
+   '-bd:border color:_colors' \
+   '-bg:background color:_colors' \
+@@ -31,10 +31,10 @@
+   '-bw:border width:_x_borderwidth' \
+   '-display:display:_x_display' \
+   '-fg:foreground color:_colors' \
++  '-font:font:_x_font' \
+   '-fn:font:_x_font' \
+   '-foreground:foreground color:_colors' \
+   '-geometry:geometry:_x_geometry' \
+-  '-iconic' \
+   '-name:name:_x_name' \
+   '-selectionTimeout:selection timeout (milliseconds):_x_selection_timeout' \
+   '-title:title:_x_title' \
+diff -u -r oc/X/_xv Completion/X/_xv
+--- oc/X/_xv	Sun Aug 29 22:06:09 1999
++++ Completion/X/_xv	Fri Aug 27 20:49:42 1999
+@@ -1,99 +1,45 @@
+ #compdef xv
+ 
+ _x_options \
+-  '-help' \
++  -{help,quick24,slow24,best24,noqcheck,pkludge,RM} \
++  -+{fixed,rw,perfect,owncmap,stdcmap,cecmap,ninstall,8,24,root,noresetroot,max,maxpect,quit,clear,cmap,imap,cemap,cmtmap,vsmap,nopos,dither,smooth,raw,acrop,4x3,hflip,vflip,norm,hist,mono,rv,wloop,random,loadclear,nofreecols,rgb,hsv,lbrowse,nostat,2xlimit,nolimits,close,iconic,viewonly,poll,vsperfect,vsdisable,nodecor} \
+   '-fg:foreground color:_colors' \
+   '-bg:background color:_colors' \
+   '-hi:top left shadow color:_colors' \
+   '-lo:bottom right shadow color:_colors' \
+   '-bw:border width:' \
+   '-geometry:geometry:_x_geometry' \
+-  '-fixed' '+fixed' \
+   '-expand:expansion factor:' \
+   '-aspect:aspect ratio (e.g. 4:3):' \
+   '-ncols:maximum number of colors used:' \
+-  '-rw' '+rw' \
+-  '-perfect' '+perfect' \
+-  '-owncmap' '+owncmap' \
+-  '-stdcmap' '+stdcmap' \
+-  '-cecmap' '+cecmap' \
+-  '-ninstall' '+ninstall' \
+-  '-8' '+8' \
+-  '-24' '+24' \
+-  '-quick24' \
+-  '-slow24' \
+-  '-best24' \
+-  '-noqcheck' \
+-  '-root' '+root' \
+-  '-rmode:root display mode:((0\:tiling 1\:integer\ tiling 2\:mirrored\ tiling 3\:integer\ mirrored\ tiling 4\:centered\ tiling 5\:centered\ tiling\ on\ solid\ background 6\:centered\ tiling\ on\ '"'"'warp'"'"'\ background 7\:centered\ tiling\ on\ '"'"'brick'"'"'\ background 8\:symmetrical\ tiling 9\:symmetrical\ mirrored\ tiling))' \
+-  '-noresetroot' '+noresetroot' \
++  '-rmode:root display mode:((0\:tiling 1\:integer\ tiling 2\:mirrored\ tiling 3\:integer\ mirrored\ tiling 4\:centered\ tiling 5\:centered\ tiling\ on\ solid\ background 6\:centered\ tiling\ on\ '\\\''warp'\\\''\ background 7\:centered\ tiling\ on\ '\\\''brick'\\\''\ background 8\:symmetrical\ tiling 9\:symmetrical\ mirrored\ tiling))' \
+   '-rfg:root foreground color:_colors' \
+   '-rbg:root background color:_colors' \
+-  '-max' '+max' \
+-  '-maxpect' '+maxpect' \
+-  '-quit' '+quit' \
+-  '-clear' '+clear' \
+-  '-cmap' '+cmap' \
+   '-cgeom:control window geometry:_x_geometry' \
+-  '-imap' '+imap' \
+   '-igeom:info window geometry:_x_geometry' \
+-  '-cemap' '+cemap' \
+   '-cegeom:color editor window geometry:_x_geometry' \
+-  '-cmtmap' '+cmtmap' \
+   '-cmtgeometry:comments window geometry:_x_geometry' \
+   '-tgeometry:text view window geometry:_x_geometry' \
+-  '-vsmap' '+vsmap' \
+   '-vsgeometry:visual schauzer geometry:_x_geometry' \
+-  '-nopos' '+nopos' \
+-  '-dither' '+dither' \
+-  '-smooth' '+smooth' \
+-  '-raw' '+raw' \
+   '-crop:left border: :top border: :width: :height:' \
+-  '-acrop' '+acrop' \
+-  '-4x3' '+4x3' \
+-  '-hflip' '+hflip' \
+-  '-vflip' '+vflip' \
+   '-rotate:rotation angle:(0 90 -90 +90 180 -180 +180 270 -270 +270)' \
+-  '-norm' '+norm' \
+-  '-hist' '+hist' \
+   '-gamma:gamma value:' \
+   '-cgamma:red gamma value: :green gamma value: :blue gamma value:' \
+   '-preset:default preset (1-4):(1 2 3 4)' \
+-  '-mono' '+mono' \
+-  '-rv' '+rv' \
+   '-white:'"'"'white'"'"' color:_colors' \
+   '-black:'"'"'black'"'"' color:_colors' \
+   '-wait:seconds to wait:' \
+-  '-wloop' '+wloop' \
+-  '-random' '+random' \
+-  '-loadclear' '+loadclear' \
+-  '-nofreecols' '+nofreecols' \
+-  '-rgb' '+rgb' \
+-  '-hsv' '+hsv' \
+-  '-lbrowse' '+lbrowse' \
+-  '-nostat' '+nostat' \
+-   '-visual:visual:(TrueColor StaticColor DirectColor StaticGray GrayScale PseudoColor)' \
++  '-visual:visual:(TrueColor StaticColor DirectColor StaticGray GrayScale PseudoColor)' \
+   '-cursor:cursor character number:' \
+-  '-2xlimit' '+2xlimit' \
+-  '-nolimits' '+nolimits' \
+-  '-close' '+close' \
+-  '-iconic' '+iconic' \
+   '-icgeometry:icon geometry:_x_geometry' \
+   '-dir:directory:_files -/' \
+   '-flist:file list file:_files' \
+   '-drift:x movement correction: :y movement correction:' \
+-  '-pkludge' \
+   '-mfn:mono spaced font:_x_font' \
+   '-name:window name:_x_name' \
+-  '-viewonly' '+viewonly' \
+-  '-grabdelay:grab delay (seconds):' '+grabdelay:grab delay (seconds):' \
+-  '-poll' '+poll' \
+-  '-vsperfect' '+vsperfect' \
+-  '-vsdisable' '+vsdisable' \
++  '-+grabdelay:grab delay (seconds):' \
+   '-gsdev:ghostscript device:' \
+   '-gsres:ghostscript resolution:' \
+   '-gsgeom:ghostscript page size:' \
+-  '-nodecor' '+nodecor' \
+-  '-RM' \
+   '-DEBUG:debug level:' \
+   '*:picture file:_files -g \*.\(\#i\)\(gif\|jpeg\|tiff\|pbm\|pgm\|ppm\|xbm\|xpm\|ras\(\|t\)\|tga\|rle\|rgb\|bmp\|pcx\|fits\|pm\)'
+diff -u od/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- od/Zsh/compsys.yo	Sun Aug 29 20:00:46 1999
++++ Doc/Zsh/compsys.yo	Sun Aug 29 22:44:59 1999
+@@ -821,8 +821,6 @@
+ widget locally sets the options it needs.
+ )
+ item(tt(_long_options))(
+-This function resides in the tt(Base) subdirectory of the example
+-completion system because it is not used by the core system.
+ 
+ This function is used to complete long options for commands that
+ support the `tt(--help)' option as, for example, most of the GNU
+@@ -832,53 +830,10 @@
+ that this function is not called for a command that does not support
+ this option.
+ 
+-For options that get an argument after a `tt(=)', the function also tries
+-to automatically find out what should be completed as the argument.
+-The possible completions for option-arguments can be described with
+-the arguments to this function. Each argument contains one description
+-of the form `tt(<pattern>:<message>:<action>)'. The message will be printed 
+-above the possible completion if the `description_format' configuration
+-key is set (see above). The actions specify what
+-should be done to complete arguments of those options that match 
+-the pattern. In both the message and the action a colon can be
+-included by preceding it with a backslash. The action may be a list of
+-words in brackets or in
+-parentheses, separated by spaces. A list in brackets denotes
+-possible values for an optional argument, a list in parentheses
+-gives words to complete for mandatory arguments. If the action does
+-not start with a bracket or parentheses, it should be the name of a
+-command (probably with arguments) that should be invoked to complete 
+-after the equal sign or a string in braces that will be evaluated. E.g.:
+-
+-example(_long_options '*\*'     '(yes no)' \ 
+-              '*=FILE*' '_files' \ 
+-              '*=DIR*'  '_files -/')
+-
+-Here, `tt(yes)' and `tt(no)' will be completed as the argument of
+-options whose description ends in a star, file names for options that
+-contain the substring `tt(=FILE)' in the description, and paths for
+-options whose description contains `tt(=DIR)'. In fact, the last two
+-patterns are not needed since this function always completes files
+-for option descriptions containing `tt(=FILE)' and paths for option
+-descriptions that contain `tt(=DIR)' or `tt(=PATH)'. These builtin
+-patterns can be overridden by patterns given as arguments, however.
+-
+-If the
+-option `tt(-t)' is given, completion is only done on words starting
+-with two hyphens. The option `tt(-i) var(patterns)' can be used to
+-give patterns for options which should not be completed. The patterns
+-can be given as the name of an array parameter or as a literal list in 
+-parentheses. E.g. `tt(-i "(--(en|dis)able-FEATURE*)")' will ignore the
+-options `tt(--enable-FEATURE)' and `tt(--disable-FEATURE)'. Finally,
+-the option `tt(-s) var(pairs)' can be used to describe options
+-aliases. Each var(pair) consists of a pattern and a
+-replacement. E.g. some tt(configure)-scripts describe options only as
+-`tt(--enable-foo)', but also accept `tt(disable-foo)'. To allow
+-completion of the second form, one would use
+-`tt(-s "(#--enable- --disable-)")'.
+ )
+ item(tt(_arguments))(
+-Like tt(_long_options), this function is in the tt(Base) subdirectory.
++This function resides in the tt(Base) subdirectory of the example
++completion system because it is not used by the core system.
+ 
+ This function can be used to complete words on the line by simply
+ describing the arguments the command on the line gets. The description 
+@@ -906,7 +861,7 @@
+ If there are two colons before the message (as in
+ `tt(*::)var(message)tt(:)var(action)') the tt(words) special array and 
+ the tt(CURRENT) special parameter will be restricted to only the
+-normal arguments when the var(Action) is executed or evaluated.
++normal arguments when the var(action) is executed or evaluated.
+ )
+ item(var(opt-spec)[var(description) ...])(
+ This describes an option and (if at least one var(description) is
+@@ -941,7 +896,10 @@
+ var(opt-spec), as in `tt(-foo-)'. If the first argument may be given
+ in one string with the option name, but may also be given as a
+ separate argument after the option, a plus sign should be used
+-instead. Finally, if the option may be given more than once, a star
++instead. If the argument may be given as the next string or in same
++string as the option name but separated by it from an equal sign, a
++`tt(=)' should be used instead of the minus or plus sign.
++Finally, if the option may be given more than once, a star
+ (`tt(*)') should be added in front of the var(opt-spec).
+ )
+ enditem()
+@@ -976,10 +934,57 @@
+ argument), options are considered to be one-character options and the
+ string from the line may contain more than one such option letter.
+ 
+-This function can also be made to automatically call the
+-tt(_long_options) function where appropriate by giving it the string
+-`tt(--)' as an argument. All arguments after this will be given
+-unchanged to the tt(_long_options) function.
++The function can also be made to automatically complete long options
++for commands that support the `tt(--help)' option as, for example,
++most of the GNU commands do. For this, the string `tt(--)' must be
++given as one argument and if it is, the command from the line is
++invoked with the `tt(--help)' option and its output is parsed to find
++possible option names. Note that this means that you should be careful
++to make sure that this feature is not used for a command that does not
++support this option.
++
++For options that get an argument after a `tt(=)', the function also tries
++to automatically find out what should be completed as the argument.
++The possible completions for option-arguments can be described with
++the arguments after the `tt(--)' (which are not used as described
++above). Each argument contains one description of the form
++`var(pattern)tt(:)var(message)tt(:)var(action)'. The var(message) and
++the var(action) have the same format as for the normal option
++descriptions described above. The var(action) will be executed to
++complete arguments of options whose description in the output of the
++command from the line with the `tt(--help)' option matches the
++var(pattern). For example:
++
++example(_arguments -- '*\*'     '(yes no)' \ 
++              '*=FILE*' '_files' \ 
++              '*=DIR*'  '_files -/')
++
++Here, `tt(yes)' and `tt(no)' will be completed as the argument of
++options whose description ends in a star, file names for options that
++contain the substring `tt(=FILE)' in the description, and paths for
++options whose description contains `tt(=DIR)'. In fact, the last two
++patterns are not needed since this function always completes files
++for option descriptions containing `tt(=FILE)' and paths for option
++descriptions that contain `tt(=DIR)' or `tt(=PATH)'. These builtin
++patterns can be overridden by patterns given as arguments, however.
++
++Note also that tt(_arguments) tries to find out automatically if the
++argument for an option is optional. If it fails to automatically
++detect this, the colon before the var(message) can be doubled to tell
++it about this as described for the normal option descriptions above.
++
++The option `tt(-i) var(patterns)' (which must be given after the
++`tt(--)') can be used to give patterns for options which should not be
++completed. The patterns can be given as the name of an array parameter
++or as a literal list in parentheses. E.g. `tt(-i
++"(--(en|dis)able-FEATURE*)")' will make the options
++`tt(--enable-FEATURE)' and `tt(--disable-FEATURE)' be ignored. The
++option `tt(-s) var(pairs)' (again, after the `tt(--)') can be used to
++describe option aliases. Each var(pair) consists of a pattern and a
++replacement. E.g. some tt(configure)-scripts describe options only as
++`tt(--enable-foo)', but also accept `tt(disable-foo)'. To allow
++completion of the second form, one would use `tt(-s "(#--enable-
++--disable-)")'.
+ 
+ Finally, this function uses one configuration key: tt(option_prefix). If
+ this is set to a string containing `tt(short)' or `tt(all)' as a
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

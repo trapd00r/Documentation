@@ -1,0 +1,713 @@
+From zsh-workers-return-17422-mason-zsh=primenet.com.au@sunsite.dk Thu Jul 04 22:31:24 2002
+Return-Path: <zsh-workers-return-17422-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22080 invoked from network); 4 Jul 2002 22:31:18 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 4 Jul 2002 22:31:18 -0000
+Received: (qmail 21997 invoked by alias); 4 Jul 2002 22:31:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17422
+Received: (qmail 21985 invoked from network); 4 Jul 2002 22:31:10 -0000
+Date: Thu, 4 Jul 2002 18:31:07 -0400
+From: Clint Adams <clint@zsh.org>
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: PATCH: tcp cleanup and breakage
+Message-ID: <20020704223107.GA5730@dman.com>
+References: <6134254DE87BD411908B00A0C99B044F03A0B326@mowd019a.mow.siemens.ru> <27105.1025780215@csr.com> <20020704165949.GB29436@dman.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+In-Reply-To: <20020704165949.GB29436@dman.com>
+User-Agent: Mutt/1.3.28i
+X-Virus-Scanned: by amavisd-milter (http://amavis.org/)
+
+> I imagine that simplified compatibility functions should be relatively
+> easy, however.
+
+So these don't do IPv6, aren't very robust, and have other flaws, but
+they do seem to function.
+
+Index: zshconfig.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/zshconfig.ac,v
+retrieving revision 1.28
+diff -w -u -r1.28 zshconfig.ac
+--- zshconfig.ac	6 May 2002 14:50:11 -0000	1.28
++++ zshconfig.ac	4 Jul 2002 22:22:46 -0000
+@@ -934,8 +934,7 @@
+ 	       waitpid wait3 \
+ 	       sigaction sigblock sighold sigrelse sigsetmask sigprocmask \
+ 	       killpg setpgid setpgrp tcsetpgrp tcgetattr nice \
+-	       gethostname gethostbyname2 getipnodebyname \
+-	       inet_aton inet_pton inet_ntop \
++	       gethostname getaddrinfo freeaddrinfo getnameinfo \
+ 	       getlogin getpwent getpwnam getpwuid getgrgid getgrnam \
+ 	       initgroups nis_list \
+ 	       setuid seteuid setreuid setresuid setsid \
+Index: Src/Modules/tcp.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/tcp.c,v
+retrieving revision 1.32
+diff -w -u -r1.32 tcp.c
+--- Src/Modules/tcp.c	5 Jun 2002 21:02:37 -0000	1.32
++++ Src/Modules/tcp.c	4 Jul 2002 22:22:49 -0000
+@@ -48,10 +48,6 @@
+ # undef HAVE_POLL
+ #endif
+ 
+-#ifdef USE_LOCAL_H_ERRNO
+-int h_errno;
+-#endif
+-
+ /* We use the RFC 2553 interfaces.  If the functions don't exist in the
+  * library, simulate them. */
+ 
+@@ -64,148 +60,146 @@
+ #endif
+ 
+ /**/
+-#ifndef HAVE_INET_NTOP
++#ifndef HAVE_GETADDRINFO
++
++/* We presume if getaddrinfo() is absent, we have gethostbyname and
++ * getservbyname, without testing for them.  We also force IPv4, do
++ * very little error checking, and don't ever return a linked list.
++ */
+ 
+ /**/
+-mod_export char const *
+-zsh_inet_ntop(int af, void const *cp, char *buf, size_t len)
++mod_export int
++zsh_getaddrinfo(const char *node, const char *service,
++		const struct addrinfo *hints, struct addrinfo **res)
+ {       
+-    if (af != AF_INET) {
+-	errno = EAFNOSUPPORT;
+-	return NULL;
++    struct addrinfo *ai;
++
++    ai = zalloc(sizeof(struct addrinfo));
++    ai->ai_family = PF_INET;
++    ai->ai_socktype = SOCK_STREAM;
++    ai->ai_protocol = IPPROTO_IP;
++    ai->ai_next = NULL;
++
++    *res = ai;
++
++    if (node) {
++	struct hostent *he;
++	struct sockaddr_in *sin;
++	char *s;
++
++	he = gethostbyname(node);
++	if (he) {
++	    if ((hints->ai_flags & AI_CANONNAME) == AI_CANONNAME) {
++		s = ztrdup(he->h_name);
++		ai->ai_canonname = s;
+     } 
+-    if (len < INET_ADDRSTRLEN) {
+-	errno = ENOSPC;
+-	return NULL;
++			
++	    sin = (struct sockaddr_in *)ai->ai_addr = zalloc(sizeof(struct sockaddr));
++	    sin->sin_addr.s_addr = ((struct in_addr *)he->h_addr_list[0])->s_addr;
++	    sin->sin_family = AF_INET;
++	    sin->sin_port = 0;
++	    ai->ai_addrlen = sizeof(struct sockaddr_in);
+     }
+-    strcpy(buf, inet_ntoa(*(struct in_addr *)cp));
+-    return buf;
+ }
+ 
+-/**/
+-#else /* !HAVE_INET_NTOP */
++    if (service) {
++	struct servent *se;
+ 
+-/**/
+-# define zsh_inet_ntop inet_ntop
++	se = getservbyname(service, "tcp");
+ 
+-/**/
+-#endif /* !HAVE_INET_NTOP */
++	if (!(ai->ai_addr))
++	    ai->ai_addr = zalloc(sizeof(struct sockaddr));
+ 
+-/**/
+-#ifndef HAVE_INET_ATON
++	if (se)
++	    ((struct sockaddr_in *)ai->ai_addr)->sin_port = se->s_port;
++	else
++	    ((struct sockaddr_in *)ai->ai_addr)->sin_port = htons(atoi(service));
++    }
+ 
+-# ifndef INADDR_NONE
+-#  define INADDR_NONE 0xffffffffUL
+-# endif
+ 
+-/**/
+-mod_export int zsh_inet_aton(char const *src, struct in_addr *dst)
+-{
+-    return (dst->s_addr = inet_addr(src)) != INADDR_NONE;
++    return 0;
+ }
+ 
+ /**/
+-#else /* !HAVE_INET_ATON */
+-
++#else /* HAVE_GETADDRINFO */
+ /**/
+-# define zsh_inet_aton inet_aton
+-
++#define zsh_getaddrinfo getaddrinfo
+ /**/
+-#endif /* !HAVE_INET_ATON */
++#endif /* HAVE_GETADDRINFO */
+ 
+ /**/
+-#ifndef HAVE_INET_PTON
++#ifndef HAVE_GETNAMEINFO
++
++/* We presume if getnameinfo() is absent, we have gethostbyaddr and
++ * getservbyport, without testing for them.  We also force IPv4, do very
++ * little error checking, and return 1 for all errors.
++ */
+ 
+ /**/
+ mod_export int
+-zsh_inet_pton(int af, char const *src, void *dst)
++zsh_getnameinfo(const struct sockaddr *sa, socklen_t salen, char *host,
++		size_t hostlen, char *serv, size_t servlen, int flags)
+ {
+-    if (af != AF_INET) {
+-	errno = EAFNOSUPPORT;
+-	return -1;
+-    }
+-    return !!zsh_inet_aton(src, dst);
+-}
+-
+-#else /* !HAVE_INET_PTON */
+-
+-# define zsh_inet_pton inet_pton
++    if (sa == NULL)
++	return 1;
+ 
+-/**/
+-#endif /* !HAVE_INET_PTON */
++    if (host) {
++	struct hostent *he;
+ 
+-/**/
+-#ifndef HAVE_GETIPNODEBYNAME
++	he = gethostbyaddr((char *)sa, (int)salen, AF_INET);
+ 
+-/**/
+-# ifndef HAVE_GETHOSTBYNAME2
++	if (he)
++	    memcpy(host, he->h_name, hostlen);
++	else
++	    return 1;
++    }
+ 
+-/**/
+-mod_export struct hostent *
+-zsh_gethostbyname2(char const *name, int af)
++    if (serv)
+ {
+-    if (af != AF_INET) {
+-	h_errno = NO_RECOVERY;
+-	return NULL;
++	struct servent *se;
++
++	se = getservbyport(((struct sockaddr_in *)sa)->sin_port, "tcp");
++	if (se)
++	    memcpy(serv, se->s_name, servlen);
++	else
++	    return 1;
+     }
+-    return gethostbyname(name);
++
++    return 0;
+ }
+ 
+ /**/
+-#else /* !HAVE_GETHOSTBYNAME2 */
+-
++#else /* HAVE_GETNAMEINFO */
+ /**/
+-# define zsh_gethostbyname2 gethostbyname2
+-
++#define zsh_getnameinfo getnameinfo
+ /**/
+-# endif /* !HAVE_GETHOSTBYNAME2 */
+-
+-/* note: this is not a complete implementation.  If ignores the flags,
+-   and does not provide the memory allocation of the standard interface.
+-   Each returned structure will overwrite the previous one. */
++#endif /* HAVE_GETNAMEINFO */
+ 
+ /**/
+-mod_export struct hostent *
+-zsh_getipnodebyname(char const *name, int af, int flags, int *errorp)
+-{
+-    static struct hostent ahe;
+-    static char nbuf[16];
+-    static char *addrlist[] = { nbuf, NULL };
+-# ifdef SUPPORT_IPV6
+-    static char pbuf[INET6_ADDRSTRLEN];
+-# else
+-    static char pbuf[INET_ADDRSTRLEN];
+-# endif
+-    struct hostent *he;
+-    if (zsh_inet_pton(af, name, nbuf) == 1) {
+-	zsh_inet_ntop(af, nbuf, pbuf, sizeof(pbuf));
+-	ahe.h_name = pbuf;
+-	ahe.h_aliases = addrlist+1;
+-	ahe.h_addrtype = af;
+-	ahe.h_length = (af == AF_INET) ? 4 : 16;
+-	ahe.h_addr_list = addrlist;
+-	return &ahe;
+-    }
+-    he = zsh_gethostbyname2(name, af);
+-    if (!he)
+-	*errorp = h_errno;
+-    return he;
+-}
++#ifndef HAVE_FREEADDRINFO
++/* On the completely unexpected chance that we are using a real
++ * getaddrinfo() yet a compatibility freeaddrinfo(), recurse to
++ * the end of the list, then free everything dynamically-allocated.
++ */
+ 
+ /**/
+ mod_export void
+-freehostent(struct hostent *ptr)
++zsh_freeaddrinfo(struct addrinfo *res)
+ {
++    if (res->ai_next)
++	zsh_freeaddrinfo(res->ai_next);
++    if (res->ai_canonname)
++	free(res->ai_canonname);
++    if (res->ai_addr)
++	free(res->ai_addr);
++    free(res);
+ }
+-
+ /**/
+-#else /* !HAVE_GETIPNODEBYNAME */
+-
++#else /* HAVE_FREEADDRINFO */
+ /**/
+-# define zsh_getipnodebyname getipnodebyname
+-
++#define zsh_freeaddrinfo freeaddrinfo
+ /**/
+-#endif /* !HAVE_GETIPNODEBYNAME */
++#endif /* HAVE_FREEADDRINFO */
+ 
+ LinkList ztcp_sessions;
+ 
+@@ -310,39 +304,32 @@
+ 
+ /**/
+ mod_export int
+-tcp_connect(Tcp_session sess, char *addrp, struct hostent *zhost, int d_port)
++tcp_connect(Tcp_session sess, struct addrinfo *zai)
+ {
+-    int salen;
++    memcpy(&(sess->peer), zai->ai_addr, zai->ai_addrlen);
+ #ifdef SUPPORT_IPV6
+-    if (zhost->h_addrtype==AF_INET6) {
+-	memcpy(&(sess->peer.in6.sin6_addr), addrp, zhost->h_length);
+-	sess->peer.in6.sin6_port = d_port;
++    if (zai->ai_family == PF_INET6) {
++	sess->peer.in6.sin6_family = zai->ai_family;
+ 	sess->peer.in6.sin6_flowinfo = 0;
+ # ifdef HAVE_STRUCT_SOCKADDR_IN6_SIN6_SCOPE_ID
+ 	sess->peer.in6.sin6_scope_id = 0;
++    }
+ # endif
+-	sess->peer.in6.sin6_family = zhost->h_addrtype;
+-	salen = sizeof(struct sockaddr_in6);
+-    } else
++    else
+ #endif /* SUPPORT_IPV6 */
+-    {
+-	memcpy(&(sess->peer.in.sin_addr), addrp, zhost->h_length);
+-	sess->peer.in.sin_port = d_port;
+-	sess->peer.in.sin_family = zhost->h_addrtype;
+-	salen = sizeof(struct sockaddr_in);
+-    }
++	sess->peer.in.sin_family = zai->ai_family;
+ 
+-    return connect(sess->fd, (struct sockaddr *)&(sess->peer), salen);
++    return connect(sess->fd, (struct sockaddr *)&(sess->peer), zai->ai_addrlen);
+ }
+ 
+ static int
+ bin_ztcp(char *nam, char **args, char *ops, int func)
+ {
+-    int herrno, err=1, destport, force=0, verbose=0, test=0, targetfd=0;
++    int gai_errno, err=1, force=0, verbose=0, test=0, targetfd=0,
++	pf = PF_INET;
+     SOCKLEN_T  len;
+-    char **addrp, *desthost, *localname, *remotename, **dargs;
+-    struct hostent *zthost = NULL, *ztpeer = NULL;
+-    struct servent *srv;
++    char *desthost, *destservice, *localname, *remotename, **dargs;
++    struct addrinfo *zthost = NULL, zthints;
+     Tcp_session sess = NULL;
+ 
+     if (ops['f'])
+@@ -354,6 +341,14 @@
+     if (ops['t'])
+         test = 1;
+ 
++#ifdef SUPPORT_IPV6
++    if (ops['4'])
++	pf = PF_INET;
++
++    if (ops['6'])
++	pf = PF_INET6;
++#endif /* SUPPORT_IPV6 */
++
+     if (ops['d']) {
+ 	targetfd = atoi(args[0]);
+ 	dargs = args + 1;
+@@ -396,44 +391,52 @@
+ 	}
+     }
+     else if (ops['l']) {
+-	int lport = 0;
++	char *localhost, *localport;
+ 
+ 	if (!dargs[0]) {
+ 	    zwarnnam(nam, "-l requires an argument", NULL, 0);
+ 	    return 1;
+ 	}
+ 
+-	srv = getservbyname(dargs[0], "tcp");
+-	if (srv)
+-	    lport = srv->s_port;
+-	else
+-	    lport = htons(atoi(dargs[0]));
+-	if (!lport) { zwarnnam(nam, "bad service name or port number", NULL, 0);
++	if ((localport = memchr(localhost = dargs[0], (int)':', strlen(dargs[0]))) == NULL) {
++	    localhost = dupstring("0.0.0.0");
++	    localport = dargs[0];
++	}
++	else {
++	    *localport++ = '\0';
++	}
++
++	memset(&zthints, 0, sizeof(zthints));
++	zthints.ai_protocol = IPPROTO_TCP;
++	zthints.ai_flags = AI_CANONNAME;
++	zthints.ai_socktype = SOCK_STREAM;
++
++	if ((gai_errno = zsh_getaddrinfo(localhost, localport, &zthints, &zthost))) {
++	    zwarnnam(nam, "bad service name, port number, or hostname: %s: %d", dargs[0], gai_errno);
+ 	return 1;
+ 	}
+-	sess = tcp_socket(PF_INET, SOCK_STREAM, 0, ZTCP_LISTEN);
++	sess = tcp_socket(pf, SOCK_STREAM, IPPROTO_IP, ZTCP_LISTEN);
+ 
+ 	if (!sess) {
+ 	    zwarnnam(nam, "unable to allocate a TCP session slot", NULL, 0);
+ 	    return 1;
+ 	}
++	if ((sess->fd) == -1) {
++	    zwarnnam(nam, "socket error: %e", NULL, errno);
++	    return 1;
++	}
+ #ifdef SO_OOBINLINE
+ 	len = 1;
+ 	setsockopt(sess->fd, SOL_SOCKET, SO_OOBINLINE, (char *)&len, sizeof(len));
+ #endif
+-	if (!zsh_inet_aton("0.0.0.0", &(sess->sock.in.sin_addr)))
+-	{
+-	    zwarnnam(nam, "bad address: %s", "0.0.0.0", 0);
+-	    return 1;
+-	}
+ 
+-	sess->sock.in.sin_family = AF_INET;
+-	sess->sock.in.sin_port = lport;
++	memcpy(&(sess->sock.a), zthost->ai_addr, sizeof(struct sockaddr));
+ 
++	zsh_freeaddrinfo(zthost);
+ 
+ 	if (bind(sess->fd, (struct sockaddr *)&sess->sock.in, sizeof(struct sockaddr_in)))
+ 	{
+-	    zwarnnam(nam, "could not bind to %s: %e", "0.0.0.0", errno);
++	    zwarnnam(nam, "could not bind to %s: %e", dargs[0], errno);
+ 	    tcp_close(sess);
+ 	    return 1;
+ 	}
+@@ -561,16 +564,21 @@
+ 
+ 		if (sess->fd != -1)
+ 		{
+-		    zthost = gethostbyaddr((const void *)&(sess->sock.in.sin_addr), sizeof(sess->sock.in.sin_addr), AF_INET);
+-		    if (zthost)
+-			localname = zthost->h_name;
+-		    else
+-			localname = ztrdup(inet_ntoa(sess->sock.in.sin_addr));
+-		    ztpeer = gethostbyaddr((const void *)&(sess->peer.in.sin_addr), sizeof(sess->peer.in.sin_addr), AF_INET);
+-		    if (ztpeer)
+-			remotename = ztpeer->h_name;
+-		    else
+-			remotename = ztrdup(inet_ntoa(sess->peer.in.sin_addr));
++		    char *hostname;
++		    hostname = zalloc(255);
++
++		    if (!zsh_getnameinfo((struct sockaddr *)&(sess->sock.a), sizeof(sess->sock.a), hostname, 255, NULL, 0, 0))
++			localname = hostname;
++		    else {
++			localname = ztrdup("ERR");
++		    }
++
++		    if (!zsh_getnameinfo((struct sockaddr *)&(sess->peer.a), sizeof(sess->peer.a), hostname, 255, NULL, 0, 0))
++			remotename = hostname;
++		    else {
++			remotename = ztrdup("ERR");
++		    }
++
+ 		    if (ops['L']) {
+ 			int schar;
+ 			if (sess->flags & ZTCP_ZFTP)
+@@ -594,31 +602,38 @@
+ 			       sess->fd,
+ 			       (sess->flags & ZTCP_ZFTP) ? " ZFTP" : "");
+ 		    }
++
++		    zsfree(localname);
++		    zsfree(remotename);
+ 		}
+ 	    }
+ 	    return 0;
+ 	}
+ 	else if (!dargs[1]) {
+-	    destport = htons(23);
++	    destservice = ztrdup("telnet");
+ 	}
+ 	else {
+-
+-	    srv = getservbyname(dargs[1],"tcp");
+-	    if (srv)
+-		destport = srv->s_port;
+-	    else
+-		destport = htons(atoi(dargs[1]));
++	    destservice = ztrdup(dargs[1]);
+ 	}
+ 	
++	memset(&zthints, 0, sizeof(zthints));
++	zthints.ai_protocol = IPPROTO_TCP;
++	zthints.ai_flags = AI_CANONNAME;
++
+ 	desthost = ztrdup(dargs[0]);
+ 	
+-	zthost = zsh_getipnodebyname(desthost, AF_INET, 0, &herrno);
+-	if (!zthost || errflag) {
+-	    zwarnnam(nam, "host resolution failure: %s", desthost, 0);
++	gai_errno = zsh_getaddrinfo(desthost, destservice, &zthints, &zthost);
++
++	zsfree(desthost);
++	zsfree(destservice);
++
++	if (gai_errno) {
++	    /* gai_strerror could be more useful here */
++	    zwarnnam(nam, "host/service resolution failure: %s: %d", desthost, gai_errno);
+ 	    return 1;
+ 	}
+ 	
+-	sess = tcp_socket(PF_INET, SOCK_STREAM, 0, 0);
++	sess = tcp_socket(pf, SOCK_STREAM, IPPROTO_IP, 0);
+ 
+ 	if (!sess) {
+ 	    zwarnnam(nam, "unable to allocate a TCP session slot", NULL, 0);
+@@ -632,23 +647,15 @@
+ 
+ 	if (sess->fd < 0) {
+ 	    zwarnnam(nam, "socket creation failed: %e", NULL, errno);
+-	    zsfree(desthost);
+ 	    zts_delete(sess);
++	    zsh_freeaddrinfo(zthost);
+ 	    return 1;
+ 	}
+ 	
+-	for (addrp = zthost->h_addr_list; err && *addrp; addrp++) {
+-	    if (zthost->h_length != 4)
+-		zwarnnam(nam, "address length mismatch", NULL, 0);
+-	    do {
+-		err = tcp_connect(sess, *addrp, zthost, destport);
+-	    } while (err && errno == EINTR && !errflag);
+-	}
+-	
+-	if (err) {
++	if ((err = tcp_connect(sess, zthost))) {
+ 	    zwarnnam(nam, "connection failed: %e", NULL, errno);
+ 	    tcp_close(sess);
+-	    zsfree(desthost);
++	    zsh_freeaddrinfo(zthost);
+ 	    return 1;
+ 	}
+ 	else
+@@ -662,17 +669,21 @@
+ 
+ 	    if (verbose)
+ 		printf("%s:%d is now on fd %d\n",
+-			desthost, destport, sess->fd);
++		       zthost->ai_canonname, ntohs(((struct sockaddr_in *)(zthost->ai_addr))->sin_port), sess->fd);
+ 	}
+ 	
+-	zsfree(desthost);
++	zsh_freeaddrinfo(zthost);
+     }
+ 
+     return 0;
+ }
+ 
+ static struct builtin bintab[] = {
++#ifdef SUPPORT_IPV6
++    BUILTIN("ztcp", 0, bin_ztcp, 0, 3, 0, "acdflLtv46", NULL),
++#else
+     BUILTIN("ztcp", 0, bin_ztcp, 0, 3, 0, "acdflLtv", NULL),
++#endif /* SUPPORT_IPV6 */
+ };
+ 
+ /* The load/unload routines required by the zsh library interface */
+Index: Src/Modules/zftp.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/zftp.c,v
+retrieving revision 1.27
+diff -w -u -r1.27 zftp.c
+--- Src/Modules/zftp.c	15 May 2002 20:38:18 -0000	1.27
++++ Src/Modules/zftp.c	4 Jul 2002 22:22:54 -0000
+@@ -1014,8 +1014,11 @@
+ 	if(zdsockp->a.sa_family == AF_INET6) {
+ 	    /* see RFC 2428 for explanation */
+ 	    strcpy(portcmd, "EPRT |2|");
+-	    zsh_inet_ntop(AF_INET6, &zdsockp->in6.sin6_addr,
+-			  portcmd+8, INET6_ADDRSTRLEN);
++
++	    zsh_getnameinfo(&(zdsockp->a), sizeof(struct sockaddr),
++			    (char *)portcmd+8, INET6_ADDRSTRLEN,
++			    NULL, 0, NI_NUMERICHOST);
++
+ 	    sprintf(strchr(portcmd, 0), "|%u|\r\n",
+ 		    (unsigned)ntohs(zdsockp->in6.sin6_port));
+ 	} else
+@@ -1696,13 +1699,11 @@
+ static int
+ zftp_open(char *name, char **args, int flags)
+ {
+-    struct protoent *zprotop;
+-    struct servent *zservp;
+-    struct hostent *zhostp = NULL;
+-    char **addrp, *fname;
++    struct addrinfo *zhostp = NULL, zthints;
++    char *fname;
+     int err, tmout;
+     SOCKLEN_T  len;
+-    int herrno, af, hlen;
++    int gai_errno, af, hlen;
+ 
+     if (!*args) {
+ 	if (zfsess->userparams)
+@@ -1721,15 +1722,6 @@
+     if (zfsess->control)
+ 	zfclose(0);
+ 
+-    /* this is going to give 0.  why bother? */
+-    zprotop = getprotobyname("tcp");
+-    zservp = getservbyname("ftp", "tcp");
+-
+-    if (!zprotop || !zservp) {
+-	zwarnnam(name, "Somebody stole FTP!", NULL, 0);
+-	return 1;
+-    }
+-
+     /* don't try talking to server yet */
+     zcfinish = 2;
+ 
+@@ -1762,20 +1754,20 @@
+ # define FAILED() do { } while(0)
+ #endif
+     {
+-	zhostp = zsh_getipnodebyname(args[0], af, 0, &herrno);
+-	if (!zhostp || errflag) {
+-	    /* should use herror() here if available, but maybe
+-	     * needs configure test. on AIX it's present but not
+-	     * in headers.
+-	     * 
+-	     * on the other hand, herror() is obsolete
+-	     */
++
++	memset(&zthints, 0, sizeof(zthints));
++	zthints.ai_protocol = IPPROTO_TCP;
++	zthints.ai_flags = AI_CANONNAME;
++
++
++	if ((gai_errno = zsh_getaddrinfo(args[0], "ftp", &zthints, &zhostp))) {
++	    /* could use gai_strerror() */
+ 	    FAILED();
+-	    zwarnnam(name, "host not found: %s", args[0], 0);
++	    zwarnnam(name, "host not found: %s: %d", args[0], gai_errno);
+ 	    alarm(0);
+ 	    return 1;
+ 	}
+-	zfsetparam("ZFTP_HOST", ztrdup(zhostp->h_name), ZFPM_READONLY);
++	zfsetparam("ZFTP_HOST", ztrdup(zhostp->ai_canonname), ZFPM_READONLY);
+ 
+ #ifdef SUPPORT_IPV6
+ 	if(af == AF_INET6) {
+@@ -1793,7 +1785,7 @@
+ 		tcp_close(zfsess->control);
+ 		zfsess->control = NULL;
+ 	    }
+-	    freehostent(zhostp);
++	    freeaddrinfo(zhostp);
+ 	    zfunsetparam("ZFTP_HOST");
+ 	    FAILED();
+ 	    zwarnnam(name, "socket failed: %e", NULL, errno);
+@@ -1810,18 +1802,10 @@
+ 
+ 	err = 1;
+ 
+-	/* try all possible IP's */
+-	for (addrp = zhostp->h_addr_list; err && *addrp; addrp++) {
+-	    if(hlen != zhostp->h_length)
+-		zwarnnam(name, "address length mismatch", NULL, 0);
+-	    do {
+-		err = tcp_connect(zfsess->control, *addrp, zhostp, zservp->s_port);
+-	    } while (err && errno == EINTR && !errflag);
+-	    /* you can check whether it's worth retrying here */
+-	}
++	err = tcp_connect(zfsess->control, zhostp);
+ 
+ 	if (err) {
+-	    freehostent(zhostp);
++	    freeaddrinfo(zhostp);
+ 	    zfclose(0);
+ 	    FAILED();
+ 	    zwarnnam(name, "connect failed: %e", NULL, errno);
+@@ -1838,11 +1822,12 @@
+ #else
+ 	char pbuf[INET_ADDRSTRLEN];
+ #endif
+-	addrp--;
+-	zsh_inet_ntop(af, *addrp, pbuf, sizeof(pbuf));
++	zsh_getnameinfo(&(zfsess->control->peer.a), sizeof(struct sockaddr),
++			pbuf, sizeof(pbuf), NULL, 0, NI_NUMERICHOST);
++
+ 	zfsetparam("ZFTP_IP", ztrdup(pbuf), ZFPM_READONLY);
+     }
+-    freehostent(zhostp);
++    freeaddrinfo(zhostp);
+     /* now we can talk to the control connection */
+     zcfinish = 0;
+ 
+

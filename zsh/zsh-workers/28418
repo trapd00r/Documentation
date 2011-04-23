@@ -1,0 +1,402 @@
+From zsh-workers-return-28418-mason-zsh=primenet.com.au@zsh.org Wed Nov 17 17:41:56 2010
+Return-Path: <zsh-workers-return-28418-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22291 invoked by alias); 17 Nov 2010 17:41:55 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28418
+Received: (qmail 25741 invoked from network); 17 Nov 2010 17:41:52 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+X-Authentication-Warning: pwslap01u.europe.root.pri: pws owned process doing -bs
+To: zsh-workers@zsh.org (Zsh hackers list)
+Subject: PATCH: bash-style substrings & subarrays
+X-Mailer: MH-E 8.2; nmh 1.3; GNU Emacs 23.2.1
+Date: Wed, 17 Nov 2010 16:54:17 +0000
+Message-ID: <27165.1290012857@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 17 Nov 2010 16:54:21.0238 (UTC) FILETIME=[14BDED60:01CB8678]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A_10_80_00 (www.mailcontrol.com) on 10.71.0.127
+
+This implements the ${NAME:OFFSET} and ${NAME:OFFSET:LENGTH} syntax.
+This is basically for compatibility; we don't need the extra
+functionality, but it's a syntax people are nowadays assuming they can
+use.  The clash with what we've got is minor and probably mostly
+negligible: modifiers take precedence, but this only applies when the
+first character after the colon is alphabetic or &, which you wouldn't
+obviously need, and the clash with ${NAME:-WORD} when OFFSET starts with
+a - is not specific to zsh.
+
+One thing I have not yet tried to do is the fact that the offset is
+offset by 1 when the variable is * or @ in bash (i.e. corresponding to
+having KSH_ARRAYS set, except it doesn't this time), i.e. ${*:1:1} gives
+you $1 not $2.  Yech.
+
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.121
+diff -p -u -r1.121 expn.yo
+--- Doc/Zsh/expn.yo	15 Oct 2010 18:56:17 -0000	1.121
++++ Doc/Zsh/expn.yo	17 Nov 2010 16:46:32 -0000
+@@ -585,6 +585,45 @@ If var(name) is an array
+ the matching array elements are removed (use the `tt((M))' flag to
+ remove the non-matched elements).
+ )
++xitem(tt(${)var(name)tt(:)var(offset)tt(}))
++item(tt(${)var(name)tt(:)var(offset)tt(:)var(length)tt(}))(
++This syntax gives effects similar to parameter subscripting
++in the form tt($)var(name)tt({)var(offset)tt(,)var(end)tt(}) but in
++a form compatible with other shells.
++
++If the variable var(name) is a scalar, substitute the contents
++starting from offset var(offset); if var(name) is an array,
++substitute elements from element var(offset).  If var(length) is
++given, substitute that many characters or elements, otherwise the
++entire rest of the scalar or array.
++
++var(offset) is treated similarly to a parameter subscript:
++the offset of the first character or element in var(name)
++is 0 if the option tt(KSH_ARRAYS) is set, else 1; a negative
++subscript counts backwards so that -1 corresponds to the last
++character or element.
++
++var(length) is always treated directly as a length and hence may not be
++negative.
++
++var(offset) and var(length) undergo the same set of shell substitutions
++as for scalar assignment; in addition, they are then subject to arithmetic
++evaluation.  Hence, for example
++
++example(print ${foo:3}
++print ${foo: 1 + 2}
++print ${foo:$(( 1 + 2))}
++print ${foo:$(echo 1 + 2)})
++
++all have the same effect.
++
++Note that if offset is negative, the tt(-) may not appear immediately
++after the tt(:) as this indicates the
++tt(${)var(name)tt(:-)var(word)tt(}) form of substitution; a space
++may be inserted before the tt(-).  Furthermore, neither var(offset) nor
++var(length) may begin with an alphabetic character or tt(&) as these are
++used to indicate history-style modifiers.
++)
+ xitem(tt(${)var(name)tt(/)var(pattern)tt(/)var(repl)tt(}))
+ item(tt(${)var(name)tt(//)var(pattern)tt(/)var(repl)tt(}))(
+ Replace the longest possible match of var(pattern) in the expansion of
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.56
+diff -p -u -r1.56 lex.c
+--- Src/lex.c	14 Sep 2010 14:46:26 -0000	1.56
++++ Src/lex.c	17 Nov 2010 16:46:32 -0000
+@@ -1398,7 +1398,12 @@ gettokstr(int c, int sub)
+ }
+ 
+ 
+-/* Return non-zero for error (character to unget), else zero */
++/*
++ * Parse input as if in double quotes.
++ * endchar is the end character to expect.
++ * sub has got something to do with whether we are doing quoted substitution.
++ * Return non-zero for error (character to unget), else zero
++ */
+ 
+ /**/
+ static int
+@@ -1591,14 +1596,20 @@ parsestrnoerr(char *s)
+     return err;
+ }
+ 
++/*
++ * Parse a subscript in string s.
++ * sub is passed down to dquote_parse().
++ * endchar is the final character.
++ * Return the next character, or NULL.
++ */
+ /**/
+ mod_export char *
+-parse_subscript(char *s, int sub)
++parse_subscript(char *s, int sub, int endchar)
+ {
+     int l = strlen(s), err;
+     char *t;
+ 
+-    if (!*s || *s == ']')
++    if (!*s || *s == endchar)
+ 	return 0;
+     lexsave();
+     untokenize(t = dupstring(s));
+@@ -1607,15 +1618,16 @@ parse_subscript(char *s, int sub)
+     len = 0;
+     bptr = tokstr = s;
+     bsiz = l + 1;
+-    err = dquote_parse(']', sub);
++    err = dquote_parse(endchar, sub);
+     if (err) {
+ 	err = *bptr;
+-	*bptr = 0;
++	*bptr = '\0';
+ 	untokenize(s);
+ 	*bptr = err;
+-	s = 0;
+-    } else
++	s = NULL;
++    } else {
+ 	s = bptr;
++    }
+     strinend();
+     inpop();
+     DPUTS(cmdsp, "BUG: parse_subscript: cmdstack not empty.");
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.164
+diff -p -u -r1.164 params.c
+--- Src/params.c	3 Nov 2010 22:40:34 -0000	1.164
++++ Src/params.c	17 Nov 2010 16:46:33 -0000
+@@ -1013,7 +1013,7 @@ isident(char *s)
+ 	return 0;
+ 
+     /* Require balanced [ ] pairs with something between */
+-    if (!(ss = parse_subscript(++ss, 1)))
++    if (!(ss = parse_subscript(++ss, 1, ']')))
+ 	return 0;
+     untokenize(s);
+     return !ss[1];
+@@ -1628,7 +1628,7 @@ getindex(char **pptr, Value v, int flags
+ 
+     *s++ = '[';
+     /* Error handled after untokenizing */
+-    s = parse_subscript(s, flags & SCANPM_DQUOTED);
++    s = parse_subscript(s, flags & SCANPM_DQUOTED, ']');
+     /* Now we untokenize everything except inull() markers so we can check *
+      * for the '*' and '@' special subscripts.  The inull()s are removed  *
+      * in getarg() after we know whether we're doing reverse indexing.    */
+Index: Src/subst.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/subst.c,v
+retrieving revision 1.108
+diff -p -u -r1.108 subst.c
+--- Src/subst.c	22 Oct 2010 16:32:36 -0000	1.108
++++ Src/subst.c	17 Nov 2010 16:46:33 -0000
+@@ -1371,6 +1371,43 @@ untok_and_escape(char *s, int escapes, i
+     return dst;
+ }
+ 
++/*
++ * See if an argument str looks like a subscript or length following
++ * a colon and parse it.  It must be followed by a ':' or nothing.
++ * If this succeeds, expand and return the evaulated expression if
++ * found, else return NULL.
++ *
++ * We assume this is what is meant if the first character is not
++ * an alphabetic character or '&', which signify modifiers.
++ *
++ * Set *endp to point to the next character following.
++ */
++static char *
++check_colon_subscript(char *str, char **endp)
++{
++    int sav;
++
++    /* Could this be a modifier (or empty)? */
++    if (!*str || ialpha(*str) || *str == '&')
++	return NULL;
++
++    *endp = parse_subscript(str, 0, ':');
++    if (!*endp) {
++	/* No trailing colon? */
++	*endp = parse_subscript(str, 0, '\0');
++	if (!*endp)
++	    return NULL;
++    }
++    sav = **endp;
++    **endp = '\0';
++    if (parsestr(str = dupstring(str)))
++	return NULL;
++    singsub(&str);
++
++    **endp = sav;
++    return str;
++}
++
+ /* parameter substitution */
+ 
+ #define	isstring(c) ((c) == '$' || (char)(c) == String || (char)(c) == Qstring)
+@@ -2683,6 +2720,97 @@ paramsubst(LinkList l, LinkNode n, char 
+ 	    }
+ 	    val = dupstring("");
+ 	}
++	if (colf && inbrace) {
++	    /*
++	     * Look for ${PARAM:OFFSET} or ${PARAM:OFFSET:LENGTH}.
++	     * This must appear before modifiers.  For compatibility
++	     * with bash we perform both standard string substitutions
++	     * and math eval.
++	     */
++	    char *check_offset2;
++	    char *check_offset = check_colon_subscript(s, &check_offset2);
++	    if (check_offset) {
++		zlong offset = mathevali(check_offset);
++		zlong length = (zlong)-1;
++		if (errflag)
++		    return NULL;
++		if ((*check_offset2 && *check_offset2 != ':')) {
++		    zerr("invalid subscript: %s", check_offset);
++		    return NULL;
++		}
++		if (*check_offset2) {
++		    check_offset = check_colon_subscript(check_offset2 + 1,
++							 &check_offset2);
++		    if (*check_offset2 && *check_offset2 != ':') {
++			zerr("invalid length: %s", check_offset);
++			return NULL;
++		    }
++		    length = mathevali(check_offset);
++		    if (errflag)
++			return NULL;
++		    if (length < (zlong)0) {
++			zerr("invalid length: %s", check_offset);
++			return NULL;
++		    }
++		}
++		if (!isset(KSHARRAYS) && offset > 0)
++		    offset--;
++		if (isarr) {
++		    int alen = arrlen(aval), count;
++		    char **srcptr, **dstptr, **newarr;
++
++		    if (offset < 0) {
++			offset += alen;
++			if (offset < 0)
++			    offset = 0;
++		    }
++		    if (length < 0)
++		      length = alen;
++		    if (offset > alen)
++			offset = alen;
++		    if (offset + length > alen)
++			length = alen - offset;
++		    count = length;
++		    srcptr = aval + offset;
++		    newarr = dstptr = (char **)
++			zhalloc((length+1)*sizeof(char *));
++		    while (count--)
++			*dstptr++ = dupstring(*srcptr++);
++		    *dstptr = (char *)NULL;
++		    aval = newarr;
++		} else {
++		    char *sptr, *eptr;
++		    if (offset < 0) {
++			MB_METACHARINIT();
++			for (sptr = val; *sptr; ) {
++			    sptr += MB_METACHARLEN(sptr);
++			    offset++;
++			}
++			if (offset < 0)
++			    offset = 0;
++		    }
++		    MB_METACHARINIT();
++		    for (sptr = val; *sptr && offset; ) {
++			sptr += MB_METACHARLEN(sptr);
++			offset--;
++		    }
++		    if (length >= 0) {
++			for (eptr = sptr; *eptr && length; ) {
++			    eptr += MB_METACHARLEN(eptr);
++			    length--;
++			}
++			val = dupstrpfx(sptr, eptr - sptr);
++		    } else {
++			val = dupstring(sptr);
++		    }
++		}
++		if (!*check_offset2) {
++		    colf = 0;
++		} else {
++		    s = check_offset2 + 1;
++		}
++	    }
++	}
+ 	if (colf) {
+ 	    /*
+ 	     * History style colon modifiers.  May need to apply
+Index: Test/D04parameter.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D04parameter.ztst,v
+retrieving revision 1.44
+diff -p -u -r1.44 D04parameter.ztst
+--- Test/D04parameter.ztst	6 Oct 2010 08:27:10 -0000	1.44
++++ Test/D04parameter.ztst	17 Nov 2010 16:46:33 -0000
+@@ -1256,3 +1256,49 @@
+ 0:$ZSH_EVAL_CONTEXT and $zsh_eval_context
+ >toplevel
+ >shfunc cmdsubst
++
++   foo="123456789"
++   print ${foo:3}
++   print ${foo: 1 + 3}
++   print ${foo:$(( 2 + 3))}
++   print ${foo:$(echo 3 + 3)}
++   print ${foo:3:1}
++   print ${foo: 1 + 3:(4-2)/2}
++   print ${foo:$(( 2 + 3)):$(( 7 - 6 ))}
++   print ${foo:$(echo 3 + 3):`echo 4 - 3`}
++   print ${foo: -1}
++   print ${foo: -10}
++0:Bash-style subscripts, scalar
++>3456789
++>456789
++>56789
++>6789
++>3
++>4
++>5
++>6
++>9
++>123456789
++
++   foo=(1 2 3 4 5 6 7 8 9)
++   print ${foo:3}
++   print ${foo: 1 + 3}
++   print ${foo:$(( 2 + 3))}
++   print ${foo:$(echo 3 + 3)}
++   print ${foo:3:1}
++   print ${foo: 1 + 3:(4-2)/2}
++   print ${foo:$(( 2 + 3)):$(( 7 - 6 ))}
++   print ${foo:$(echo 3 + 3):`echo 4 - 3`}
++   print ${foo: -1}
++   print ${foo: -10}
++0:Bash-style subscripts, array
++>3 4 5 6 7 8 9
++>4 5 6 7 8 9
++>5 6 7 8 9
++>6 7 8 9
++>3
++>4
++>5
++>6
++>9
++>1 2 3 4 5 6 7 8 9
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

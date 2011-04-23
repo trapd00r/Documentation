@@ -1,0 +1,425 @@
+From zsh-workers-return-13070-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Oct 24 07:46:09 2000
+Return-Path: <zsh-workers-return-13070-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17746 invoked from network); 24 Oct 2000 07:46:07 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 24 Oct 2000 07:46:07 -0000
+Received: (qmail 29033 invoked by alias); 24 Oct 2000 07:46:00 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13070
+Received: (qmail 29026 invoked from network); 24 Oct 2000 07:45:59 -0000
+Date: Tue, 24 Oct 2000 09:44:42 +0200 (MET DST)
+Message-Id: <200010240744.JAA21146@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "E. Jay Berkenbilt"'s message of Fri, 20 Oct 2000 12:38:43 -0400
+Subject: Re: still confused about completion and matching
+
+
+E. Jay Berkenbilt wrote:
+
+> ...
+> 
+> If I omit "suffix" from :completion:*:paths expand, although 
+> 
+> ls u?/ TAB
+> 
+> doesn't generate a superfluous / anymore,
+> 
+> ls u?/q/ TAB
+> 
+> still does.
+
+This is a different case. These are the automatically added slashes we
+get due to LIST_TYPES. I've got a patch for the C-code to fix it there.
+I'll commit it. We won't want it to ever add a file-type character 
+after a slash anyway or do we?
+
+> ls u?/q/d TAB
+> 
+> lists u1/q/devel and u3/q/dark as it should.  However,
+> 
+> ls u?/q/de TAB
+> 
+> doesn't list anything.  Similarly,
+
+As you found out, this happened in cases where there was only one match.
+This was caused by the yet unchanged compadd around line 624 in _path_files
+which used pattern matching even if there was a pattern in a component in
+the -p-prefix (which is used using the match specs).
+
+> ...
+> 
+> Finally,
+> 
+> ls u? TAB
+> 
+> works fine, but
+> 
+> ls ./u? TAB
+> 
+> makes the ? disappear from the commandline.
+
+A small problem with an attempt at additional cleverness in _match.
+
+> ...
+> 
+> Now to make a gratuitous personal observation.... zsh is about the
+> only open source software I've used recently where it hasn't been just
+> as easy for me to send a patch implementing my requested changes as it
+> is to describe them in detail.  I'm not sure exactly why this is, but
+> I think it's just because there is so much power that can be expressed
+> so compactly that the density of code that I don't understand due to
+> lack of zsh knowledge is increased.  Perhaps also the software has so
+> much potential that I'm thinking of changes that just wouldn't occur
+> to me if the software couldn't already almost handle them. 
+
+I sometimes have the impression that this is a trap even we've run
+into before ;-)
+
+> I have a
+> rule against modifying code I don't understand (at least locally).
+> Reading the code in the zsh completion system, I find that there is
+> something mysterious in just about every line though the documentation
+> seems remarkably complete.  Should I decide to spend the time required
+> to really understand what's going on in code like that in _path_files,
+> looking back at these discussions and patches will no doubt be an
+> invaluable tool. 
+
+_path_files certainly wasn't the best starting point when trying to
+learn the ways of the completion system. Writing a new completion
+function, looking at older ones, starting with a simple and incomplete
+solution and improving it step by step is almost certainly the best
+way. As Andrej already said, you should begin by using only _arguments,
+continue by using its advanced features as you go along, using (i.e.
+calling) other utility functions if needed (I'm referring to functions
+like _hosts, for which we still don't have a complete list, sigh). If
+needed, you could then have a look at the compadd and compset builtins
+and the special completion parameters (and from those $compstate is
+normally the last one needed). And if your completion function can
+reasonably support different modes, learn using zstyle to look up
+styles.
+
+
+
+Bye
+ Sven
+
+diff -u -r ../oz/Completion/Builtins/_zstyle ./Completion/Builtins/_zstyle
+--- ../oz/Completion/Builtins/_zstyle	Sun Oct 22 15:17:57 2000
++++ ./Completion/Builtins/_zstyle	Mon Oct 23 19:28:26 2000
+@@ -44,7 +44,7 @@
+   ignored-patterns	 c:
+   insert-ids             c:insert-ids
+   insert-tab             c:bool
+-  insert-unambiguous	 c:bool
++  insert-unambiguous	 c:insunambig
+   keep-prefix		 c:keep-prefix
+   last-prompt		 c:bool
+   list			 c:listwhen
+@@ -52,6 +52,7 @@
+   list-packed		 c:bool
+   list-prompt            c:
+   list-rows-first	 c:bool
++  list-suffixes		 c:bool
+   local			 c:
+   match-original	 c:match-orig
+   matcher		 c:
+@@ -290,6 +291,10 @@
+ 
+     oldmatches) 
+       _wanted values expl 'use list of old matches' compadd true false only
++      ;;
++
++    insunambig) 
++      _wanted values expl 'insert unambiguous string compadd true false pattern
+       ;;
+ 
+     urgh) 
+diff -u -r ../oz/Completion/Core/_match ./Completion/Core/_match
+--- ../oz/Completion/Core/_match	Sun Oct 22 15:17:57 2000
++++ ./Completion/Core/_match	Mon Oct 23 20:33:15 2000
+@@ -11,41 +11,56 @@
+ 
+ ### Shouldn't be needed any more: [[ _matcher_num -gt 1 ]] && return 1
+ 
+-local tmp opm="$compstate[pattern_match]" ret=0 orig ins
++local tmp opm="$compstate[pattern_match]" ret=1 orig ins
++local oms="$_old_match_string"
++local ocsi="$compstate[insert]" ocspi="$compstate[pattern_insert]"
+ 
+ # Do nothing if we don't have a pattern.
+ 
+ tmp="${${:-$PREFIX$SUFFIX}#[~=]}"
+ [[ "$tmp:q" = "$tmp" ]] && return 1
+ 
++_old_match_string="$PREFIX$SUFFIX$HISTNO"
++
+ zstyle -s ":completion:${curcontext}:" match-original orig
+-zstyle -b ":completion:${curcontext}:" insert-unambiguous ins
++zstyle -s ":completion:${curcontext}:" insert-unambiguous ins
+ 
+ # Try completion without inserting a `*'?
+ 
+ if [[ -n "$orig" ]]; then
+   compstate[pattern_match]='-'
+-  _complete && ret=1
++  _complete && ret=0
+   compstate[pattern_match]="$opm"
+ 
+-  if (( ret )); then
+-    [[ "$ins" = yes &&
+-       $#compstate[unambiguous] -ge ${#:-${PREFIX}${SUFFIX}} ]] && 
+-        compstate[pattern_insert]=unambiguous
+-    return 0
+-  fi
++  # No completion with inserting `*'?
++
++  [[ ret -eq 1 && "$orig" = only ]] && return 1
++fi
++
++if (( ret )); then
++  compstate[pattern_match]='*'
++  _complete && ret=0
++  compstate[pattern_match]="$opm"
+ fi
+ 
+-# No completion with inserting `*'?
++if (( ! ret )); then
++
++  if [[ "$ins" = pattern && $compstate[nmatches] -gt 1 ]]; then
+ 
+-[[ "$orig" = only ]] && return 1
++    [[ "$oms" = "$PREFIX$SUFFIX$HISTNO" &&
++       "$compstate[insert]" = automenu-unambiguous ]] &&
++        compstate[insert]=automenu
++    [[ "$compstate[insert]" != *menu ]] &&
++        compstate[pattern_insert]= compstate[insert]=
+ 
+-compstate[pattern_match]='*'
+-_complete && ret=1
+-compstate[pattern_match]="$opm"
++    [[ $compstate[unambiguous_cursor] -gt $#compstate[unambiguous] ]] &&
++        ins=yes compstate[insert]="$ocsi" compstate[pattern_insert]="$ocspi"
++  fi
+ 
+-[[ ret -eq 1 && "$ins" = yes &&
+-   $#compstate[unambiguous] -ge ${#:-${PREFIX}${SUFFIX}} ]] && 
+-    compstate[pattern_insert]=unambiguous
++  [[ "$ins" = (true|yes|on|1) &&
++     $#compstate[unambiguous] -ge ${#:-${PREFIX}${SUFFIX}} ]] && 
++      compstate[pattern_insert]=unambiguous
++
++fi
+ 
+-return 1-ret
++return ret
+diff -u -r ../oz/Completion/Core/_path_files ./Completion/Core/_path_files
+--- ../oz/Completion/Core/_path_files	Sun Oct 22 15:17:57 2000
++++ ./Completion/Core/_path_files	Mon Oct 23 20:56:33 2000
+@@ -5,7 +5,7 @@
+ 
+ local linepath realpath donepath prepath testpath exppath skips skipped
+ local tmp1 tmp2 tmp3 tmp4 i orig eorig pre suf tpre tsuf opre osuf cpre
+-local pats haspats ignore pfxsfx sopt gopt opt sdirs ignpar cfopt
++local pats haspats ignore pfxsfx sopt gopt opt sdirs ignpar cfopt listsfx
+ local nm=$compstate[nmatches] menu matcher mopts sort match mid accex fake
+ 
+ typeset -U prepaths exppaths
+@@ -137,6 +137,8 @@
+ fi
+ 
+ zstyle -s ":completion:${curcontext}:paths" special-dirs sdirs
++zstyle -t ":completion:${curcontext}:paths" list-suffixes &&
++    listsfx=yes
+ 
+ [[ "$pats" = ((|*[[:blank:]])\*(|[[:blank:]]*)|*\([^[:blank:]]#/[^[:blank:]]#\)*) ]] &&
+     sopt=$sopt/
+@@ -460,9 +462,11 @@
+       SUFFIX="${tsuf}"
+     fi
+ 
+-    if (( tmp4 )) ||
+-       [[ -n "$compstate[pattern_match]" &&
+-          "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]; then
++    # This once tested `|| [[ -n "$compstate[pattern_match]" &&
++    # "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]' but it should now be smart
++    # enough to handle multiple components with patterns.
++
++    if (( tmp4 )); then
+       # It is. For menucompletion we now add the possible completions
+       # for this component with the unambigous prefix we have built
+       # and the rest of the string from the line as the suffix.
+@@ -480,15 +484,33 @@
+         compquote tmp1 tmp2
+       fi
+ 
++      if [[ -z "$_comp_correct" &&
++            "$compstate[pattern_match]" = \*  && -n "$listsfx" &&
++            "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]; then
++        PREFIX="$opre"
++        SUFFIX="$osuf"
++      fi
++
+       if [[ -n $menu || -z "$compstate[insert]" ]] ||
+-         ! zstyle -t ":completion:${curcontext}:paths" expand suffix; then
++         ! zstyle -t ":completion:${curcontext}:paths" expand suffix ||
++           [[ -z "$listsfx" &&
++              ( -n "$_comp_correct" ||
++                -z "$compstate[pattern_match]" || "$SUFFIX" != */* ||
++                "${SUFFIX#*/}" = (|*[^\\])[][*?#~^\|\<\>]* ) ]]; then
+         (( tmp4 )) && zstyle -t ":completion:${curcontext}:paths" ambiguous &&
+             compstate[to_end]=
+         if [[ "$tmp3" = */* ]]; then
+-	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" -s "/${tmp3#*/}" \
+-	          -W "$prepath$realpath$testpath" \
+-		  "$pfxsfx[@]" -M "r:|/=* r:|=*" \
+-		  - "${(@)tmp1%%/*}"
++	  if [[ -z "$listsfx" || "$tmp3" != */?* ]]; then
++	    compadd -Qf "$mopts[@]" -p "$linepath$tmp2" -s "/${tmp3#*/}" \
++	            -W "$prepath$realpath$testpath" \
++		    "$pfxsfx[@]" -M "r:|/=* r:|=*" \
++		    - "${(@)tmp1%%/*}"
++          else
++	    compadd -Qf "$mopts[@]" -p "$linepath$tmp2" \
++	            -W "$prepath$realpath$testpath" \
++		    "$pfxsfx[@]" -M "r:|/=* r:|=*" \
++		    - "${(@)^tmp1%%/*}/${tmp3#*/}"
++          fi
+ 	else
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" \
+ 	          -W "$prepath$realpath$testpath" \
+@@ -497,12 +519,20 @@
+ 	fi
+       else
+         if [[ "$tmp3" = */* ]]; then
+-	  tmp3=( -Qf "$mopts[@]" -p "$linepath$tmp2"
++	  tmp4=( -Qf "$mopts[@]" -p "$linepath$tmp2"
+ 	         -W "$prepath$realpath$testpath"
+ 	         "$pfxsfx[@]" -M "r:|/=* r:|=*" )
+-          for i in "$tmp1[@]"; do
+-	    compadd "$tmp3[@]" -s "/${i#*/}" - "${i%%/*}"
+-	  done
++	  if [[ -z "$listsfx" ]]; then
++            for i in "$tmp1[@]"; do
++	      compadd "$tmp4[@]" -s "/${i#*/}" - "${i%%/*}"
++	    done
++          else
++            [[ -n "$compstate[pattern_match]" ]] && SUFFIX="${SUFFIX:s./.*/}*"
++
++            for i in "$tmp1[@]"; do
++	      compadd "$tmp4[@]" - "$i"
++	    done
++          fi
+         else
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" \
+                   -W "$prepath$realpath$testpath" \
+@@ -526,22 +556,33 @@
+     # take it from the filenames.
+ 
+     testpath="${testpath}${tmp1[1]%%/*}/"
+-    tmp1=( "${(@)tmp1#*/}" )
+ 
+     tmp3="${tmp3#*/}"
+ 
+     if [[ "$tpre" = */* ]]; then
+-      cpre="${cpre}${tpre%%/*}/"
++      if [[ -z "$_comp_correct" && -n "$compstate[pattern_match]" &&
++            "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]; then
++        cpre="${cpre}${tmp1[1]%%/*}/"
++      else
++        cpre="${cpre}${tpre%%/*}/"
++      fi
+       tpre="${tpre#*/}"
+     elif [[ "$tsuf" = */* ]]; then
+       [[ "$tsuf" != /* ]] && mid="$testpath"
+-      cpre="${cpre}${tpre}/"
++      if [[ -z "$_comp_correct" && -n "$compstate[pattern_match]" &&
++            "$tmp2" = (|*[^\\])[][*?#~^\|\<\>]* ]]; then
++        cpre="${cpre}${tmp1[1]%%/*}/"
++      else
++        cpre="${cpre}${tpre}/"
++      fi
+       tpre="${tsuf#*/}"
+       tsuf=
+     else
+       tpre=
+       tsuf=
+     fi
++
++    tmp1=( "${(@)tmp1#*/}" )
+   done
+ 
+   if [[ -z "$tmp4" ]]; then
+@@ -580,8 +621,14 @@
+       else
+         compquote tmp4 tmp1
+       fi
+-      compadd -Qf "$mopts[@]" -p "$linepath$tmp4" -W "$prepath$realpath$testpath" \
+-	      "$pfxsfx[@]" -M "r:|/=* r:|=*" -a tmp1
++      if [[ -z "$_comp_correct" && -n "$compstate[pattern_match]" &&
++            "$PREFIX$SUFFIX" = (|*[^\\])[][*?#~^\|\<\>]* ]]; then
++        compadd -Qf -W "$prepath$realpath" "$pfxsfx[@]" "$mopts[@]" \
++                -M "r:|/=* r:|=*" - "$linepath$tmp4${(@)^tmp1}"
++      else
++        compadd -Qf -p "$linepath$tmp4" -W "$prepath$realpath$testpath" \
++	        "$pfxsfx[@]" "$mopts[@]" -M "r:|/=* r:|=*" -a tmp1
++      fi
+     fi
+   fi
+ done
+diff -u -r ../oz/Doc/Zsh/compsys.yo ./Doc/Zsh/compsys.yo
+--- ../oz/Doc/Zsh/compsys.yo	Sun Oct 22 15:17:51 2000
++++ ./Doc/Zsh/compsys.yo	Mon Oct 23 19:28:27 2000
+@@ -1367,6 +1367,10 @@
+ in the context name to one of tt(correct-)var(num) or
+ tt(approximate-)var(num), where var(num) is the number of errors that
+ were accepted.
++
++When used for the tt(_match) completer, the style may also be set to
++the string `tt(pattern)'.  This makes the pattern on the line be left
++unchanged if it didn't match unambiguously.
+ )
+ kindex(keep-prefix, completion style)
+ item(tt(keep-prefix))(
+@@ -1466,6 +1470,14 @@
+ determines if matches are to be listed in a rows-first fashion, as for the
+ tt(LIST_ROWS_FIRST) option.
+ )
++kindex(list-suffixes, completion style)
++item(tt(list-suffixes))(
++This style is used by the function used to complete filenames.  If
++completion is attempted on a string containing multiple partially
++typed pathname components and this style is set to `true', all
++components starting with the first one for which more than one match
++could be generated will be shown.
++)
+ kindex(local, completion style)
+ item(tt(local))(
+ This style is used by completion functions which generate URLs as
+@@ -2416,6 +2428,9 @@
+ tt(insert-unambiguous) style is set to `true'.  In
+ this case menu completion will only be started if no unambiguous string
+ could be generated that is at least as long as the original string.
++The style may also be set to the string `tt(pattern)'.  This will keep 
++the pattern on the line intact as long as there isn't an unambiguous
++completion with which it could be replaced.
+ 
+ Note that the matcher specifications defined globally or used by the
+ completion functions will not be used.
+@@ -3474,7 +3489,7 @@
+ `tt(-r)', and `tt(-R)' options from the tt(compadd) builtin.
+ 
+ Finally, the tt(_path_files) function  uses the styles tt(expand),
+-tt(ambiguous) and tt(special-dirs) and tt(file-sort).
++tt(ambiguous), tt(special-dirs), tt(list-suffixes) and tt(file-sort).
+ )
+ findex(_regex_arguments)
+ item(tt(_regex_arguments) var(name) var(specs) ...)(
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,155 @@
+From zsh-workers-return-10513-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Apr 05 12:03:25 2000
+Return-Path: <zsh-workers-return-10513-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24984 invoked from network); 5 Apr 2000 12:03:24 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Apr 2000 12:03:24 -0000
+Received: (qmail 8275 invoked by alias); 5 Apr 2000 12:03:08 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10513
+Received: (qmail 8234 invoked from network); 5 Apr 2000 12:03:02 -0000
+Date: Wed, 05 Apr 2000 13:01:52 +0100
+From: Peter Stephenson <pws@cambridgesiliconradio.com>
+Subject: PATCH: depth-first directory listing.
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Message-id: <0FSJ002HHLF3OZ@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+This implements an order qualifier to list things in subdirectories before
+(or after) things in the current directory.  It's just done with the other
+sorts, based on looking for slashes; it doesn't change the scanner at all.
+Maybe there's a more efficient way, or a more useful definition of `depth
+first'.
+
+It's best combined with doing name searches as a second criterion, i.e.
+  print -l **/*(odon)
+else you get files within each directory unsorted.
+
+I haven't checked this in, since I deliberately don't have write access
+here.  I'll do it when I get home.
+
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.2
+diff -u -r1.2 expn.yo
+--- Doc/Zsh/expn.yo	2000/04/01 20:43:44	1.2
++++ Doc/Zsh/expn.yo	2000/04/05 11:49:11
+@@ -1619,19 +1619,24 @@
+ )
+ item(tt(o)var(c))(
+ specifies how the names of the files should be sorted. If var(c) is
+-tt(n) they are sorted by name (the default), if it is tt(L) they
+-are sorted depending on the size (length) of the files, if tt(l) 
+-they are sorted by the number of links, and if tt(a), tt(m), and tt(c)
++tt(n) they are sorted by name (the default); if it is tt(L) they
++are sorted depending on the size (length) of the files; if tt(l) 
++they are sorted by the number of links; if tt(a), tt(m), or tt(c)
+ they are sorted by the time of the last access, modification, or
+-inode change respectively. Note that tt(a), tt(m), and tt(c) compare
+-the age against the current time, hence the first name in the list is the 
+-the youngest file. Also note that the modifiers tt(^) and tt(-) are 
+-used, so `tt(*(^-oL))' gives a list of all files sorted by file size in 
+-descending order, following any symbolic links.
++inode change respectively; if var(d), files in subdirectories appear before
++those in the current directory at each level of the search --- this is best
++combined with other criteria, for example `tt(odon)' to sort on names for
++files within the same directory.  Note that tt(a), tt(m), and tt(c) compare
++the age against the current time, hence the first name in the list is the
++the youngest file. Also note that the modifiers tt(^) and tt(-) are used,
++so `tt(*(^-oL))' gives a list of all files sorted by file size in descending
++order, following any symbolic links.
+ )
+ item(tt(O)var(c))(
+ like `tt(o)', but sorts in descending order; i.e. `tt(*(^oc))' is the
+-same as `tt(*(Oc))' and `tt(*(^Oc))' is the same as `tt(*(oc))'
++same as `tt(*(Oc))' and `tt(*(^Oc))' is the same as `tt(*(oc))'; `tt(OD)'
++puts files in the current directory before those in subdirectories at each
++level of the search.
+ )
+ item(tt([)var(beg)[tt(,)var(end)]tt(]))(
+ specifies which of the matched filenames should be included in the
+Index: Src/glob.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/glob.c,v
+retrieving revision 1.1.1.48
+diff -u -r1.1.1.48 glob.c
+--- Src/glob.c	2000/03/13 09:37:31	1.1.1.48
++++ Src/glob.c	2000/04/05 11:49:11
+@@ -55,11 +55,12 @@
+ };
+ 
+ #define GS_NAME   1
+-#define GS_SIZE   2
+-#define GS_ATIME  4
+-#define GS_MTIME  8
+-#define GS_CTIME 16
+-#define GS_LINKS 32
++#define GS_DEPTH  2
++#define GS_SIZE   4
++#define GS_ATIME  8
++#define GS_MTIME 16
++#define GS_CTIME 32
++#define GS_LINKS 64
+ 
+ #define GS_SHIFT  5
+ #define GS__SIZE  (GS_SIZE << GS_SHIFT)
+@@ -68,7 +69,7 @@
+ #define GS__CTIME (GS_CTIME << GS_SHIFT)
+ #define GS__LINKS (GS_LINKS << GS_SHIFT)
+ 
+-#define GS_DESC  2048
++#define GS_DESC  4096
+ 
+ #define GS_NORMAL (GS_SIZE | GS_ATIME | GS_MTIME | GS_CTIME | GS_LINKS)
+ #define GS_LINKED (GS_NORMAL << GS_SHIFT)
+@@ -844,6 +845,28 @@
+ 	case GS_NAME:
+ 	    r = notstrcmp(&a->name, &b->name);
+ 	    break;
++	case GS_DEPTH:
++	    {
++		char *aptr = a->name, *bptr = b->name;
++		int slasha = 0, slashb = 0;
++		/* Count slashes.  Trailing slashes don't count. */
++		while (*aptr && *aptr == *bptr)
++		    aptr++, bptr++;
++		if (*aptr)
++		    for (; aptr[1]; aptr++)
++			if (*aptr == '/') {
++			    slasha = 1;
++			    break;
++			}
++		if (*bptr)
++		    for (; bptr[1]; bptr++)
++			if (*bptr == '/') {
++			    slashb = 1;
++			    break;
++			}
++		r = slasha - slashb;
++	    }
++	    break;
+ 	case GS_SIZE:
+ 	    r = b->size - a->size;
+ 	    break;
+@@ -1261,12 +1284,13 @@
+ 			    case 'a': t = GS_ATIME; break;
+ 			    case 'm': t = GS_MTIME; break;
+ 			    case 'c': t = GS_CTIME; break;
++			    case 'd': t = GS_DEPTH; break;
+ 			    default:
+ 				zerr("unknown sort specifier", NULL, 0);
+ 				restore_globstate(saved);
+ 				return;
+ 			    }
+-			    if ((sense & 2) && t != GS_NAME)
++			    if ((sense & 2) && !(t & (GS_NAME|GS_DEPTH)))
+ 				t <<= GS_SHIFT;
+ 			    if (gf_sorts & t) {
+ 				zerr("doubled sort specifier", NULL, 0);
+
+pws
+

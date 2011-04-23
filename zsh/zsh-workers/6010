@@ -1,0 +1,1527 @@
+From zsh-workers-return-6010-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Apr 12 11:42:48 1999
+Return-Path: <zsh-workers-return-6010-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17456 invoked from network); 12 Apr 1999 11:42:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Apr 1999 11:42:44 -0000
+Received: (qmail 28171 invoked by alias); 12 Apr 1999 11:42:15 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6010
+Received: (qmail 28158 invoked from network); 12 Apr 1999 11:42:14 -0000
+Date: Mon, 12 Apr 1999 11:07:51 +0200 (MET DST)
+Message-Id: <199904120907.LAA26706@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: matching in the new completion system
+
+
+As Andrej has pointed out, the need for the `_match_*' function in the 
+new completion system is a bad thing. I agree with that (although my
+answers to his mails probably didn't show that).
+
+He suggested adding `(#...)' glob flags to support `compctl -M' style
+modifications of a glob pattern, which I didn't really like because it 
+looked like something too specialised to be worth supporting in the
+core.
+
+So I have been thinking about two other ways to get rid of the
+`_match_*' functions and the patch below implements one of them. One
+of the reasons to make it this way is that it is really simple to
+implement ;-)
+
+The patch adds two more options to `compadd': `-O' and `-A', both get
+an array-name as their argument. If at least one of them is given, the 
+words given as possible matches are not stored as completions by the
+code, but instead are just stored in the array whose name is
+given. The interesting bit, of course, is that `compadd' also does
+matching (unless the `-U' option is given), which allows one to easily 
+check for matching strings in completion functions by just doing
+something like: `compadd -O foo - ...'.
+
+The difference between `-A' and `-O' is that `-O' stores the original
+strings unchanged and `-A' uses the strings built while the matching
+is done. With `-M "L:|no="' and `nof' on the line, matching the string
+`foo' will store `nofoo' with the `-A' option and `foo' with the `-O'
+option.
+
+Some more comments:
+
+- The exmaple files have been changed to make use of this, of course.
+  This means that the `_match_*' functions may now be removed.
+- The `_path_files' function has changed a lot. It was the hardest
+  function to change and I took the chance to rewrite most of it. It
+  is much smaller now, should be more readable, and probably faster.
+  Of course, this means that I may have failed to re-implement the
+  behavior of the old version under every circumstance. No doubt,
+  Andrej will sooner or later tell us about the problems he finds ;-)
+  Andrej, if you want to make me happy, you'll first collect the
+  problems before posting them -- you pointed out too many things for
+  me to remember, but I hope most things are ok.
+- The patch also modifies the the `README' file (remember to invoke
+  `patch' with `-p0'). I don't think that I'll do this again, trying
+  to move only to the `compsys.yo' file. Maybe Peter will make the
+  `README' file disappear (or change it to contain only a pointer to
+  `compsys.yo' or the manual in general).
+
+Anyway, I'll hope you agree that this is a good thing to have.
+
+Bye
+ Sven
+
+diff -u os/utils.c Src/utils.c
+--- os/utils.c	Thu Apr  1 15:09:06 1999
++++ Src/utils.c	Wed Apr  7 23:30:29 1999
+@@ -3177,10 +3177,7 @@
+ 	*v++ = *u;
+     }
+     *v = '\0';
+-    if (strcmp(buf, s))
+-	tt = dupstring(buf);
+-    else
+-	tt = s;
++    tt = dupstring(buf);
+     v += tt - buf;
+     if (e && (sf & 1))
+ 	*e += tt - buf;
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Thu Apr  1 15:09:22 1999
++++ Src/Zle/comp1.c	Wed Apr  7 21:25:22 1999
+@@ -52,7 +52,7 @@
+ /* pointers to functions required by compctl and defined by zle */
+ 
+ /**/
+-int (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, char *, char *, char *, char *, int, int, Cmatcher, char *, char **));
++int (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, char *, char *, char *, char *, int, int, Cmatcher, char *, char *, char *, char **));
+ 
+ /**/
+ char *(*comp_strptr) _((int *, int *, int));
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Wed Apr  7 21:12:34 1999
++++ Src/Zle/compctl.c	Wed Apr  7 21:24:48 1999
+@@ -1694,7 +1694,7 @@
+     char *p, **sp, *e;
+     char *ipre = NULL, *isuf = NULL, *ppre = NULL, *psuf = NULL, *prpre = NULL;
+     char *pre = NULL, *suf = NULL, *group = NULL, *m = NULL, *rs = NULL;
+-    char *ign = NULL, *rf = NULL, *expl = NULL;
++    char *ign = NULL, *rf = NULL, *expl = NULL, *apar = NULL, *opar = NULL;
+     int f = 0, a = CAF_MATCH, dm;
+     Cmatcher match = NULL;
+ 
+@@ -1791,6 +1791,14 @@
+ 		sp = &rf;
+ 		e = "function name expected after -%c";
+ 		break;
++	    case 'A':
++		sp = &apar;
++		e = "parameter name expected after -%c";
++		break;
++	    case 'O':
++		sp = &opar;
++		e = "parameter name expected after -%c";
++		break;
+ 	    case '-':
+ 		argv++;
+ 		goto ca_args;
+@@ -1824,7 +1832,7 @@
+ 
+     match = cpcmatcher(match);
+     a = addmatchesptr(ipre, isuf, ppre, psuf, prpre, pre, suf, group,
+-		      rs, rf, ign, f, a, match, expl, argv);
++		      rs, rf, ign, f, a, match, expl, apar, opar, argv);
+     freecmatcher(match);
+ 
+     return a;
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Wed Apr  7 21:02:56 1999
++++ Src/Zle/zle_tricky.c	Fri Apr  9 23:47:44 1999
+@@ -3444,6 +3444,22 @@
+     return cm;
+ }
+ 
++/* This stores the strings from the list in an array. */
++
++static void
++set_param(char *name, LinkList l)
++{
++    char **a, **p;
++    LinkNode n;
++
++    a = (char **) zalloc((countlinknodes(l) + 1) * sizeof(char *));
++    for (p = a, n = firstnode(l); n; incnode(n))
++	*p++ = ztrdup((char *) getdata(n));
++    *p = NULL;
++
++    setaparam(name, a);
++}
++
+ /* This is used by compadd to add a couple of matches. The arguments are
+  * the strings given via options. The last argument is the array with
+  * the matches. */
+@@ -3453,22 +3469,29 @@
+ addmatches(char *ipre, char *isuf,
+ 	   char *ppre, char *psuf, char *prpre, char *pre,
+ 	   char *suf, char *group, char *rems, char *remf, char *ign,
+-	   int flags, int aflags, Cmatcher match, char *exp, char **argv)
++	   int flags, int aflags, Cmatcher match, char *exp, 
++	   char *apar, char *opar, char **argv)
+ {
+     char *s, *ms, *lipre = NULL, *lisuf = NULL, *lpre = NULL, *lsuf = NULL;
+     char **aign = NULL;
+     int lpl, lsl, pl, sl, bpl, bsl, llpl = 0, llsl = 0, nm = mnum;
+-    int oisalt = 0, isalt, isexact;
++    int oisalt = 0, isalt, isexact, doadd;
+     Cline lc = NULL;
+     Cmatch cm;
+     struct cmlist mst;
+     Cmlist oms = mstack;
+     Comp cp = NULL;
++    LinkList aparl = NULL, oparl = NULL;
+ 
+     /* Switch back to the heap that was used when the completion widget
+      * was invoked. */
+     SWITCHHEAPS(compheap) {
+ 	HEAPALLOC {
++	    doadd = (!apar && !opar);
++	    if (apar)
++		aparl = newlinklist();
++	    if (opar)
++		oparl = newlinklist();
+ 	    if (exp) {
+ 		expl = (Cexpl) zhalloc(sizeof(struct cexpl));
+ 		expl->count = expl->fcount = 0;
+@@ -3596,7 +3619,7 @@
+ 		    rems = dupstring(rems);
+ 
+ 		/* Probably quote the prefix and suffix for testing. */
+-		if (!cp && !(aflags & CAF_QUOTE)) {
++		if (!cp && (aflags & CAF_MATCH) && !(aflags & CAF_QUOTE)) {
+ 		    lpre = quotename(lpre, NULL);
+ 		    lsuf = quotename(lsuf, NULL);
+ 		    llpl = strlen(lpre);
+@@ -3619,6 +3642,9 @@
+ 			if ((filell = strlen(*pt)) < sl
+ 			    && !strcmp(*pt, s + sl - filell))
+ 			    isalt = 1;
++
++		    if (isalt && !doadd)
++			continue;
+ 		}
+ 		if (!(aflags & CAF_MATCH)) {
+ 		    ms = dupstring(s);
+@@ -3629,15 +3655,27 @@
+ 					     &bpl, &bsl, &isexact)))
+ 		    continue;
+ 
+-		cm = add_match_data(isalt, ms, lc, ipre, ipre, isuf, pre, 
+-				    prpre, ppre, psuf, suf, bpl, bsl,
+-				    flags, isexact);
+-		cm->rems = rems;
+-		cm->remf = remf;
++		if (doadd) {
++		    cm = add_match_data(isalt, ms, lc, ipre, ipre, isuf, pre, 
++					prpre, ppre, psuf, suf, bpl, bsl,
++					flags, isexact);
++		    cm->rems = rems;
++		    cm->remf = remf;
++		} else {
++		    if (apar)
++			addlinknode(aparl, ms);
++		    if (opar)
++			addlinknode(oparl, s);
++		    free_cline(lc);
++		}
+ 	    }
+ 	    compnmatches = mnum;
+ 	    if (exp)
+ 		addexpl();
++	    if (apar)
++		set_param(apar, aparl);
++	    if (opar)
++		set_param(opar, oparl);
+ 	} LASTALLOC;
+     } SWITCHBACKHEAPS;
+ 
+diff -u od/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- od/Zsh/compsys.yo	Thu Apr  1 15:08:57 1999
++++ Doc/Zsh/compsys.yo	Sat Apr 10 15:41:03 1999
+@@ -648,59 +648,6 @@
+ accepts the option `tt(-t)'. If this is given, completion is only done
+ on words starting with two hyphens.
+ )
+-item(tt(_match_test))(
+-This function is called at the beginning of functions that do matching in
+-shell code with one argument: the name of the calling function. It
+-should test the value of `tt($compstate[matcher])' and return non-zero
+-if the calling function should try to generate matches for the global
+-match specification in use.
+-
+-If you have a global match specification with more than one set of patterns
+-you may want to modify this function to return non-zero for all of your
+-match specifications and modify the function tt(_match_pattern) to build the
+-pattern to use in the calling function.
+-)
+-item(tt(_match_pattern))(
+-This function is called from functions that do matching whenever they
+-need to build a pattern that is used to match possible completions.
+-It gets the name of the calling function and two names of parameters
+-as arguments. The first one is used in the calling function to build
+-the pattern used for matching possible completions. The content of this
+-parameter on entry to this function is the string taken from the line.
+-Here it should be changed to a pattern that matches words as the match
+-specifications currently in use do.
+-
+-In the calling function this pattern may be changed again or used only 
+-in parts. The second parameter whose name is given as the third argument
+-allows to give pattern flags like `tt(LPAR()#l)tt(RPAR())' that are to
+-be used whenever matching is done.
+-
+-As an example, if you have global match specifications like:
+-
+-indent(nofill(
+-tt(compctl -M 'm:{a-z}={A-Z}' 'm:{a-z}={A-Z} r:|[.-]=* r:|=*')))
+-
+-This function should look like:
+-
+-indent(nofill(
+-tt(eval "${3}='(#l)'")
+-tt([[ compstate[matcher] -eq 2 ]] && eval "$2='${(P)2:gs/./*./:gs/-/*-/}'")))
+-
+-The first line makes sure that matching is done case-insensitively as
+-specified by `tt(m:{a-z}={A-Z})'. The second line replaces dots and hyphens
+-in the given string by patterns matching any characters before them,
+-like the `tt(r:|[.-]=* r:|=*)'. To make this work, the function `_match_test'
+-would have to be changed to `tt(LPAR()LPAR() compstate[matcher] <= 2 RPAR()RPAR())'.
+-
+-When correction is used (see above), you probably don't want to set
+-matching flags here as that may make the results slightly
+-unpredictable. For this, change the line above to:
+-
+-indent(nofill(
+-tt([[ compstate[matcher] -lt 0 ]] && eval "${3}='(#l)'")))
+-
+-The default implementation of this function is empty.
+-)
+ enditem()
+ 
+ Apart from the functions explained, the tt(Base) sub-directory
+diff -u od/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- od/Zsh/compwid.yo	Thu Apr  1 15:08:57 1999
++++ Doc/Zsh/compwid.yo	Sat Apr 10 15:40:28 1999
+@@ -336,7 +336,8 @@
+ xitem([ tt(-W) var(file-prefix) ])
+ xitem([ tt(-J) var(name) ] [ tt(-V) var(name) ] [ tt(-X) var(explanation) ])
+ xitem([ tt(-r) var(remove-chars) ] [ tt(-R) var(remove-func) ])
+-item([ tt(-M) var(match-spec) ] [ tt(--) ] [ var(words) ... ])(
++xitem([ tt(-M) var(match-spec) ] [ tt(-O) var(array) ] [ tt(-A) var(array) ])
++item([ tt(--) ] [ var(words) ... ])(
+ 
+ This builtin command can be used to add matches and directly control
+ all the information the completion code stores with each possible
+@@ -504,6 +505,23 @@
+ Note that with tt(compadd) this option does not automatically turn on
+ menu completion if tt(AUTO_LIST) is set as the same options for the
+ tt(compctl) and tt(compgen) builtin command do.
++)
++item(tt(-O) var(array))(
++If this option is given, the var(words) are em(not) added to the set of
++possible completions. Instead, matching is done as usual and all
++var(words) given as arguments that are matched will be stored in the
++array parameter whose name is given as var(array).
++)
++item(tt(-A) var(array))(
++Like the tt(-O) option this keeps the var(words) from being stored as
++possible completions. The matching words are instead stored in the array
++parameter given as var(array). In difference to the tt(-O) option this
++does not store the unchanged var(words) given as arguments, but instead
++the strings the completion code generated while matching. For example,
++with a matching specification of `tt(-M "L:|no=")', the string `tt(nof)'
++on the line and the string `tt(foo)' as one of the var(words), this option
++will make the string `tt(nofoo)' be stored in the array, whereas the tt(-O)
++option stores the `tt(foo)' originally given.
+ )
+ item(tt(-), tt(--))(
+ This flag ends the list of flags and options. All arguments after it
+diff -u -r oc/Base/_long_options Completion/Base/_long_options
+--- oc/Base/_long_options	Thu Apr  1 15:09:52 1999
++++ Completion/Base/_long_options	Thu Apr  8 19:20:53 1999
+@@ -200,20 +200,6 @@
+   osuf="$SUFFIX"
+ 
+   pre="${str%%\=*}"
+-  IPREFIX="${IPREFIX}${pre}="
+-  PREFIX="${str#*\=}"
+-  SUFFIX=""
+-
+-  # We will check if the arrays contain an option matching what's on
+-  # the line. To do this good, we build a pattern.
+-
+-  [[ -n "$_comp_correct" && $#pre -le _comp_correct ]] && return 1
+-
+-  pat="${pre}*"
+-  patflags=''
+-  _match_pattern _long_options pat patflags
+-
+-  [[ -n "$_comp_correct" ]] && patflags="$patflags(#a$_comp_correct)"
+ 
+   # Then we walk through the array names. For each array we test if it 
+   # contains the option string. If so, we `invoke' the action stored
+@@ -223,6 +209,9 @@
+   for name in "$_lo_cache_names[@]"; do
+     action="$_lo_cache_actions[anum]"
+     if (( ${(@)${(@P)name}[(I)$pre]} )); then
++      IPREFIX="${oipre}${pre}="
++      PREFIX="${str#*\=}"
++      SUFFIX=""
+       if [[ "$action[1]" = (\[|\() ]]; then
+         compadd - ${=action[2,-2]}
+       elif (( $#action )); then
+@@ -240,7 +229,10 @@
+     # element from `_lo_actions' in `parta'. If we find more than one
+     # such option or if we already had one, we set `parto' to `-'.
+ 
+-    tmp=("${(@M)${(@P)name}:#${~pat}}")
++    PREFIX="${str%%\=*}"
++    SUFFIX=""
++    compadd -O tmp -M 'r:|-=* r:|=*' - "${(@P)name}"
++
+     if [[ $#tmp -eq 1 ]]; then
+       if [[ -z "$parto" ]]; then
+         parto="$tmp[1]"
+@@ -258,8 +250,9 @@
+   # try to complete the string after the `='.
+ 
+   if [[ -n "$parto" && "$parto" != - ]]; then
+-    IPREFIX="${parto}="
+-
++    IPREFIX="${oipre}${parto}="
++    PREFIX="${str#*\=}"
++    SUFFIX=""
+     if (( $#parta )); then
+       if [[ "$parta[1]" = (\[|\() ]]; then
+         compadd - ${=parta[2,-2]}
+@@ -281,7 +274,7 @@
+ 
+ # The string on the line did not contain a `=', or we couldn't
+ # complete the option string since there were more than one matching
+-# what's on the line. So we just ad the option string as possible
++# what's on the line. So we just add the option strings as possible
+ # matches, giving the string from the `=' on as a suffix.
+ 
+ if [[ "$str" = *\=* ]]; then
+diff -u -r oc/Core/_multi_parts Completion/Core/_multi_parts
+--- oc/Core/_multi_parts	Thu Apr  1 15:09:50 1999
++++ Completion/Core/_multi_parts	Fri Apr  9 20:29:17 1999
+@@ -7,15 +7,8 @@
+ # The parts of words from the array that are separated by the
+ # separator character are then completed independently.
+ 
+-local sep matches patstr orig matchflags pref i tmp1 tmp2 nm
+-local group expl menu origflags mflags
+-
+-_match_test _multi_parts || return 1
+-
+-# Save the current number of matches to be able to return if we added
+-# matches or not.
+-
+-nm=$compstate[nmatches]
++local sep matches pref npref i tmp1 group expl menu pre suf
++typeset -U tmp2
+ 
+ # Get the options.
+ 
+@@ -41,193 +34,159 @@
+   matches=( "${(@P)2}" )
+ fi
+ 
+-# Now build the pattern from what we have on the line. We also save
+-# the original string in `orig'.
++# In `pre' and `suf' we will hold the prefix and the suffix from the
++# line while we walk through them. The original string are used 
++# temporarily for matching.
++
++pre="$PREFIX"
++suf="$SUFFIX"
++orig="$PREFIX$SUFFIX"
+ 
+-if [[ $#compstate[pattern_match] -ne 0 ]]; then
+-  if [[ "${compstate[pattern_match]-*}" = \** ]]; then
+-    str="${PREFIX}*${SUFFIX}*"
+-  else
+-    str="${PREFIX}${SUFFIX}"
+-  fi
+-else
+-  patstr="${PREFIX:q}*${SUFFIX:q}*"
+-fi
+-orig="${PREFIX}${SUFFIX}"
++# Special handling for menucompletion?
+ 
+ [[ $compstate[insert] = (*menu|[0-9]*) || -n "$_comp_correct" ||
+    ( $#compstate[pattern_match] -ne 0 &&
+      "$orig" != "${orig:q}" ) ]] && menu=yes
+ 
+-matchflags=""
+-_match_pattern _path_files patstr matchflags
+-origflags="$matchflags"
+-[[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+-
+-patstr="${${patstr//$sep/*$sep}//\*##/*}"
+-
+-# First we will skip over those parts of the matches for which we have 
+-# exact substrings on the line. In `pref' we will build the
+-# unambiguous prefix string.
++# In `pref' we collect the unambiguous prefix path.
+ 
+ pref=''
+-while [[ "$orig" = *${sep}* ]] do
+ 
+-  # First build the pattern to use, then collect all strings from
+-  # `matches' that match the prefix we have and the exact substring in 
+-  # the array `tmp1'.
++# If the string from the line matches at least one of the strings,
++# we use only the matching strings.
+ 
+-  if [[ -n "$_comp_correct" && "${#orig%%${sep}*}" -le _comp_correct ]]; then
+-    mflags="$origflags"
+-  else
+-    mflags="$matchflags"
+-  fi
++compadd -O tmp1 -M "r:|${sep}=* r:|=*" - "$matches[@]"
+ 
+-  pat="${${${patstr#*${sep}}%${sep}*}//\*/[^${sep}]#}"
+-  tmp1=( "${(@M)matches:#${~mflags}${orig%%${sep}*}${sep}${~pat}}" )
++(( $#tmp1 )) && matches=( "$tmp1[@]" )
+ 
+-  # If there are no words matching the exact substring, stop.
++while true; do
+ 
+-  (( $#tmp1 )) || break
++  # Get the prefix and suffix for matching.
+ 
+-  # Otherwise add the part to the prefix, remove it from the matches
+-  # (and also remove all words not matching the string at all), and
+-  # set `patstr' and `orig' to the next component.
+-
+-  tmp1="${orig%%${sep}*}${sep}"
+-  pref="$pref$tmp1"
+-  matches=("${(@)${(@)${(@M)matches:#${tmp1}*}#$tmp1}:#}")
+-  orig="${orig#*${sep}}"
+-  patstr="${patstr#*${sep}}"
+-done
++  if [[ "$pre" = *${sep}* ]]; then
++    PREFIX="${pre%%${sep}*}"
++    SUFFIX=""
++  else
++    PREFIX="${pre}"
++    SUFFIX="${suf%%${sep}*}"
++  fi
+ 
+-# Now we get all the words that still match in `tmp1'.
++  # Check if the component for some of the possible matches is equal
++  # to the string from the line. If there are such strings, we directly
++  # use the stuff from the line. This avoids having `foo' complete to
++  # both `foo' and `foobar'.
+ 
+-if [[ "$patstr" = *${sep}* ]]; then
+-  tmp1="${patstr%${sep}*}${sep}"
+-  pat="${tmp1//\*/[^${sep}]#}${patstr##*${sep}}"
+-else
+-  pat="$patstr"
+-fi
+-if [[ -n "$_comp_correct" && "${#orig%%${sep}*}" -le _comp_correct ]]; then
+-  mflags="$origflags"
+-else
+-  mflags="$matchflags"
+-fi
+-tmp1=( "${(@M)matches:#${~mflags}${~pat}}" )
++  tmp1=( "${(@M)matches:#${PREFIX}${SUFFIX}${sep}*}" )
+ 
+-if (( $#tmp1 )); then
++  if (( $#tmp1 )); then
++    npref="${PREFIX}${SUFFIX}${sep}"
++  else
++    # No exact match, see how many strings match what's on the line.
+ 
+-  # There are words that are matched, put them into `matches' and then
+-  # move all unambiguous components from the beginning into `pref'.
++    tmp2=( "${(@)matches%%${sep}*}" )
++    compadd -O tmp1 - "$tmp2[@]"
+ 
+-  matches=( "$tmp1[@]" )
+-  while [[ "$matches[1]" = *${sep}* ]]; do
++    if [[ $#tmp1 -eq 1 ]]; then
+ 
+-    # We just take the first component of the first match and see if
+-    # there are other matches with a different prefix (these are
+-    # collected in `tmp2'). If there are any, we give up.
++      # Only one match. If there are still separators from the line
++      # we just accept this component. Otherwise we insert what we 
++      # have collected, probably giving it a separator character
++      # as a suffix.
+ 
+-    tmp1="${matches[1]%%${sep}*}${sep}"
+-    tmp2=( "${(@)matches:#${tmp1}*}" )
+-    (( $#tmp2 )) && break
++      if [[ "$pre$suf" = *${sep}* ]]; then
++        npref="${tmp1[1]}${sep}"
++      else
++        matches=( "${(@M)matches:#${tmp1[1]}*}" )
++	tmp2=( "${(@M)matches:#${tmp1[1]}${sep}*}" )
+ 
+-    # All matches have the same prefix, put it into `pref' and remove
+-    # it from the matches.
++	if (( $#tmp2 )); then
++	  compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++	          -p "$pref" -qS "$sep" - "$tmp1[1]"
++        else
++	  compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++	          -p "$pref" - "$tmp1[1]"
++        fi
++	return 1
++      fi
++    elif (( $#tmp1 )); then
+ 
+-    pref="$pref$tmp1"
+-    matches=( "${(@)${(@)matches#$tmp1}:#}" )
++      # More than one match. First we get all strings that match the
++      # rest from the line.
+ 
+-    if [[ "$orig" = *${sep}* ]]; then
+-      orig="${orig#*${sep}}"
++      PREFIX="$pre"
++      SUFFIX="$suf"
++      compadd -O matches -M "r:|${sep}=* r:|=*" - "$matches[@]"
++
++      if [[ -n "$menu" ]]; then
++        # With menucompletion we just add matches for the matching
++        # components with the prefix we collected and the rest from the
++        # line as a suffix.
++
++        tmp2="$pre$suf"
++        if [[ "$tmp2" = *${sep}* ]]; then
++          compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++	          -p "$pref" -s "${sep}${tmp2#*${sep}}" - "$tmp1[@]"
++        else
++          compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++	          -p "$pref" - "$tmp1[@]"
++        fi
++      else
++        # With normal completion we add all matches one-by-one with
++	# the unmatched part as a suffix. This will insert the longest
++	# unambiguous string for all matching strings.
++
++        for i in "${(@M)matches:#(${(j:|:)~tmp1})*}"; do
++	  if [[ "$i" = *${sep}* ]]; then
++            compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++	            -S '' -p "$pref" -s "${i#*${sep}}" - "${i%%${sep}*}${sep}"
++          else
++            compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++	            -S '' -p "$pref" - "$i"
++          fi
++        done
++      fi
++      return 0
+     else
+-      orig=''
+-    fi
+-  done
++      # We are here if no string matched what's on the line. In this
++      # case we insert the expanded prefix we collected if it differs
++      # from the original string from the line.
+ 
+-  # Now we can tell the completion code about the things we
+-  # found. Strings that have a separator will be added with a suffix.
++      [[ "$orig" = "$pref$pre$suf" ]] && return 1
+ 
+-  if [[ -z "$orig" && "$PREFIX$SUFFIX" != "$pref$orig" ]]; then
+-    compadd -QU  "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" -S '' - \
+-            "${pref}${orig}"
+-  elif [[ -n "$menu" ]]; then
+-    if [[ "$orig" = *${sep}* ]]; then
+-      orig="${sep}${orig#*${sep}}"
+-    else
+-      orig=''
+-    fi
+-    for i in "$matches[@]" ; do
+-      if [[ "$i" = *${sep}* ]]; then
++      if [[ -n "$suf" ]]; then
+         compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	        -p "$pref" -s "$orig" - "${i%%${sep}*}${sep}"
++	        -s "$suf" - "$pref$pre"
+       else
+         compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-	        -p "$pref" -s "$orig" - "${i%%${sep}*}"
++	        -S '' - "$pref$pre$suf"
+       fi
+-    done
+-  else
+-    for i in "$matches[@]" ; do
+-      if [[ "$i" = *${sep}* ]]; then
+-        compadd -U -i "$IPREFIX" -I "$ISUFFIX" -p "$pref" -s "${i#*${sep}}" \
+-	        "$group[@]" "$expl[@]" -M "r:|${sep:q}=*" - "${i%%${sep}*}${sep}"
+-      else
+-        compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-                -p "$pref" - "$i"
+-      fi
+-    done
+-  fi
+-elif [[ "$patstr" = *${sep}* ]]; then
+-
+-  # We had no words matching the string from the line. But we want to
+-  # be friendly and at least expand the prefix as far as we can. So we 
+-  # will loop through the rest of the string from the line and test
+-  # the components one by one.
+-
+-  while [[ "$patstr" = *${sep}* ]]; do
+-
+-    # First we get all words matching at least this component in
+-    # `tmp1'. If there are none, we give up.
+-
+-    if [[ -n "$_comp_correct" && "${#orig%%${sep}*}" -le _comp_correct ]]; then
+-      mflags="$origflags"
+-    else
+-      mflags="$matchflags"
+-    fi
+-    tmp1=( "${(@M)matches:#${~mflags}${~patstr%%${sep}*}${sep}*}" )
+-    (( $#tmp1 )) || break
+-
+-    # Then we check if there are words that have a different prefix.
+-
+-    tmp2=( "${(@)tmp1:#${tmp1[1]%%${sep}*}${sep}*}" )
+-    if (( $#tmp2 )); then
+-
+-      # There are words with another prefix, so we have found an
+-      # ambiguous component. So we just give all possible prefixes to
+-      # the completion code together with our prefix and the rest of
+-      # the string from the line as the suffix.
+-
+-      compadd -U "$group[@]" "$expl[@]" -S '' -i "$IPREFIX" -I "$ISUFFIX" \
+-              -p "$pref" -s "${sep}${orig#*${sep}}" - "${(@)matches%%${sep}*}"
+       return 0
+     fi
++  fi
+ 
+-    # All words have the same prefix, so add it to `pref' again and
+-    # try the next component.
+-
+-    pref="$pref${tmp1[1]%%${sep}*}${sep}"
+-    matches=( "${(@)matches#${tmp1[1]%%${sep}*}${sep}}" )
+-    orig="${orig#*${sep}}"
+-    patstr="${patstr#*${sep}}"
+-  done
+-
+-  # Finally, add the unambiguous prefix and the rest of the string
+-  # from the line.
+-
+-  compadd -U "$group[@]" "$expl[@]" -S '' -i "$IPREFIX" -I "$ISUFFIX" \
+-          -p "$pref" - "$orig"
+-fi
++  # We just accepted and/or expanded a component from the line. We
++  # remove it from the matches (using only those that have a least
++  # the skipped string) and ad it the `pref'.
++
++  matches=( "${(@)${(@)${(@M)matches:#${npref}*}#*${sep}}:#}" )
++  pref="$pref$npref"
++
++  # Now we set `pre' and `suf' to their new values.
++
++  if [[ "$pre" = *${sep}* ]]; then
++    pre="${pre#*${sep}}"
++  elif [[ "$suf" = *${sep}* ]]; then
++    pre="${suf#*${sep}}"
++    suf=""
++  else
++    # The string from the line is fully handled. If we collected an
++    # unambiguous prefix and that differs from the original string,
++    # we insert it.
+ 
+-# This sets the return value to indicate that we added matches (or not).
++    [[ -n "$pref" && "$orig" != "$pref" ]] &&
++        compadd -U "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++	        -S '' - "$pref"
+ 
+-[[ nm -ne compstate[nmatches] ]]
++    return
++  fi
++done
+--- oc/Core/_path_files	Thu Apr  1 15:09:49 1999
++++ Completion/Core/_path_files	Sun Apr 11 23:37:25 1999
+@@ -17,22 +17,13 @@
+ #    If this is set to a non-empty string, the partially typed path
+ #    from the line will be expanded as far as possible even if trailing
+ #    pathname components can not be completed.
+-#
+-#
+-# This function uses the helper functions `_match_test' and `_match_pattern'.
+ 
+-# First see if we should generate matches for the global matcher in use.
++local linepath realpath donepath prepath testpath exppath
++local tmp1 tmp2 tmp3 tmp4 i orig pre suf tpre tsuf
++local pats ignore group expl addpfx addsfx remsfx
++local nm=$compstate[nmatches] menu
+ 
+-_match_test _path_files || return 1
+-
+-# Yes, so...
+-
+-local nm str linepath realpath donepath patstr prepath testpath rest
+-local tmp1 collect tmp2 suffixes i ignore matchflags opt group sopt pats gopt
+-local addpfx addsfx expl orig ostr nm=$compstate[nmatches] menu remsfx patlast
+-local origflags mflags tmp3 tmp4 exppaths
+-
+-typeset -U prepaths
++typeset -U prepaths exppaths
+ 
+ setopt localoptions nullglob rcexpandparam extendedglob
+ unsetopt markdirs globsubst shwordsplit nounset
+@@ -108,61 +99,24 @@
+   fi
+ fi
+ 
+-# str holds the whole string from the command line with a `*' between
+-# the prefix and the suffix. Then we see if we will do menucompletion.
++# We get the prefix and the suffix from the line and save the whole
++# original string. Then we see if we will do menucompletion.
+ 
+-if [[ $#compstate[pattern_match] -ne 0 ]]; then
+-  if [[ "${compstate[pattern_match]-*}" = \** ]]; then
+-    str="${PREFIX}*${SUFFIX}"
+-  else
+-    str="${PREFIX}${SUFFIX}"
+-  fi
+-else
+-  str="${PREFIX:q}*${SUFFIX:q}"
+-  [[ "$str" = \\\~* ]] && str="$str[2,-1]"
+-fi
++pre="$PREFIX"
++suf="$SUFFIX"
+ orig="${PREFIX}${SUFFIX}"
+ 
+ [[ $compstate[insert] = (*menu|[0-9]*) || -n "$_comp_correct" ||
+    ( $#compstate[pattern_match] -ne 0 &&
+      "${orig#\~}" != "${${orig#\~}:q}" ) ]] && menu=yes
+ 
+-
+-# We will first try normal completion called with `compgen', but only if we
+-# weren't given a `-F', `-r', or `-R' option.
+-
+-if [[ $#ignore -eq 0 && $#remsfx -eq 0 && -z "$_comp_correct" ]]; then
+-  # First build an array containing the `-W' option, if there is any and we
+-  # want to use it. We don't want to use it if the string from the command line
+-  # is a absolute path or relative to the current directory.
+-
+-  if [[ -z "$tmp1[1]" || "$str[1]" = [~/] || "$str" = (.|..)/* ]]; then
+-    tmp1=()
+-  else
+-    tmp1=(-W "( $prepaths )")
+-  fi
+-
+-  # Now call compgen.
+-
+-  nm=$compstate[nmatches]
+-  if [[ -z "$gopt" ]]; then
+-    compgen "$addpfx[@]" "$addsfx[@]" "$group[@]" "$expl[@]" "$tmp1[@]" $sopt
+-  else
+-    compgen "$addpfx[@]" "$addsfx[@]" "$group[@]" "$expl[@]" "$tmp1[@]" $sopt -g "$pats"
+-  fi
+-
+-  # If this generated any matches, we don't want to do in-path completion.
+-
+-  [[ compstate[nmatches] -eq nm ]] || return 0
+-fi
+-
+-# No `-F' option, so we want to use `fignore'.
++# If given no `-F' option, we want to use `fignore'.
+ 
+ (( $#ignore )) || ignore=(-F fignore)
+ 
+ # Now let's have a closer look at the string to complete.
+ 
+-if [[ "$str[1]" = \~ ]]; then
++if [[ "$pre[1]" = \~ ]]; then
+   # It begins with `~', so remember anything before the first slash to be able
+   # to report it to the completion code. Also get an expanded version of it
+   # (in `realpath'), so that we can generate the matches. Then remove that
+@@ -170,10 +124,10 @@
+   # paths and make sure that the loop below is run only once with an empty
+   # prefix path by setting `prepaths'.
+   
+-  linepath="${str%%/*}/"
++  linepath="${pre%%/*}/"
+   eval realpath\=$linepath
+   [[ "$realpath" = "$linepath" ]] && return 1
+-  str="${str#*/}"
++  pre="${pre#*/}"
+   orig="${orig#*/}"
+   donepath=''
+   prepaths=( '' )
+@@ -184,12 +138,12 @@
+   linepath=''
+   realpath=''
+ 
+-  if [[ "$str[1]" = / ]]; then
++  if [[ "$pre[1]" = / ]]; then
+     # If it is a absolut path name, we remove the first slash and put it in
+     # `donepath' meaning that we treat it as the path that was already handled.
+     # Also, we don't use the paths from `-W'.
+ 
+-    str="$str[2,-1]"
++    pre="$pre[2,-1]"
+     orig="$orig[2,-1]"
+     donepath='/'
+     prepaths=( '' )
+@@ -197,279 +151,199 @@
+     # The common case, we just use the string as it is, unless it begins with
+     # `./' or `../' in which case we don't use the paths from `-W'.
+     
+-    [[ "$str" = (.|..)/* ]] && prepaths=( '' )
++    [[ "$pre" = (.|..)/* ]] && prepaths=( '' )
+     donepath=''
+   fi
+ fi
+ 
+-# Now build the glob pattern by calling `_match_pattern'.
+-patstr="$str"
+-matchflags=""
+-_match_pattern _path_files patstr matchflags
+-origflags="$matchflags"
+-[[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+-
+-# We almost expect the pattern to have changed `..' into `*.*.', `/.' into
+-# `/*.', and probably to contain two or more consecutive `*'s. Since these
+-# have special meaning for globbing, we remove them. But before that, we
+-# add the pattern for matching any characters before a slash.
+-
+-patstr="$patstr:gs-/-*/-:gs/*.*./../:gs/**/*/"
+-
+-# We take the last pathname component from the pattern and store it in
+-# `patlast', replacing `*'s in it with patterns that match any character
+-# but not slashes. Later we will generate matches using `patstr' with the
+-# patterns we were given (like `*.c') appended to it, producing all matching
+-# files. These filenames are then compared to `patlast' and all names not
+-# matching that will be removed. All this is needed to be able to correctly
+-# support `completeinword' as otherwise we would have something like `a*x'
+-# from the line (the `*' was inserted above) and appending the `-g' pattern
+-# `*.tex' would yield `a*x*.tex' which is not what we want.
+-
+-if [[ "$patstr" = */* ]]; then
+-  if [[ -n "$_comp_correct" && "${#orig##*/}" -le _comp_correct ]]; then
+-    patlast="*/${origflags}${${${patstr##*/}//\*/[^/]#}:gs.\[^/]#.\\\*.}"
+-  else
+-    patlast="*/${matchflags}${${${patstr##*/}//\*/[^/]#}:gs.\[^/]#.\\\*.}"
+-  fi
+-  patstr="${patstr%/*}/"
+-else
+-  if [[ -n "$_comp_correct" && "$#orig" -le _comp_correct ]]; then
+-    patlast="${origflags}${${patstr//\*/[^/]#}:gs.\[^/]#.\\\*.}"
+-  else
+-    patlast="${matchflags}${${patstr//\*/[^/]#}:gs.\[^/]#.\\\*.}"
+-  fi
+-  patstr=""
+-fi
++# Now we generate the matches. First we loop over all prefix paths given
++# with the `-W' option.
+ 
+-# First we skip over all pathname components in `str' which really exist in
+-# the file-system, so that `/usr/lib/l<TAB>' doesn't offer you `lib' and
+-# `lib5'. Pathname components skipped this way are taken from `orig' and added
+-# to `donepath'.
+-
+-while [[ "$orig" = */* ]] do
+-  tmp1=( $realpath$donepath${orig%%/*}/${~matchflags}${~patstr#*/}${^~pats} )
+-  tmp1=("${(@M)tmp1:#$~patlast}")
+-  [[ $#tmp1 -gt 0 && -e "$realpath$donepath${orig%%/*}" ]] || break
+-  donepath="$donepath${orig%%/*}/"
+-  orig="${orig#*/}"
+-  patstr="${patstr#*/}"
+-done
++for prepath in "$prepaths[@]"; do
+ 
+-# Finally, generate the matches. First we loop over all the paths from `-W'.
+-# Note that in this loop `str' is used as a modifyable version of `patstr'
+-# and `testpath' is a modifyable version of `donepath'.
++  # Get local copies of the prefix, suffix, and the prefix path to use
++  # in the following loop, which walks through the pathname components
++  # in the string from the line.
+ 
+-for prepath in "$prepaths[@]"; do
+-  str="$patstr"
++  tpre="$pre"
++  tsuf="$suf"
+   testpath="$donepath"
+-  ostr="$orig"
+ 
+-  [[ -z "$prepath" || "$prepath[-1]" = / ]] || prepath="${prepath}/"
++  tmp1=( "$prepath$realpath$donepath" )
++
++  while true; do
+ 
+-  # The second loop tests the components of the path in `str' to get the
+-  # possible matches.
++    # Skip over `./' and `../'.
++
++    if [[ "$tpre" = (.|..)/* ]]; then
++      tmp1=( ${^tmp1}${tpre%%/*}/ )
++      tpre="${tpre#*/}"
++      continue
++    fi
++
++    # Get the prefix and suffix for matching.
++
++    if [[ "$tpre" = */* ]]; then
++      PREFIX="${tpre%%/*}"
++      SUFFIX=""
++    else
++      PREFIX="${tpre}"
++      SUFFIX="${tsuf%%/*}"
++    fi
+ 
+-  while [[ "$str" = */* ]] do
+-    # `rest' is the pathname after the first slash that is left. In `tmp1'
+-    # we get the globbing matches for the pathname component currently
+-    # handled.
++    # Get the matching files by globbing.
+ 
+-    if [[ -n "$_comp_correct" && "${#ostr%%/*}" -le _comp_correct ]]; then
+-      mflags="$origflags"
++    if [[ "$tpre$tsuf" = */* ]]; then
++      tmp1=( ${^tmp1}*(D/) )
+     else
+-      mflags="$matchflags"
++      tmp1=( ${^tmp1}${^~pats} )
+     fi
+-    rest="${str#*/}"
+-    tmp1="${prepath}${realpath}${testpath}${~mflags}${str%%/*}(-/)"
+-    tmp1=( $~tmp1 )
+-
+-    if [[ $#tmp1 -eq 0 ]]; then
+-      # If this didn't produce any matches, we don't need to test this path
+-      # any further, so continue with the next `-W' path, if any.
+ 
++    # See which of them match what's on the line.
++
++    compadd -O tmp2 "$ignore[@]" - "${(@)tmp1##*/}"
++
++    # If no file matches, save the expanded path and continue with
++    # the outer loop.
++
++    if [[ $#tmp2 -eq 0 && "$tmp1[1]" = */* ]]; then
++      exppaths=( "$exppaths[@]" ${^tmp1%/*}/${tpre}${tsuf} )
+       continue 2
+-    elif [[ $#tmp1 -gt 1 ]]; then
+-      # If it produced more than one match, we want to remove those which
+-      # don't have possible following pathname components matching the 
+-      # rest of the string we are completing. (The case with only one
+-      # match is handled below.)
+-      # In `collect' we will collect those of the produced pathnames that
+-      # have a matching possible path-suffix. In `suffixes' we build an
+-      # array containing strings build from the rest of the string to 
+-      # complete and the glob patterns we were given as arguments.
+-
+-      collect=()
+-      suffixes=( $rest$^pats )
+-      suffixes=( "${(@)suffixes:gs.**.*.}" )
++    fi
+ 
+-      if [[ -n "$_comp_correct" && "${#ostr#*/}" -le _comp_correct ]]; then
+-        mflags="$origflags"
+-      else
+-        mflags="$matchflags"
+-      fi
++    # Remove all files that weren't matched.
+ 
+-      # In the loop the prefixes from the `tmp1' array produced above and
+-      # the suffixes we just built are used to produce possible matches
+-      # via globbing.
+-
+-      for i in "$tmp1[@]" ; do
+-        tmp2=( ${~i}/${~mflags}${~suffixes} )
+-        tmp2=("${(@M)tmp2:#$~patlast}")
+-        [[ $#tmp2 -ne 0 ]] && collect=( $collect $i )
+-      done
+-
+-      # If this test showed that none of the matches from the glob in `tmp1'
+-      # has a possible sub-path matching what's on the line, we add the
+-      # matches found in `tmp1' and otherwise give up and continue with the
+-      # next `-W' path.
+-
+-      if [[ $#collect -eq 0 ]]; then
+-        # Before giving up, we first try to get the longest expandable path-
+-	# prefix, though. The result is stored in `exppaths'
+-
+-        tmp2=()
+-	tmp3="$rest"
+-	[[ "$tmp3[-1]" = / ]] && tmp3="$tmp3[1,-2](-/M)"
+-	tmp4="${ostr##*/}"
+-	ostr="${ostr%/*}"
+-	while [[ "$ostr" = */* ]]; do
+-	  tmp2=( ${^tmp1}/${~mflags}${~tmp3} )
+-	  if [[ $#tmp2 -eq 1 ]]; then
+-	    exppaths=( "$exppaths[@]" "${tmp2[1]}${tmp4}" )
+-	    exppaths=( "${(@)exppaths#${prepath}${realpath}}" )
+-	    break;
+-          fi
+-	  tmp3="${tmp3%/*}"
+-	  tmp4="${ostr##*/}/${tmp4}"
+-	  ostr="${ostr%/*}"
+-        done
+-        continue 2
+-      elif [[ $#collect -ne 1 ]]; then
+-        # If we have more than one possible match, this means that the
+-	# pathname component currently handled is ambiguous, so we give
+-	# it to the completion code.
+-	# First we build the full path prefix in `tmp1'.
+-
+-        tmp1="$prepath$realpath$testpath"
+-
+-	# Now produce all matching pathnames in `collect'.
+-
+-        collect=( ${~collect}/${~matchflags}${~suffixes} )
+-	collect=("${(@M)collect:#$~patlast}")
+-
+-	# And then remove the common path prefix from all these matches.
+-
+-        collect=( ${collect#$tmp1} )
+-
+-	# Finally, we add all these matches with the common (unexpanded)
+-	# pathprefix (the `-p' option), the path-prefix (the `-W' option)
+-	# to allow the completion code to test file type, and the path-
+-	# suffix (the `-s' option). We also tell the completion code that
+-	# these are file names and that `fignore' should be used as usual
+-	# (the `-f' and `-F' options).
+-
+-	if [[ -n "$menu" ]]; then
+-          compadd -QU "$addpfx[@]" "$addsfx[@]" "$group[@]" "$expl[@]" \
+-                  -i "$IPREFIX" -I "$ISUFFIX" -p "$linepath${testpath:q}" \
+-		  -s "/${ostr#*/}" \
+-		  -W "$tmp1" -f "$ignore[@]" - "${(@)${(@)collect%%/*}:q}"
+-	else
+-          for i in $collect; do
+-            compadd -QU "$addpfx[@]" "$addsfx[@]" "$group[@]" "$expl[@]" \
+-	            -i "$IPREFIX" -I "$ISUFFIX" \
+-                    -p "$linepath${testpath:q}" -s "/${${i#*/}:q}" \
+-		    -M 'r:|/=*' -W "$tmp1" -f "$ignore[@]" - "${${i%%/*}:q}"
+-          done
+-	fi
++    if [[ "$tmp1[1]" = */* ]]; then
++      tmp1=( "${(@M)tmp1:#*/(${(j:|:)~tmp2})}" )
++    else
++      tmp1=( "${(@M)tmp1:#(${(j:|:)~tmp2})}" )
++    fi
++
++    # Step over to the next component, if any.
++
++    if [[ "$tpre" = */* ]]; then
++      tpre="${tpre#*/}"
++    elif [[ "$tsuf" = */* ]]; then
++      tpre="${tsuf#*/}"
++      tsuf=""
++    else
++      break
++    fi
++
++    # There are more components, so add a slash to the files we are
++    # collecting.
++
++    tmp1=( ${^tmp1}/ )
++  done
++
++  # The next loop searches the first ambiguous component.
++
++  tmp3="$pre$suf"
++  tmp1=( "${(@)tmp1#${prepath}${realpath}${testpath}}" )
+ 
+-	# We have just finished handling all the matches from above, so we
+-	# can continue with the next `-W' path.
++  while true; do
+ 
+-	continue 2
++    # First we check if some of the files match the original string
++    # for this component. If there are some we remove all other
++    # names. This avoid having `foo' complete to `foo' and `foobar'.
++
++    if [[ "$tmp3" = */* ]]; then
++      tmp4=( "${(@M)tmp1:#${tmp3%%/*}/*}" )
++      if (( $#tmp4 )); then
++        tmp1=( "$tmp4[@]" )
+       fi
++    fi
++
++    # Next we see if this component is ambiguous.
++
++    if [[ "$tmp3" = */* ]]; then
++      tmp4=( "${(@)tmp1:#${tmp1[1]%%/*}/*}" )
++    else
++      tmp4=( "${(@)tmp1:#${tmp1[1]}}" )
++    fi
++
++    if (( $#tmp4 )); then
+ 
+-      # We reach this point if only one of the path prefixes in `tmp1'
+-      # has a existing path-suffix matching the string from the line.
+-      # In this case we accept this match and continue with the next
+-      # path-name component.
+-
+-      tmp1=( "$collect[1]" )
+-    elif [[ -n "$_comp_correct" && "$mflags" = "$matchflags" ]]; then
+-
+-      # If we got only one match with auto-correction and if we get none
+-      # without correction, stop now.
+-
+-      tmp2="${prepath}${realpath}${testpath}${~origflags}${str%%/*}(-/)"
+-      tmp2=( $~tmp2 )
+-
+-      if [[ $#tmp1 -ne $#tmp2 ]]; then
+-        compadd -QU "$addpfx[@]" -S '' "$group[@]" "$expl[@]" \
+-                -i "$IPREFIX" -I "$ISUFFIX" \
+-                -p "$linepath${testpath:q}" -s "/${ostr#*/}" \
+-		- "${${tmp1#${prepath}${realpath}${testpath}}:q}"
+-        continue 2
++      # It is. For menucompletion we now add the possible completions
++      # for this component with the unambigous prefix we have built
++      # and the rest of the string from the line as the suffix.
++      # For normal completion we add the rests of the filenames
++      # collected as the suffixes to make the completion code expand
++      # it as far as possible.
++
++      if [[ -n $menu ]]; then
++        if [[ "$tmp3" = */* ]]; then
++	  compadd -Uf -p "$linepath$testpath" -s "/${tmp3#*/}" \
++	          -W "$prepath$realpath$testpath" "$ignore[@]" \
++		  "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
++		  "$group[@]" "$expl[@]" \
++		  - "${(@)tmp1%%/*}"
++	else
++	  compadd -Uf -p "$linepath$testpath" \
++	          -W "$prepath$realpath$testpath" "$ignore[@]" \
++		   "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
++		   "$group[@]" "$expl[@]" \
++		   - "$tmp1[@]"
++	fi
++      else
++        if [[ "$tmp3" = */* ]]; then
++          for i in "$tmp1[@]"; do
++	    compadd -Uf -p "$linepath$testpath" -s "/${i#*/}" \
++		    -W "$prepath$realpath$testpath" "$ignore[@]" \
++		    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
++		    "$group[@]" "$expl[@]" \
++		    - "${i%%/*}"
++	  done
++        else
++          for i in "$tmp1[@]"; do
++	    compadd -Uf -p "$linepath$testpath" \
++		    -W "$prepath$realpath$testpath" "$ignore[@]" \
++		    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
++		    "$group[@]" "$expl[@]" \
++		    - "$i"
++	  done
++        fi
+       fi
++      tmp4=-
++      break
+     fi
+-    # This is also reached if the first globbing produced only one match
+-    # in this case we just continue with the next pathname component, too.
+ 
+-    tmp1="$tmp1[1]"
+-    testpath="$testpath${tmp1##*/}/"
+-    str="$rest"
+-    ostr="${ostr#*/}"
+-  done
++    # If we have checked all components, we stop now and add the 
++    # strings collected after the loop.
+ 
+-  # We are here if all pathname components except the last one (which is still
+-  # not tested) are unambiguous. So we add matches with the full path prefix, 
+-  # no path suffix, the `-W' we are currently handling, all the matches we
+-  # can produce in this directory, if any.
++    if [[ "$tmp3" != */* ]]; then
++      tmp4=""
++      break
++    fi
+ 
+-  if [[ -n "$_comp_correct" && "${#ostr#*/}" -le _comp_correct ]]; then
+-    mflags="$origflags"
+-  else
+-    mflags="$matchflags"
+-  fi
+-  tmp1="$prepath$realpath$testpath"
+-  suffixes=( $str$^pats )
+-  suffixes=( "${(@)suffixes:gs.**.*.}" )
+-  tmp2=( ${~tmp1}${~matchflags}${~suffixes} )
+-  if [[ "$tmp1" = */* && "$patlast" != \*/* ]]; then
+-    tmp2=("${(@M)tmp2:#*${~patlast}}")
+-  else
+-    tmp2=("${(@M)tmp2:#$~patlast}")
+-  fi
+-  if [[ $#tmp2 -eq 0 ]]; then
+-    # No match, insert the expanded path and add the original tail.
++    # Otherwise we add the unambiguous component to `testpath' and
++    # take it from the filenames.
+ 
+-    [[ "$testpath[-1]" = / ]] && testpath="$testpath[1,-2]"
+-    [[ -z "$testpath" && "$linepath[-1]" = / ]] && linepath="$linepath[1,-2]"
+-    [[ -n "$ostr" && -n "$linepath$testpath" ]] && ostr="/$ostr"
++    testpath="${testpath}${tmp1[1]%%/*}/"
++    tmp1=( "${(@)tmp1#*/}" )
+ 
+-    # But only if something changed.
+-    [[ "${PREFIX}${SUFFIX}" = $linepath$testpath$ostr(|/) ]] && return 1
++    tmp3="${tmp3#*/}"
++  done
+ 
+-    compadd -QU -S '' "$group[@]" "$expl[@]" \
+-            -i "$IPREFIX" -I "$ISUFFIX" -f - "$linepath${testpath:q}$ostr"
+-  else
+-    compadd -QU "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" "$group[@]" "$expl[@]" \
+-            -i "$IPREFIX" -I "$ISUFFIX" \
+-            -p "$linepath${testpath:q}" -f "$ignore[@]" \
+-	    -W "$prepath$realpath$testpath" - "${(@)${(@)tmp2#$tmp1}:q}"
++  if [[ -z "$tmp4" ]]; then
++    compadd -Uf -p "$linepath$testpath" \
++	    -W "$prepath$realpath$testpath" "$ignore[@]" \
++	    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
++	    "$group[@]" "$expl[@]" \
++	    - "$tmp1[@]"
+   fi
+ done
+ 
+-# If no matches were found but we have expanded paths which are different
+-# from the original string, use them.
++# If we are configured to expand paths as far as possible and we collected
++# expanded paths that are different from the string on the line, we add
++# them as possible matches.
+ 
+ exppaths=( "${(@)exppaths:#$orig}" )
+ 
+ if [[ -n "$compconfig[path_expand]" &&
+-      nm -eq compstate[nmatches] && $#exppaths -ne 0 ]]; then
+-  compadd -UQ -S '' "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" - \
+-          "${linepath}${(@)^exppaths}"
++      $#exppaths -ne 0 && nm -eq compstate[nmatches] ]]; then
++  compadd -U -S '' "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" - \
++          "${(@)exppaths}"
+ fi
+ 
+-# This sets the return value to indicate that we added matches (or not).
+-
+-[[ nm -ne compstate[nmatches] ]]
++[[ nm -eq compstate[nmatches] ]]
+diff -u -r oc/Core/_sep_parts Completion/Core/_sep_parts
+--- oc/Core/_sep_parts	Thu Apr  1 15:09:50 1999
++++ Completion/Core/_sep_parts	Thu Apr  8 19:34:46 1999
+@@ -9,24 +9,17 @@
+ #
+ #  _sep_parts '(foo bar)' @ hosts
+ #
+-# This will make this function complete the strings in the array
+-# `friends'. If the string on the line contains a `@', the substring
+-# after it will be completed from the array `hosts'. Of course more
+-# arrays may be given, each preceded by another separator string.
++# This will make this function complete the strings `foo' and `bar'
++# If the string on the line contains a `@', the substring after it
++# will be completed from the array `hosts'. Of course more arrays
++# may be given, each preceded by another separator string.
+ #
+ # This function understands the `-J group', `-V group', and
+ # `-X explanation' options.
+-#
+-# This function does part of the matching itself and calls the functions
+-# `_match_test' and `_match_pattern' for this.
+ 
+ local str arr sep test testarr tmparr prefix suffixes matchers autosuffix
+ local matchflags opt group expl nm=$compstate[nmatches]
+ 
+-# Test if we should use this function for the global matcher in use.
+-
+-_match_test _sep_parts || return 1
+-
+ # Get the options.
+ 
+ group=()
+@@ -42,7 +35,7 @@
+ # Get the string from the line.
+ 
+ str="$PREFIX$SUFFIX"
+-[[ $#compstate[pattern_match] -ne 0 ]] || str="$str:q"
++SUFFIX=""
+ prefix=""
+ 
+ # Walk through the arguments to find the longest unambiguous prefix.
+@@ -56,61 +49,49 @@
+     tmparr=( ${=arr[2,-2]} )
+     arr=tmparr
+   fi
++
+   # Is the separator on the line?
+-  [[ "$str" != *${sep}* ]] && break
+ 
+-  # Build a pattern matching the possible matches and get all these
+-  # matches in an array.
++  [[ "$str" != *${sep}* ]] && break
+ 
+-  test="${str%%${sep}*}"
+-  [[ -n "$_comp_correct" && $#test -le _comp_correct ]] && return 1
++  # Get the matching array elements.
+ 
+-  matchflags=""
+-  _match_pattern _sep_parts test matchflags
+-  [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+-
+-  test="${matchflags}${test}"
+-  testarr=( "${(@M)${(@P)arr}:#${~test}*}" )
+-  testarr=( "${(@)testarr:#}" )
++  PREFIX="${str%%${sep}*}"
++  compadd -O testarr - "${(@P)arr}"
+ 
+   # If there are no matches we give up. If there is more than one
+   # match, this is the part we will complete.
++
+   (( $#testarr )) || return 1
+   [[ $#testarr -gt 1 ]] && break
+ 
+   # Only one match, add it to the prefix and skip over it in `str',
+   # continuing with the next array and separator.
++
+   prefix="${prefix}${testarr[1]}${sep}"
+   str="${str#*${sep}}"
+   shift 2
+ done
+ 
+ # Get the array to work upon.
++
+ arr="$1"
+ if [[ "$arr[1]" == '(' ]]; then
+   tmparr=( ${=arr[2,-2]} )
+   arr=tmparr
+ fi
++
+ if [[ $# -le 1 || "$str" != *${2}* ]]; then
+   # No more separators, build the matches.
+ 
+-  test="$str"
+-  [[ -n "$_comp_correct" && $#test -le _comp_correct ]] && return 1
+-
+-  matchflags=""
+-  _match_pattern _sep_parts test matchflags
+-  [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+-
+-  [[ "${compstate[pattern_match]-*}" != \** ]] && test="$test:gs/*//"
+-
+-  test="${matchflags}${test}"
+-  testarr=( "${(@M)${(@P)arr}:#${~test}*}" )
+-  testarr=( "${(@)testarr:#}" )
++  PREFIX="$str"
++  compadd -O testarr - "${(@P)arr}"
+ fi
+ 
+ [[ $#testarr -eq 0 || ${#testarr[1]} -eq 0 ]] && return 1
+ 
+ # Now we build the suffixes to give to the completion code.
++
+ shift
+ matchers=()
+ suffixes=("")
+@@ -118,26 +99,18 @@
+ 
+ while [[ $# -gt 0 && "$str" == *${1}* ]]; do
+   # Remove anything up to the the suffix.
++
+   str="${str#*${1}}"
+ 
+   # Again, we get the string from the line up to the next separator
+   # and build a pattern from it.
++
+   if [[ $# -gt 2 ]]; then
+-    test="${str%%${3}*}"
++    PREFIX="${str%%${3}*}"
+   else
+-    test="$str"
++    PREFIX="$str"
+   fi
+ 
+-  [[ -n "$_comp_correct" && $#test -le _comp_correct ]] && return 1
+-
+-  matchflags=""
+-  _match_pattern _sep_parts test matchflags
+-  [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+-
+-  [[ "${compstate[pattern_match]-*}" != \** ]] && test="$test:gs/*//"
+-
+-  test="${matchflags}${test}"
+-
+   # We incrementally add suffixes by appending to them the seperators
+   # and the strings from the next array that match the pattern we built.
+ 
+@@ -146,26 +119,31 @@
+     tmparr=( ${=arr[2,-2]} )
+     arr=tmparr
+   fi
+-  tmparr=( "${(@M)${(@P)arr}:#${~test}*}" )
+-  tmparr=( "${(@)tmparr:#}" )
++
++  compadd -O tmparr - "${(@P)arr}"
++
+   suffixes=("${(@)^suffixes[@]}${1}${(@)^tmparr}")
+ 
+   # We want the completion code to generate the most specific suffix
+   # for us, so we collect matching specifications that allow partial
+   # word matching before the separators on the fly.
++
+   matchers=("$matchers[@]" "r:|${1:q}=*")
+   shift 2
+ done
+ 
+ # If we were given at least one more separator we make the completion
+ # code offer it by appending it as a autoremovable suffix.
++
+ (( $# )) && autosuffix=(-qS "$1")
+ 
+ # If we have collected matching specifications, we build an array
+ # from it that can be used as arguments to `compadd'.
++
+ [[ $#matchers -gt 0 ]] && matchers=(-M "$matchers")
+ 
+ # Add the matches for each of the suffixes.
++
+ for i in "$suffixes[@]"; do
+   compadd -U "$group[@]" "$expl[@]" "$matchers[@]" "$autosuffix[@]" \
+           -i "$IPREFIX" -I "$ISUFFIX" -p "$prefix" -s "$i" - "$testarr[@]"
+diff -u -r oc/Core/compinit Completion/Core/compinit
+--- oc/Core/compinit	Thu Apr  1 15:09:49 1999
++++ Completion/Core/compinit	Thu Apr  8 19:42:58 1999
+@@ -39,11 +39,6 @@
+ # were able to add matches and non-zero otherwise.
+ #
+ # See the file `compdump' for how to speed up initialisation.
+-#
+-# If you are using global matching specifications with `compctl -M ...'
+-# have a look at the files `_match_test' and `_match_pattern'. To make
+-# all the example functions use matching as specified with `-M' these
+-# need some editing.
+ 
+ # If we got the `-d'-flag, we will automatically dump the new state (at
+ # the end).
+diff -u -r oc/README Completion/README
+--- oc/README	Thu Apr  1 15:09:46 1999
++++ Completion/README	Sat Apr 10 15:30:32 1999
+@@ -110,13 +110,6 @@
+     dangerous because the command from the line will be called with the
+     --help option and hence could cause damage if used with a command
+     that does not support it.
+-  _match_pattern
+-  _match_test
+-    These are used by Base/_path_files (and hence also Base/_files)
+-    and Base/_sep_parts for file completion with control over
+-    matching (whether to complete case-insensitively, or to allow
+-    insertion before `.', etc.)  See _match_test for instructions.
+-    Note _path_files expects these files to be present.
+   _precommand
+     Allows completion when the first word on the line has to be ignored,
+     for example `noglob ...' should ignore the noglob and just complete
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

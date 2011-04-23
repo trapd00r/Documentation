@@ -1,0 +1,554 @@
+From zsh-workers-return-7482-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Aug 25 14:21:09 1999
+Return-Path: <zsh-workers-return-7482-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13502 invoked from network); 25 Aug 1999 14:21:06 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Aug 1999 14:21:06 -0000
+Received: (qmail 25429 invoked by alias); 25 Aug 1999 14:21:00 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7482
+Received: (qmail 25422 invoked from network); 25 Aug 1999 14:20:59 -0000
+Date: Wed, 25 Aug 1999 16:20:57 +0200 (MET DST)
+Message-Id: <199908251420.QAA13906@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Zefram's message of Mon, 23 Aug 1999 09:38:10 +0100 (BST)
+Subject: PATCH: Re: Files modified after a given date
+
+
+Zefram wrote:
+
+> Bruce Stephens wrote:
+> >You could write a function using the stat module, but I don't think we
+> >have user-defined glob patterns yet?
+> 
+> That's one of the many things I never got round to.  I was going to
+> have patterns like "*(F:func:)" call the shell function "func" with the
+> name of each file which otherwise matches the glob pattern, and use its
+> return value to decide whether it matches or not.  Should be quite easy
+> to implement -- just a few lines.
+
+(I just needed some fun after the bug-hunting...)
+
+This is a not-so-simple implementation (although most of this patch is 
+re-indentation and changing the argument lists of the qualifier
+functions).
+
+First of all it allows the `*(F:func:)' Zefram mentioned. The function 
+will get the filename as its first argument and the return value says
+if the name should be included (ir it is zero, of course).
+
+But it also allows one to give additional arguments as in
+`*(F:func::arg1::arg2:)' and so on -- these are available as `$2'
+etc. in the function. And finally it allows the function to say *what* 
+should be included by setting the `reply' or `REPLY' parameter to a
+string or array (`REPLY' is only tested for a string value). For
+security reasons these are unset by the shell before the function is
+called, but we could change that if you prefer.
+
+
+(Maybe this is going a bit too far?)
+
+Bye
+ Sven
+
+diff -u os/exec.c Src/exec.c
+--- os/exec.c	Tue Aug 24 14:16:38 1999
++++ Src/exec.c	Tue Aug 24 16:11:36 1999
+@@ -1799,8 +1799,11 @@
+ 	is_exec = 1;
+     }
+ 
+-    if (args && !(cflags & BINF_NOGLOB))
++    if (args && !(cflags & BINF_NOGLOB)) {
++	LinkList oargs = args;
+ 	globlist(args);
++	args=oargs;
++    }
+     if (errflag) {
+ 	lastval = 1;
+ 	goto err;
+diff -u os/glob.c Src/glob.c
+--- os/glob.c	Fri Aug 20 15:18:07 1999
++++ Src/glob.c	Wed Aug 25 16:14:01 1999
+@@ -106,7 +106,8 @@
+ #define TT_KILOBYTES 2
+ #define TT_MEGABYTES 3
+ 
+-typedef int (*TestMatchFunc) _((struct stat *, off_t));
++
++typedef int (*TestMatchFunc) _((char *, struct stat *, off_t, LinkList));
+ 
+ struct qual {
+     struct qual *next;		/* Next qualifier, must match                */
+@@ -117,6 +118,7 @@
+     int amc;			/* Flag for which time to test (a, m, c)     */
+     int range;			/* Whether to test <, > or = (as per signum) */
+     int units;			/* Multiplier for time or size, respectively */
++    LinkList ldata;		/* currently only: shell function to call    */
+ };
+ 
+ /* Qualifiers pertaining to current pattern */
+@@ -197,6 +199,11 @@
+     return l ? lstat(buf, st) : stat(buf, st);
+ }
+ 
++/* This may be set by qualifier functions to an array of strings to insert
++ * into the list instead of the original string. */
++
++char **inserts;
++
+ /* add a match to the list */
+ 
+ /**/
+@@ -207,6 +214,8 @@
+     char *news = s;
+     int statted = 0;
+ 
++    inserts = NULL;
++
+     if (gf_listtypes || gf_markdirs) {
+ 	/* Add the type marker to the end of the filename */
+ 	mode_t mode;
+@@ -235,6 +244,9 @@
+ 
+ 	if (!statted && statfullpath(s, &buf, 1))
+ 	    return;
++
++	news = dyncat(pathbuf, news);
++
+ 	statted = 1;
+ 	qo = quals;
+ 	for (qn = qo; qn && qn->func;) {
+@@ -251,7 +263,7 @@
+ 	    /* Reject the file if the function returned zero *
+ 	     * and the sense was positive (sense&1 == 0), or *
+ 	     * vice versa.                                   */
+-	    if ((!((qn->func) (bp, qn->data)) ^ qn->sense) & 1) {
++	    if ((!((qn->func) (news, bp, qn->data, qn->ldata)) ^ qn->sense) & 1) {
+ 		/* Try next alternative, or return if there are no more */
+ 		if (!(qo = qo->or))
+ 		    return;
+@@ -264,47 +276,53 @@
+ 	if (statfullpath(s, NULL, 1))
+ 	    return;
+ 	statted = 1;
+-    }
+-    news = dyncat(pathbuf, news);
+-    if (colonmod) {
+-	/* Handle the remainder of the qualifer:  e.g. (:r:s/foo/bar/). */
+-	s = colonmod;
+-	modify(&news, &s);
+-    }
+-    if (!statted && (gf_sorts & GS_NORMAL)) {
+-	statfullpath(s, &buf, 1);
+-	statted = 1;
+-    }
+-    if (!(statted & 2) && (gf_sorts & GS_LINKED)) {
+-	if (statted) {
+-	    if (!S_ISLNK(buf.st_mode) || statfullpath(s, &buf2, 0))
+-		memcpy(&buf2, &buf, sizeof(buf));
+-	} else if (statfullpath(s, &buf2, 0))
+-	    statfullpath(s, &buf2, 1);
+-	statted |= 2;
+-    }
+-    matchptr->name = news;
+-    if (statted & 1) {
+-	matchptr->size = buf.st_size;
+-	matchptr->atime = buf.st_atime;
+-	matchptr->mtime = buf.st_mtime;
+-	matchptr->ctime = buf.st_ctime;
+-	matchptr->links = buf.st_nlink;
+-    }
+-    if (statted & 2) {
+-	matchptr->_size = buf2.st_size;
+-	matchptr->_atime = buf2.st_atime;
+-	matchptr->_mtime = buf2.st_mtime;
+-	matchptr->_ctime = buf2.st_ctime;
+-	matchptr->_links = buf2.st_nlink;
+-    }
+-    matchptr++;
+-
+-    if (++matchct == matchsz) {
+-	matchbuf = (Gmatch )realloc((char *)matchbuf,
+-				    sizeof(struct gmatch) * (matchsz *= 2));
++	news = dyncat(pathbuf, news);
++    } else
++	news = dyncat(pathbuf, news);
++
++    while (!inserts || (news = dupstring(*inserts++))) {
++	if (colonmod) {
++	    /* Handle the remainder of the qualifer:  e.g. (:r:s/foo/bar/). */
++	    s = colonmod;
++	    modify(&news, &s);
++	}
++	if (!statted && (gf_sorts & GS_NORMAL)) {
++	    statfullpath(s, &buf, 1);
++	    statted = 1;
++	}
++	if (!(statted & 2) && (gf_sorts & GS_LINKED)) {
++	    if (statted) {
++		if (!S_ISLNK(buf.st_mode) || statfullpath(s, &buf2, 0))
++		    memcpy(&buf2, &buf, sizeof(buf));
++	    } else if (statfullpath(s, &buf2, 0))
++		statfullpath(s, &buf2, 1);
++	    statted |= 2;
++	}
++	matchptr->name = news;
++	if (statted & 1) {
++	    matchptr->size = buf.st_size;
++	    matchptr->atime = buf.st_atime;
++	    matchptr->mtime = buf.st_mtime;
++	    matchptr->ctime = buf.st_ctime;
++	    matchptr->links = buf.st_nlink;
++	}
++	if (statted & 2) {
++	    matchptr->_size = buf2.st_size;
++	    matchptr->_atime = buf2.st_atime;
++	    matchptr->_mtime = buf2.st_mtime;
++	    matchptr->_ctime = buf2.st_ctime;
++	    matchptr->_links = buf2.st_nlink;
++	}
++	matchptr++;
++
++	if (++matchct == matchsz) {
++	    matchbuf = (Gmatch )realloc((char *)matchbuf,
++					sizeof(struct gmatch) * (matchsz *= 2));
+ 
+-	matchptr = matchbuf + matchct;
++	    matchptr = matchbuf + matchct;
++	}
++	if (!inserts)
++	    break;
+     }
+ }
+ 
+@@ -832,19 +850,21 @@
+ 		break;
+ 	if (*s == Inpar && (!isset(EXTENDEDGLOB) || s[1] != Pound)) {
+ 	    /* Real qualifiers found. */
+-	    int sense = 0;	/* bit 0 for match (0)/don't match (1)   */
+-				/* bit 1 for follow links (2), don't (0) */
+-	    off_t data = 0;	/* Any numerical argument required       */
+-	    int (*func) _((Statptr, off_t));
++	    int sense = 0;	   /* bit 0 for match (0)/don't match (1)   */
++				   /* bit 1 for follow links (2), don't (0) */
++	    off_t data = 0;	   /* Any numerical argument required       */
++	    LinkList ldata = NULL; /* Any list argument required            */
++	    int (*func) _((char *, Statptr, off_t, LinkList));
+ 
+ 	    str[sl-1] = 0;
+ 	    *s++ = 0;
+ 	    while (*s && !colonmod) {
+-		func = (int (*) _((Statptr, off_t)))0;
++		func = (int (*) _((char *, Statptr, off_t, LinkList)))0;
+ 		if (idigit(*s)) {
+ 		    /* Store numeric argument for qualifier */
+ 		    func = qualflags;
+ 		    data = 0;
++		    ldata = NULL;
+ 		    while (idigit(*s))
+ 			data = data * 010 + (*s++ - '0');
+ 		} else if (*s == ',') {
+@@ -1169,6 +1189,48 @@
+ 			    s++;
+ 			    break;
+ 			}
++		    case 'F':
++			{
++			    char sav, *tt = get_strarg(s);
++
++			    if (!*tt) {
++				zerr("missing end of function name", NULL, 0);
++				data = 0;
++			    } else {
++				char sep = *s;
++
++				sav = *tt;
++				*tt = '\0';
++				func = qualshfunc;
++				ldata = newlinklist();
++				addlinknode(ldata, dupstring(s + 1));
++				addlinknode(ldata, NULL);
++				*tt = sav;
++				if (sav)
++				    s = tt + 1;
++				else
++				    s = tt;
++				while (*s == sep) {
++				    tt = get_strarg(s);
++				    if (!*tt) {
++					zerr("missing end of argument", NULL, 0);
++					data = 0;
++					ldata = NULL;
++					break;
++				    } else {
++					sav = *tt;
++					*tt = '\0';
++					addlinknode(ldata, dupstring(s + 1));
++					*tt = sav;
++					if (sav)
++					    s = tt + 1;
++					else
++					    s = tt;
++				    }
++				}
++			    }
++			    break;
++			}
+ 		    case '[':
+ 		    case Inbrack:
+ 			{
+@@ -1203,6 +1265,7 @@
+ 		    qn->func = func;
+ 		    qn->sense = sense;
+ 		    qn->data = data;
++		    qn->ldata = ldata;
+ 		    qn->range = range;
+ 		    qn->units = units;
+ 		    qn->amc = amc;
+@@ -2176,7 +2239,7 @@
+ 
+ /**/
+ static int
+-qualdev(struct stat *buf, off_t dv)
++qualdev(char *name, struct stat *buf, off_t dv, LinkList dummy)
+ {
+     return buf->st_dev == dv;
+ }
+@@ -2185,7 +2248,7 @@
+ 
+ /**/
+ static int
+-qualnlink(struct stat *buf, off_t ct)
++qualnlink(char *name, struct stat *buf, off_t ct, LinkList dummy)
+ {
+     return (range < 0 ? buf->st_nlink < ct :
+ 	    range > 0 ? buf->st_nlink > ct :
+@@ -2196,7 +2259,7 @@
+ 
+ /**/
+ static int
+-qualuid(struct stat *buf, off_t uid)
++qualuid(char *name, struct stat *buf, off_t uid, LinkList dummy)
+ {
+     return buf->st_uid == uid;
+ }
+@@ -2205,7 +2268,7 @@
+ 
+ /**/
+ static int
+-qualgid(struct stat *buf, off_t gid)
++qualgid(char *name, struct stat *buf, off_t gid, LinkList dummy)
+ {
+     return buf->st_gid == gid;
+ }
+@@ -2214,7 +2277,7 @@
+ 
+ /**/
+ static int
+-qualisdev(struct stat *buf, off_t junk)
++qualisdev(char *name, struct stat *buf, off_t junk, LinkList dummy)
+ {
+     return S_ISBLK(buf->st_mode) || S_ISCHR(buf->st_mode);
+ }
+@@ -2223,7 +2286,7 @@
+ 
+ /**/
+ static int
+-qualisblk(struct stat *buf, off_t junk)
++qualisblk(char *name, struct stat *buf, off_t junk, LinkList dummy)
+ {
+     return S_ISBLK(buf->st_mode);
+ }
+@@ -2232,7 +2295,7 @@
+ 
+ /**/
+ static int
+-qualischr(struct stat *buf, off_t junk)
++qualischr(char *name, struct stat *buf, off_t junk, LinkList dummy)
+ {
+     return S_ISCHR(buf->st_mode);
+ }
+@@ -2241,7 +2304,7 @@
+ 
+ /**/
+ static int
+-qualisdir(struct stat *buf, off_t junk)
++qualisdir(char *name, struct stat *buf, off_t junk, LinkList dummy)
+ {
+     return S_ISDIR(buf->st_mode);
+ }
+@@ -2250,7 +2313,7 @@
+ 
+ /**/
+ static int
+-qualisfifo(struct stat *buf, off_t junk)
++qualisfifo(char *name, struct stat *buf, off_t junk, LinkList dummy)
+ {
+     return S_ISFIFO(buf->st_mode);
+ }
+@@ -2259,7 +2322,7 @@
+ 
+ /**/
+ static int
+-qualislnk(struct stat *buf, off_t junk)
++qualislnk(char *name, struct stat *buf, off_t junk, LinkList dummy)
+ {
+     return S_ISLNK(buf->st_mode);
+ }
+@@ -2268,7 +2331,7 @@
+ 
+ /**/
+ static int
+-qualisreg(struct stat *buf, off_t junk)
++qualisreg(char *name, struct stat *buf, off_t junk, LinkList dummy)
+ {
+     return S_ISREG(buf->st_mode);
+ }
+@@ -2277,7 +2340,7 @@
+ 
+ /**/
+ static int
+-qualissock(struct stat *buf, off_t junk)
++qualissock(char *name, struct stat *buf, off_t junk, LinkList dummy)
+ {
+     return S_ISSOCK(buf->st_mode);
+ }
+@@ -2286,7 +2349,7 @@
+ 
+ /**/
+ static int
+-qualflags(struct stat *buf, off_t mod)
++qualflags(char *name, struct stat *buf, off_t mod, LinkList dummy)
+ {
+     return mode_to_octal(buf->st_mode) & mod;
+ }
+@@ -2295,7 +2358,7 @@
+ 
+ /**/
+ static int
+-qualmodeflags(struct stat *buf, off_t mod)
++qualmodeflags(char *name, struct stat *buf, off_t mod, LinkList dummy)
+ {
+     long v = mode_to_octal(buf->st_mode), y = mod & 07777, n = mod >> 12;
+ 
+@@ -2306,7 +2369,7 @@
+ 
+ /**/
+ static int
+-qualiscom(struct stat *buf, off_t mod)
++qualiscom(char *name, struct stat *buf, off_t mod, LinkList dummy)
+ {
+     return S_ISREG(buf->st_mode) && (buf->st_mode & S_IXUGO);
+ }
+@@ -2315,7 +2378,7 @@
+ 
+ /**/
+ static int
+-qualsize(struct stat *buf, off_t size)
++qualsize(char *name, struct stat *buf, off_t size, LinkList dummy)
+ {
+ #if defined(LONG_IS_64_BIT) || defined(OFF_T_IS_64_BIT)
+ # define QS_CAST_SIZE()
+@@ -2350,7 +2413,7 @@
+ 
+ /**/
+ static int
+-qualtime(struct stat *buf, off_t days)
++qualtime(char *name, struct stat *buf, off_t days, LinkList dummy)
+ {
+     time_t now, diff;
+ 
+@@ -2379,4 +2442,45 @@
+     return (range < 0 ? diff < days :
+ 	    range > 0 ? diff > days :
+ 	    diff == days);
++}
++
++/* call shell function */
++
++/**/
++static int
++qualshfunc(char *name, struct stat *buf, off_t days, LinkList args)
++{
++    List list;
++    char *func = (char *) getdata(firstnode(args));
++
++    if ((list = getshfunc(func)) && list != &dummy_list) {
++	int osc = sfcontext, ef = errflag, lv = lastval, ret;
++
++	unsetparam("reply");
++	unsetparam("REPLY");
++
++	setdata(nextnode(firstnode(args)), dupstring(name));
++	sfcontext = SFC_GLOB;
++	doshfunc(func, list, args, 0, 0);
++	ret = lastval;
++	errflag = ef;
++	lastval = lv;
++	sfcontext = osc;
++
++	if (!(inserts = getaparam("reply")) &&
++	    !(inserts = gethparam("reply"))) {
++	    char *tmp;
++
++	    if ((tmp = getsparam("reply")) || (tmp = getsparam("REPLY"))) {
++		static char *tmparr[2];
++
++		tmparr[0] = tmp;
++		tmparr[1] = NULL;
++
++		inserts = tmparr;
++	    }
++	}
++	return !ret;
++    }
++    return 0;
+ }
+diff -u os/zsh.h Src/zsh.h
+--- os/zsh.h	Fri Aug 20 15:18:10 1999
++++ Src/zsh.h	Wed Aug 25 15:23:38 1999
+@@ -819,6 +819,7 @@
+ #define SFC_WIDGET   3		/* user defined widget */
+ #define SFC_COMPLETE 4		/* called from completion code */
+ #define SFC_CWIDGET  5		/* new style completion widget */
++#define SFC_GLOB     6		/* called from the `F' glob qualifier */
+ 
+ /* node in list of function call wrappers */
+ 
+diff -u od/Zsh/expn.yo Doc/Zsh/expn.yo
+--- od/Zsh/expn.yo	Mon Aug 23 15:47:49 1999
++++ Doc/Zsh/expn.yo	Wed Aug 25 16:12:30 1999
+@@ -1377,6 +1377,24 @@
+ permission, and for which other users don't have read or execute
+ permission.
+ )
++item(tt(F)var(name)[var(args)...])(
++The shell function var(name) will be called with the generated
++filename as its first argument and the return value determines if the
++filename should be included in the list (if it is zero) or not (if it
++is non-zero). The first character after the `tt(F)' will be used as a
++separator and anything up to the next matching separator will be taken 
++as the name of the function (`tt([)', `tt({)', and `tt(<)' match
++`tt(])', `tt(})', and `tt(>)' respectively, any other character
++matches itself). Arguments may be given inside consecutive pairs of
++the same separator(s). These strings will be given literally to the
++shell function as the second to last argument.
++
++If the function sets the parameter tt(reply) to an array or to a
++string or if it sets the parameter tt(REPLY) to a string, then these
++strings will be inserted into the generated list instead of the
++original string. For security reasons, these parameters will be unset
++by the shell before the function is called.
++)
+ item(tt(d)var(dev))(
+ files on the device var(dev)
+ )
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

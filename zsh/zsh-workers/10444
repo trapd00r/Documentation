@@ -1,0 +1,359 @@
+From zsh-workers-return-10444-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Apr 04 01:16:37 2000
+Return-Path: <zsh-workers-return-10444-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10003 invoked from network); 4 Apr 2000 01:16:35 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 4 Apr 2000 01:16:34 -0000
+Received: (qmail 24814 invoked by alias); 4 Apr 2000 01:16:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10444
+Received: (qmail 24805 invoked from network); 4 Apr 2000 01:16:26 -0000
+Subject: Re: <n> == <n->?
+In-Reply-To: <Pine.GSO.4.02.10004040058110.14057-100000@astmatix.ida.liu.se>
+ from "[Johan Sundstr_m]" at "Apr 4, 2000 01:09:29 am"
+To: "[Johan Sundstr_m]" <johsu650@student.liu.se>
+Date: Tue, 4 Apr 2000 02:16:21 +0100 (BST)
+CC: zsh-workers@sunsite.auc.dk
+X-Mailer: ELM [version 2.4ME+ PL66 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Message-Id: <E12cHx7-0006VR-00@crucigera.fysh.org>
+From: Zefram <zefram@fysh.org>
+
+[Johan Sundstr_m] wrote:
+>When upgrading from zsh 3.1.6 to 3.1.6-dev-17 (as found in the Mandrake
+>zsh-3.1.6dev17-1mdk rpm), I was sad to notice that the glob behaviour of
+>the pattern <number> had changed to something identical to what I had
+>earlier (and still can) specified as <number->, that is, an open range of
+>numbers, from number onwards.
+
+Hmm.
+
+I thought we'd decided, quite some time ago, that the numeric glob syntax
+was going to require a "-", to minimise ambiguity with redirection.
+This is, in fact, what zshexpn(1) shows.  However, that was when the
+<> operator was being introduced, so perhaps that change was limited
+to making "<>" be always a redirection rather than a glob operator,
+requiring "<->" for globbing.
+
+<fx: checks>
+
+Actually, lex.c is more lenient than that.  Anything matching
+/\<[-0-9]+\>/ is initially lexed as a string rather than as operators.
+However, gettokstr() has some nasties here.  Although the above grammar
+applies at the beginning of a word, gettokstr() makes no such check
+in the middle of a word.  As far as it's concerned, anything matching
+/\<[-0-9]/ is the start of a glob operator, and it'll keep adding to
+the string (past whitespace and so on) until it finds the closing ">".
+Try typing "echo a<1" (and compare against "echo <1").
+
+To complete the set, tokenize() insists on /\<[0-9]*-[0-9]*\>/.  So it
+looks like it's *intended* that the "-" be required, but the lexer just
+isn't actually enforcing it.  The code that actually causes "<n>" to
+be treated like "<n->" is in pattern.c: it sees that it has a starting
+number but no ending number, and just doesn't distinguish the two cases.
+
+>                         <n> isn't useless, if (s)he who changed its 
+>behaviour thought so, since it matches all the number n with any amount of
+>leading zeroes, a feature I have daily use for, when rummaging through
+>huge log directories, for instance.
+
+"0#n" will do that (# = zero or more of the previous character).
+
+OK.  This patch (already in the repository) fixes the grammar
+disagreements, making all the relevant places check for the
+/\<[0-9]*-[0-9]*\>/ syntax.  "<n>" is consequently removed; you'll have
+to use "0#n" or "<n-n>".  No doc change, since this is changing things
+to match the documented behaviour.
+
+On the way, I fixed the rather nasty bug that if a word started with
+a digit followed by a numeric glob, the initial digit got swallowed.
+(The digit was provisionally treated as a file descriptor number and
+never got restored.)
+
+Incidentally, Adam, in /home/groups/zsh/zsh, you've managed to set all
+*regular* files to be sgid, rather than all directories.  Can we have
+from Adam and Peter please a "chgrp -R zsh /home/groups/zsh; chmod -R
+g+w,g-s /home/groups/zsh; chmod g+s /home/groups/zsh/**/*(/)".
+
+-zefram
+
+Index: ChangeLog
+===================================================================
+RCS file: /cvsroot/zsh/zsh/ChangeLog,v
+retrieving revision 1.3
+diff -c -r1.3 ChangeLog
+*** ChangeLog	2000/04/02 17:37:34	1.3
+--- ChangeLog	2000/04/04 01:11:25
+***************
+*** 1,3 ****
+--- 1,9 ----
++ 2000-04-04  Andrew Main  <zefram@zsh.org>
++ 
++ 	* 10444: Src/lex.c, Src/pattern.c: Insist on proper syntax
++ 	for numeric globbing (with the "-").  Also fix the bug whereby
++ 	"echo 1<2-3>" would lose the "1".
++ 
+  2000-04-02  Peter Stephenson  <pws@pwstephenson.fsnet.co.uk>
+  
+  	* pws: Config/version.mk: 3.1.6-dev-21.
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.1.1.19
+diff -c -r1.1.1.19 lex.c
+*** Src/lex.c	2000/03/13 09:44:19	1.1.1.19
+--- Src/lex.c	2000/04/04 01:11:29
+***************
+*** 569,575 ****
+--- 569,612 ----
+      return skipcomm();
+  }
+  
++ /* Check whether we're looking at valid numeric globbing syntax      *
++  * (/\<[0-9]*-[0-9]*\>/).  Call pointing just after the opening "<". *
++  * Leaves the input in the same place, returning 0 or 1.             */
++ 
+  /**/
++ static int
++ isnumglob(void)
++ {
++     int c, ec = '-', ret = 0;
++     int tbs = 256, n = 0;
++     char *tbuf = (char *)zalloc(tbs);
++ 
++     while(1) {
++ 	c = hgetc();
++ 	if(lexstop) {
++ 	    lexstop = 0;
++ 	    break;
++ 	}
++ 	tbuf[n++] = c;
++ 	if(!idigit(c)) {
++ 	    if(c != ec)
++ 		break;
++ 	    if(ec == '>') {
++ 		ret = 1;
++ 		break;
++ 	    }
++ 	    ec = '>';
++ 	}
++ 	if(n == tbs)
++ 	    tbuf = (char *)realloc(tbuf, tbs *= 2);
++     }
++     while(n--)
++ 	hungetc(tbuf[n]);
++     zfree(tbuf, tbs);
++     return ret;
++ }
++ 
++ /**/
+  int
+  gettok(void)
+  {
+***************
+*** 719,759 ****
+  	if (!incmdpos && d == '(') {
+  	    hungetc(d);
+  	    lexstop = 0;
+  	    break;
+  	}
+! 	if (d == '>')
+  	    peek = INOUTANG;
+- 	else if (idigit(d) || d == '-') {
+- 	    int tbs = 256, n = 0, nc;
+- 	    char *tbuf, *tbp, *ntb;
+- 
+- 	    tbuf = tbp = (char *)zalloc(tbs);
+- 	    hungetc(d);
+- 
+- 	    while ((nc = hgetc()) && !lexstop) {
+- 		if (!idigit(nc) && nc != '-')
+- 		    break;
+- 		*tbp++ = (char)nc;
+- 		if (++n == tbs) {
+- 		    ntb = (char *)realloc(tbuf, tbs *= 2);
+- 		    tbp += ntb - tbuf;
+- 		    tbuf = ntb;
+- 		}
+- 	    }
+- 	    if (nc == '>' && !lexstop) {
+- 		hungetc(nc);
+- 		while (n--)
+- 		    hungetc(*--tbp);
+- 		zfree(tbuf, tbs);
+- 		break;
+- 	    }
+- 	    if (nc && !lexstop)
+- 		hungetc(nc);
+- 	    lexstop = 0;
+- 	    while (n--)
+- 		hungetc(*--tbp);
+- 	    zfree(tbuf, tbs);
+- 	    peek = INANG;
+  	} else if (d == '<') {
+  	    int e = hgetc();
+  
+--- 756,770 ----
+  	if (!incmdpos && d == '(') {
+  	    hungetc(d);
+  	    lexstop = 0;
++ 	    unpeekfd:
++ 	    if(peekfd != -1) {
++ 		hungetc(c);
++ 		c = '0' + peekfd;
++ 	    }
+  	    break;
+  	}
+! 	if (d == '>') {
+  	    peek = INOUTANG;
+  	} else if (d == '<') {
+  	    int e = hgetc();
+  
+***************
+*** 770,781 ****
+  		lexstop = 0;
+  		peek = DINANG;
+  	    }
+! 	} else if (d == '&')
+  	    peek = INANGAMP;
+! 	else {
+! 	    peek = INANG;
+  	    hungetc(d);
+! 	    lexstop = 0;
+  	}
+  	tokfd = peekfd;
+  	return peek;
+--- 781,793 ----
+  		lexstop = 0;
+  		peek = DINANG;
+  	    }
+! 	} else if (d == '&') {
+  	    peek = INANGAMP;
+! 	} else {
+  	    hungetc(d);
+! 	    if(isnumglob())
+! 		goto unpeekfd;
+! 	    peek = INANG;
+  	}
+  	tokfd = peekfd;
+  	return peek;
+***************
+*** 783,789 ****
+  	d = hgetc();
+  	if (d == '(') {
+  	    hungetc(d);
+! 	    break;
+  	} else if (d == '&') {
+  	    d = hgetc();
+  	    if (d == '!' || d == '|')
+--- 795,801 ----
+  	d = hgetc();
+  	if (d == '(') {
+  	    hungetc(d);
+! 	    goto unpeekfd;
+  	} else if (d == '&') {
+  	    d = hgetc();
+  	    if (d == '!' || d == '|')
+***************
+*** 1056,1084 ****
+  	    if (isset(SHGLOB) && sub)
+  		break;
+  	    e = hgetc();
+! 	    if (!(idigit(e) || e == '-' || (e == '(' && intpos))) {
+! 		hungetc(e);
+! 		lexstop = 0;
+! 		if (in_brace_param || sub)
+! 		    break;
+! 		goto brk;
+! 	    }
+! 	    c = Inang;
+! 	    if (e == '(') {
+! 		add(c);
+  		if (skipcomm()) {
+  		    peek = LEXERR;
+  		    goto brk;
+  		}
+  		c = Outpar;
+! 	    } else {
+! 		add(c);
+! 		c = e;
+! 		while (c != '>' && !lexstop)
+! 		    add(c), c = hgetc();
+  		c = Outang;
+  	    }
+! 	    break;
+  	case LX2_EQUALS:
+  	    if (intpos) {
+  		e = hgetc();
+--- 1068,1094 ----
+  	    if (isset(SHGLOB) && sub)
+  		break;
+  	    e = hgetc();
+! 	    if(e == '(' && intpos) {
+! 		add(Inang);
+  		if (skipcomm()) {
+  		    peek = LEXERR;
+  		    goto brk;
+  		}
+  		c = Outpar;
+! 		break;
+! 	    }
+! 	    hungetc(e);
+! 	    if(isnumglob()) {
+! 		add(Inang);
+! 		while ((c = hgetc()) != '>')
+! 		    add(c);
+  		c = Outang;
++ 		break;
+  	    }
+! 	    lexstop = 0;
+! 	    if (in_brace_param || sub)
+! 		break;
+! 	    goto brk;
+  	case LX2_EQUALS:
+  	    if (intpos) {
+  		e = hgetc();
+Index: Src/pattern.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/pattern.c,v
+retrieving revision 1.2
+diff -c -r1.2 pattern.c
+*** Src/pattern.c	2000/04/01 20:49:48	1.2
+--- Src/pattern.c	2000/04/04 01:11:37
+***************
+*** 989,1002 ****
+  		patparse = nptr;
+  		len |= 1;
+  	    }
+! 	    if (*patparse == '-') {
+! 		patparse++;
+! 		if (idigit(*patparse)) {
+! 		    to = (zrange_t) zstrtol((char *)patparse,
+! 					      (char **)&nptr, 10);
+! 		    patparse = nptr;
+! 		    len |= 2;
+! 		}
+  	    }
+  	    if (*patparse != Outang)
+  		return 0;
+--- 989,1001 ----
+  		patparse = nptr;
+  		len |= 1;
+  	    }
+! 	    DPUTS(*patparse != '-', "BUG: - missing from numeric glob");
+! 	    patparse++;
+! 	    if (idigit(*patparse)) {
+! 		to = (zrange_t) zstrtol((char *)patparse,
+! 					  (char **)&nptr, 10);
+! 		patparse = nptr;
+! 		len |= 2;
+  	    }
+  	    if (*patparse != Outang)
+  		return 0;
+END
+

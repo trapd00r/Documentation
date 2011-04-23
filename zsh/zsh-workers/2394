@@ -1,0 +1,93 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Thu Nov 14 04:45:19 1996
+Return-Path: zsh-workers-request@euclid.skiles.gatech.edu
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.6/8.7.3) with ESMTP id EAA05418 for <mason@primenet.com.au>; Thu, 14 Nov 1996 04:45:16 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id MAA04762; Wed, 13 Nov 1996 12:37:53 -0500 (EST)
+Resent-Date: Wed, 13 Nov 1996 12:37:53 -0500 (EST)
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <961113094120.ZM29104@candle.brasslantern.com>
+Date: Wed, 13 Nov 1996 09:41:19 -0800
+In-Reply-To: Zefram <zefram@dcs.warwick.ac.uk>
+        "signal weirdness" (Nov 13,  2:06pm)
+References: <11873.199611131406@stone.dcs.warwick.ac.uk>
+Reply-To: schaefer@nbn.com
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: Zefram <zefram@dcs.warwick.ac.uk>,
+        zsh-workers@math.gatech.edu (Z Shell workers mailing list)
+Subject: Re: signal weirdness
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"bGRKx2.0.JA1.mTWYo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2394
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+On Nov 13,  2:06pm, Zefram wrote:
+} Subject: signal weirdness
+} 
+} When the segv program terminates, zsh acts as if it had received a
+} SIGSEGV (it executes the trap), despite the fact that it was its child
+} process that received it.  This doesn't happen if the signal is not
+} trapped.
+} 
+} I'm not looking into this at the moment; I'm not familiar with the
+} signal code, and I have more urgent things to do.  I hope someone can
+} diagnose this.
+
+Around line 180 in jobs.c:
+
+    /* WHY DO WE USE THE RETURN STATUS OF PROCESS GROUP LEADER HERE? */
+    /* If the foreground job got a signal, pretend we got it, too.   */
+    if (inforeground && WIFSIGNALED(status)) {
+        if (sigtrapped[WTERMSIG(status)]) {
+            /* Run the trap with the error flag unset.
+             * Errflag is set in printjobs if the jobs terminated
+             * with SIGINT.  I don't know why it's done there and
+             * not here.   (PWS 1995/06/08)
+             */
+            errflag = 0;
+            dotrap(WTERMSIG(status));
+            /* We keep the errflag as set or not by dotrap.
+             * This is to fulfil the promise to carry on
+             * with the jobs if trap returns zero.
+             * Setting breaks = loops ensures a consistent return
+             * status if inside a loop.  Maybe the code in loops
+             * should be changed.
+             */
+            if (errflag)
+                breaks = loops;
+        } else if (WTERMSIG(status) == SIGINT ||
+                   WTERMSIG(status) == SIGQUIT) {
+            breaks = loops;
+            errflag = 1;
+        }
+
+This code is intended to handle (among other things) the case where the
+user types the interrupt character when a foreground job is executing,
+thereby causing zsh to behave the same as if interrupt were typed at a
+bare prompt.  Similarly, if the user typed the quit character, or if
+the foreground job got a HUP because the tty line dropped, we want zsh
+to notice and behave as if it got the signal as well.  But (except for
+INT and QUIT), the signals are only interesting if they're trapped, as
+zsh normally ignores the rest.
+
+I don't know who wrote the "WHY DO WE ..." question, and I'm not sure
+exactly what's being asked.  Why is it the group leader's status?  Or
+why is it the status at all?  It's the group leader because the group
+leader gets the tty-generated signals, and it's the status because the
+type of signal received by the job can be extracted from the status.
+
+Anyway, the code is more general than it needs to be -- there is only
+a subset of signals (HUP, INT, QUIT, TSTP, ...) that really need to be
+handled this way.  On the other hand, there's no way to make a good
+comprehensive cross-platform list of all the signals that should be so
+treated, which is why it's as general as it is.  It might be possible
+to come up with a list of signals that we know should *not* be treated
+this way (BUS, FPE, SEGV, others?) and explicitly omit them, if this
+is really annoying for some reason.
+
+-- 
+Bart Schaefer                             Brass Lantern Enterprises
+http://www.well.com/user/barts            http://www.nbn.com/people/lantern
+

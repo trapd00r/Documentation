@@ -1,0 +1,191 @@
+From hzoli@cs.elte.hu Mon Apr  1 07:43:42 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id HAA26601 for <mason@werple.mira.net.au>; Mon, 1 Apr 1996 07:43:39 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id QAA21427; Sun, 31 Mar 1996 16:29:43 -0500 (EST)
+Resent-Date: Sun, 31 Mar 1996 16:29:43 -0500 (EST)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199603311814.UAA00723@hzoli.ppp.cs.elte.hu>
+Subject: Re: signal handling bug
+To: pws@hydra.ifh.de (Peter Stephenson)
+Date: Sun, 31 Mar 1996 20:14:17 +0200 (MET DST)
+Cc: zsh-workers@math.gatech.edu
+In-Reply-To: <9603140829.AA14997@hydra.ifh.de> from Peter Stephenson at "Mar 14, 96 09:29:00 am"
+X-Mailer: ELM [version 2.4ME+ PL11 (25)]
+MIME-Version: 1.0
+Content-Type: application/pgp; format=text; x-action=sign
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"647od2.0.gE5.6blNn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/884
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 5707
+Status: O
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+Peter wrote in article 826:
+> hzoli@cs.elte.hu wrote:
+> > Try
+> > 
+> > % zsh -c 'trap exit INT ; while true ; do sleep 1 ; done'
+> > 
+> > It is not interruptible with ^C.  The INT signal terminates the sleep 1
+> > process but zsh ignores this and starts an other sleep.  Without sleep
+> > ^C works.  It also works without `trap exit INT' or in interractive shells.
+> 
+> I sent various patches for problems related to traps a long time ago
+> which haven't appeared yet.  They certainly involved problems like
+> this.
+> 
+> Here's a collection of the trap-related mail I sent last year.  I
+> don't even know if the patches still apply cleanly; several at least
+> probably don't, but all are nonetheless probably still applicable.
+
+I tried these patches.  I only needed to replace t0 to sig to apply them
+cleanly.  I include all of the patches together below (these were posted by
+Peter in articles 6200, 89 and 91 and reposed in article 826).
+Unfortunately these paches still do not fix the problems:
+
+% zsh -c 'trap "echo Interrupt ; exit" INT ; while true ; do sleep 1 ; done'
+
+After applying the patches, this is interruptible, but the trap is not
+executed (and it is interruptible even if I use trap - INT).
+
+Again, if I omit the sleep the trap is executed correctly.
+
+Also I'd like to recall a related bug I reported very long ago:
+
+% zsh -c 'cat a_long_file | less ; :'
+can be interrupted with ^C. The prompt comes back and less is orphaed.
+If you go to the end of the file with less and cat terminates, ^C
+will not terminate less. The `; :' after less forces zsh to fork before
+executing less.
+
+In place of less any program can be substituted which blocks SIGINT.  Such
+a job will continue running in the background even after the shell prompt
+returned.  Fortunately less terminates when it notices that its terminal is
+taken by zsh, but before it really dies it prints something to the screen
+which confuses the zsh prompt.
+
+I'm not an expert in zsh's signal handling code so I will not try to fix
+that but I hope that there will be some other zsh gurus who know this
+better.
+
+Bye,
+
+Zoltan
+
+ rcsdiff -qc -kk -r1.2 -r1.4 Src/signals.c
+ *** Src/signals.c
+ --- Src/signals.c	1996/03/31 17:29:21	1.4
+ ***************
+ *** 662,670 ****
+           return;
+       }
+       sigtrapped[sig] = 0;
+ !     if (sig == SIGINT)
+           intr();
+ !     else if (sig == SIGHUP)
+           install_handler(sig);
+       else if (sig && sig <= SIGCOUNT &&
+   #ifdef SIGWINCH
+ --- 662,674 ----
+           return;
+       }
+       sigtrapped[sig] = 0;
+ !     if (sig == SIGINT && interact) {
+ ! 	/* PWS 1995/05/16:  added test for interactive, also noholdintr()
+ ! 	 * as subshells ignoring SIGINT have it blocked from delivery
+ ! 	 */
+           intr();
+ ! 	noholdintr();
+ !     } else if (sig == SIGHUP)
+           install_handler(sig);
+       else if (sig && sig <= SIGCOUNT &&
+   #ifdef SIGWINCH
+ ***************
+ *** 688,695 ****
+    
+       sav = sigtrapped[sig];
+       savval = lastval;
+ !     if (sav == 2)          /* if signal is being ignored, return */
+           return;
+       sigtrapped[sig] = 2;
+       if (sigfuncs[sig]) {
+           lexsave();
+ --- 692,707 ----
+    
+       sav = sigtrapped[sig];
+       savval = lastval;
+ !     if (errflag || sav == 2)
+           return;
+ +     /* If signal is being ignored, return.
+ +      *  
+ +      *  Also return if errflag is set.  In fact, the code in the
+ +      *  function will test for this, but this way we keep status flags
+ +      *  intact without working too hard.  Special cases (e.g. calling
+ +      *  a trap for SIGINT after the error flag was set) are handled
+ +      *  by the calling code.  (PWS 1995/06/08).
+ +      */
+       sigtrapped[sig] = 2;
+       if (sigfuncs[sig]) {
+           lexsave();
+ rcsdiff -qc -kk -r1.2 -r1.4 Src/jobs.c
+ *** Src/jobs.c
+ --- Src/jobs.c	1996/03/31 17:32:04	1.4
+ ***************
+ *** 157,163 ****
+ --- 157,178 ----
+       /* If the foreground job got a signal, pretend we got it, too.   */
+       if (inforeground && WIFSIGNALED(status)) {
+   	if (sigtrapped[WTERMSIG(status)]) {
+ + 	    /* Run the trap with the error flag unset.
+ + 	     * Errflag is set in printjobs if the jobs terminated
+ + 	     * with SIGINT.  I don't know why it's done there and
+ + 	     * not here.   (PWS 1995/06/08)
+ + 	     */
+ + 	    errflag = 0;
+   	    dotrap(WTERMSIG(status));
+ + 	    /* We keep the errflag as set or not by dotrap.
+ + 	     * This is to fulfil the promise to carry on
+ + 	     * with the jobs if trap returns zero.
+ + 	     * Setting breaks = loops ensures a consistent return
+ + 	     * status if inside a loop.  Maybe the code in loops
+ + 	     * should be changed.
+ + 	     */
+ + 	    if (errflag)
+ + 		breaks = loops;
+   	} else if (WTERMSIG(status) == SIGINT ||
+   		   WTERMSIG(status) == SIGQUIT) {
+   	    breaks = loops;
+ ***************
+ *** 225,231 ****
+   		    len = llen;
+   		if (sig != SIGINT && sig != SIGPIPE)
+   		    sflag = 1;
+ ! 		else if (sig == SIGINT)
+   		    errflag = 1;
+   		if (job == thisjob && sig == SIGINT)
+   		    doputnl = 1;
+ --- 240,247 ----
+   		    len = llen;
+   		if (sig != SIGINT && sig != SIGPIPE)
+   		    sflag = 1;
+ ! 		else if (sig == SIGINT && sigtrapped[SIGINT] != 2)
+ ! 		    /* PWS 1995/05/16 added test for ignoring SIGINT */
+   		    errflag = 1;
+   		if (job == thisjob && sig == SIGINT)
+   		    doputnl = 1;
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.3i
+Charset: noconv
+
+iQCVAwUBMV7LdQupSCiLN749AQHRAgQAkhK3nZaEBVVxMWHhzQwStCWwTz5thJBX
+9jHTsYnt5ctcJ/PPu4fa2ga/JegL1PWnPaAFQOJXNdVYG4mxNdsFB2R1WRCdxQE9
+eW/lYkcsoAzyUMSe9BTf0YRxBVdhTE76eDPKE6RkgQZRpu7/5K86ul+08MDj6Kn1
+CiYW3hcp7C4=
+=oBuE
+-----END PGP SIGNATURE-----
+

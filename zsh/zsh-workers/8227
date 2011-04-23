@@ -1,0 +1,1383 @@
+From zsh-workers-return-8227-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Oct 13 09:47:40 1999
+Return-Path: <zsh-workers-return-8227-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17220 invoked from network); 13 Oct 1999 09:47:17 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 13 Oct 1999 09:47:17 -0000
+Received: (qmail 5897 invoked by alias); 13 Oct 1999 09:46:55 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8227
+Received: (qmail 5863 invoked from network); 13 Oct 1999 09:46:39 -0000
+Date: Wed, 13 Oct 1999 11:46:35 +0200 (MET DST)
+Message-Id: <199910130946.LAA12312@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: compstate[nmatches]
+
+
+First of all, this patch makes `compstate[nmatches]' reflect the correct 
+number of patches by calculating/caching the sorted/uniquified arrays
+as I described in earlier posts. Then it replaces the
+`normal_nmatches' with the `alternate_nmatches' key. The former was
+really a workaround to make the implementation simpler (at that
+time). It was only used in incremental completion anyway and I
+actually prefer it this way round. This also means that `nmatches' now 
+only gives the number of `normal' matches (without `fignore' ignored).
+
+Then the patch adds the `list_lines' keys which gives the number of
+lines needed for the list of matches. This is really only the list, so 
+to be able to calculate if the list plus the current prompt fits on
+the line you need to know the number of lines needed for the edit
+buffer. Since this is really a ZLE thing, I've added the ZLE special
+parameter `BUFFERLINES' for that.
+
+Then I found a redisplay bug when the completion code printed only the 
+explanation strings (this is done if no list is requested but there
+are matches) and, e.g. i-c-w set up a statusline. In such cases we
+didn't use the normal list display functions -- we do now. Since that
+required a flag saying whether we want to see only the explanations or
+everything, I thought I could equally well go ahead and make the
+`compstate[list]' key a bit fancier. So now, if its value contains the
+string `explanations' (well, it really looks just for `expl' but we
+don't tell our users about that), only the explanation strings are
+printed. The first of these changes also means that now the
+explanation strings printed stick to the command line (e.g. after
+Control-L) just like a real list.
+
+Fine, then I wanted to use all these things in i-c-w, of course, but
+that required an addition to `_main_complete': i-c-w (with incremental-list
+set) should show the list only if it fits on the screen. But to find
+that out it has to look at `compstate[list_lines]' and set `compstate[list]'
+which it can't because they are only available in completion
+widgets. So I added the `comppostfuncs' array which is normally
+empty. But completion functions and widgets calling the completion
+code can store names of functions in it that are to be called after
+all matches have been generated. With that i-c-w can make a little
+helper function be called which first tries to show only the
+explanation strings and if even that needs to many lines, turns on
+list-display entirely.
+
+About this `comppostfuncs' business: some time ago we discussed ways
+to be able to execute code when the real list of matches is known. At
+that time I said that this can only be done after the completion
+widget has really finished. For most (maybe all?) things this isn't
+true any more, since the first changes described above required the
+possibility to build the final list while the widget is still running
+anyway. So, most of the code we need to be able to offer information
+about the matches added should now be there already. I don't exactly
+remember the things we discussed then and am too lazy to dig it up
+just now, but I think adding more stuff in this direction should be
+quite simple now. Anyway, if we ever find uses for such a looking-at-
+what-we-have, the `comppostfuncs' array may look more useful.
+
+And one last comment: whenver I openly thought about access to the
+matches, I said (or wanted to say) that we need ways to access both
+the old and the currently built lists. Adam suggested that we make
+`nmatches' reflect the number of matches in the old list if the
+`oldlist' key is set to `keep'. I hadn't thought about using this key
+to switch between getting information about one list or the other. It
+should be possible to implement that without too much ado, but the
+question is: should we? Or should we add another key, say
+`old_nmatches' or something like that? And do we need
+`old_alternate_nmatches'?
+
+And then, of course, I'd like to hear suggestions for the interface to 
+access the matches and match-groups. Or comments about the stuff I
+said about it.
+
+
+Ok, that's it. Adam, it's your turn now ;-)
+
+Bye
+ Sven
+
+diff -u oldsrc/Zle/comp.h Src/Zle/comp.h
+--- oldsrc/Zle/comp.h	Tue Oct 12 11:42:34 1999
++++ Src/Zle/comp.h	Tue Oct 12 17:17:42 1999
+@@ -350,6 +350,7 @@
+     int nlist;			/* number of matches to list */
+     int nlines;			/* number of lines needed */
+     int hidden;			/* != 0 if there are hidden matches */
++    int onlyexpl;		/* != 0 if only explanations to print */
+ };
+ 
+ typedef void (*CLPrintFunc)(Cmgroup, Cmatch *, int, int, int, int,
+@@ -440,8 +441,10 @@
+ #define CP_OLDINS      (1 << CPN_OLDINS)
+ #define CPN_VARED      24
+ #define CP_VARED       (1 << CPN_VARED)
+-#define CPN_NNMATCHES  25
+-#define CP_NNMATCHES   (1 << CPN_NNMATCHES)
++#define CPN_ANMATCHES  25
++#define CP_ANMATCHES   (1 << CPN_ANMATCHES)
++#define CPN_LISTLINES  26
++#define CP_LISTLINES   (1 << CPN_LISTLINES)
+ 
+-#define CP_KEYPARAMS   26
+-#define CP_ALLKEYS     ((unsigned int) 0xffffff)
++#define CP_KEYPARAMS   27
++#define CP_ALLKEYS     ((unsigned int) 0x7ffffff)
+diff -u oldsrc/Zle/comp1.c Src/Zle/comp1.c
+--- oldsrc/Zle/comp1.c	Tue Oct 12 11:42:35 1999
++++ Src/Zle/comp1.c	Wed Oct 13 10:53:41 1999
+@@ -67,6 +67,15 @@
+ int (*makecomplistctlptr) _((int));
+ 
+ /**/
++zlong (*num_matchesptr) _((int));
++
++/**/
++zlong (*list_linesptr) _((void));
++
++/**/
++void (*comp_listptr) _((char *));
++
++/**/
+ char *(*unambig_dataptr) _((int *));
+ 
+ /**/
+@@ -104,11 +113,10 @@
+ 
+ /**/
+ zlong compcurrent,
+-      compnmatches,
+-      compnnmatches,
+       compmatcher,
+       compmatchertot,
+-      complistmax;
++      complistmax,
++      complistlines;
+ 
+ /**/
+ char **compwords,
+diff -u oldsrc/Zle/compctl.c Src/Zle/compctl.c
+--- oldsrc/Zle/compctl.c	Tue Oct 12 11:42:35 1999
++++ Src/Zle/compctl.c	Wed Oct 13 10:55:38 1999
+@@ -2249,7 +2249,7 @@
+ };
+ 
+ static struct compparam compkparams[] = {
+-    { "nmatches", PM_INTEGER, VAL(compnmatches), NULL, NULL },
++    { "nmatches", PM_INTEGER | PM_READONLY, NULL, NULL, VAL(get_nmatches) },
+     { "matcher", PM_INTEGER, VAL(compmatcher), NULL, NULL },
+     { "matcher_string", PM_SCALAR, VAL(compmatcherstr), NULL, NULL },
+     { "total_matchers", PM_INTEGER, VAL(compmatchertot), NULL, NULL },
+@@ -2259,7 +2259,7 @@
+     { "quote", PM_SCALAR | PM_READONLY, VAL(compquote), NULL, NULL },
+     { "quoting", PM_SCALAR | PM_READONLY, VAL(compquoting), NULL, NULL },
+     { "restore", PM_SCALAR, VAL(comprestore), NULL, NULL },
+-    { "list", PM_SCALAR, VAL(complist), NULL, NULL },
++    { "list", PM_SCALAR, NULL, VAL(set_complist), VAL(get_complist) },
+     { "force_list", PM_SCALAR, VAL(compforcelist), NULL, NULL },
+     { "insert", PM_SCALAR, VAL(compinsert), NULL, NULL },
+     { "exact", PM_SCALAR, VAL(compexact), NULL, NULL },
+@@ -2275,7 +2275,8 @@
+     { "old_list", PM_SCALAR, VAL(compoldlist), NULL, NULL },
+     { "old_insert", PM_SCALAR, VAL(compoldins), NULL, NULL },
+     { "vared", PM_SCALAR, VAL(compvared), NULL, NULL },
+-    { "normal_nmatches", PM_INTEGER, VAL(compnnmatches), NULL, NULL },
++    { "alternate_nmatches", PM_INTEGER | PM_READONLY, NULL, NULL, VAL(get_anmatches) },
++    { "list_lines", PM_INTEGER | PM_READONLY, NULL, NULL, VAL(get_listlines) },
+     { NULL, 0, NULL, NULL, NULL }
+ };
+ 
+@@ -2380,6 +2381,41 @@
+ 		    break;
+ 		}
+     deleteparamtable(ht);
++}
++
++/**/
++static zlong
++get_nmatches(Param pm)
++{
++    return num_matchesptr(1);
++}
++
++/**/
++static zlong
++get_anmatches(Param pm)
++{
++    return num_matchesptr(0);
++}
++
++/**/
++static zlong
++get_listlines(Param pm)
++{
++    return list_linesptr();
++}
++
++/**/
++static void
++set_complist(Param pm, char *v)
++{
++    comp_listptr(v);
++}
++
++/**/
++static char *
++get_complist(Param pm)
++{
++    return complist;
+ }
+ 
+ /**/
+diff -u oldsrc/Zle/complist.c Src/Zle/complist.c
+--- oldsrc/Zle/complist.c	Tue Oct 12 11:42:35 1999
++++ Src/Zle/complist.c	Wed Oct 13 10:40:09 1999
+@@ -525,9 +525,9 @@
+     char *line;
+     char *brbeg;
+     char *brend;
+-    int cs, acc;
++    int cs, acc, nmatches;
+     struct menuinfo info;
+-    Cmgroup amatches, pmatches, lmatches;
++    Cmgroup amatches, pmatches, lastmatches, lastlmatches;
+ };
+ 
+ static int
+@@ -538,7 +538,7 @@
+     Cmgroup *pg;
+     Thingy cmd;
+     Menustack u = NULL;
+-    int i = 0, acc = 0, wishcol = 0, setwish = 0;
++    int i = 0, acc = 0, wishcol = 0, setwish = 0, oe = onlyexpl;
+     char *s;
+ 
+     HEAPALLOC {
+@@ -555,6 +555,7 @@
+ 	noselect = 0;
+ 	mselect = (*(minfo.cur))->gnum;
+ 	for (;;) {
++	    onlyexpl = 0;
+ 	    showinglist = -2;
+ 	    zrefresh();
+ 	    inselect = 1;
+@@ -601,18 +602,23 @@
+ 		memcpy(&(s->info), &minfo, sizeof(struct menuinfo));
+ 		s->amatches = amatches;
+ 		s->pmatches = pmatches;
+-		s->lmatches = lmatches;
++		s->lastmatches = lastmatches;
++		s->lastlmatches = lastlmatches;
+ 		s->acc = menuacc;
+ 		s->brbeg = dupstring(brbeg);
+ 		s->brend = dupstring(brend);
++		s->nmatches = nmatches;
+ 		menucmp = menuacc = 0;
+ 		fixsuffix();
+ 		validlist = 0;
+-		pmatches = NULL;
++		amatches = pmatches = lastmatches = NULL;
+ 		invalidatelist();
+-		menucomplete(zlenoargs);
++		PERMALLOC {
++		    menucomplete(zlenoargs);
++		} LASTALLOC;
+ 		if (dat->num < 2 || !minfo.cur || !*(minfo.cur)) {
+ 		    noselect = clearlist = listshown = 1;
++		    onlyexpl = 0;
+ 		    zrefresh();
+ 		    break;
+ 		}
+@@ -629,10 +635,12 @@
+ 		s->line = dupstring((char *) line);
+ 		s->cs = cs;
+ 		memcpy(&(s->info), &minfo, sizeof(struct menuinfo));
+-		s->amatches = s->pmatches = s->lmatches = NULL;
++		s->amatches = s->pmatches =
++		    s->lastmatches = s->lastlmatches = NULL;
+ 		s->acc = menuacc;
+ 		s->brbeg = dupstring(brbeg);
+ 		s->brend = dupstring(brend);
++		s->nmatches = nmatches;
+ 		acceptlast();
+ 		do_menucmp(0);
+ 		mselect = (*(minfo.cur))->gnum;
+@@ -652,12 +660,15 @@
+ 		menuacc = u->acc;
+ 		memcpy(&minfo, &(u->info), sizeof(struct menuinfo));
+ 		p = &(minfo.cur);
+-		if (u->pmatches && pmatches != u->pmatches) {
+-		    freematches();
++		if (u->lastmatches && lastmatches != u->lastmatches) {
++		    if (lastmatches)
++			freematches(lastmatches);
+ 		    amatches = u->amatches;
+ 		    pmatches = u->pmatches;
+-		    lmatches = u->lmatches;
+-		    hasperm = 1;
++		    lastmatches = u->lastmatches;
++		    lastlmatches = u->lastlmatches;
++		    nmatches = u->nmatches;
++		    hasoldlist = 1;
+ 		}
+ 		zsfree(brbeg);
+ 		zsfree(brend);
+@@ -666,6 +677,7 @@
+ 		u = u->prev;
+ 		clearlist = 1;
+ 		setwish = 1;
++		listdat.valid = 0;
+ 	    } else if (cmd == Th(z_redisplay)) {
+ 		redisplay(zlenoargs);
+ 		continue;
+@@ -819,19 +831,11 @@
+ 	    do_single(**p);
+ 	    mselect = (**p)->gnum;
+ 	}
+-	if (u) {
+-	    int hp = hasperm;
+-	    Cmgroup m = pmatches;
++	if (u)
++	    for (; u; u = u->prev)
++		if (u->lastmatches != lastmatches)
++		    freematches(u->lastmatches);
+ 
+-	    for (; u; u = u->prev) {
+-		if (u->pmatches != m) {
+-		    pmatches = u->pmatches;
+-		    freematches();
+-		}
+-	    }
+-	    pmatches = m;
+-	    hasperm = hp;
+-	}
+ 	selectlocalmap(NULL);
+ 	mselect = -1;
+ 	inselect = 0;
+@@ -842,6 +846,7 @@
+ 	}
+ 	if (!noselect) {
+ 	    showinglist = -2;
++	    onlyexpl = oe;
+ 	    zrefresh();
+ 	}
+ 	fdat = NULL;
+diff -u oldsrc/Zle/zle_main.c Src/Zle/zle_main.c
+--- oldsrc/Zle/zle_main.c	Tue Oct 12 11:42:36 1999
++++ Src/Zle/zle_main.c	Wed Oct 13 10:54:16 1999
+@@ -979,6 +979,9 @@
+     getcpatptr = getcpat;
+     makecomplistcallptr = makecomplistcall;
+     makecomplistctlptr = makecomplistctl;
++    num_matchesptr = num_matches;
++    list_linesptr = list_lines;
++    comp_listptr = comp_list;
+     unambig_dataptr = unambig_data;
+     set_comp_sepptr = set_comp_sep;
+ 
+@@ -1059,6 +1062,9 @@
+     getcpatptr = NULL;
+     makecomplistcallptr = NULL;
+     makecomplistctlptr = NULL;
++    num_matchesptr = NULL;
++    list_linesptr = NULL;
++    comp_listptr = NULL;
+     unambig_dataptr = NULL;
+     set_comp_sepptr = NULL;
+ 
+diff -u oldsrc/Zle/zle_params.c Src/Zle/zle_params.c
+--- oldsrc/Zle/zle_params.c	Tue Oct 12 11:42:36 1999
++++ Src/Zle/zle_params.c	Wed Oct 13 11:23:19 1999
+@@ -73,6 +73,8 @@
+         unset_numeric, NULL },
+     { "HISTNO", PM_INTEGER | PM_READONLY, NULL, FN(get_histno),
+         zleunsetfn, NULL },
++    { "BUFFERLINES", PM_INTEGER | PM_READONLY, NULL, FN(get_bufferlines),
++        zleunsetfn, NULL },
+     { NULL, 0, NULL, NULL, NULL, NULL }
+ };
+ 
+@@ -284,4 +286,11 @@
+ get_histno(Param pm)
+ {
+     return histline;
++}
++
++/**/
++static zlong
++get_bufferlines(Param pm)
++{
++    return nlnct;
+ }
+diff -u oldsrc/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- oldsrc/Zle/zle_tricky.c	Tue Oct 12 13:12:52 1999
++++ Src/Zle/zle_tricky.c	Wed Oct 13 10:53:22 1999
+@@ -136,16 +136,24 @@
+ 
+ static LinkList matches, fmatches;
+ 
+-/* This holds the list of matches-groups. lmatches is a pointer to the  *
+- * last element in this list. */
++/* This holds the list of matches-groups. lastmatches holds the last list of 
++ * permanently allocated matches, pmatches is the same for the list
++ * currently built, amatches is the heap allocated stuff during completion
++ * (after all matches have been generated it is an alias for pmatches), and
++ * lmatches/lastlmatches is a pointer to the last element in the lists. */
+ 
+ /**/
+-Cmgroup pmatches, amatches, lmatches;
++Cmgroup lastmatches, pmatches, amatches, lmatches, lastlmatches;
+ 
+-/* Non-zero if we have permanently allocated matches. */
++/* Non-zero if we have permanently allocated matches (old and new). */
+ 
+ /**/
+-int hasperm;
++int hasoldlist, hasperm;
++
++/* Non-zero if we have newly added matches. */
++
++/**/
++int newmatches;
+ 
+ /* Number of permanently allocated matches and groups. */
+ 
+@@ -153,13 +161,19 @@
+ 
+ /* The total number of matches and the number of matches to be listed. */
+ 
+-static int nmatches, smatches;
++/**/
++int nmatches, smatches;
+ 
+ /* !=0 if we have a valid completion list. */
+ 
+ /**/
+ int validlist;
+ 
++/* != 0 if only explanation strings should be printed */
++
++/**/
++int onlyexpl;
++
+ /* Information about the matches for listing. */
+ 
+ /**/
+@@ -234,7 +248,7 @@
+ 
+ /* Match counters: all matches, normal matches (not alternate set). */
+ 
+-static int mnum, nmnum;
++static int mnum;
+ 
+ /* The match counter when unambig_data() was called. */
+ 
+@@ -3899,8 +3913,6 @@
+     ai->line = join_clines(ai->line, line);
+ 
+     mnum++;
+-    if (!alt)
+-	nmnum++;
+     ai->count++;
+     
+     /* Allocate and fill the match structure. */
+@@ -3929,6 +3941,8 @@
+     cm->rems = cm->remf = cm->disp = NULL;
+     addlinknode((alt ? fmatches : matches), cm);
+ 
++    newmatches = 1;
++
+     /* One more match for this explanation. */
+     if (expl) {
+ 	if (alt)
+@@ -4283,8 +4297,6 @@
+ 		    free_cline(lc);
+ 		}
+ 	    }
+-	    compnmatches = mnum;
+-	    compnnmatches = nmnum;
+ 	    if (dat->apar)
+ 		set_list_array(dat->apar, aparl);
+ 	    if (dat->opar)
+@@ -4843,13 +4855,18 @@
+ 		minfo.cur = NULL;
+ 		minfo.asked = 0;
+ 		do_single(m->matches[0]);
+-		if (compforcelist && *compforcelist && uselist)
+-		    showinglist = -2;
+-		else
++		if (compforcelist && *compforcelist) {
++		    if (uselist)
++			showinglist = -2;
++		    else
++			clearlist = 1;
++		} else
+ 		    invalidatelist();
+ 	    }
+ 	} else {
+ 	    invalidatelist();
++	    if (compforcelist && *compforcelist)
++		clearlist = 1;
+ 	    cs = 0;
+ 	    foredel(ll);
+ 	    inststr(origline);
+@@ -4858,6 +4875,9 @@
+ 	/* Print the explanation strings if needed. */
+ 	if (!showinglist && validlist && usemenu != 2 && nmatches != 1 &&
+ 	    useline != 2 && (!oldlist || !listshown)) {
++	    onlyexpl = 1;
++	    showinglist = -2;
++#if 0
+ 	    Cmgroup g = amatches;
+ 	    Cexpl *e;
+ 	    int up = 0, tr = 1, nn = 0;
+@@ -4894,6 +4914,7 @@
+ 		    putc('\n', shout);
+ 		fflush(shout);
+ 	    }
++#endif
+ 	}
+       compend:
+ 	for (n = firstnode(matchers); n; incnode(n))
+@@ -5067,8 +5088,6 @@
+ 	zsfree(compqisuffix);
+ 	compqisuffix = ztrdup(qisuf ? qisuf : "");
+ 	compcurrent = (usea ? (clwpos + 1 - aadd) : 0);
+-	compnmatches = mnum;
+-	compnnmatches = nmnum;
+ 
+ 	zsfree(complist);
+ 	switch (uselist) {
+@@ -5103,7 +5122,7 @@
+ 	    comptoend = ztrdup("match");
+ 	zsfree(compoldlist);
+ 	zsfree(compoldins);
+-	if (hasperm && permmnum) {
++	if (hasoldlist && permmnum) {
+ 	    if (listshown)
+ 		compoldlist = "shown";
+ 	    else
+@@ -5150,14 +5169,17 @@
+ 
+ 	if (!complist)
+ 	    uselist = 0;
+-	else if (!strcmp(complist, "list"))
++	else if (!strncmp(complist, "list", 4))
+ 	    uselist = 1;
+-	else if (!strcmp(complist, "auto") || !strcmp(complist, "autolist"))
++	else if (!strncmp(complist, "auto", 4))
+ 	    uselist = 2;
+-	else if (!strcmp(complist, "ambig") || !strcmp(complist, "ambiguous"))
++	else if (!strncmp(complist, "ambig", 5))
+ 	    uselist = 3;
+ 	else
+ 	    uselist = 0;
++
++	onlyexpl = (complist && strstr(complist, "expl"));
++
+ 	if (!compinsert)
+ 	    useline = 0;
+ 	else if (!strcmp(compinsert, "unambig") ||
+@@ -5193,8 +5215,8 @@
+ 	else
+ 	    movetoend = 2;
+ 
+-	oldlist = (hasperm && compoldlist && !strcmp(compoldlist, "keep"));
+-	oldins = (hasperm && minfo.cur &&
++	oldlist = (hasoldlist && compoldlist && !strcmp(compoldlist, "keep"));
++	oldins = (hasoldlist && minfo.cur &&
+ 		  compoldins && !strcmp(compoldins, "keep"));
+ 
+ 	zfree(comprpms, CP_REALPARAMS * sizeof(Param));
+@@ -5287,13 +5309,13 @@
+ 	if (!validlist)
+ 	    lastambig = 0;
+ 	amatches = NULL;
+-	mnum = nmnum = 0;
++	mnum = 0;
+ 	unambig_mnum = -1;
+ 	isuf = NULL;
+ 	insmnum = insgnum = 1;
+ 	insgroup = oldlist = oldins = 0;
+ 	begcmgroup("default", 0);
+-	menucmp = menuacc = 0;
++	menucmp = menuacc = newmatches = onlyexpl = 0;
+ 
+ 	ccused = newlinklist();
+ 	ccstack = newlinklist();
+@@ -5318,16 +5340,32 @@
+ 	if (oldlist) {
+ 	    nmatches = onm;
+ 	    validlist = 1;
+-	    amatches = pmatches;
+-
++	    amatches = lastmatches;
++	    lmatches = lastlmatches;
++	    if (pmatches) {
++		freematches(pmatches);
++		pmatches = NULL;
++		hasperm = 0;
++	    }
+ 	    redup(osi, 0);
+ 
+ 	    return 0;
+ 	}
+ 	PERMALLOC {
+-	    permmatches();
++	    if (lastmatches) {
++		freematches(lastmatches);
++		lastmatches = NULL;
++	    }
++	    permmatches(1);
++	    amatches = pmatches;
+ 	} LASTALLOC;
+ 
++	lastmatches = pmatches;
++	lastlmatches = lmatches;
++	pmatches = NULL;
++	hasperm = 0;
++	hasoldlist = 1;
++
+ 	if (nmatches && !errflag) {
+ 	    validlist = 1;
+ 
+@@ -5709,8 +5747,6 @@
+ 	    instring = ois;
+ 	    inbackt = oib;
+ 	    autoq = oaq;
+-	    compnmatches = mnum;
+-	    compnnmatches = nmnum;
+ 	} LASTALLOC;
+     } SWITCHBACKHEAPS;
+ 
+@@ -5785,8 +5821,6 @@
+ 	    inbackt = oib;
+ 	    autoq = oaq;
+ 	    offs = ooffs;
+-	    compnmatches = mnum;
+-	    compnnmatches = nmnum;
+ 	    zsfree(cmdstr);
+ 	    freearray(clwords);
+ 	    cmdstr = os;
+@@ -7145,8 +7179,11 @@
+ {
+     if (showinglist == -2)
+ 	listmatches();
+-    if (validlist)
+-	freematches();
++    if (validlist) {
++	freematches(lastmatches);
++	lastmatches = NULL;
++	hasoldlist = 0;
++    }
+     lastambig = menucmp = menuacc = validlist = showinglist = fromcomp = 0;
+     listdat.valid = 0;
+     if (listshown < 0)
+@@ -7463,6 +7500,7 @@
+ 	}
+     }
+     addlinknode(expls, expl);
++    newmatches = 1;
+ }
+ 
+ /* This duplicates one match. */
+@@ -7500,32 +7538,42 @@
+ /* This duplicates all groups of matches. */
+ 
+ /**/
+-static void
+-permmatches(void)
++static int
++permmatches(int last)
+ {
+     Cmgroup g = amatches, n;
+     Cmatch *p, *q;
+     Cexpl *ep, *eq, e, o;
+     Compctl *cp, *cq;
+-    int nn, nl, ll, fi = 0, gn = 1, mn = 1, rn;
++    LinkList mlist;
++    static int fi = 0;
++    int nn, nl, ll, gn = 1, mn = 1, rn;
++
++    if (pmatches && !newmatches)
++	return fi;
++
++    newmatches = fi = 0;
+ 
+-    if (hasperm)
+-	freematches();
++    if (pmatches)
++	freematches(pmatches);
+ 
+-    amatches = lmatches = NULL;
++    pmatches = lmatches = NULL;
+     nmatches = smatches = 0;
+ 
+     if (!ainfo->count) {
+-	ainfo = fainfo;
++	if (last)
++	    ainfo = fainfo;
+ 	fi = 1;
+     }
+     while (g) {
+ 	HEAPALLOC {
+ 	    if (empty(g->lmatches))
+ 		/* We have no matches, try ignoring fignore. */
+-		g->lmatches = g->lfmatches;
++		mlist = g->lfmatches;
++	    else
++		mlist = g->lmatches;
+ 
+-	    g->matches = makearray(g->lmatches, 1, g->flags, &nn, &nl, &ll);
++	    g->matches = makearray(mlist, 1, g->flags, &nn, &nl, &ll);
+ 	    g->mcount = nn;
+ 	    if ((g->lcount = nn - nl) < 0)
+ 		g->lcount = 0;
+@@ -7548,10 +7596,10 @@
+ 
+ 	if (!lmatches)
+ 	    lmatches = n;
+-	if (amatches)
+-	    amatches->prev = n;
+-	n->next = amatches;
+-	amatches = n;
++	if (pmatches)
++	    pmatches->prev = n;
++	n->next = pmatches;
++	pmatches = n;
+ 	n->prev = 0;
+ 	n->num = gn++;
+ 
+@@ -7594,18 +7642,71 @@
+ 
+ 	g = g->next;
+     }
+-    for (g = amatches; g; g = g->next) {
++    for (g = pmatches; g; g = g->next) {
+ 	for (rn = 1, q = g->matches; *q; q++) {
+ 	    (*q)->rnum = rn++;
+ 	    (*q)->gnum = mn++;
+ 	}
+     }
+-    pmatches = amatches;
+     hasperm = 1;
+     permmnum = mn - 1;
+     permgnum = gn - 1;
++
++    return fi;
++}
++
++/* Return the real number of matches. */
++
++/**/
++zlong
++num_matches(int normal)
++{
++    int alt;
++
++    PERMALLOC {
++	alt = permmatches(0);
++    } LASTALLOC;
++
++    if (normal)
++	return (alt ? 0 : nmatches);
++    else
++	return (alt ? nmatches : 0);
++}
++
++/* Return the number of screen lines needed for the list. */
++
++/**/
++zlong
++list_lines(void)
++{
++    Cmgroup oam;
++
++    PERMALLOC {
++	permmatches(0);
++    } LASTALLOC;
++
++    oam = amatches;
++    amatches = pmatches;
++    listdat.valid = 0;
++    calclist();
++    listdat.valid = 0;
++    amatches = oam;
++
++    return listdat.nlines;
+ }
+ 
++/**/
++void
++comp_list(char *v)
++{
++    zsfree(complist);
++    complist = ztrdup(v);
++
++    onlyexpl = (v && strstr(v, "expl"));
++}
++
++/**/
++
+ /* This frees one match. */
+ 
+ /**/
+@@ -7634,9 +7735,9 @@
+ 
+ /**/
+ void
+-freematches(void)
++freematches(Cmgroup g)
+ {
+-    Cmgroup g = pmatches, n;
++    Cmgroup n;
+     Cmatch *m;
+     Cexpl *e;
+     Compctl *c;
+@@ -7670,8 +7771,6 @@
+ 
+ 	g = n;
+     }
+-    hasperm = 0;
+-    listdat.valid = 0;
+ }
+ 
+ /* Insert the given string into the command line.  If move is non-zero, *
+@@ -8576,27 +8675,33 @@
+ 		    break;
+ 		case 'B':
+ 		    b = 1;
+-		    tcout(TCBOLDFACEBEG);
++		    if (dopr)
++			tcout(TCBOLDFACEBEG);
+ 		    break;
+ 		case 'b':
+ 		    b = 0; m = 1;
+-		    tcout(TCALLATTRSOFF);
++		    if (dopr)
++			tcout(TCALLATTRSOFF);
+ 		    break;
+ 		case 'S':
+ 		    s = 1;
+-		    tcout(TCSTANDOUTBEG);
++		    if (dopr)
++			tcout(TCSTANDOUTBEG);
+ 		    break;
+ 		case 's':
+ 		    s = 0; m = 1;
+-		    tcout(TCSTANDOUTEND);
++		    if (dopr)
++			tcout(TCSTANDOUTEND);
+ 		    break;
+ 		case 'U':
+ 		    u = 1;
+-		    tcout(TCUNDERLINEBEG);
++		    if (dopr)
++			tcout(TCUNDERLINEBEG);
+ 		    break;
+ 		case 'u':
+ 		    u = 0; m = 1;
+-		    tcout(TCUNDERLINEEND);
++		    if (dopr)
++			tcout(TCUNDERLINEEND);
+ 		    break;
+ 		case '{':
+ 		    for (p++; *p && (*p != '%' || p[1] != '}'); p++, cc++)
+@@ -8608,7 +8713,7 @@
+ 			p--;
+ 		    break;
+ 		}
+-		if (m) {
++		if (dopr && m) {
+ 		    if (b)
+ 			tcout(TCBOLDFACEBEG);
+ 		    if (s)
+@@ -8697,7 +8802,8 @@
+     int max = 0, i;
+     VARARR(int, mlens, nmatches + 1);
+ 
+-    if (listdat.valid && menuacc == listdat.menuacc &&
++    if (listdat.valid && onlyexpl == listdat.onlyexpl &&
++	menuacc == listdat.menuacc &&
+ 	lines == listdat.lines && columns == listdat.columns)
+ 	return;
+ 
+@@ -8705,7 +8811,7 @@
+ 	char **pp = g->ylist;
+ 	int nl = 0, l, glong = 1, gshort = columns, ndisp = 0, totl = 0;
+ 
+-	if (pp) {
++	if (!onlyexpl && pp) {
+ 	    /* We have an ylist, lets see, if it contains newlines. */
+ 	    hidden = 1;
+ 	    while (!nl && *pp)
+@@ -8742,7 +8848,7 @@
+ 		    pp++;
+ 		}
+ 	    }
+-	} else {
++	} else if (!onlyexpl) {
+ 	    for (p = g->matches; (m = *p); p++) {
+ 		if (menuacc && !hasbrpsfx(m, minfo.prebr, minfo.postbr)) {
+ 		    m->flags |= CMF_HIDE;
+@@ -8798,50 +8904,52 @@
+ 		max = i;
+ 	}
+     }
+-    for (g = amatches; g; g = g->next) {
+-	char **pp;
+-	int glines = 0;
++    if (!onlyexpl) {
++	for (g = amatches; g; g = g->next) {
++	    char **pp;
++	    int glines = 0;
+ 
+-	zfree(g->widths, 0);
+-	g->widths = NULL;
++	    zfree(g->widths, 0);
++	    g->widths = NULL;
+ 
+-	if ((pp = g->ylist)) {
+-	    if (!(g->flags & CGF_LINES)) {
++	    if ((pp = g->ylist)) {
++		if (!(g->flags & CGF_LINES)) {
++		    if (g->cols) {
++			glines += (arrlen(pp) + g->cols - 1) / g->cols;
++			if (g->cols > 1)
++			    g->width += (max - (g->width * g->cols - add)) / g->cols;
++		    } else {
++			g->cols = 1;
++			g->width = 1;
++			
++			while (*pp)
++			    glines += 1 + (strlen(*pp++) / columns);
++		    }
++		}
++	    } else {
+ 		if (g->cols) {
+-		    glines += (arrlen(pp) + g->cols - 1) / g->cols;
++		    glines += (g->dcount + g->cols - 1) / g->cols;
+ 		    if (g->cols > 1)
+ 			g->width += (max - (g->width * g->cols - add)) / g->cols;
+-		} else {
++		} else if (!(g->flags & CGF_LINES)) {
+ 		    g->cols = 1;
+-		    g->width = 1;
+-
+-		    while (*pp)
+-			glines += 1 + (strlen(*pp++) / columns);
++		    g->width = 0;
++		    
++		    for (p = g->matches; (m = *p); p++)
++			if (!(m->flags & CMF_HIDE)) {
++			    if (m->disp) {
++				if (!(m->flags & CMF_DISPLINE))
++				    glines += 1 + (mlens[m->gnum] / columns);
++			    } else if (!(m->flags & CMF_NOLIST))
++				glines += 1 + ((1 + mlens[m->gnum]) / columns);
++			}
+ 		}
+ 	    }
+-	} else {
+-	    if (g->cols) {
+-		glines += (g->dcount + g->cols - 1) / g->cols;
+-		if (g->cols > 1)
+-		    g->width += (max - (g->width * g->cols - add)) / g->cols;
+-	    } else if (!(g->flags & CGF_LINES)) {
+-		g->cols = 1;
+-		g->width = 0;
+-
+-		for (p = g->matches; (m = *p); p++)
+-		    if (!(m->flags & CMF_HIDE)) {
+-			if (m->disp) {
+-			    if (!(m->flags & CMF_DISPLINE))
+-				glines += 1 + (mlens[m->gnum] / columns);
+-			} else if (!(m->flags & CMF_NOLIST))
+-			    glines += 1 + ((1 + mlens[m->gnum]) / columns);
+-		    }
+-	    }
++	    g->lins = glines;
++	    nlines += glines;
+ 	}
+-	g->lins = glines;
+-	nlines += glines;
+     }
+-    if (isset(LISTPACKED)) {
++    if (!onlyexpl && isset(LISTPACKED)) {
+ 	char **pp;
+ 	int *ws, tlines, tline, tcols, maxlen, nth, width;
+ 
+@@ -9017,6 +9125,9 @@
+     listdat.nlist = nlist;
+     listdat.nlines = nlines;
+     listdat.menuacc = menuacc;
++    listdat.onlyexpl = onlyexpl;
++    listdat.columns = columns;
++    listdat.lines = lines;
+ }
+ 
+ /**/
+@@ -9111,7 +9222,7 @@
+ 		e++;
+ 	    }
+ 	}
+-	if (pp && *pp) {
++	if (!listdat.onlyexpl && pp && *pp) {
+ 	    if (pnl) {
+ 		putc('\n', shout);
+ 		pnl = 0;
+@@ -9164,7 +9275,7 @@
+ 		    pp += (isset(LISTROWSFIRST) ? g->cols : 1);
+ 		}
+ 	    }
+-	} else if (g->lcount) {
++	} else if (!listdat.onlyexpl && g->lcount) {
+ 	    int n = g->dcount, nl, nc, i, j, wid;
+ 	    Cmatch *q;
+ 
+@@ -9329,7 +9440,7 @@
+ listlist(LinkList l)
+ {
+     struct cmgroup dg;
+-    int vl = validlist, sm = smatches;
++    int vl = validlist, sm = smatches, nm = nmatches;
+     char *oclp = complastprompt;
+     Cmgroup am = amatches;
+ 
+@@ -9341,12 +9452,14 @@
+     validlist = 1;
+     memset(&dg, 0, sizeof(struct cmgroup));
+     dg.ylist = (char **) makearray(l, 0, 1, &(dg.lcount), NULL, NULL);
++    nmatches = dg.lcount;
+     amatches = &dg;
+     ilistmatches(NULL, NULL);
+     amatches = am;
+ 
+     validlist = vl;
+     smatches = sm;
++    nmatches = nm;
+     complastprompt = oclp;
+ 
+     return !dg.lcount;
+diff -u olddoc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- olddoc/Zsh/compsys.yo	Tue Oct 12 11:42:13 1999
++++ Doc/Zsh/compsys.yo	Wed Oct 13 10:35:36 1999
+@@ -318,6 +318,12 @@
+ called. If the return value is zero, no other completers are tried and the
+ tt(_main_complete) function returns.
+ 
++Immediately before returning the tt(_main_complete) function calls all
++functions whose names are given in the tt(comppostfuncs) array and
++then resets it to an empty array. This can be used by completion
++functions or by other ZLE widgets calling completion to register code
++that is to be executed after all matches have been added.
++
+ The widget function tt(_main_complete) also uses the configuration key 
+ tt(last_prompt). If this is set to tt(always), the cursor is moved up
+ to the last prompt after printing a list of matches even if a numeric
+@@ -1718,10 +1724,14 @@
+ a common prefix, respectively. The sequence `tt(%c)' is replaced by
+ the name of the completer function that generated the matches (without
+ the leading underscore). Finally, `tt(%n)' is replaced by the number
+-of matches generated and `tt(%a)' is replaced by an empty string if
++of matches generated, `tt(%a)' is replaced by an empty string if
+ the matches are in the normal set (i.e. the one without file names
+ with one of the suffixes from the tt(fignore) array) and with `tt(
+--alt-)' if the matches are in the alternate set.
++-alt-)' if the matches are in the alternate set, and if the
++tt(incremental_list) key (see below) is set, `tt(%l)' is replaced by
++`tt(...)' if the list of matches is too long to fit on the screen and
++with an empty string otherwise. If tt(incremental_list) is not set or
++set to an empty string, `tt(%l)' will always be removed.
+ )
+ item(tt(incremental_stop))(
+ This gives a pattern matching (keyboard-) keys which will cause
+diff -u olddoc/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- olddoc/Zsh/compwid.yo	Tue Oct 12 11:42:13 1999
++++ Doc/Zsh/compwid.yo	Wed Oct 13 10:47:13 1999
+@@ -184,10 +184,13 @@
+ is unset.
+ )
+ item(tt(nmatches))(
+-The number of matches generated and accepted by the completion code so far.
++The number of matches generated and accepted by the completion code so
++far, excluding those matches that are only accepted by ignoring the
++tt(fignore) parameter and the tt(-a) option of the tt(compadd) builtin 
++command.
+ )
+-item(tt(normal_nmatches))(
+-Like tt(nmatches), but counts only matches in the normal set. I.e. file
++item(tt(alternate_nmatches))(
++Like tt(nmatches), but counts only matches in the alternate set. I.e. file
+ names with one of the suffixes from the tt(fignore) array and matches
+ put into the alternate set using the tt(-a) option of the tt(compadd)
+ builtin command (see below) are not counted.
+@@ -216,11 +219,14 @@
+ )
+ item(tt(list))(
+ This controls whether or how the list of matches will be displayed.  If it
+-is unset or empty they will never be listed; if is set to tt(list), they
+-will always be listed; if tt(autolist) or tt(ambiguous), they will be
+-listed when the tt(AUTO_LIST) or tt(LIST_AMBIGUOUS) options respectively
+-would normally cause them to be.  It will be set appropriately on entry to
+-a completion widget and may be changed there.
++is unset or empty they will never be listed; if its value begins with
++tt(list), they will always be listed; if it begins with tt(autolist)
++or tt(ambiguous), they will be listed when the tt(AUTO_LIST) or
++tt(LIST_AMBIGUOUS) options respectively would normally cause them to
++be.  Finally, if the value contains the string tt(explanations), only
++the explanation strings, if any, will be listed. It will be set
++appropriately on entry to a completion widget and may be changed
++there.
+ )
+ item(tt(force_list))(
+ If the value for the tt(list) key is tt(autolist) or tt(ambiguous), the list will
+@@ -232,6 +238,13 @@
+ Initially this is set to the value of the tt(LISTMAX) parameter.
+ It may be set to any other numeric value; when the widget exits this value
+ will be used in the same way as the value of tt(LISTMAX).
++)
++item(tt(list_lines))(
++This gives the number of lines that are needed to display the full
++list of completions. Note that to calculate the total number of lines
++to display you need to add the number of lines needed for the command
++line to this value, this is available as the value of the tt(BLINES)
++special parameter.
+ )
+ item(tt(last_prompt))(
+ If this is set to an non-empty string, the completion code will move
+diff -u olddoc/Zsh/zle.yo Doc/Zsh/zle.yo
+--- olddoc/Zsh/zle.yo	Tue Oct 12 11:42:16 1999
++++ Doc/Zsh/zle.yo	Wed Oct 13 09:20:11 1999
+@@ -141,6 +141,12 @@
+ If it is assigned to, only that part of the buffer is replaced, and the
+ cursor remains between the old tt($LBUFFER) and the new tt($RBUFFER).
+ )
++vindex(BLINES)
++item(tt(BLINES))(
++The number of screen lines needed for the edit buffer currently
++displayed on screen (i.e. without any changes to the preceding
++parameters done after the last redisplay).
++)
+ vindex(PREBUFFER)
+ item(tt(PREBUFFER) (scalar))(
+ In a multi-line input at the secondary prompt, this read-only parameter
+--- of/Zle/incremental-complete-word	Tue Oct 12 14:27:57 1999
++++ Functions/Zle/incremental-complete-word	Wed Oct 13 11:23:30 1999
+@@ -1,8 +1,7 @@
+-# incremental-complete-word() {
+-
+ # Autoload this function, run `zle -N <func-name>' and bind <func-name>
+ # to a key.
+ 
++
+ # This allows incremental completion of a word.  After starting this
+ # command, a list of completion choices can be shown after every character
+ # you type, which you can delete with ^h or DEL.  RET will accept the
+@@ -23,10 +22,12 @@
+ #    such a common prefix, respectively. The sequence `%c' is replaced
+ #    by the name of the completer function that generated the matches
+ #    (without the leading underscore). Finally, `%n' is replaced by the
+-#    number of matches generated and `%a' is replaced by an empty string
++#    number of matches generated, `%a' is replaced by an empty string
+ #    if the matches are in the normal set (i.e. the one without file names
+ #    with one of the suffixes from `fignore') and with ` -alt-' if the
+-#    matches are in the alternate set.
++#    matches are in the alternate set, and if the `incremental_list' key
++#    (see below) is set, `%l' is replaced by `...' if the list of matches
++#    is too long to fit on the screen and with an empty string otherwise.
+ #
+ #  incremental_stop
+ #    Pattern matching keys which will cause icompletion to stop and the
+@@ -44,68 +45,37 @@
+ #    key-press.
+ 
+ 
+-emulate -L zsh
+-unsetopt autolist menucomplete automenu # doesn't work well
+-
+-local key lbuf="$LBUFFER" rbuf="$RBUFFER" pmpt word
+-local lastl lastr wid twid num alt
++# The main widget function.
+ 
+-[[ -n "$compconfig[incremental_completer]" ]] &&
+-    set ${(s.:.)compconfig[incremental_completer]}
+-pmpt="${compconfig[incremental_prompt]-incremental (%c): %u%s}"
+-
+-if [[ -n "$compconfig[incremental_list]" ]]; then
+-  wid=list-choices
+-else
+-  wid=complete-word
+-fi
+-
+-zle $wid "$@"
+-LBUFFER="$lbuf"
+-RBUFFER="$rbuf"
+-if (( ! _lastcomp[nmatches] )); then
+-  word=''
+-  state='-no match-'
+-elif [[ "${LBUFFER}${RBUFFER}" = *${_lastcomp[unambiguous]}* ]]; then
+-  word=''
+-  state='-no prefix-'
+-else
+-  word="${_lastcomp[unambiguous]}"
+-  state=''
+-fi
+-num=$_lastcomp[normal_nmatches]
+-if (( ! num )); then
+-  num="${_lastcomp[nmatches]}"
+-  alt=' -alt-'
+-fi
+-zle -R "${${${${${pmpt//\\%u/$word}//\\%s/$state}//\\%c/${_lastcomp[completer][2,-1]}}//\\%n/$num}//\\%a/$alt}"
+-read -k key
+-
+-while [[ '#key' -ne '#\\r' && '#key' -ne '#\\n' &&
+-         '#key' -ne '#\\C-g' ]]; do
+-  twid=$wid
+-  if [[ "$key" = ${~compconfig[incremental_stop]} ]]; then
+-    zle -U "$key"
+-    return
+-  elif [[ "$key" = ${~compconfig[incremental_break]} ]]; then
+-    return
+-  elif [[ '#key' -eq '#\\C-h' || '#key' -eq '#\\C-?' ]]; then
+-    [[ $#LBUFFER -gt $#l ]] && LBUFFER="$LBUFFER[1,-2]"
+-  elif [[ '#key' -eq '#\\t' ]]; then
+-    zle complete-word "$@"
+-    lbuf="$LBUFFER"
+-    rbuf="$RBUFFER"
+-  elif [[ '#key' -eq '#\\C-d' ]]; then
+-    twid=list-choices
++incremental-complete-word() {
++  emulate -L zsh
++  unsetopt autolist menucomplete automenu # doesn't work well
++
++  local key lbuf="$LBUFFER" rbuf="$RBUFFER" pmpt word
++  local lastl lastr wid twid num alt post toolong
++
++  [[ -n "$compconfig[incremental_completer]" ]] &&
++      set ${(s.:.)compconfig[incremental_completer]}
++  pmpt="${compconfig[incremental_prompt]-incremental (%c): %u%s  %l}"
++
++  if [[ -n "$compconfig[incremental_list]" ]]; then
++    wid=list-choices
++    post=( icw-list-helper )
+   else
+-    LBUFFER="$LBUFFER$key"
++    wid=complete-word
++    post=()
+   fi
+-  lastl="$LBUFFER"
+-  lastr="$RBUFFER"
+-  zle $twid "$@"
+-  LBUFFER="$lastl"
+-  RBUFFER="$lastr"
+-  if (( ! _lastcomp[nmatches] )); then
++
++  comppostfuncs=( "$post[@]" )
++  zle $wid "$@"
++  LBUFFER="$lbuf"
++  RBUFFER="$rbuf"
++  num=$_lastcomp[nmatches]
++  if (( ! num )); then
++    num="${_lastcomp[alternate_nmatches]}"
++    alt=' -alt-'
++  fi
++  if (( ! num )); then
+     word=''
+     state='-no match-'
+   elif [[ "${LBUFFER}${RBUFFER}" = *${_lastcomp[unambiguous]}* ]]; then
+@@ -115,20 +85,78 @@
+     word="${_lastcomp[unambiguous]}"
+     state=''
+   fi
+-  num=$_lastcomp[normal_nmatches]
+-  if (( ! num )); then
+-    num="${_lastcomp[nmatches]}"
+-    alt=' -alt-'
+-  else
+-    alt=''
+-  fi
+-  zle -R "${${${${${pmpt//\\%u/$word}//\\%s/$state}//\\%c/${_lastcomp[completer][2,-1]}}//\\%n/$num}//\\%a/$alt}"
++  zle -R "${${${${${${pmpt//\\%u/$word}//\\%s/$state}//\\%c/${_lastcomp[completer][2,-1]}}//\\%n/$num}//\\%a/$alt}//\\%l/$toolong}"
+   read -k key
+-done
+ 
+-if [[ '#key' -eq '#\\C-g' ]]; then
+-  LBUFFER="$lbuf"
+-  RBUFFER="$rbuf"
+-fi
+-zle -Rc
+-# }
++  while [[ '#key' -ne '#\\r' && '#key' -ne '#\\n' &&
++           '#key' -ne '#\\C-g' ]]; do
++    twid=$wid
++    if [[ "$key" = ${~compconfig[incremental_stop]} ]]; then
++      zle -U "$key"
++      return
++    elif [[ "$key" = ${~compconfig[incremental_break]} ]]; then
++      return
++    elif [[ '#key' -eq '#\\C-h' || '#key' -eq '#\\C-?' ]]; then
++      [[ $#LBUFFER -gt $#l ]] && LBUFFER="$LBUFFER[1,-2]"
++    elif [[ '#key' -eq '#\\t' ]]; then
++      zle complete-word "$@"
++      lbuf="$LBUFFER"
++      rbuf="$RBUFFER"
++    elif [[ '#key' -eq '#\\C-d' ]]; then
++      twid=list-choices
++    else
++      LBUFFER="$LBUFFER$key"
++    fi
++    lastl="$LBUFFER"
++    lastr="$RBUFFER"
++    [[ "$twid" = "$wid" ]] && comppostfuncs=( "$post[@]" )
++    toolong=''
++    zle $twid "$@"
++    LBUFFER="$lastl"
++    RBUFFER="$lastr"
++    num=$_lastcomp[nmatches]
++    if (( ! num )); then
++      num="${_lastcomp[alternate_nmatches]}"
++      alt=' -alt-'
++    else
++      alt=''
++    fi
++    if (( ! num )); then
++      word=''
++      state='-no match-'
++    elif [[ "${LBUFFER}${RBUFFER}" = *${_lastcomp[unambiguous]}* ]]; then
++      word=''
++      state='-no prefix-'
++    else
++      word="${_lastcomp[unambiguous]}"
++      state=''
++    fi
++    zle -R "${${${${${${pmpt//\\%u/$word}//\\%s/$state}//\\%c/${_lastcomp[completer][2,-1]}}//\\%n/$num}//\\%a/$alt}//\\%l/$toolong}"
++    read -k key
++  done
++
++  if [[ '#key' -eq '#\\C-g' ]]; then
++    LBUFFER="$lbuf"
++    RBUFFER="$rbuf"
++  fi
++  zle -Rc
++}
++
++# Helper function used as a completion post-function used to make sure that
++# the list of matches in only shown if it fits on the screen.
++
++icw-list-helper() {
++
++  # +1 for the status line we will add...
++
++  if [[ compstate[list_lines]+BUFFERLINES+1 -gt LINES ]]; then
++    compstate[list]='list explanations'
++    if [[ compstate[list_lines]+BUFFERLINES+1 -gt LINES ]]; then
++      compstate[list]=''
++      compstate[force_list]=yes
++    fi
++    toolong='...'
++  fi
++}
++
++incremental-complete-word "$@"
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

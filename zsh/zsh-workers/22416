@@ -1,0 +1,1061 @@
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: user-defined math functions
+Date: Tue, 11 Apr 2006 19:25:47 +0100
+From: Peter Stephenson <pws@csr.com>
+Message-ID: <EXCHANGE03aPeLjCdcl00008114@exchange03.csr.com>
+Content-Type: text/plain
+MIME-Version: 1.0
+Status: RO
+X-Seq: zsh-workers 22416
+
+More bloat, I'm afraid.
+
+This adds user-defined math functions implemented by shell functions.
+Here's a minimal example:
+
+  cube() { (( $1 * $1 * $1 )) }
+  functions -M cube 1
+  print $(( cube(3) ))
+
+Using "functions" seemed the best way of avoiding having to create a new
+builtin.  Maybe someone has a better suggestion which avoids too much
+new syntax.
+
+The argument passing isn't ideal: since it uses normal shell functions
+the parameters are simply strings.  Currently we can't have arrays of
+integers or floats, so there's no simple way around.
+
+zmathfuncdef is a simple front end to this, taking a function name
+and a definition.  It limits pollution of the shell function namespace by
+adding a prefix to the shell function.  This is not ideal but it's
+no worse than the completion system.
+
+zcalc uses zmathfuncdef to define functions.  Within zcalc the above
+becomes:
+
+  1> function cube $1 * $1 * $1
+  1> cube(3)
+  27
+
+which is the sort of use I was thinking of when I wrote it.
+
+The argument passing between execcmd() and execute() in exec.c was
+weird: there was a static linked list args sitting waiting to get
+trashed by commands executed at unexpected points, which I duly did.
+I've passed args as a proper argument and everything still seems happy.
+It would be nice to get rid of other similar hazards.  Goodness knows
+if there's something else hidden away there waiting to happen.
+
+I'll be away from tomorrow for about a week.  I won't check this in
+before I get back.
+
+
+Index: Doc/Zsh/builtins.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/builtins.yo,v
+retrieving revision 1.84
+diff -u -r1.84 builtins.yo
+--- Doc/Zsh/builtins.yo	20 Mar 2006 11:06:24 -0000	1.84
++++ Doc/Zsh/builtins.yo	11 Apr 2006 18:12:30 -0000
+@@ -501,8 +501,52 @@
+ point numbers are not permitted.
+ )
+ findex(functions)
+-item(tt(functions) [ {tt(PLUS())|tt(-)}tt(UXkmtuz) ] [ var(name) ... ])(
+-Equivalent to tt(typeset -f).
++xitem(tt(functions) [ {tt(PLUS())|tt(-)}tt(UXkmtuz) ] [ var(name) ... ])
++xitem(tt(functions -M) var(mathfn) [ var(min) [ var(max) [ var(shellfn) ] ] ])
++xitem(tt(functions -M) [ tt(-m) var(pattern) ... ])
++item(tt(functions +M) [ tt(-m) ] var(mathfn))(
++Equivalent to tt(typeset -f), with the exception of the tt(-M) option.
++Use of the tt(-M) option may not be combined with any of the options
++handled by tt(typeset -f).
++
++tt(functions -M) var(mathfn) defines var(mathfn) as the name of
++a mathematical function recognised in all forms of arithmetical expressions;
++see
++ifzman(the section `Arithmetic Evaluation' in zmanref(zshmisc))\
++ifnzman(noderef(Arithmetic Evaluation))\
++.  By default var(mathfn) may take
++any number of comma-separated arguments.  If var(min) is given,
++it must have exactly var(min) args; if var(min) and var(max) are
++both given, it must have at least var(min) and and at most var(max)
++args.  var(max) may be -1 to indicate that there is no upper limit.
++
++By default the function is implemented by a shell function of the same
++name; if var(shellfn) is specified it gives the name of the corresponding
++shell function while var(mathfn) remains the name used in arithmetical
++expressions.  The name of the function in tt($0) is var(mathfn) (not
++var(shellfn) as would usually be the case), provided the option
++tt(FUNCTION_ARGZERO) is in effect.  The positional parameters in the shell
++function correspond to the arguments of the mathematical function call.
++The result of the last arithmetical expression evaluated
++inside the shell function (even if it is a form that normally only returns
++a status) gives the result of the mathematical function.
++
++tt(functions -M) with no arguments lists all such user-defined functions in
++the same form as a definition.  With the additional option tt(-m) and
++a list of arguments, all functions whose var(mathfn) matches one of
++the pattern arguments are listed.
++
++tt(function +M) removes the list of mathematical functions; with the
++additional option tt(-m) the arguments are treated as patterns and
++all functions whose tt(mathfn) matches the pattern are removed.  Note
++that the shell function implementing the behaviour is not removed
++(regardless of whether its name coincides with tt(mathfn)).
++
++For example, the following prints the cube of 3:
++
++example(zmath_cube+LPAR()RPAR() { (( $1 * $1 * $1 )) }
++functions -M cube 1 1 zmath_cube
++print $(( cube+LPAR()3+RPAR() )))
+ )
+ module(getcap)(zsh/cap)
+ findex(getln)
+@@ -652,8 +696,10 @@
+ findex(let)
+ item(tt(let) var(arg) ...)(
+ Evaluate each var(arg) as an arithmetic expression.
+-See noderef(Arithmetic Evaluation) for a description
+-of arithmetic expressions.  The exit status is 0 if the
++See
++ifzman(the section `Arithmetic Evaluation' in zmanref(zshmisc))\
++ifnzman(noderef(Arithmetic Evaluation))
++for a description of arithmetic expressions.  The exit status is 0 if the
+ value of the last expression is nonzero, and 1 otherwise.
+ )
+ findex(limit)
+@@ -856,7 +902,9 @@
+ specifiers, if the corresponding argument starts with a quote character,
+ the numeric value of the following character is used as the number to
+ print otherwise the argument is evaluated as an arithmetic expression. See
+-noderef(Arithmetic Evaluation) for a description of arithmetic
++ifzman(the section `Arithmetic Evaluation' in zmanref(zshmisc))\
++ifnzman(noderef(Arithmetic Evaluation))
++for a description of arithmetic
+ expressions. With `tt(%n)', the corresponding argument is taken as an
+ identifier which is created as an integer parameter.
+ 
+Index: Doc/Zsh/contrib.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/contrib.yo,v
+retrieving revision 1.56
+diff -u -r1.56 contrib.yo
+--- Doc/Zsh/contrib.yo	5 Apr 2006 10:26:32 -0000	1.56
++++ Doc/Zsh/contrib.yo	11 Apr 2006 18:12:31 -0000
+@@ -15,6 +15,7 @@
+ menu(ZLE Functions)
+ menu(Exception Handling)
+ menu(MIME Functions)
++menu(Mathematical Functions)
+ menu(Other Functions)
+ endmenu()
+ 
+@@ -1339,7 +1340,7 @@
+ start of the outermost layer of any code that uses exception handling will
+ eliminate this problem.
+ 
+-texinode(MIME Functions)(Other Functions)(Exception Handling)(User Contributions)
++texinode(MIME Functions)(Mathematical Functions)(Exception Handling)(User Contributions)
+ sect(MIME Functions)
+ 
+ Three functions are available to provide handling of files recognised by
+@@ -1553,7 +1554,125 @@
+ )
+ enditem()
+ 
+-texinode(Other Functions)()(MIME Functions)(User Contributions)
++texinode(Mathematical Functions)(Other Functions)(MIME Functions)(User Contributions)
++sect(Mathematical Functions)
++
++startitem()
++findex(zcalc)
++item(tt(zcalc) [ var(expression) ... ])(
++A reasonably powerful calculator based on zsh's arithmetic evaluation
++facility.  The syntax is similar to that of formulae in most programming
++languages; see
++ifzman(the section `Arithmetic Evaluation' in zmanref(zshmisc))\
++ifnzman(noderef(Arithmetic Evaluation)) for details.  The mathematical
++library tt(zsh/mathfunc) will be loaded if it is available; see
++ifzman(the section `The zsh/mathfunc Module' in zmanref(zshmodules))\
++ifnzman(noderef(The zsh/mathfunc Module)).  The mathematical functions
++correspond to the raw system libraries, so trigonometric functions are
++evaluated using radians, and so on.
++
++Each line typed is evaluated as an expression.  The prompt shows a number,
++which corresponds to a positional parameter where the result of that
++calculation is stored.  For example, the result of the calculation on the
++line preceded by `tt(4> )' is available as tt($4).  The last value
++calculated is available as tt(ans).  Full command line editing, including
++the history of previous calculations, is available; the history is saved in
++the file tt(~/.zcalc_history).  To exit, enter a blank line or type `tt(q)'
++on its own.
++
++If arguments are given to tt(zcalc) on start up, they are used to prime the
++first few positional parameters.  A visual indication of this is given when
++the calculator starts.
++
++The constants tt(PI) (3.14159...) and tt(E) (2.71828...) are provided.
++Parameter assignment is possible, but note that all parameters will be put
++into the global namespace.
++
++The output base can be initialised by passing the option `tt(-#)var(base)',
++for example `tt(zcalc -#16)' (the `tt(#)' may have to be quoted, depending
++on the globbing options set).
++
++The prompt is configurable via the parameter tt(ZCALCPROMPT), which
++undergoes standard prompt expansion.  The index of the current entry is
++stored locally in the first element of the array tt(psvar), which can be
++referred to in tt(ZCALCPROMPT) as `tt(%1v)'.  The default prompt is
++`tt(%1v> )'.
++
++The output precision may be specified within zcalc by special commands
++familiar from many calculators:
++startitem()
++item(tt(norm))(
++The default output format.  It corresponds to the printf tt(%g)
++specification.  Typically this shows six decimal digits.
++)
++item(tt(sci) var(digits))(
++Scientific notation, corresponding to the printf tt(%g) output format with
++the precision given by var(digits).  This produces either fixed point or
++exponential notation depending on the value output.
++)
++item(tt(fix) var(digits))(
++Fixed point notation, corresponding to the printf tt(%f) output format with
++the precision given by var(digits).
++)
++item(tt(eng) var(digits))(
++Exponential notation, corresponding to the printf tt(%E) output format with
++the precision given by var(digits).
++)
++enditem()
++
++Other special commands:
++startitem()
++item(tt(local) var(arg) ...)(
++Declare variables local to the function.  Note that certain variables
++are used by the function for its own purposes.  Other variables
++may be used, too, but they will be taken from or put into the global
++scope.
++)
++item(tt(function) var(name) [ var(body) ])(
++Define a mathematical function or (with no var(body)) delete it.
++The function is defined using tt(zmathfuncdef), see below.
++
++Note that tt(zcalc) takes care of all quoting.  Hence for example:
++
++example(function cube $1 * $1 * $1)
++
++defines a function to cube the sole argument.
++)
++item(tt([#)var(base)tt(]))(
++When this syntax appears on a line by itself, the default output radix
++is set to var(base).  Use, for example, `tt([#16])' to display hexadecimal
++output preceded by an indication of the base, or `tt([##16])' just to
++display the raw number in the given base.  Bases themselves are always
++specified in decimal. `tt([#])' restores the normal output format.  Note
++that setting an output base suppresses floating point output; use `tt([#])'
++to return to normal operation.
++
++)
++enditem()
++
++See the comments in the function for a few extra tips.
++)
++findex(zmathfuncdef)
++item(tt(zmathfuncdef) var(mathfunc) [ var(body) ])(
++A convenient front end to tt(functions -M).
++
++With two arguments, define a mathematical function named var(mathfunc)
++which can be used in any form of arithmetic evaluation.  var(body)
++is a mathematical expression to implement the function.  It may
++contain references to position parameters tt($1), tt($2), ...
++to refer to mandatory parameters and tt(${1:-)var(defvalue)tt(}) ...
++to refer to optional parameters.  Note that the forms must be
++strictly adhered to for the function to calculate the correct number
++of arguments.  The implementation is held in a shell function named
++tt(zsh_math_func_)var(mathfunc); usually the user will not need
++to refer to the shell function directly.
++
++With one argument, remove the mathematical function var(mathfunc)
++as well as the shell function implementation.
++)
++enditem()
++
++texinode(Other Functions)()(Mathematical Functions)(User Contributions)
+ sect(Other Functions)
+ 
+ There are a large number of helpful functions in the tt(Functions/Misc)
+@@ -1720,77 +1839,6 @@
+ For details of the other tt(zargs) options, see zmanref(xargs) or run
+ tt(zargs) with the tt(-)tt(-help) option.
+ )
+-findex(zcalc)
+-item(tt(zcalc) [ var(expression) ... ])(
+-A reasonably powerful calculator based on zsh's arithmetic evaluation
+-facility.  The syntax is similar to that of formulae in most programming
+-languages; see
+-ifzman(the section `Arithmetic Evaluation' in zmanref(zshmisc))\
+-ifnzman(noderef(Arithmetic Evaluation)) for details.  The mathematical
+-library tt(zsh/mathfunc) will be loaded if it is available; see
+-ifzman(the section `The zsh/mathfunc Module' in zmanref(zshmodules))\
+-ifnzman(noderef(The zsh/mathfunc Module)).  The mathematical functions
+-correspond to the raw system libraries, so trigonometric functions are
+-evaluated using radians, and so on.
+-
+-Each line typed is evaluated as an expression.  The prompt shows a number,
+-which corresponds to a positional parameter where the result of that
+-calculation is stored.  For example, the result of the calculation on the
+-line preceded by `tt(4> )' is available as tt($4).  Full command line
+-editing, including the history of previous calculations, is available; the
+-history is saved in the file tt(~/.zcalc_history).  To exit, enter a blank
+-line or type `tt(q)' on its own.
+-
+-If arguments are given to tt(zcalc) on start up, they are used to prime the
+-first few positional parameters.  A visual indication of this is given when
+-the calculator starts.
+-
+-The constants tt(PI) (3.14159...) and tt(E) (2.71828...) are provided.
+-Parameter assignment is possible, but note that all parameters will be put
+-into the global namespace.
+-
+-An extra facility is provided for changing the default output base.  Use,
+-for example, `tt([#16])' to display hexadecimal output preceded by an
+-indication of the base, or `tt([##16])' just to display the raw number in
+-the given base.  Bases themselves are always specified in decimal.
+-`tt([#])' restores the normal output format.  Note that setting an output
+-base suppresses floating point output; use `tt([#])' to return to normal
+-operation.
+-
+-The output base can be initialised by passing the option `tt(-#)var(base)',
+-for example `tt(zcalc -#16)' (the `tt(#)' may have to be quoted, depending
+-on the globbing options set).
+-
+-The prompt is configurable via the parameter tt(ZCALCPROMPT), which
+-undergoes standard prompt expansion.  The index of the current entry is
+-stored locally in the first element of the array tt(psvar), which can be
+-referred to in tt(ZCALCPROMPT) as `tt(%1v)'.  The default prompt is
+-`tt(%1v> )'.
+-
+-The output precision may be specified within zcalc by special commands
+-familiar from many calculators:
+-startitem()
+-item(tt(norm))(
+-The default output format.  It corresponds to the printf tt(%g)
+-specification.  Typically this shows six decimal digits.
+-)
+-item(tt(sci) var(digits))(
+-Scientific notation, corresponding to the printf tt(%g) output format with
+-the precision given by var(digits).  This produces either fixed point or
+-exponential notation depending on the value output.
+-)
+-item(tt(fix) var(digits))(
+-Fixed point notation, corresponding to the printf tt(%f) output format with
+-the precision given by var(digits).
+-)
+-item(tt(eng) var(digits))(
+-Exponential notation, corresponding to the printf tt(%E) output format with
+-the precision given by var(digits).
+-)
+-enditem()
+-
+-See the comments in the function for a few extra tips.
+-)
+ findex(zed)
+ xitem(tt(zed) [ tt(-f) ] var(name))
+ item(tt(zed -b))(
+Index: Functions/Misc/.distfiles
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/Misc/.distfiles,v
+retrieving revision 1.10
+diff -u -r1.10 .distfiles
+--- Functions/Misc/.distfiles	2 Sep 2002 18:27:07 -0000	1.10
++++ Functions/Misc/.distfiles	11 Apr 2006 18:12:32 -0000
+@@ -3,4 +3,5 @@
+ allopt      getjobs       mere       relative   zcalc   zmv          zargs
+ checkmail   harden        nslookup   run-help   zed     zrecompile
+ colors      is-at-least   promptnl   tetris     zkbd    zstyle+
++zmathfuncdef
+ '
+Index: Functions/Misc/zcalc
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/Misc/zcalc,v
+retrieving revision 1.13
+diff -u -r1.13 zcalc
+--- Functions/Misc/zcalc	31 Oct 2005 16:01:14 -0000	1.13
++++ Functions/Misc/zcalc	11 Apr 2006 18:12:32 -0000
+@@ -42,6 +42,13 @@
+ # use the variables listed in the `local' and `integer' lines below
+ # (translation: I can't be bothered to provide a sandbox).
+ #
++# You can declare or delete math functions (implemented via zmathfuncdef):
++#   1> function cube $1 * $1 * $1
++# This has a single compulsory argument.  Note the function takes care of
++# the punctuation.  To delete the function, put nothing (at all) after
++# the function name:
++#   1> function cube
++#
+ # Some constants are already available: (case sensitive as always):
+ #   PI     pi, i.e. 3.1415926545897931
+ #   E      e, i.e. 2.7182818284590455
+@@ -86,6 +93,8 @@
+ emulate -L zsh
+ setopt extendedglob
+ 
++# TODO: make local variables that shouldn't be visible in expressions
++# begin with _.
+ local line ans base defbase forms match mbegin mend psvar optlist opt arg
+ local compcontext="-math-"
+ integer num outdigits outform=1
+@@ -96,6 +105,7 @@
+ forms=( '%2$g' '%.*g' '%.*f' '%.*E' )
+ 
+ zmodload -i zsh/mathfunc 2>/dev/null
++autoload zmathfuncdef
+ 
+ : ${ZCALCPROMPT="%1v> "}
+ 
+@@ -167,34 +177,39 @@
+   print -s -- $line
+ 
+   case ${${line##[[:blank:]]#}%%[[:blank:]]#} in
+-    q) # Exit if `q' on its own.
++    (q) # Exit if `q' on its own.
+       return 0
+     ;;
+-    norm) # restore output format to default
++    (norm) # restore output format to default
+       outform=1
+     ;;
+-    sci[[:blank:]]#(#b)(<->)(#B))
++    (sci[[:blank:]]#(#b)(<->)(#B))
+       outdigits=$match[1]
+       outform=2
+     ;;
+-    fix[[:blank:]]#(#b)(<->)(#B))
++    (fix[[:blank:]]#(#b)(<->)(#B))
+       outdigits=$match[1]
+       outform=3
+     ;;
+-    eng[[:blank:]]#(#b)(<->)(#B))
++    (eng[[:blank:]]#(#b)(<->)(#B))
+       outdigits=$match[1]
+       outform=4
+     ;;
+-    local([[:blank:]]##*|))
++    (local([[:blank:]]##*|))
+       eval $line
+       line=
+       continue
+     ;;
+-    *)
++    (function[[:blank:]]##(#b)([^[:blank:]]##)(|[[:blank:]]##([^[:blank:]]*)))
++      zmathfuncdef $match[1] $match[3]
++      line=
++      continue
++    ;;
++    (*)
+       # Latest value is stored as a string, because it might be floating
+       # point or integer --- we don't know till after the evaluation, and
+       # arrays always store scalars anyway.
+-      # 
++      #
+       # Since it's a string, we'd better make sure we know which
+       # base it's in, so don't change that until we actually print it.
+       eval "ans=\$(( $line ))"
+Index: Functions/Misc/zmathfuncdef
+===================================================================
+RCS file: Functions/Misc/zmathfuncdef
+diff -N Functions/Misc/zmathfuncdef
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Functions/Misc/zmathfuncdef	11 Apr 2006 18:12:32 -0000
+@@ -0,0 +1,45 @@
++# Define a mathematical function with its definition and smart(ish)
++# guessing of the number of arguments.  Doesn't overload for different
++# numbers of arguments, but that could be done.  Type overloading would be
++# more fraught.
++
++emulate -L zsh
++setopt extendedglob
++
++if (( $# < 1 || $# > 2 )); then
++  print "Usage: $0 name [body]" >&2
++  return 1
++fi
++
++local mname=$1
++local fname="zsh_math_func_$1"
++
++if (( $# == 1 )); then
++  functions +M $mname && unfunction $fname
++  return 0
++fi
++
++integer iarg=0 ioptarg
++local body=$2
++
++# count compulsory arguments
++while [[ $body = *'$'$((iarg+1))(|[^[:digit:]]*) ]]; do
++  (( iarg++ ))
++done
++
++# count optional arguments
++(( ioptarg = iarg ))
++while [[ $body = *'${'$((ioptarg+1))':-'* ]]; do
++  (( ioptarg++ ))
++done
++
++functions -M $mname $iarg $ioptarg $fname || return 1
++
++{
++  eval "$fname() { (( $body )) }"
++} always {
++  # Remove math function if shell function definition failed.
++  if (( TRY_BLOCK_ERROR )); then
++    functions +M $mname
++  fi
++}
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.156
+diff -u -r1.156 builtin.c
+--- Src/builtin.c	8 Mar 2006 15:50:54 -0000	1.156
++++ Src/builtin.c	11 Apr 2006 18:12:33 -0000
+@@ -46,7 +46,7 @@
+     BUILTIN(".", BINF_PSPECIAL, bin_dot, 1, -1, 0, NULL, NULL),
+     BUILTIN(":", BINF_PSPECIAL, bin_true, 0, -1, 0, NULL, NULL),
+     BUILTIN("alias", BINF_MAGICEQUALS | BINF_PLUSOPTS, bin_alias, 0, -1, 0, "Lgmrs", NULL),
+-    BUILTIN("autoload", BINF_PLUSOPTS, bin_functions, 0, -1, 0, "tUXwkz", "u"),
++    BUILTIN("autoload", BINF_PLUSOPTS, bin_functions, 0, -1, 0, "ktUwXz", "u"),
+     BUILTIN("bg", 0, bin_fg, 0, -1, BIN_BG, NULL, NULL),
+     BUILTIN("break", BINF_PSPECIAL, bin_break, 0, 1, BIN_BREAK, NULL, NULL),
+     BUILTIN("bye", 0, bin_break, 0, 1, BIN_EXIT, NULL, NULL),
+@@ -72,7 +72,7 @@
+     BUILTIN("fc", 0, bin_fc, 0, -1, BIN_FC, "nlre:IRWAdDfEimpPa", NULL),
+     BUILTIN("fg", 0, bin_fg, 0, -1, BIN_FG, NULL, NULL),
+     BUILTIN("float", BINF_PLUSOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "E:%F:%HL:%R:%Z:%ghlprtux", "E"),
+-    BUILTIN("functions", BINF_PLUSOPTS, bin_functions, 0, -1, 0, "kmtuUz", NULL),
++    BUILTIN("functions", BINF_PLUSOPTS, bin_functions, 0, -1, 0, "kmMtuUz", NULL),
+     BUILTIN("getln", 0, bin_read, 0, -1, 0, "ecnAlE", "zr"),
+     BUILTIN("getopts", 0, bin_getopts, 2, -1, 0, NULL, NULL),
+     BUILTIN("hash", BINF_MAGICEQUALS, bin_hash, 0, -1, 0, "Ldfmrv", NULL),
+@@ -2476,6 +2476,43 @@
+ 			     (OPT_ISSET(ops,'z') ? 0 : 1)), 1);
+ }
+ 
++
++/* List a user-defined math function. */
++static void
++listusermathfunc(MathFunc p)
++{
++    int showargs;
++
++    if (p->module)
++	showargs = 3;
++    else if (p->maxargs != (p->minargs ? p->minargs : -1))
++	showargs = 2;
++    else if (p->minargs)
++	showargs = 1;
++    else
++	showargs = 0;
++
++    printf("functions -M %s", p->name);
++    if (showargs) {
++	printf(" %d", p->minargs);
++	showargs--;
++    }
++    if (showargs) {
++	printf(" %d", p->maxargs);
++	showargs--;
++    }
++    if (showargs) {
++	/*
++	 * function names are not required to consist of ident characters
++	 */
++	putchar(' ');
++	quotedzputs(p->module, stdout);
++	showargs--;
++    }
++    putchar('\n');
++}
++
++
+ /* Display or change the attributes of shell functions.   *
+  * If called as autoload, it will define a new autoloaded *
+  * (undefined) shell function.                            */
+@@ -2522,6 +2559,131 @@
+     if (OPT_PLUS(ops,'f') || OPT_ISSET(ops,'+'))
+ 	pflags |= PRINT_NAMEONLY;
+ 
++    if (OPT_MINUS(ops,'M') || OPT_PLUS(ops,'M')) {
++	MathFunc p, q;
++	/*
++	 * Add/remove/list function as mathematical.
++	 */
++	if (on || off || pflags || OPT_ISSET(ops,'X') || OPT_ISSET(ops,'u')
++	    || OPT_ISSET(ops,'U') || OPT_ISSET(ops,'w')) {
++	    zwarnnam(name, "invalid option(s)", NULL, 0);
++	    return 1;
++	}
++	if (!*argv) {
++	    /* List functions. */
++	    queue_signals();
++	    for (p = mathfuncs; p; p = p->next)
++		if (p->flags & MFF_USERFUNC)
++		    listusermathfunc(p);
++	    unqueue_signals();
++	} else if (OPT_ISSET(ops,'m')) {
++	    /* List matching functions. */
++	    for (; *argv; argv++) {
++		tokenize(*argv);
++		if ((pprog = patcompile(*argv, PAT_STATIC, 0))) {
++		    queue_signals();
++		    for (p = mathfuncs, q = NULL; p; q = p, p = p->next) {
++			MathFunc next;
++			do {
++			    next = NULL;
++			    if (pattry(pprog, p->name)) {
++				if (OPT_PLUS(ops,'M')) {
++				    next = p->next;
++				    removemathfunc(q, p);
++				    p = next;
++				} else
++				    listusermathfunc(p);
++			    }
++			    /* if we deleted one, retry with the new p */
++			} while (next);
++		    }
++		    unqueue_signals();
++		} else {
++		    untokenize(*argv);
++		    zwarnnam(name, "bad pattern : %s", *argv, 0);
++		    returnval = 1;
++		}
++	    }
++	} else if (OPT_PLUS(ops,'M')) {
++	    /* Delete functions. -m is allowed but is handled above. */
++	    for (; *argv; argv++) {
++		queue_signals();
++		for (p = mathfuncs, q = NULL; p; q = p, p = p->next) {
++		    if (!strcmp(p->name, *argv)) {
++			removemathfunc(q, p);
++			break;
++		    }
++		}
++		unqueue_signals();
++	    }
++	} else {
++	    /* Add a function */
++	    int minargs = 0, maxargs = -1;
++	    char *funcname = *argv++;
++	    char *modname = NULL;
++	    char *ptr;
++
++	    for (ptr = funcname; *ptr; ptr++)
++		if (!iident(*ptr))
++		    break;
++	    if (idigit(*funcname) || funcname == ptr || *ptr) {
++		zwarnnam(name, "-M %s: bad math function name", funcname, 0);
++		return 1;
++	    }
++
++	    if (*argv) {
++		minargs = (int)zstrtol(*argv, &ptr, 0);
++		if (minargs < 0 || *ptr) {
++		    zwarnnam(name, "-M: invalid min number of arguments: %s",
++			     *argv, 0);
++		    return 1;
++		}
++		maxargs = minargs;
++		argv++;
++	    }
++	    if (*argv) {
++		maxargs = (int)zstrtol(*argv, &ptr, 0);
++		if (maxargs < -1 ||
++		    (maxargs != -1 && maxargs < minargs) ||
++		    *ptr) {
++		    zwarnnam(name,
++			     "-M: invalid max number of arguments: %s",
++			     *argv, 0);
++		    return 1;
++		}
++		argv++;
++	    }
++	    if (*argv)
++		modname = *argv++;
++	    if (*argv) {
++		zwarnnam(name, "-M: too many arguments", NULL, 0);
++		return 1;
++	    }
++
++	    p = (MathFunc)zshcalloc(sizeof(struct mathfunc));
++	    p->name = ztrdup(funcname);
++	    p->flags = MFF_USERFUNC;
++	    p->module = modname ? ztrdup(modname) : NULL;
++	    p->minargs = minargs;
++	    p->maxargs = maxargs;
++
++	    queue_signals();
++	    for (q = mathfuncs; q; q = q->next) {
++		if (!strcmp(q->name, funcname)) {
++		    zwarnnam(name, "-M: function already exists", NULL, 0);
++		    zfree(p, sizeof(struct mathfunc));
++		    return 1;
++		}
++	    }
++
++	    p->next = mathfuncs;
++	    mathfuncs = p;
++	    unqueue_signals();
++	}
++
++	return 0;
++    }
++
+     /* If no arguments given, we will print functions.  If flags *
+      * are given, we will print only functions containing these  *
+      * flags, else we'll print them all.                         */
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.97
+diff -u -r1.97 exec.c
+--- Src/exec.c	7 Mar 2006 21:30:36 -0000	1.97
++++ Src/exec.c	11 Apr 2006 18:12:34 -0000
+@@ -142,7 +142,6 @@
+ 
+ #define execerr() if (!forked) { lastval = 1; goto done; } else _exit(1)
+ 
+-static LinkList args;
+ static int doneps4;
+ static char *STTYval;
+ 
+@@ -464,7 +463,7 @@
+ 
+ /**/
+ void
+-execute(UNUSED(Cmdnam cmdname), int dash, int defpath)
++execute(LinkList args, int dash, int defpath)
+ {
+     Cmdnam cn;
+     char buf[MAXCMDLEN], buf2[MAXCMDLEN];
+@@ -482,15 +481,12 @@
+      * we first run the stty command with the value of this       *
+      * parameter as it arguments.                                 */
+     if ((s = STTYval) && isatty(0) && (GETPGRP() == getpid())) {
+-	LinkList exargs = args;
+ 	char *t = tricat("stty", " ", s);
+ 
+ 	STTYval = 0;	/* this prevents infinite recursion */
+ 	zsfree(s);
+-	args = NULL;
+ 	execstring(t, 1, 0);
+ 	zsfree(t);
+-	args = exargs;
+     } else if (s) {
+ 	STTYval = 0;
+ 	zsfree(s);
+@@ -1827,6 +1823,7 @@
+ execcmd(Estate state, int input, int output, int how, int last1)
+ {
+     HashNode hn = NULL;
++    LinkList args;
+     LinkNode node;
+     Redir fn;
+     struct multio *mfds[10];
+@@ -2638,7 +2635,7 @@
+ 		    zsfree(STTYval);
+ 		    STTYval = 0;
+ 		}
+-		execute((Cmdnam) hn, cflags & BINF_DASH, use_defpath);
++		execute(args, cflags & BINF_DASH, use_defpath);
+ 	    } else {		/* ( ... ) */
+ 		DPUTS(varspc,
+ 		      "BUG: assignment before complex command");
+@@ -4094,7 +4091,6 @@
+     struct execstack *es;
+ 
+     es = (struct execstack *) malloc(sizeof(struct execstack));
+-    es->args = args;
+     es->list_pipe_pid = list_pipe_pid;
+     es->nowait = nowait;
+     es->pline_level = pline_level;
+@@ -4122,7 +4118,6 @@
+     struct execstack *en;
+ 
+     DPUTS(!exstack, "BUG: execrestore() without execsave()");
+-    args = exstack->args;
+     list_pipe_pid = exstack->list_pipe_pid;
+     nowait = exstack->nowait;
+     pline_level = exstack->pline_level;
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.22
+diff -u -r1.22 math.c
+--- Src/math.c	29 Nov 2004 12:07:12 -0000	1.22
++++ Src/math.c	11 Apr 2006 18:12:35 -0000
+@@ -42,6 +42,14 @@
+ /**/
+ mod_export mnumber zero_mnumber;
+ 
++/*
++ * The last value we computed:  note this isn't cleared
++ * until the next computation, unlike unlike yyval.
++ * Everything else is saved and returned to allow recursive calls.
++ */
++/**/
++mnumber lastmathval;
++
+ /* last input base we used */
+ 
+ /**/
+@@ -582,22 +590,42 @@
+     a[strlen(a) - 1] = '\0';
+ 
+     if ((f = getmathfunc(n, 1))) {
+-	if (f->flags & MFF_STR)
++	if (f->flags & MFF_STR) {
+ 	    return f->sfunc(n, a, f->funcid);
+-	else {
++	} else {
+ 	    int argc = 0;
+-	    mnumber *argv = NULL, *q;
++	    mnumber *argv = NULL, *q, marg;
+ 	    LinkList l = newlinklist();
+ 	    LinkNode node;
+ 
++	    if (f->flags & MFF_USERFUNC) {
++		/* first argument is function name: always use mathfunc */
++		addlinknode(l, n);
++	    }
++
+ 	    while (iblank(*a))
+ 		a++;
+ 	    while (*a) {
+ 		if (*a) {
+ 		    argc++;
+- 		    q = (mnumber *) zhalloc(sizeof(mnumber));
+-		    *q = mathevall(a, ARGPREC, &a);
+-		    addlinknode(l, q);
++		    if (f->flags & MFF_USERFUNC) {
++			/* need to pass strings */
++			char *str;
++			marg = mathevall(a, ARGPREC, &a);
++			if (marg.type & MN_FLOAT) {
++			    /* convfloat is off the heap */
++			    str = convfloat(marg.u.d, 0, 0, NULL);
++			} else {
++			    char buf[BDIGBUFSIZE];
++			    convbase(buf, marg.u.l, 10);
++			    str = dupstring(buf);
++			}
++			addlinknode(l, str);
++		    } else {
++			q = (mnumber *) zhalloc(sizeof(mnumber));
++			*q = mathevall(a, ARGPREC, &a);
++			addlinknode(l, q);
++		    }
+ 		    if (errflag || mtok != COMMA)
+ 			break;
+ 		}
+@@ -608,12 +636,24 @@
+ 	    if (!errflag) {
+ 		if (argc >= f->minargs && (f->maxargs < 0 ||
+ 					   argc <= f->maxargs)) {
+-		    if (argc) {
+-			q = argv = (mnumber *)zhalloc(argc * sizeof(mnumber));
+-			for (node = firstnode(l); node; incnode(node))
+-			    *q++ = *(mnumber *)getdata(node);
++		    if (f->flags & MFF_USERFUNC) {
++			char *shfnam = f->module ? f->module : n;
++			Eprog prog = getshfunc(shfnam);
++			if (prog == &dummy_eprog)
++			    zerr("no such function: %s", shfnam, 0);
++			else {
++			    doshfunc(n, prog, l, 0, 1);
++			    return lastmathval;
++			}
++		    } else {
++			if (argc) {
++			    q = argv =
++				(mnumber *)zhalloc(argc * sizeof(mnumber));
++			    for (node = firstnode(l); node; incnode(node))
++				*q++ = *(mnumber *)getdata(node);
++			}
++			return f->nfunc(n, argc, argv, f->funcid);
+ 		    }
+-		    return f->nfunc(n, argc, argv, f->funcid);
+ 		} else
+ 		    zerr("wrong number of arguments: %s", o, 0);
+ 	    }
+@@ -1013,7 +1053,7 @@
+ 	sp = xsp;
+ 	stack = xstack;
+     }
+-    return ret;
++    return lastmathval = ret;
+ }
+ 
+ 
+Index: Src/module.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/module.c,v
+retrieving revision 1.20
+diff -u -r1.20 module.c
+--- Src/module.c	7 Mar 2006 21:30:37 -0000	1.20
++++ Src/module.c	11 Apr 2006 18:12:36 -0000
+@@ -1384,7 +1384,7 @@
+ 	MathFunc p;
+ 
+ 	for (p = mathfuncs; p; p = p->next) {
+-	    if (p->module) {
++	    if (!(p->flags & MFF_USERFUNC) && p->module) {
+ 		if (OPT_ISSET(ops,'L')) {
+ 		    fputs("zmodload -af", stdout);
+ 		    printf(" %s %s\n", p->module, p->name);
+@@ -2085,7 +2085,8 @@
+ MathFunc mathfuncs;
+ 
+ /**/
+-static void removemathfunc(MathFunc previous, MathFunc current)
++void
++removemathfunc(MathFunc previous, MathFunc current)
+ {
+     if (previous)
+ 	previous->next = current->next;
+@@ -2105,7 +2106,7 @@
+ 
+     for (p = mathfuncs; p; q = p, p = p->next)
+ 	if (!strcmp(name, p->name)) {
+-	    if (autol && p->module) {
++	    if (autol && p->module && !(p->flags & MFF_USERFUNC)) {
+ 		char *n = dupstring(p->module);
+ 
+ 		removemathfunc(q, p);
+@@ -2131,7 +2132,7 @@
+ 
+     for (p = mathfuncs; p; q = p, p = p->next)
+ 	if (!strcmp(f->name, p->name)) {
+-	    if (p->module) {
++	    if (p->module && !(p->flags & MFF_USERFUNC)) {
+ 		/*
+ 		 * Autoloadable, replace.
+ 		 */
+@@ -2206,6 +2207,7 @@
+ 	else
+ 	    mathfuncs = f->next;
+ 
++	/* the following applies to both unloaded and user-defined functions */
+ 	if (f->module) {
+ 	    zsfree(f->name);
+ 	    zsfree(f->module);
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.88
+diff -u -r1.88 zsh.h
+--- Src/zsh.h	9 Apr 2006 21:47:22 -0000	1.88
++++ Src/zsh.h	11 Apr 2006 18:12:38 -0000
+@@ -86,8 +86,12 @@
+     int funcid;
+ };
+ 
++/* Math function takes a string argument */
+ #define MFF_STR      1
++/* Math function has been loaded from library */
+ #define MFF_ADDED    2
++/* Math function is implemented by a shell function */
++#define MFF_USERFUNC 4
+ 
+ #define NUMMATHFUNC(name, func, min, max, id) \
+     { NULL, name, 0, func, NULL, NULL, min, max, id }
+@@ -815,7 +819,6 @@
+ struct execstack {
+     struct execstack *next;
+ 
+-    LinkList args;
+     pid_t list_pipe_pid;
+     int nowait;
+     int pline_level;
+Index: Test/C04funcdef.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/C04funcdef.ztst,v
+retrieving revision 1.1
+diff -u -r1.1 C04funcdef.ztst
+--- Test/C04funcdef.ztst	2 Apr 2001 12:32:58 -0000	1.1
++++ Test/C04funcdef.ztst	11 Apr 2006 18:12:38 -0000
+@@ -11,3 +11,62 @@
+   foo
+ 0:Function definition without braces
+ >bar
++
++  functions -M m1
++  m1() { (( $# )) }
++  print $(( m1() ))
++  print $(( m1(1) ))
++  print $(( m1(1,2) ))
++0:User-defined math functions, argument handling
++>0
++>1
++>2
++
++  functions -M m2
++  m2() {
++    integer sum
++    local val
++    for val in $*; do
++      (( sum += $val ))
++    done
++  }
++  print $(( m2(1) ))
++  print $(( m2(1,3+3,4**2) ))
++0:User-defined math functions, complex argument handling
++>1
++>23
++
++  functions -M m3 1 2
++  m3() { (( 1 )) }
++  print zero
++  (print $(( m3() )))
++  print one
++  print $(( m3(1) ))
++  print two
++  print $(( m3(1,2) ))
++  print three
++  (print $(( m3(1,2,3) )))
++1:User-defined math functions, argument checking
++>zero
++>one
++>1
++>two
++>1
++>three
++?(eval):4: wrong number of arguments: m3()
++?(eval):10: wrong number of arguments: m3(1,2,3)
++
++  functions -M m4 0 0 testmathfunc
++  functions -M m5 0 0 testmathfunc
++  testmathfunc() {
++    if [[ $0 = m4 ]]; then
++      (( 4 ))
++    else
++      (( 5 ))
++    fi
++  }
++  print $(( m4() ))
++  print $(( m5() ))
++0:User-defined math functions, multiple interfaces
++>4
++>5
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+To access the latest news from CSR copy this link into a web browser:  http://www.csr.com/email_sig.php
+

@@ -1,0 +1,126 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Message-Id: <9901291700.AA41949@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.5-pws-5++: tidying up zle parameters
+Date: Fri, 29 Jan 1999 18:00:53 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5111
+
+This is the fix for removing zle parameters I alluded to.  You can see
+the problem if you set e.g. BUFFER, then call a zle widget, then try
+to use BUFFER again.  (If you already called a zle widget you'll see
+the problem straight away.)  The problem was that specials didn't get
+removed from the parameter table by unsetparam().  At some stage that
+got altered so they did, but that was certainly wrong because then
+they got freed as well.  I patched it so they didn't get removed,
+either, but you could probably argue over this (what is the effect of
+unsetting PATH then assigning to it, for example?)  There is now a
+PM_REMOVABLE flag which says specials can be removed from the
+parameter table, and I've made sure they never get freed.  Much of the
+patch is slight cosmetic surgery in unsetparam_pm().
+
+By the way, it seems to me
+
+% typeset -T FOO foo
+% foo="scalar"
+% print $FOO
+
+%
+
+is probably a bug, so I'll try to remember to have a look at it.
+Someone can remind me if I don't.  I never understood quite how
+PATH/path were supposed to behave anyway, so have no comment to make
+on that issue.
+
+--- Src/Zle/compctl.c.unset	Fri Jan 29 11:28:27 1999
++++ Src/Zle/compctl.c	Fri Jan 29 17:39:42 1999
+@@ -1803,7 +1803,7 @@
+     struct compparam *cp;
+ 
+     for (cp = compparams; cp->name; cp++) {
+-	Param pm = createparam(cp->name, cp->type | PM_SPECIAL);
++	Param pm = createparam(cp->name, cp->type | PM_SPECIAL|PM_REMOVABLE);
+ 	if (!pm)
+ 	    pm = (Param) paramtab->getnode(paramtab, cp->name);
+ 	DPUTS(!pm, "param not set in makecompparams");
+--- Src/Zle/zle_params.c.unset	Fri Jan 29 10:56:05 1999
++++ Src/Zle/zle_params.c	Fri Jan 29 17:38:43 1999
+@@ -75,7 +75,7 @@
+     struct zleparam *zp;
+ 
+     for(zp = zleparams; zp->name; zp++) {
+-	Param pm = createparam(zp->name, (zp->type | PM_SPECIAL |
++	Param pm = createparam(zp->name, (zp->type |PM_SPECIAL|PM_REMOVABLE|
+ 					  (ro ? PM_READONLY : 0)));
+ 	if (!pm)
+ 	    pm = (Param) paramtab->getnode(paramtab, zp->name);
+--- Src/params.c.unset	Fri Jan 29 17:36:44 1999
++++ Src/params.c	Fri Jan 29 17:36:10 1999
+@@ -1662,26 +1662,36 @@
+ 	    unsetparam_pm(altpm, 1, exp);
+     }
+ 
+-    /* If this was a local variable, we need to keep the old     *
+-     * struct so that it is resurrected at the right level.      *
+-     * This is partly because when an array/scalar value is set  *
+-     * and the parameter used to be the other sort, unsetparam() *
+-     * is called.  Beyond that, there is an ambiguity:  should   *
+-     * foo() { local bar; unset bar; } make the global bar       *
+-     * available or not?  The following makes the answer "no".   */
+-    if ((locallevel && locallevel >= pm->level) || (pm->flags & PM_SPECIAL))
++    /*
++     * If this was a local variable, we need to keep the old
++     * struct so that it is resurrected at the right level.
++     * This is partly because when an array/scalar value is set
++     * and the parameter used to be the other sort, unsetparam()
++     * is called.  Beyond that, there is an ambiguity:  should
++     * foo() { local bar; unset bar; } make the global bar
++     * available or not?  The following makes the answer "no".
++     *
++     * Some specials, such as those used in zle, still need removing
++     * from the parameter table; they have the PM_REMOVABLE flag.
++     */
++    if ((locallevel && locallevel >= pm->level) ||
++	(pm->flags & (PM_SPECIAL|PM_REMOVABLE)) == PM_SPECIAL)
+ 	return;
+ 
+-    paramtab->removenode(paramtab, pm->nam); /* remove parameter node from table */
++    /* remove parameter node from table */
++    paramtab->removenode(paramtab, pm->nam);
+ 
+     if (pm->old) {
+ 	oldpm = pm->old;
+ 	paramtab->addnode(paramtab, oldpm->nam, oldpm);
+-	if ((PM_TYPE(oldpm->flags) == PM_SCALAR) && oldpm->sets.cfn == strsetfn)
++	if ((PM_TYPE(oldpm->flags) == PM_SCALAR) &&
++	    oldpm->sets.cfn == strsetfn)
+ 	    adduserdir(oldpm->nam, oldpm->u.str, 0, 0);
+     }
+ 
+-    paramtab->freenode((HashNode) pm); /* free parameter node */
++    /* Even removable specials shouldn't be deleted. */
++    if (!(pm->flags & PM_SPECIAL))
++	paramtab->freenode((HashNode) pm); /* free parameter node */
+ }
+ 
+ /* Standard function to unset a parameter.  This is mostly delegated to *
+--- Src/zsh.h.unset	Thu Jan 28 17:58:23 1999
++++ Src/zsh.h	Fri Jan 29 17:33:20 1999
+@@ -922,6 +922,7 @@
+ #define PM_DONTIMPORT	(1<<14)	/* do not import this variable                */
+ #define PM_RESTRICTED	(1<<15) /* cannot be changed in restricted mode       */
+ #define PM_UNSET	(1<<16)	/* has null value                             */
++#define PM_REMOVABLE	(1<<17)	/* special can be removed from paramtab */
+ 
+ /* Flags for extracting elements of arrays and associative arrays */
+ #define SCANPM_WANTVALS   (1<<0)
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

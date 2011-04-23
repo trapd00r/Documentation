@@ -1,0 +1,141 @@
+From zsh-workers-return-5684-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Mar 08 14:47:13 1999
+Return-Path: <zsh-workers-return-5684-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4760 invoked from network); 8 Mar 1999 14:47:12 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 Mar 1999 14:47:12 -0000
+Received: (qmail 24899 invoked by alias); 8 Mar 1999 14:45:18 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5684
+Received: (qmail 24883 invoked from network); 8 Mar 1999 14:45:15 -0000
+Message-Id: <9903081427.AA23194@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: _tar, again
+In-Reply-To: "Peter Stephenson"'s message of "Mon, 08 Mar 1999 12:15:41 NFT."
+             <9903081115.AA35710@ibmth.df.unipi.it> 
+Date: Mon, 08 Mar 1999 15:27:31 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Peter Stephenson wrote:
+> - in principle, you can have combined short arguments like -xv or -cP or
+> whatever anywhere on the command line before the file list, so it probably
+> ought to check if it had no luck early on --- e.g. look for
+> -[[:alpha:]]#[cxturA]*
+
+actually, this was pretty much handled and I didn't notice.
+
+> - any --use-compress-program=*, or indeed --use-comp*, should get added to
+> $largs
+> 
+> - any --dir*=* should be changed to when completing archives and existing
+> files, which is another good argument for using absolute paths for $tf.
+
+actually, this should only be done for putting files inside the archive,
+not for the archive itself.
+
+This handles these and fixes some bugs: finding the archive didn't work if
+there were --*'s because it miscounted words; the files inside the archive
+were used even for creating an archive (if that was deliberate, there are
+probably better ways of persuading the user not to overwrite an existing
+archive).
+
+Minor gripes: in the listing, _long_options doesn't show the / after
+directories inside the archive as my original _tar did (that's why I stuck
+it on the end instead of treating it as a suffix); _path_files seems to
+have forgotten about noglobdots somehow.  Somehow my _match_pattern isn't
+having an effect on _multi_parts, but I suppose that's my problem.
+
+--- ./Completion/User/_tar.bak	Mon Mar  8 14:59:18 1999
++++ ./Completion/User/_tar	Mon Mar  8 15:24:06 1999
+@@ -16,7 +16,7 @@
+ emulate -LR zsh
+ setopt extendedglob
+ 
+-local _tar_cmd tf tmp
++local _tar_cmd tf tmp del
+ 
+ # First we collect in `_tar_cmd' single letter options describing what
+ # should be done with the archive and if it is compressed. This
+@@ -32,7 +32,19 @@
+ (( $words[(I)--list] ))          && _tar_cmd="t$_tar_cmd"
+ (( $words[(I)--(extract|get)] )) && _tar_cmd="x$_tar_cmd"
+ (( $words[(I)--create] ))        && _tar_cmd="c$_tar_cmd"
+-[[ "$words[2]" != -* ]]          && _tar_cmd="$words[2]$_tar_cmd"
++
++# Other ways of finding out what we're doing:  first
++# look in the first argument if it's not an option
++if [[ "$words[2]" = *[txcdruA]*~-* ]]; then
++  _tar_cmd="$words[2]$_tar_cmd"
++elif [[ $_tar_cmd != *[txcdruA]* && CURRENT -gt 2 ]]; then
++  # look for more obscure long options: these aren't all handled.
++  (( $words[(I)--(diff|compare)] )) && _tar_cmd="d$_tar_cmd"
++  (( $words[(I)--append] )) && _tar_cmd="r$_tar_cmd"
++  (( $words[(I)--update] )) && _tar_cmd="u$_tar_cmd"
++  (( $words[(I)--(con|)catenate] )) && _tar_cmd="A$_tar_cmd"
++  (( $words[(I)--delete] )) && del=1
++fi
+ 
+ # Next, we try to find the archive name and store it in `tf'. The name 
+ # is searched after a `--file=' long option, in the third word if the
+@@ -47,7 +59,7 @@
+   tf="$words[3]"
+   _tar_cmd="f$_tar_cmd"
+ else
+-  tmp="${${(@M)words:#-[^-]*}[(I)*f*]}"
++  tmp="${words[(I)-*f*~--*]}"
+   if (( tmp )); then
+     tf="$words[tmp+1]"
+     _tar_cmd="f$_tar_cmd"
+@@ -73,7 +85,7 @@
+ 
+   _tar_archive
+ 
+-elif [[ -n "$_tar_cmd" && -n "$tf" ]]; then
++elif [[ ( "$_tar_cmd" = *[xt]* || -n $del ) && -n "$tf" ]]; then
+ 
+   # ...and files from the archive if we found an archive name and tar
+   # commands. We run `tar t...' on the file, keeping the list of
+@@ -82,8 +94,15 @@
+ 
+   local largs=-tf
+ 
+-  [[ $_tar_cmd = *z* ]] && largs=-tzf
+-  [[ $_tar_cmd = *Z* ]] && largs=-tZf
++  if [[ $_tar_cmd = *z* ]]; then
++    largs=-tzf
++  elif [[ $_tar_cmd = *Z* ]]; then
++    largs=-tZf
++  else
++    # Some random compression program e.g. bzip2
++    tmp="${words[(r)--use-comp*]}"
++    [[ -n $tmp ]] && largs=($tmp -tf)
++  fi
+ 
+   if [[ $tf != $_tar_cache_name ]]; then
+     _tar_cache_list=("${(@f)$($words[1] $largs $tf)}")
+@@ -91,4 +110,16 @@
+   fi
+ 
+   _multi_parts / _tar_cache_list
++else
++  
++  # See if we should use a path prefix.  We have to use eval as the dir can
++  # be any unevaluated thing which appears on the command line, including a
++  # parameter.
++  tmp=${words[(r)--dir[a-z]#=*]}
++  if [[ -n $tmp ]]; then
++    eval "tmp=(${tmp#*=})"
++    _path_files -W tmp
++  else
++    _files
++  fi
+ fi
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

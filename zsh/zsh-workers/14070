@@ -1,0 +1,190 @@
+From zsh-workers-return-14070-mason-zsh=primenet.com.au@sunsite.dk Mon Apr 23 15:07:26 2001
+Return-Path: <zsh-workers-return-14070-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20224 invoked from network); 23 Apr 2001 15:07:24 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Apr 2001 15:07:24 -0000
+Received: (qmail 13272 invoked by alias); 23 Apr 2001 15:07:17 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14070
+Received: (qmail 13257 invoked from network); 23 Apr 2001 15:07:16 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010423150522.ZM12197@candle.brasslantern.com>
+Date: Mon, 23 Apr 2001 15:05:21 +0000
+In-Reply-To: <20010422224053.82020139C3@pwstephenson.fsnet.co.uk>
+Comments: In reply to Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+        "Re: PATCH: Array subscript documentation" (Apr 22, 11:40pm)
+References: <20010422224053.82020139C3@pwstephenson.fsnet.co.uk>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: Re: PATCH: Array subscript documentation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Apr 22, 11:40pm, Peter Stephenson wrote:
+} Subject: Re: PATCH: Array subscript documentation
+}
+} > +example(typeset -A aa
+} > +typeset "aa[one\"two\"three\"quotes]"=QQQ
+} > +print "$aa[one\"two\"three\"quotes]")
+} 
+} Unless there's something remaining uncommitted, the last line still
+} doesn't work. The assignment strips the backslashes, but the expansion
+} doesn't.
+
+Oh, dear.  When I tested this, I forgot to do the `typeset -A' first, so
+naturally it appeared to work because both strings evaluate to zero as
+arithmetic on an ordinary array.
+
+} I suppose that's because the Bnull's don't get stripped till after the
+} end of the parameter expansion. But I don't really understand.
+
+Dnulls, actually, and yes, that's exactly it.  Turns out getindex() needs
+to know whether it's being called from inside double quotes.  I'm going
+to commit the following patch, which fixes the bug above, and then look
+at ways to eliminate the extra strchr(), as the caller of getindex()
+ought to be equipped to supply this information.
+
+I was distracted for quite a while trying to fix this bug:
+
+% typeset -A aa
+% typeset "aa[one\"two\"three\"quotes]"=QQQ
+% print $aa[one"two"three"quotes]"
+QQQ
+
+Note in the print line, that the quotes are balanced but that the fourth
+quote is outside the brackets.  This should be a parse error.  However,
+this bug is present in 4.0.1-pre-2 and other earlier versions of zsh, so
+I eventually gave up on it.
+
+Incidentally, an extra thank you goes to everyone who contributed to the 
+test suite, especially PWS and Sven.  I wouldn't have been willing/able
+to fiddle with this whole subscripting issue if there hadn't been a way
+to thoroughly check that I wasn't breaking a vital bit of shell parsing.
+
+diff -ru -x CVS zsh-forge/current/Src/lex.c zsh-4.0/Src/lex.c
+--- zsh-forge/current/Src/lex.c	Sat Apr 21 11:40:35 2001
++++ zsh-4.0/Src/lex.c	Sun Apr 22 20:58:02 2001
+@@ -1305,7 +1305,8 @@
+ 		    c == endchar || c == '`' ||
+ 		    (endchar == ']' && (c == '[' || c == ']' ||
+ 					c == '(' || c == ')' ||
+-					c == '{' || c == '}')))
++					c == '{' || c == '}' ||
++					(c == '"' && sub))))
+ 		    add(Bnull);
+ 		else {
+ 		    /* lexstop is implicitly handled here */
+@@ -1390,7 +1391,7 @@
+ 		err = (!brct-- && math);
+ 	    break;
+ 	case '"':
+-	    if (intick || endchar == ']' || (!endchar && !bct))
++	    if (intick || ((endchar == ']' || !endchar) && !bct))
+ 		break;
+ 	    if (bct) {
+ 		add(Dnull);
+@@ -1463,7 +1464,7 @@
+ 
+ /**/
+ mod_export char *
+-parse_subscript(char *s)
++parse_subscript(char *s, int sub)
+ {
+     int l = strlen(s), err;
+     char *t;
+@@ -1477,7 +1478,7 @@
+     len = 0;
+     bptr = tokstr = s;
+     bsiz = l + 1;
+-    err = dquote_parse(']', 1);
++    err = dquote_parse(']', sub);
+     if (err) {
+ 	err = *bptr;
+ 	*bptr = 0;
+diff -ru -x CVS zsh-forge/current/Src/params.c zsh-4.0/Src/params.c
+--- zsh-forge/current/Src/params.c	Sun Apr 22 11:43:22 2001
++++ zsh-4.0/Src/params.c	Mon Apr 23 07:46:42 2001
+@@ -785,7 +785,7 @@
+ 	return 0;
+ 
+     /* Require balanced [ ] pairs with something between */
+-    if (!(ss = parse_subscript(++ss)))
++    if (!(ss = parse_subscript(++ss, 1)))
+ 	return 0;
+     untokenize(s);
+     return !ss[1];
+@@ -922,18 +922,18 @@
+     for (t = s, i = 0;
+ 	 (c = *t) && ((c != Outbrack &&
+ 		       (ishash || c != ',')) || i); t++) {
+-	/* Untokenize INULL() except before brackets, for parsestr() */
++	/* Untokenize INULL() except before brackets and double-quotes */
+ 	if (INULL(c)) {
+ 	    c = t[1];
+ 	    if (c == '[' || c == ']' ||
+ 		c == '(' || c == ')' ||
+ 		c == '{' || c == '}') {
+ 		/* This test handles nested subscripts in hash keys */
+-		if (ishash && i)
++		if (ishash && i)
+ 		    *t = ztokens[*t - Pound];
+ 		needtok = 1;
+ 		++t;
+-	    } else
++	    } else if (c != '"')
+ 		*t = ztokens[*t - Pound];
+ 	    continue;
+ 	}
+@@ -1181,16 +1181,17 @@
+ {
+     int start, end, inv = 0;
+     char *s = *pptr, *tbrack;
++    int dq = !!strchr(s, Dnull);
+ 
+     *s++ = '[';
+-    s = parse_subscript(s);	/* Error handled after untokenizing */
++    s = parse_subscript(s, dq);	/* Error handled after untokenizing */
+     /* Now we untokenize everthing except INULL() markers so we can check *
+      * for the '*' and '@' special subscripts.  The INULL()s are removed  *
+      * in getarg() after we know whether we're doing reverse indexing.    */
+     for (tbrack = *pptr + 1; *tbrack && tbrack != s; tbrack++) {
+ 	if (INULL(*tbrack) && !*++tbrack)
+ 	    break;
+-	if (itok(*tbrack))
++	if (itok(*tbrack))	/* Need to check for Nularg here? */
+ 	    *tbrack = ztokens[*tbrack - Pound];
+     }
+     /* If we reached the end of the string (s == NULL) we have an error */
+diff -ru -x CVS zsh-forge/current/Test/D06subscript.ztst zsh-4.0/Test/D06subscript.ztst
+--- zsh-forge/current/Test/D06subscript.ztst	Sun Apr 22 11:43:22 2001
++++ zsh-4.0/Test/D06subscript.ztst	Sun Apr 22 21:44:07 2001
+@@ -145,3 +145,18 @@
+ 0:Associative array keys interpreted as patterns
+ >\2 backcbrack cbrack star
+ >\\\4 \\\? star zounds
++
++  typeset "A[one\"two\"three\"quotes]"=QQQ
++  typeset 'A[one\"two\"three\"quotes]'=qqq
++  print -R "$A[one\"two\"three\"quotes]"
++  print -R $A[one\"two\"three\"quotes]
++  A[one"two"three"four"quotes]=QqQq
++  print -R $A[one"two"three"four"quotes]
++  print -R $A[$A[(i)one\"two\"three\"quotes]]
++  print -R "$A[$A[(i)one\"two\"three\"quotes]]"
++0:Associative array keys with double quotes
++>QQQ
++>qqq
++>QqQq
++>qqq
++>QQQ
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

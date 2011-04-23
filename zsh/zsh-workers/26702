@@ -1,0 +1,110 @@
+From zsh-workers-return-26702-mason-zsh=primenet.com.au@sunsite.dk Mon Mar 09 11:23:18 2009
+Return-Path: <zsh-workers-return-26702-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13087 invoked from network); 9 Mar 2009 11:23:14 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 9 Mar 2009 11:23:14 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 81177 invoked from network); 9 Mar 2009 11:23:06 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 9 Mar 2009 11:23:06 -0000
+Received: (qmail 28851 invoked by alias); 9 Mar 2009 11:22:56 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 26702
+Received: (qmail 28834 invoked from network); 9 Mar 2009 11:22:55 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 9 Mar 2009 11:22:55 -0000
+Received: from cluster-g.mailcontrol.com (cluster-g.mailcontrol.com [208.87.233.190])
+	by bifrost.dotsrc.org (Postfix) with ESMTPS id 1483280307F8
+	for <zsh-workers@sunsite.dk>; Mon,  9 Mar 2009 12:22:50 +0100 (CET)
+Received: from cameurexb01.EUROPE.ROOT.PRI ([193.128.72.68])
+	by rly21g.srv.mailcontrol.com (MailControl) with ESMTP id n29BMksR002894
+	for <zsh-workers@sunsite.dk>; Mon, 9 Mar 2009 11:22:47 GMT
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.3959);
+	 Mon, 9 Mar 2009 11:22:46 +0000
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.14.2/8.13.4) with ESMTP id n29BMjSc017100
+	for <zsh-workers@sunsite.dk>; Mon, 9 Mar 2009 11:22:46 GMT
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.14.2/8.14.2/Submit) with ESMTP id n29BMjFF017096
+	for <zsh-workers@sunsite.dk>; Mon, 9 Mar 2009 11:22:45 GMT
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: Seg. fault in chpwd hook in a widget
+X-Mailer: MH-E 8.0.3; nmh 1.3; GNU Emacs 22.1.1
+Date: Mon, 09 Mar 2009 11:22:45 +0000
+Message-ID: <17095.1236597765@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 09 Mar 2009 11:22:46.0235 (UTC) FILETIME=[5F1BE2B0:01C9A0A9]
+X-Scanned-By: MailControl A_08_51_00 (www.mailcontrol.com) on 10.71.0.131
+X-Virus-Scanned: ClamAV 0.92.1/9080/Fri Mar  6 20:13:38 2009 on bifrost
+X-Virus-Status: Clean
+
+Just had a look at the Sourforge bug tracker, which normally I don't
+have time to do (please feel free to forward things to the list if you
+notice anything there which appears to be reproducible and hasn't been
+fixed); issue 2338948 is this:
+
+https://sourceforge.net/tracker/index.php?func=detail&aid=2338948&group_id=4068&atid=104068
+
+This is an interesting interaction of different levels of the shell.  I
+think a key part of it is the "source".  It seems that hbegin() in here
+is trashing the current history line chline.  It seems to me that we
+should only be calling hbegin() after a lexsave(), to protect against
+this, and there appears to be nothing in the call to loop() from
+source() that does that.
+
+I'm quite surpsised we've never seen anything like this before; there
+seems to be no protection against chline being trashed by any old
+"source" or "." that comes along.  As far as I can see, lexsave() is the
+only way of doing this.  I think the answer is that most of the time the
+history mechanism has exited by this time, so chline is already NULL and
+its friends aren't being used.
+
+Obviously any alternative opinions would be useful.  Currently that
+means Bart, but both of us would be very interested in getting new
+apprentice source code gurus...
+
+(I wonder if there's a more efficient way of saving and restoring lexical
+context?  It would imply lexical variables being accessed by pointers,
+so the answer may well be "no".)
+
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.99
+diff -u -r1.99 init.c
+--- Src/init.c	19 Feb 2009 10:12:39 -0000	1.99
++++ Src/init.c	9 Mar 2009 11:07:31 -0000
+@@ -105,6 +105,8 @@
+     Eprog prog;
+ 
+     pushheap();
++    if (!toplevel)
++	lexsave();
+     for (;;) {
+ 	freeheap();
+ 	if (stophist == 3)	/* re-entry via preprompt() */
+@@ -199,6 +201,8 @@
+ 	if (justonce)
+ 	    break;
+     }
++    if (!toplevel)
++	lexrestore();
+     popheap();
+ }
+ 
+
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+

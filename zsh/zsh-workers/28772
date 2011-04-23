@@ -1,0 +1,803 @@
+From zsh-workers-return-28772-mason-zsh=primenet.com.au@zsh.org Fri Feb 18 21:53:57 2011
+Return-Path: <zsh-workers-return-28772-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2710 invoked by alias); 18 Feb 2011 21:53:57 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28772
+Received: (qmail 28856 invoked from network); 18 Feb 2011 21:53:43 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.58 as permitted sender)
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@zsh.org (Zsh hackers list)
+Subject: PATCH: update region highlighting as line changes
+X-Mailer: MH-E 8.2; nmh 1.3; GNU Emacs 23.2.1
+Date: Fri, 18 Feb 2011 21:20:44 +0000
+Message-ID: <8161.1298064044@pws-pc.ntlworld.com>
+X-Cloudmark-Analysis: v=1.1 cv=JvdXmxIgLJv2/GthKqHpGJEEHukvLcvELVXUanXFreg= c=1 sm=0 a=9wmhdeG116QA:10 a=NLZqzBF-AAAA:8 a=lSRiqKFOouJ9QG1fHRgA:9 a=Us2g7lKm6ldW7jR7PqYA:7 a=3F7iviGg7CoM5LXqGy8iptymNjMA:4 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+This makes an attempt to keep the highlighted regions set by the zle
+special parameter $region_highlight in sync as the line changes.  The
+basics seem to be working.  The region is sticky: if you extend it in
+front or at the back the region grows.  This can be made optional later
+if necessary.
+
+Things I haven't done:
+
+- Remove entries from the array if the region shrinks to zero or is cut
+entirely.  This would probably be sensible.
+
+- Remove entries from the array if the line changes wholesale, e.g. you
+move up and down in the history.  This also seems sensible.  One day 
+it might be possible to retain the highlighting as you move through the
+history in the same way it already remembers edits on other history
+lines until you hit return.
+
+- Look at ZLE function widgets to see if they can be made more aware of
+how much of the line is changing.  If you simply replace LBUFFER and
+RBUFFER it's hard to know how to update the highlighted regions.
+I think we'd need a smarter way of updating stuff around the cursor.
+You can do it just by invoking zle widgets but it's not as convenient.
+Maybe simply using the normal delete and insert functions to resize
+the buffer before or after the cursor would help a lot.
+
+- Add undo control for the highlighting.  It already works for undoing
+inserts and deletions, the only thing that doesn't work is undoing the
+highlighting itself and I think that would be a bit over the top.
+
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.90
+diff -p -u -r1.90 zle.yo
+--- Doc/Zsh/zle.yo	17 Dec 2010 17:10:48 -0000	1.90
++++ Doc/Zsh/zle.yo	18 Feb 2011 21:04:54 -0000
+@@ -842,10 +842,7 @@ specifies that the first twenty characte
+ any predisplay string should be highlighted in bold.
+ 
+ Note that the effect of tt(region_highlight) is not saved and disappears
+-as soon as the line is accepted.  The line editor makes no attempt to
+-keep the highlighting effect synchronised with the line as it is edited;
+-hence region highlighting is best limited to static effects within
+-user widgets.
++as soon as the line is accepted.
+ )
+ vindex(WIDGET)
+ item(tt(WIDGET) (scalar))(
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.104
+diff -p -u -r1.104 compcore.c
+--- Src/Zle/compcore.c	14 Dec 2010 10:35:39 -0000	1.104
++++ Src/Zle/compcore.c	18 Feb 2011 21:04:54 -0000
+@@ -1395,8 +1395,6 @@ set_comp_sep(void)
+     LinkNode n;
+     /* Save word position */
+     int owe = we, owb = wb;
+-    /* Save cursor position and line length */
+-    int ocs, oll;
+     /*
+      * Values of word beginning and end and cursor after subtractions
+      * due to separators.   I think these are indexes into zlemetaline,
+@@ -1481,8 +1479,7 @@ set_comp_sep(void)
+ 
+     /* Put the string in the lexer buffer and call the lexer to *
+      * get the words we have to expand.                        */
+-    ocs = zlemetacs;
+-    oll = zlemetall;
++    zle_save_positions();
+     ol = zlemetaline;
+     addedx = 1;
+     noerrs = 1;
+@@ -1639,9 +1636,8 @@ set_comp_sep(void)
+     lexrestore();
+     wb = owb;
+     we = owe;
+-    zlemetacs = ocs;
+     zlemetaline = ol;
+-    zlemetall = oll;
++    zle_restore_positions();
+     if (cur < 0 || i < 1)
+ 	return 1;
+     owb = offs;
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.79
+diff -p -u -r1.79 compresult.c
+--- Src/Zle/compresult.c	15 Aug 2010 18:40:06 -0000	1.79
++++ Src/Zle/compresult.c	18 Feb 2011 21:04:54 -0000
+@@ -698,8 +698,10 @@ hasbrpsfx(Cmatch m, char *pre, char *suf
+     {
+ 	char *op = lastprebr, *os = lastpostbr;
+ 	VARARR(char, oline, zlemetall);
+-	int oll = zlemetall, ocs = zlemetacs, ole = lastend, opcs = brpcs, oscs = brscs, ret;
++	int oll = zlemetall, newll, ole = lastend;
++	int opcs = brpcs, oscs = brscs, ret;
+ 
++	zle_save_positions();
+ 	memcpy(oline, zlemetaline, zlemetall);
+ 
+ 	lastprebr = lastpostbr = NULL;
+@@ -710,7 +712,10 @@ hasbrpsfx(Cmatch m, char *pre, char *suf
+ 	foredel(zlemetall, CUT_RAW);
+ 	spaceinline(oll);
+ 	memcpy(zlemetaline, oline, oll);
+-	zlemetacs = ocs;
++	/* we do not want to restore zlemetall */
++	newll = zlemetall;
++	zle_restore_positions();
++	zlemetall = newll;
+ 	lastend = ole;
+ 	brpcs = opcs;
+ 	brscs = oscs;
+Index: Src/Zle/zle.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle.h,v
+retrieving revision 1.42
+diff -p -u -r1.42 zle.h
+--- Src/Zle/zle.h	22 Mar 2010 19:49:07 -0000	1.42
++++ Src/Zle/zle.h	18 Feb 2011 21:04:54 -0000
+@@ -385,6 +385,47 @@ enum suffixflags {
+     SUFFLAGS_SPACE = 0x0001	/* Add a space when removing suffix */
+ };
+ 
++
++/* Flags for the region_highlight structure */
++enum {
++    /* Offsets include predisplay */
++    ZRH_PREDISPLAY = 1
++};
++
++/*
++ * Attributes used for highlighting regions.
++ * and mark.
++ */
++struct region_highlight {
++    /* Attributes turned on in the region */
++    int atr;
++    /* Start of the region */
++    int start;
++    /* Start of the region in metafied ZLE line */
++    int start_meta;
++    /*
++     * End of the region:  position of the first character not highlighted
++     * (the same system as for point and mark).
++     */
++    int end;
++    /* End of the region in metafied ZLE line */
++    int end_meta;
++    /*
++     * Any of the flags defined above.
++     */
++    int flags;
++};
++
++/*
++ * Count of special uses of region highlighting, which account
++ * for the first few elements of region_highlights.
++ * 0: region between point and mark
++ * 1: isearch region
++ * 2: suffix
++ */
++#define N_SPECIAL_HIGHLIGHTS	(3)
++
++
+ #ifdef MULTIBYTE_SUPPORT
+ /*
+  * We use a wint_t here, since we need an invalid character as a
+@@ -420,15 +461,28 @@ typedef REFRESH_ELEMENT *REFRESH_STRING;
+ 
+ 
+ #if defined(MULTIBYTE_SUPPORT) && defined(__STDC_ISO_10646__)
++/*
++ * With ISO 10646 there is a private range defined within
++ * the encoding.  We use this for storing single-byte
++ * characters in sections of strings that wouldn't convert to wide
++ * characters.  This allows to preserve the string when transformed
++ * back to multibyte strings.
++ */
++
++/* The start of the private range we use, for 256 characters */
+ #define ZSH_INVALID_WCHAR_BASE	(0xe000U)
++/* Detect a wide character within our range */
+ #define ZSH_INVALID_WCHAR_TEST(x)			\
+     ((unsigned)(x) >= ZSH_INVALID_WCHAR_BASE &&		\
+      (unsigned)(x) <= (ZSH_INVALID_WCHAR_BASE + 255u))
++/* Turn a wide character in that range back to single byte */
+ #define ZSH_INVALID_WCHAR_TO_CHAR(x)			\
+     ((char)((unsigned)(x) - ZSH_INVALID_WCHAR_BASE))
++/* Turn a wide character in that range to an integer */
+ #define ZSH_INVALID_WCHAR_TO_INT(x)			\
+     ((int)((unsigned)(x) - ZSH_INVALID_WCHAR_BASE))
+-#define ZSH_CHAR_TO_INVALID_WCHAR(x)		\
++/* Turn a single byte character into a private wide character */
++#define ZSH_CHAR_TO_INVALID_WCHAR(x)			\
+     ((wchar_t)(STOUC(x) + ZSH_INVALID_WCHAR_BASE))
+ #endif
+ 
+Index: Src/Zle/zle_refresh.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_refresh.c,v
+retrieving revision 1.84
+diff -p -u -r1.84 zle_refresh.c
+--- Src/Zle/zle_refresh.c	17 Dec 2010 23:05:31 -0000	1.84
++++ Src/Zle/zle_refresh.c	18 Feb 2011 21:04:54 -0000
+@@ -210,50 +210,21 @@ int predisplaylen, postdisplaylen;
+ 
+ static int default_atr_on, special_atr_on;
+ 
+-/* Flags for the region_highlight structure */
+-enum {
+-    /* Offsets include predisplay */
+-    ZRH_PREDISPLAY = 1
+-};
+-
+-/*
+- * Attributes used for highlighting regions.
+- * and mark.
+- */
+-struct region_highlight {
+-    /* Attributes turned on in the region */
+-    int atr;
+-    /* Start of the region */
+-    int start;
+-    /*
+-     * End of the region:  position of the first character not highlighted
+-     * (the same system as for point and mark).
+-     */
+-    int end;
+-    /*
+-     * Any of the flags defined above.
+-     */
+-    int flags;
+-};
+ /*
+  * Array of region highlights, no special termination.
+  * The first element (0) always describes the region between
+  * point and mark.  Any other elements are set by the user
+  * via the parameter region_highlight.
+  */
++
++/**/
+ struct region_highlight *region_highlights;
+-/*
+- * Count of special uses of region highlighting, which account
+- * for the first few elements of region_highlights.
+- * 0: region between point and mark
+- * 1: isearch region
+- * 2: suffix
+- */
+-#define N_SPECIAL_HIGHLIGHTS	(3)
++
+ /*
+  * Number of elements in region_highlights.
+  * This includes the special elements above.
+  */
++/**/
+ int n_region_highlights;
+ 
+ /*
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_tricky.c,v
+retrieving revision 1.104
+diff -p -u -r1.104 zle_tricky.c
+--- Src/Zle/zle_tricky.c	14 Dec 2010 10:35:39 -0000	1.104
++++ Src/Zle/zle_tricky.c	18 Feb 2011 21:04:54 -0000
+@@ -2675,14 +2675,13 @@ int
+ doexpandhist(void)
+ {
+     char *ol;
+-    int oll, ocs, ne = noerrs, err, ona = noaliases;
++    int ne = noerrs, err, ona = noaliases;
+ 
+     UNMETACHECK();
+ 
+     pushheap();
+     metafy_line();
+-    oll = zlemetall;
+-    ocs = zlemetacs;
++    zle_save_positions();
+     ol = dupstring(zlemetaline);
+     expanding = 1;
+     excs = zlemetacs;
+@@ -2725,8 +2724,7 @@ doexpandhist(void)
+     }
+ 
+     strcpy(zlemetaline, ol);
+-    zlemetall = oll;
+-    zlemetacs = ocs;
++    zle_restore_positions();
+     unmetafy_line();
+ 
+     popheap();
+Index: Src/Zle/zle_utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_utils.c,v
+retrieving revision 1.58
+diff -p -u -r1.58 zle_utils.c
+--- Src/Zle/zle_utils.c	11 Feb 2011 19:32:21 -0000	1.58
++++ Src/Zle/zle_utils.c	18 Feb 2011 21:04:55 -0000
+@@ -179,6 +179,8 @@ zlecharasstring(ZLE_CHAR_T inchar, char 
+  * string length, without the NULL byte.
+  *
+  * If outcsp is non-NULL, assign the new character position.
++ * If outcsp is &zlemetacs, update the positions in the region_highlight
++ * array, too.  This is a bit of a hack.
+  *
+  * If useheap is 1, memory is returned from the heap, else is allocated
+  * for later freeing.
+@@ -190,6 +192,7 @@ zlelineasstring(ZLE_STRING_T instr, int 
+ 		int *outcsp, int useheap)
+ {
+     int outcs, outll;
++    struct region_highlight *rhp;
+ 
+ #ifdef MULTIBYTE_SUPPORT
+     char *s;
+@@ -201,9 +204,22 @@ zlelineasstring(ZLE_STRING_T instr, int 
+ 
+     outcs = 0;
+     memset(&mbs, 0, sizeof(mbs));
+-    for (i=0; i < inll; i++, incs--) {
++    for (i=0; i < inll; i++) {
+ 	if (incs == 0)
+ 	    outcs = mb_len;
++	incs--;
++	if (region_highlights && outcsp == &zlemetacs) {
++	    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++		 rhp < region_highlights + n_region_highlights;
++		 rhp++) {
++		if (rhp->start == 0)
++		    rhp->start_meta = mb_len;
++		rhp->start--;
++		if (rhp->end == 0)
++		    rhp->end_meta = mb_len;
++		rhp->end--;
++	    }
++	}
+ #ifdef __STDC_ISO_10646__
+ 	if (ZSH_INVALID_WCHAR_TEST(instr[i])) {
+ 	    s[mb_len++] = ZSH_INVALID_WCHAR_TO_CHAR(instr[i]);
+@@ -222,12 +238,30 @@ zlelineasstring(ZLE_STRING_T instr, int 
+     }
+     if (incs == 0)
+ 	outcs = mb_len;
++    if (region_highlights && outcsp == &zlemetacs) {
++	for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++	     rhp < region_highlights + n_region_highlights;
++	     rhp++) {
++	    if (rhp->start == 0)
++		rhp->start_meta = mb_len;
++	    if (rhp->end == 0)
++		rhp->end_meta = mb_len;
++	}
++    }
+     s[mb_len] = '\0';
+ 
+     outll = mb_len;
+ #else
+     outll = inll;
+     outcs = incs;
++    if (region_highlights && outcsp == &zlemetacs) {
++	for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++	     rhp < region_highlights + n_region_highlights;
++	     rhp++) {
++	    rhp->start_meta = rhp->start;
++	    rhp->end_meta = rhp->end;
++	}
++    }
+ #endif
+ 
+     /*
+@@ -243,11 +277,33 @@ zlelineasstring(ZLE_STRING_T instr, int 
+ #endif
+ 	char *stopcs = strp + outcs;
+ 	char *stopll = strp + outll;
++	char *startp = strp;
+ 
++	if (region_highlights && outcsp == &zlemetacs) {
++	    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++		 rhp < region_highlights + n_region_highlights;
++		 rhp++) {
++		/* Used as temporary storage */
++		rhp->start = rhp->start_meta;
++		rhp->end = rhp->end_meta;
++	    }
++	}
+ 	while (strp < stopll) {
+ 	    if (imeta(*strp)) {
+ 		if (strp < stopcs)
+ 		    outcs++;
++		if (region_highlights && outcsp == &zlemetacs) {
++		    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++			 rhp < region_highlights + n_region_highlights;
++			 rhp++) {
++			if (strp < startp + rhp->start) {
++			    rhp->start_meta++;
++			}
++			if (strp < startp + rhp->end) {
++			    rhp->end_meta++;
++			}
++		    }
++		}
+ 		outll++;
+ 	    }
+ 	    strp++;
+@@ -290,6 +346,9 @@ zlelineasstring(ZLE_STRING_T instr, int 
+  * each metafied character) is converted into the corresponding
+  * character position in *outcs.
+  *
++ * If, further, outcs is &zlecs, we update the positions in the
++ * region_highlight array, too.  (This is a bit of a hack.)
++ *
+  * Note that instr is modified in place, hence should be copied
+  * first if necessary;
+  *
+@@ -304,6 +363,7 @@ stringaszleline(char *instr, int incs, i
+ {
+     ZLE_STRING_T outstr;
+     int ll, sz;
++    struct region_highlight *rhp;
+ #ifdef MULTIBYTE_SUPPORT
+     mbstate_t mbs;
+ #endif
+@@ -316,10 +376,32 @@ stringaszleline(char *instr, int incs, i
+ 	 * is all the processing required to calculate outcs.
+ 	 */
+ 	char *inptr = instr, *cspos = instr + incs;
+-	while (*inptr && inptr < cspos) {
++	if (region_highlights && outcs == &zlecs) {
++	    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++		 rhp < region_highlights + n_region_highlights;
++		 rhp++) {
++		rhp->start = rhp->start_meta;
++		rhp->end = rhp->end_meta;
++	    }
++	}
++	while (*inptr) {
+ 	    if (*inptr == Meta) {
++		if (inptr < cspos) {
++		    incs--;
++		}
++		if (region_highlights && outcs == &zlecs) {
++		    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++			 rhp < region_highlights + n_region_highlights;
++			 rhp++) {
++			if (inptr - instr < rhp->start) {
++			    rhp->start_meta--;
++			}
++			if (inptr - instr < rhp->end) {
++			    rhp->end_meta--;
++			}
++		    }
++		}
+ 		inptr++;
+-		incs--;
+ 	    }
+ 	    inptr++;
+ 	}
+@@ -385,6 +467,20 @@ stringaszleline(char *instr, int incs, i
+ 		int offs = inptr - instr;
+ 		if (offs <= incs && incs < offs + (int)cnt)
+ 		    *outcs = outptr - outstr;
++		if (region_highlights && outcs == &zlecs) {
++		    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++			 rhp < region_highlights + n_region_highlights;
++			 rhp++) {
++			if (offs <= rhp->start_meta &&
++			    rhp->start_meta < offs + (int)cnt) {
++			    rhp->start = outptr - outstr;
++			}
++			if (offs <= rhp->end_meta &&
++			    rhp->end_meta < offs + (int)cnt) {
++			    rhp->end = outptr - outstr;
++			}
++		    }
++		}
+ 	    }
+ 
+ 	    inptr += cnt;
+@@ -404,6 +500,14 @@ stringaszleline(char *instr, int incs, i
+     *outll = ll;
+     if (outcs)
+ 	*outcs = incs;
++    if (region_highlights && outcs == &zlecs) {
++	for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++	     rhp < region_highlights + n_region_highlights;
++	     rhp++) {
++	    rhp->start = rhp->start_meta;
++	    rhp->end = rhp->end_meta;
++	}
++    }
+ #endif
+ 
+     return outstr;
+@@ -432,6 +536,158 @@ zlegetline(int *ll, int *cs)
+ }
+ 
+ 
++/* Forward reference */
++struct zle_region;
++
++/* A non-special entry in region_highlight */
++struct zle_region  {
++    struct zle_region *next;
++    /* Entries of region_highlight, as needed */
++    int atr;
++    int start;
++    int end;
++    int flags;
++};
++
++/* Forward reference */
++struct zle_position;
++
++/* A saved set of position information */
++struct zle_position {
++    /* Link pointer */
++    struct zle_position *next;
++    /* Cursor position */
++    int cs;
++    /* Mark */
++    int mk;
++    /* Line length */
++    int ll;
++    struct zle_region *regions;
++};
++
++/* LIFO stack of positions */
++struct zle_position *zle_positions;
++
++/*
++ * Save positions including cursor, end-of-line and
++ * (non-special) region highlighting.
++ *
++ * Must be matched by a subsequent zle_restore_positions().
++ */
++
++/**/
++void
++zle_save_positions(void)
++{
++    struct region_highlight *rhp;
++    struct zle_position *newpos;
++    struct zle_region **newrhpp, *newrhp;
++
++    newpos = (struct zle_position *)zalloc(sizeof(*newpos));
++
++    newpos->mk = mark;
++    if (zlemetaline) {
++	/* Use metafied information */
++	newpos->cs = zlemetacs;
++	newpos->ll = zlemetall;
++    } else {
++	/* Use unmetafied information */
++	newpos->cs = zlecs;
++	newpos->ll = zlell;
++
++    }
++
++    newrhpp = &newpos->regions;
++    *newrhpp = NULL;
++    if (region_highlights) {
++	for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++	     rhp < region_highlights + n_region_highlights;
++	     rhp++) {
++	    /*
++	     * This is a FIFO stack, so we preserve the order
++	     * of entries when we restore region_highlights.
++	     */
++	    newrhp = *newrhpp = (struct zle_region *)zalloc(sizeof(**newrhpp));
++	    newrhp->next = NULL;
++	    newrhp->atr = rhp->atr;
++	    newrhp->flags = rhp->flags;
++	    if (zlemetaline) {
++		newrhp->start = rhp->start_meta;
++		newrhp->end = rhp->end_meta;
++	    } else {
++		newrhp->start = rhp->start;
++		newrhp->end = rhp->end;
++	    }
++	    newrhpp = &newrhp->next;
++	}
++    }
++
++    newpos->next = zle_positions;
++    zle_positions = newpos;
++}
++
++/*
++ * Restore positions previously saved.
++ * Relies on zlemetaline being restored correctly beforehand,
++ * so that it can tell whether to use metafied positions or not.
++ */
++
++/**/
++void
++zle_restore_positions(void)
++{
++    struct zle_position *oldpos = zle_positions;
++    struct zle_region *oldrhp;
++    struct region_highlight *rhp;
++    int nreg;
++
++    zle_positions = oldpos->next;
++
++    mark = oldpos->mk;
++    if (zlemetaline) {
++	/* Use metafied information */
++	zlemetacs = oldpos->cs;
++	zlemetall = oldpos->ll;
++    } else {
++	/* Use unmetafied information */
++	zlecs = oldpos->cs;
++	zlell = oldpos->ll;
++    }
++
++    /* Count number of regions and see if the array needs resizing */
++    for (nreg = 0, oldrhp = oldpos->regions;
++	 oldrhp;
++	 nreg++, oldrhp = oldrhp->next)
++	;
++    if (nreg + N_SPECIAL_HIGHLIGHTS != n_region_highlights) {
++	n_region_highlights = nreg + N_SPECIAL_HIGHLIGHTS;
++	region_highlights = (struct region_highlight *)
++	    zrealloc(region_highlights,
++		     sizeof(struct region_highlight) * n_region_highlights);
++    }
++    oldrhp = oldpos->regions;
++    rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++    while (oldrhp) {
++	struct zle_region *nextrhp = oldrhp->next;
++
++	rhp->atr = oldrhp->atr;
++	rhp->flags = oldrhp->flags;
++	if (zlemetaline) {
++	    rhp->start_meta = oldrhp->start;
++	    rhp->end_meta = oldrhp->end;
++	} else {
++	    rhp->start = oldrhp->start;
++	    rhp->end = oldrhp->end;
++	}
++
++	zfree(oldrhp, sizeof(*oldrhp));
++	oldrhp = nextrhp;
++	rhp++;
++    }
++
++    zfree(oldpos, sizeof(*oldpos));
++}
++
+ /*
+  * Basic utility functions for adding to line or removing from line.
+  * At this level the counts supplied are raw character counts, so
+@@ -450,6 +706,7 @@ mod_export void
+ spaceinline(int ct)
+ {
+     int i;
++    struct region_highlight *rhp;
+ 
+     if (zlemetaline) {
+ 	sizeline(ct + zlemetall);
+@@ -460,6 +717,19 @@ spaceinline(int ct)
+ 
+ 	if (mark > zlemetacs)
+ 	    mark += ct;
++
++	if (region_highlights) {
++	    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++		 rhp < region_highlights + n_region_highlights;
++		 rhp++) {
++		if (rhp->start_meta >= zlemetacs) {
++		    rhp->start_meta += ct;
++		}
++		if (rhp->end_meta >= zlemetacs) {
++		    rhp->end_meta += ct;
++		}
++	    }
++	}
+     } else {
+ 	sizeline(ct + zlell);
+ 	for (i = zlell; --i >= zlecs;)
+@@ -469,26 +739,85 @@ spaceinline(int ct)
+ 
+ 	if (mark > zlecs)
+ 	    mark += ct;
++
++	if (region_highlights) {
++	    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++		 rhp < region_highlights + n_region_highlights;
++		 rhp++) {
++		if (rhp->start >= zlecs) {
++		    rhp->start += ct;
++		}
++		if (rhp->end >= zlecs) {
++		    rhp->end += ct;
++		}
++	    }
++	}
+     }
+     region_active = 0;
+ }
+ 
++/*
++ * Within the ZLE line, cut the "cnt" characters from position "to".
++ */
++
+ /**/
+ void
+ shiftchars(int to, int cnt)
+ {
++    struct region_highlight *rhp;
++
+     if (mark >= to + cnt)
+ 	mark -= cnt;
+     else if (mark > to)
+ 	mark = to;
+ 
+     if (zlemetaline) {
++	/* before to is updated... */
++	if (region_highlights) {
++	    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++		 rhp < region_highlights + n_region_highlights;
++		 rhp++) {
++		if (rhp->start_meta > to) {
++		    if (rhp->start_meta > to + cnt)
++			rhp->start_meta -= cnt;
++		    else
++			rhp->start_meta = to;
++		}
++		if (rhp->end_meta > to) {
++		    if (rhp->end_meta > to + cnt)
++			rhp->end_meta -= cnt;
++		    else
++			rhp->end_meta = to;
++		}
++	    }
++	}
++
+ 	while (to + cnt < zlemetall) {
+ 	    zlemetaline[to] = zlemetaline[to + cnt];
+ 	    to++;
+ 	}
+ 	zlemetaline[zlemetall = to] = '\0';
+     } else {
++	/* before to is updated... */
++	if (region_highlights) {
++	    for (rhp = region_highlights + N_SPECIAL_HIGHLIGHTS;
++		 rhp < region_highlights + n_region_highlights;
++		 rhp++) {
++		if (rhp->start > to) {
++		    if (rhp->start > to + cnt)
++			rhp->start -= cnt;
++		    else
++			rhp->start = to;
++		}
++		if (rhp->end > to) {
++		    if (rhp->end > to + cnt)
++			rhp->end -= cnt;
++		    else
++			rhp->end = to;
++		}
++	    }
++	}
++
+ 	while (to + cnt < zlell) {
+ 	    zleline[to] = zleline[to + cnt];
+ 	    to++;
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

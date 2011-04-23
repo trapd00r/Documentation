@@ -1,0 +1,270 @@
+From zsh-workers-return-6152-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Apr 29 09:38:11 1999
+Return-Path: <zsh-workers-return-6152-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16863 invoked from network); 29 Apr 1999 09:38:04 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 29 Apr 1999 09:38:04 -0000
+Received: (qmail 6334 invoked by alias); 29 Apr 1999 09:06:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6152
+Received: (qmail 6322 invoked from network); 29 Apr 1999 09:05:59 -0000
+Date: Thu, 29 Apr 1999 11:05:53 +0200 (MET DST)
+Message-Id: <199904290905.LAA19906@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Wed, 28 Apr 1999 17:00:43 +0200
+Subject: Re: completion in vared
+
+
+Peter Stephenson wrote:
+
+> Any thoughts about completion in vared?  Would it be possible to get it to
+> start completion with the context set to _value or _array_value, and
+> compstate[parameter] set?  (Maybe even a special compstate flag, but I'm
+> not particular about that and don't necessarily have a use for it.)
+
+I had thought about this some time ago, then forgot it again. And I 
+was mostly thinking about something like what Bart suggested, but...
+
+Well, I wouldn't like it to unconditionally set compstate[context] to
+(array_|)value because sometimes one might want to let the user edit a 
+command line which is then `eval'ed or something like that. Then
+normal command completion would be nice, of course.
+
+*But* we probably should allow the completion widget writer to find
+out that vared is active. So the patch below adds compstate[vared]
+which is set to the argument that is currently varedited. With that
+one could do (e.g. in the function for the -first- context):
+
+    if [[ -n $compstate[vared] ]]; then
+      if [[ $compstate[vared] = *\[* ]]; then
+        compstate[parameter]=${compstate[vared]%%\[*}
+        compstate[context]=value
+      else
+        compstate[parameter]=$compstate[vared]
+        if [[ ${(tP)compstate[vared]} = *(array|assoc)* ]]; then
+          compstate[context]=array_value
+        else
+          compstate[context]=value
+        fi
+      fi
+      return
+    fi
+
+to set up compstate accordingly. (This is another example of how a
+example _first function might be useful. Does anyone have one? Any
+other suggestions about what we might put there? (If I were to add it, 
+I would put everything in it in comments, not disturbing completion
+but explaining what can be done.))
+
+Are there other places where completion might get called from (other
+than normal line editing and vared)? If so, we should change the
+key/value to be able to reflect these other circumstances.
+
+But in reply to Bart: I, too, had thought about a special variable
+which is tested by the completion (shell-)code, and, if it is set,
+it's value is used as the name of the context to use. So I would put
+it into _complete and it would allow us to use the normal context-
+distribution and -definition mechanism. Hm, does this sound ok? Any
+suggestions for the name?
+
+Bye
+ Sven
+
+Sidenote: The code uses a mask to say which of the special completion
+          parameters should be set or unset. With compstate[vared] we
+	  have reached 32. If anyone comes up with an idea for another 
+	  key, I'll have to re-write a bit more of the code (seven
+	  bits can be freed, after that I would have to change even
+	  more).
+
+P.S.: The patch also contains two small fixes where I forgot to
+      include the mask for ISUFFIX. IF a function usetted that it
+      wasn't restored after function exit again (well, the value was
+      restored all right, but it didn't re-appear).
+
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Thu Apr 29 10:14:47 1999
++++ Src/Zle/comp.h	Thu Apr 29 10:24:33 1999
+@@ -331,7 +331,8 @@
+ #define CP_TOEND      (1 << 28)
+ #define CP_OLDLIST    (1 << 29)
+ #define CP_OLDINS     (1 << 30)
++#define CP_VARED      (1 << 31)
+ 
+-#define CP_NUM              31
++#define CP_NUM              32
+ 
+-#define CP_ALLMASK    ((int) ((((unsigned int) 1) << CP_NUM) - 1))
++#define CP_ALLMASK    ((unsigned int) 0xffffffff)
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Thu Apr 29 10:14:47 1999
++++ Src/Zle/comp1.c	Thu Apr 29 10:26:28 1999
+@@ -129,7 +129,8 @@
+      *complastprompt,
+      *comptoend,
+      *compoldlist,
+-     *compoldins;
++     *compoldins,
++     *compvared;
+ 
+ /**/
+ Param *comppms;
+@@ -445,7 +446,7 @@
+ 	compquoting = comprestore = complist = compinsert =
+ 	compexact = compexactstr = comppatmatch = comppatinsert =
+ 	compforcelist = complastprompt = comptoend = 
+-	compoldlist = compoldins = NULL;
++	compoldlist = compoldins = compvared = NULL;
+     makecompparamsptr = NULL;
+     comp_setunsetptr = NULL;
+     return 0;
+@@ -497,6 +498,7 @@
+     zsfree(comptoend);
+     zsfree(compoldlist);
+     zsfree(compoldins);
++    zsfree(compvared);
+     return 0;
+ }
+ 
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Thu Apr 29 10:14:47 1999
++++ Src/Zle/compctl.c	Thu Apr 29 10:38:32 1999
+@@ -2173,6 +2173,7 @@
+     { "to_end", PM_SCALAR, VAL(comptoend), NULL, NULL },
+     { "old_list", PM_SCALAR, VAL(compoldlist), NULL, NULL },
+     { "old_insert", PM_SCALAR, VAL(compoldins), NULL, NULL },
++    { "vared", PM_SCALAR, VAL(compvared), NULL, NULL },
+     { NULL, 0, NULL, NULL, NULL }
+ };
+ 
+@@ -2316,7 +2317,7 @@
+ 
+ /**/
+ void
+-comp_setunset(int set, int unset)
++comp_setunset(unsigned int set, unsigned int unset)
+ {
+     Param *p;
+ 
+@@ -2342,11 +2343,11 @@
+     else {
+ 	char *orest, *opre, *osuf, *oipre, *oisuf, **owords;
+ 	long ocur;
+-	int unset = 0, m, sm;
++	unsigned int unset = 0, m, sm;
+ 	Param *pp;
+ 
+ 	m = CP_WORDS | CP_CURRENT | CP_PREFIX | CP_SUFFIX | 
+-	    CP_IPREFIX | CP_RESTORE;
++	    CP_IPREFIX | CP_ISUFFIX | CP_RESTORE;
+ 	for (pp = comppms, sm = 1; m; pp++, m >>= 1, sm <<= 1) {
+ 	    if ((m & 1) && ((*pp)->flags & PM_UNSET))
+ 		unset |= sm;
+@@ -2381,7 +2382,8 @@
+ 	    } LASTALLOC;
+ 	    comp_setunset(CP_COMPSTATE |
+ 			  (~unset & (CP_WORDS | CP_CURRENT | CP_PREFIX |
+-				     CP_SUFFIX | CP_IPREFIX | CP_RESTORE)),
++				     CP_SUFFIX | CP_IPREFIX | CP_ISUFFIX |
++				     CP_RESTORE)),
+ 			  unset);
+ 	} else
+ 	    comp_setunset(CP_COMPSTATE | (~unset & CP_RESTORE),
+diff -u os/Zle/zle_main.c Src/Zle/zle_main.c
+--- os/Zle/zle_main.c	Thu Apr 29 10:14:47 1999
++++ Src/Zle/zle_main.c	Thu Apr 29 10:36:33 1999
+@@ -656,14 +656,18 @@
+ 	initmodifier(&zmod);
+ }
+ 
++/* this exports the argument we are currently vared'iting if != NULL */
++
++/**/
++char *varedarg;
++
+ /* vared: edit (literally) a parameter value */
+ 
+ /**/
+ static int
+ bin_vared(char *name, char **args, char *ops, int func)
+ {
+-    char *s;
+-    char *t;
++    char *s, *t, *ova = varedarg;
+     Value v;
+     Param pm = 0;
+     int create = 0;
+@@ -753,7 +757,9 @@
+     PERMALLOC {
+ 	pushnode(bufstack, ztrdup(s));
+     } LASTALLOC;
++    varedarg = *args;
+     t = (char *) zleread(p1, p2, ops['h'] ? ZLRF_HISTORY : 0);
++    varedarg = ova;
+     if (!t || errflag) {
+ 	/* error in editing */
+ 	errflag = 0;
+@@ -926,6 +932,8 @@
+ 
+     /* initialise the keymap system */
+     init_keymaps();
++
++    varedarg = NULL;
+ 
+     return 0;
+ }
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Thu Apr 29 10:14:48 1999
++++ Src/Zle/zle_tricky.c	Thu Apr 29 10:40:14 1999
+@@ -4280,14 +4280,22 @@
+ 
+     if ((list = getshfunc(fn)) != &dummy_list) {
+ 	char **p, *tmp;
+-	int set, aadd = 0, usea = 1, icf = incompfunc, osc = sfcontext;
++	int aadd = 0, usea = 1, icf = incompfunc, osc = sfcontext;
++	unsigned int set;
+ 	Param *ocpms = comppms;
+ 
+ 	comppms = (Param *) zalloc(CP_NUM * sizeof(Param));
+ 
+-	set = -1 & ~(CP_PARAMETER | CP_REDIRECT | CP_QUOTE | CP_QUOTING |
+-		     CP_EXACTSTR | CP_FORCELIST | CP_OLDLIST | CP_OLDINS |
+-		     (useglob ? 0 : CP_PATMATCH));
++	set = CP_ALLMASK &
++	    ~(CP_PARAMETER | CP_REDIRECT | CP_QUOTE | CP_QUOTING |
++	      CP_EXACTSTR | CP_FORCELIST | CP_OLDLIST | CP_OLDINS |
++	      (useglob ? 0 : CP_PATMATCH));
++	zsfree(compvared);
++	if (varedarg) {
++	    compvared = ztrdup(varedarg);
++	    set |= CP_VARED;
++	} else
++	    compvared = ztrdup("");
+ 	if (!*complastprompt)
+ 	    set &= ~CP_LASTPROMPT;
+ 	zsfree(compcontext);
+diff -u od/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- od/Zsh/compwid.yo	Wed Apr 28 16:24:22 1999
++++ Doc/Zsh/compwid.yo	Thu Apr 29 11:05:07 1999
+@@ -140,6 +140,12 @@
+ )
+ enditem()
+ )
++item(tt(vared))(
++If completion is called while editing a line using the tt(vared)
++builtin, the value of this key is set to the name of the parameter
++given as argument to tt(vared). If tt(vared) is not currently used,
++this key is unset.
++)
+ item(tt(parameter))(
+ The name of the parameter when completing in a subscript or in the
+ value of a parameter assignment.
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

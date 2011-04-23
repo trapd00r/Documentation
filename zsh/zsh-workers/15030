@@ -1,0 +1,289 @@
+From zsh-workers-return-15030-mason-zsh=primenet.com.au@sunsite.dk Thu Jun 21 15:36:53 2001
+Return-Path: <zsh-workers-return-15030-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15511 invoked from network); 21 Jun 2001 15:36:52 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Jun 2001 15:36:52 -0000
+Received: (qmail 11481 invoked by alias); 21 Jun 2001 15:36:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15030
+Received: (qmail 11458 invoked from network); 21 Jun 2001 15:36:09 -0000
+Message-ID: <Tc0a88d015448428950@mailsweeper01.cambridgesiliconradio.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH (redux): non-POSIX `for' syntax 
+In-reply-to: ""Bart Schaefer""'s message of "Thu, 21 Jun 2001 10:34:39 -0000."
+             <1010621103439.ZM9814@candle.brasslantern.com> 
+Date: Thu, 21 Jun 2001 16:31:15 +0100
+From: Peter Stephenson <pws@csr.com>
+
+"Bart Schaefer" wrote:
+> This goes on top of the last one.
+
+This is my patch relative to the foregoing.  It improves the documentation,
+and adds the fix not to expand aliases in parameter names after the first.
+
+Index: Doc/Zsh/grammar.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/grammar.yo,v
+retrieving revision 1.4
+diff -u -r1.4 grammar.yo
+--- Doc/Zsh/grammar.yo	2000/08/29 06:35:40	1.4
++++ Doc/Zsh/grammar.yo	2001/06/21 15:27:31
+@@ -149,12 +149,21 @@
+ findex(for)
+ cindex(for loops)
+ cindex(loops, for)
+-item(tt(for) var(name) [ tt(in) var(word) ... var(term) ] tt(do) var(list) tt(done))(
++item(tt(for) var(name) ... [ tt(in) var(word) ... ] var(term) tt(do) var(list) tt(done))(
+ where var(term) is at least one newline or tt(;).
+ Expand the list of var(word)s, and set the parameter
+ var(name) to each of them in turn, executing
+ var(list) each time.  If the tt(in) var(word) is omitted,
+ use the positional parameters instead of the var(word)s.
++
++More than one parameter var(name) can appear before the list of
++var(word)s.  If var(N) var(name)s are given, then on each execution of the
++loop the next tt(N) var(word)s are assigned to the corresponding
++parameters.  If there are more var(name)s than remaining var(word)s, the
++remaining parameters are each set to the empty string.  Execution of the
++loop ends when there is no remaining var(word) to assign to the first
++var(name).  It is only possible for tt(in) to appear as the first var(name)
++in the list, else it will be treated as marking the end of the list.
+ )
+ item(tt(for LPAR()LPAR()) [var(expr1)] tt(;) [var(expr2)] tt(;) [var(expr3)] tt(RPAR()RPAR() do) var(list) tt(done))(
+ The arithmetic expression var(expr1) is evaluated first (see
+@@ -289,17 +298,17 @@
+ item(tt(if) var(list) var(sublist))(
+ A short form of the alternate `if'.
+ )
+-item(tt(for) var(name) tt(LPAR()) var(word) ... tt(RPAR()) var(sublist))(
++item(tt(for) var(name) ... tt(LPAR()) var(word) ... tt(RPAR()) var(sublist))(
+ A short form of tt(for).
+ )
+-item(tt(for) var(name) [ tt(in) var(word) ... var(term) ] var(sublist))(
++item(tt(for) var(name) ... [ tt(in) var(word) ... ] var(term) var(sublist))(
+ where var(term) is at least one newline or tt(;).
+ Another short form of tt(for).
+ )
+ item(tt(for LPAR()LPAR()) [var(expr1)] tt(;) [var(expr2)] tt(;) [var(expr3)] tt(RPAR()RPAR()) var(sublist))(
+ A short form of the arithmetic tt(for) command.
+ )
+-item(tt(foreach) var(name) tt(LPAR()) var(word) ... tt(RPAR()) var(list) tt(end))(
++item(tt(foreach) var(name) ... tt(LPAR()) var(word) ... tt(RPAR()) var(list) tt(end))(
+ Another form of tt(for).
+ )
+ item(tt(while) var(list) tt({) var(list) tt(}))(
+Index: Src/loop.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/loop.c,v
+retrieving revision 1.4
+diff -u -r1.4 loop.c
+--- Src/loop.c	2000/06/17 17:05:53	1.4
++++ Src/loop.c	2001/06/21 15:27:31
+@@ -52,15 +52,15 @@
+     Wordcode end, loop;
+     wordcode code = state->pc[-1];
+     int iscond = (WC_FOR_TYPE(code) == WC_FOR_COND), ctok = 0, atok = 0;
++    int last = 0;
+     char *name, *str, *cond = NULL, *advance = NULL;
+     zlong val = 0;
+-    LinkList args = NULL;
++    LinkList vars = NULL, args = NULL;
+ 
+-    name = ecgetstr(state, EC_NODUP, NULL);
+     end = state->pc + WC_FOR_SKIP(code);
+ 
+     if (iscond) {
+-	str = dupstring(name);
++	str = dupstring(ecgetstr(state, EC_NODUP, NULL));
+ 	singsub(&str);
+ 	if (isset(XTRACE)) {
+ 	    char *str2 = dupstring(str);
+@@ -77,28 +77,32 @@
+ 	}
+ 	cond = ecgetstr(state, EC_NODUP, &ctok);
+ 	advance = ecgetstr(state, EC_NODUP, &atok);
+-    } else if (WC_FOR_TYPE(code) == WC_FOR_LIST) {
+-	int htok = 0;
+-
+-	if (!(args = ecgetlist(state, *state->pc++, EC_DUPTOK, &htok))) {
+-	    state->pc = end;
+-	    return 0;
+-	}
+-	if (htok)
+-	    execsubst(args);
+     } else {
+-	char **x;
++	vars = ecgetlist(state, *state->pc++, EC_NODUP, NULL);
++
++	if (WC_FOR_TYPE(code) == WC_FOR_LIST) {
++	    int htok = 0;
++
++	    if (!(args = ecgetlist(state, *state->pc++, EC_DUPTOK, &htok))) {
++		state->pc = end;
++		return 0;
++	    }
++	    if (htok)
++		execsubst(args);
++	} else {
++	    char **x;
+ 
+-	args = newlinklist();
+-	for (x = pparams; *x; x++)
+-	    addlinknode(args, dupstring(*x));
++	    args = newlinklist();
++	    for (x = pparams; *x; x++)
++		addlinknode(args, dupstring(*x));
++	}
+     }
+     lastval = 0;
+     loops++;
+     pushheap();
+     cmdpush(CS_FOR);
+     loop = state->pc;
+-    for (;;) {
++    while (!last) {
+ 	if (iscond) {
+ 	    if (ctok) {
+ 		str = dupstring(cond);
+@@ -127,14 +131,29 @@
+ 	    if (!val)
+ 		break;
+ 	} else {
+-	    if (!args || !(str = (char *) ugetnode(args)))
+-		break;
+-	    if (isset(XTRACE)) {
+-		printprompt4();
+-		fprintf(xtrerr, "%s=%s\n", name, str);
+-		fflush(xtrerr);
++	    LinkNode node;
++	    int count = 0;
++	    for (node = firstnode(vars); node; incnode(node))
++	    {
++		name = (char *)getdata(node);
++		if (!args || !(str = (char *) ugetnode(args)))
++		{
++		    if (count) { 
++			str = "";
++			last = 1;
++		    } else
++			break;
++		}
++		if (isset(XTRACE)) {
++		    printprompt4();
++		    fprintf(xtrerr, "%s=%s\n", name, str);
++		    fflush(xtrerr);
++		}
++		setsparam(name, ztrdup(str));
++		count++;
+ 	    }
+-	    setsparam(name, ztrdup(str));
++	    if (!count)
++		break;
+ 	}
+ 	state->pc = loop;
+ 	execlist(state, 1, do_exec && args && empty(args));
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.25
+diff -u -r1.25 parse.c
+--- Src/parse.c	2001/06/21 10:54:49	1.25
++++ Src/parse.c	2001/06/21 15:27:31
+@@ -878,7 +878,7 @@
+ par_for(int *complex)
+ {
+     int oecused = ecused, csh = (tok == FOREACH), p, sel = (tok == SELECT);
+-    int type;
++    int type, ona = noaliases;
+ 
+     p = ecadd(0);
+ 
+@@ -903,19 +903,32 @@
+ 	yylex();
+ 	type = WC_FOR_COND;
+     } else {
+-	int posix_in;
++	int np, n, posix_in;
+ 	infor = 0;
+ 	if (tok != STRING || !isident(tokstr))
+ 	    YYERRORV(oecused);
+-	ecstr(tokstr);
++	np = ecadd(0);
++	n = 0;
+ 	incmdpos = 1;
+-	yylex();
++	noaliases = 1;
++	for (;;) {
++	    n++;
++	    ecstr(tokstr);
++	    yylex();	
++	    if (tok != STRING || !strcmp(tokstr, "in") || sel)
++		break;
++	    if (!isident(tokstr))
++	    {
++		noaliases = ona;
++		YYERRORV(oecused);
++	    }
++	}
++	noaliases = ona;
++	ecbuf[np] = n;
+ 	posix_in = isnewlin;
+ 	while (isnewlin)
+-	  yylex();
+-	if (tok == STRING && !strcmp(tokstr, "in")) {
+-	    int np, n;
+-
++	    yylex();
++        if (tok == STRING && !strcmp(tokstr, "in")) {
+ 	    incmdpos = 0;
+ 	    yylex();
+ 	    np = ecadd(0);
+@@ -925,8 +938,6 @@
+ 	    ecbuf[np] = n;
+ 	    type = (sel ? WC_SELECT_LIST : WC_FOR_LIST);
+ 	} else if (!posix_in && tok == INPAR) {
+-	    int np, n;
+-
+ 	    incmdpos = 0;
+ 	    yylex();
+ 	    np = ecadd(0);
+Index: Src/text.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/text.c,v
+retrieving revision 1.5
+diff -u -r1.5 text.c
+--- Src/text.c	2000/12/05 10:34:23	1.5
++++ Src/text.c	2001/06/21 15:27:31
+@@ -415,7 +415,7 @@
+ 		    taddstr(ecgetstr(state, EC_NODUP, NULL));
+ 		    taddstr(")) do");
+ 		} else {
+-		    taddstr(ecgetstr(state, EC_NODUP, NULL));
++		    taddlist(state, *state->pc++);
+ 		    if (WC_FOR_TYPE(code) == WC_FOR_LIST) {
+ 			taddstr(" in ");
+ 			taddlist(state, *state->pc++);
+
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

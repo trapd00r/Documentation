@@ -1,0 +1,185 @@
+From zsh-workers-return-27822-mason-zsh=primenet.com.au@zsh.org Mon Mar 22 16:09:47 2010
+Return-Path: <zsh-workers-return-27822-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1992 invoked by alias); 22 Mar 2010 16:09:46 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27822
+Received: (qmail 29007 invoked from network); 22 Mar 2010 16:09:44 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-3.0 required=5.0 tests=AWL,BAYES_00,
+	RCVD_IN_DNSWL_LOW,SPF_HELO_PASS autolearn=ham version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Mon, 22 Mar 2010 16:07:16 +0000
+From: Peter Stephenson <pws@csr.com>
+To: zsh-workers@zsh.org
+Subject: Re: Bug with ZLE special variables and traps?
+Message-ID: <20100322160716.5b81001e@news01>
+In-Reply-To: <100322075703.ZM21762@torch.brasslantern.com>
+References: <c16a574a0809181450t61a5b5ddq2e80797fde37636e@mail.gmail.com>
+	<20080919162045.GA22435@ruderich.org>
+	<20090706151644.6BF508027106@bifrost.dotsrc.org>
+	<20090706154309.GA15663@fermat.math.technion.ac.il>
+	<20090706155337.GB15663@fermat.math.technion.ac.il>
+	<20100315164237.GA23224@fermat.math.technion.ac.il>
+	<100320105027.ZM20067@torch.brasslantern.com>
+	<20100322084226.GA26739@fermat.math.technion.ac.il>
+	<100322075703.ZM21762@torch.brasslantern.com>
+Organization: CSR
+X-Mailer: Claws Mail 3.5.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 22 Mar 2010 16:07:16.0752 (UTC) FILETIME=[BE139100:01CAC9D9]
+X-Scanned-By: MailControl A_09_30_00 (www.mailcontrol.com) on 10.68.0.120
+
+On Mon, 22 Mar 2010 07:57:03 -0700
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> Hey, zsh-workers:  Is this a recently-introduced bug?  Why is PREBUFFER
+> empty in a signal handler at patchlevel 1.4940 when it is not at 1.4705?
+
+It's actually a wonder this every worked.  The internal current history
+line is used at multiple lexical stack depths and is not guaranteed to be
+the same as any line that's going to be read back as a stored line to be
+executed from the command line.  Until recently we've been lax in hiding it
+when it should be invalid.
+
+As we say in WiFi embedded software, WDIAHTBSC?
+
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.96
+diff -p -u -r1.96 hist.c
+--- Src/hist.c	18 Dec 2009 19:50:45 -0000	1.96
++++ Src/hist.c	22 Mar 2010 16:03:29 -0000
+@@ -164,6 +164,22 @@ mod_export char *hptr;
+ /**/
+ mod_export char *chline;
+ 
++/*
++ * The current history line as seen by ZLE.
++ * We modify chline for use in other contexts while ZLE may
++ * still be running; ZLE should see only the top-level value.
++ *
++ * To avoid having to modify this every time we modify chline,
++ * we set it when we push the stack, and unset it when we pop
++ * the appropriate value off the stack.  As it's never modified
++ * on the stack this is the only maintainance we ever do on it.
++ * In return, ZLE has to check both zle_chline and (if that's
++ * NULL) chline to get the current value.
++ */
++
++/**/
++mod_export char *zle_chline;
++
+ /* true if the last character returned by hgetc was an escaped bangchar *
+  * if it is set and NOBANGHIST is unset hwaddc escapes bangchars        */
+ 
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.53
+diff -p -u -r1.53 lex.c
+--- Src/lex.c	4 Jan 2010 12:21:09 -0000	1.53
++++ Src/lex.c	22 Mar 2010 16:03:29 -0000
+@@ -249,6 +249,13 @@ lexsave(void)
+     ls->histdone = histdone;
+     ls->stophist = stophist;
+     stophist = 0;
++    if (!lstack) {
++	/* top level, make this version visible to ZLE */
++	zle_chline = chline;
++	/* ensure line stored is NULL-terminated */
++	if (hptr)
++	    *hptr = '\0';
++    }
+     ls->hline = chline;
+     chline = NULL;
+     ls->hptr = hptr;
+@@ -355,6 +362,11 @@ lexrestore(void)
+     errflag = 0;
+ 
+     ln = lstack->next;
++    if (!ln) {
++	/* Back to top level: don't need special ZLE value */
++	DPUTS(chline != zle_chline, "BUG: Ouch, wrong chline for ZLE");
++	zle_chline = NULL;
++    }
+     free(lstack);
+     lstack = ln;
+ }
+Index: Src/Zle/zle_params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_params.c,v
+retrieving revision 1.33
+diff -p -u -r1.33 zle_params.c
+--- Src/Zle/zle_params.c	13 Mar 2009 10:04:21 -0000	1.33
++++ Src/Zle/zle_params.c	22 Mar 2010 16:03:29 -0000
+@@ -334,8 +334,19 @@ get_rbuffer(UNUSED(Param pm))
+ static char *
+ get_prebuffer(UNUSED(Param pm))
+ {
+-    if (chline)
++    /*
++     * Use the editing current history line, not necessarily the
++     * history line that's currently in the history mechanism
++     * since our line may have been stacked.
++     */
++    if (zle_chline) {
++	/* zle_chline was NULL terminated when pushed onto the stack */
++	return dupstring(zle_chline);
++    }
++    if (chline) {
++	/* hptr is valid */
+ 	return dupstrpfx(chline, hptr - chline);
++    }
+     return dupstring("");
+ }
+ 
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_tricky.c,v
+retrieving revision 1.101
+diff -p -u -r1.101 zle_tricky.c
+--- Src/Zle/zle_tricky.c	7 Dec 2009 21:40:11 -0000	1.101
++++ Src/Zle/zle_tricky.c	22 Mar 2010 16:03:29 -0000
+@@ -632,16 +632,16 @@ docomplete(int lst)
+     origline = dupstring(zlemetaline);
+     origcs = zlemetacs;
+     origll = zlemetall;
+-    if (!isfirstln && chline != NULL) {
+-	/* If we are completing in a multi-line buffer (which was not  *
+-	 * taken from the history), we have to prepend the stuff saved *
+-	 * in chline to the contents of line.                          */
+-
++    if (!isfirstln && (chline != NULL || zle_chline != NULL)) {
+ 	ol = dupstring(zlemetaline);
+-	/* Make sure that chline is zero-terminated. */
+-	*hptr = '\0';
++	/*
++	 * Make sure that chline is zero-terminated.
++	 * zle_chline always is and hptr doesn't point into it anyway.
++	 */
++	if (!zle_chline)
++	    *hptr = '\0';
+ 	zlemetacs = 0;
+-	inststr(chline);
++	inststr(zle_chline ? zle_chline : chline);
+ 	chl = zlemetacs;
+ 	zlemetacs += ocs;
+     } else
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

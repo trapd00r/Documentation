@@ -1,0 +1,107 @@
+From zsh-workers-return-14494-mason-zsh=primenet.com.au@sunsite.dk Sun May 27 14:06:38 2001
+Return-Path: <zsh-workers-return-14494-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11306 invoked from network); 27 May 2001 14:06:37 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 May 2001 14:06:37 -0000
+Received: (qmail 319 invoked by alias); 27 May 2001 14:06:30 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14494
+Received: (qmail 307 invoked from network); 27 May 2001 14:06:29 -0000
+Message-ID: <3B110A3F.4020802@mail.ru>
+Date: Sun, 27 May 2001 18:07:59 +0400
+From: Andrej Borsenkow <arvidjaar@mail.ru>
+Reply-To: Andrej.Borsenkow@mow.siemens.ru
+User-Agent: Mozilla/5.0 (X11; U; Linux 2.4.4-6mdk i686; en-US; rv:0.9) Gecko/20010521
+X-Accept-Language: en
+MIME-Version: 1.0
+To: cooker@linux-mandrake.com,
+	ZSH Workers Mailing List <zsh-workers@sunsite.dk>
+Subject: Re: [Cooker] /bin/login from util-linux-2.11c-2mdk  breaks zsh ctty hadling
+References: <3B0BF59E.6030408@mow.siemens.ru> <m3n183su14.fsf@giants.mandrakesoft.com>
+Content-Type: text/plain; charset=us-ascii; format=flowed
+Content-Transfer-Encoding: 7bit
+
+Chmouel Boudjnah wrote:
+
+ > Andrej Borsenkow <Andrej.Borsenkow@mow.siemens.ru> writes:
+ >
+ >
+ >>After I upgraded to the latest util-linux all login zsh's are running
+ >>without controlling tty. bash seems to run normally (attached to
+ >>tty). consoletype fails with EPERM that results in returning "serial"
+ >>instead "vt" and russian charset not activated. I had to copy
+ >>/bin/login from Mdk8 to be able to work.
+ >>
+ >>It is also 2.4.4-3mdk kernel
+ >>
+ >>Chmoul?
+ >>
+ >
+ > ????? really couldn't reproduce the problem, here...
+ >
+ >
+
+O.K., I have found why it happens. Here goes.
+
+Here is what happens around a fork in /bin/login for a "good" login
+(1188 is login process):
+
+1188  fork()                            = 1200
+1188  wait4(-1,  <unfinished ...>
+1200  rt_sigaction(SIGINT, {SIG_DFL}, {SIG_IGN}, 8) = 0
+1200  msgget(501, 0x2|02)               = 0
+1200  chdir("/home/bor")                = 0
+1200  execve("/bin/zsh", ["-zsh"], [/* 6 vars */]) = 0
+
+Here is what happens at the same place for a "bad" login (1175 is
+login). I marked offending call:
+
+1175  fork()                            = 1178
+1175  ioctl(0, TIOCNOTTY)               = 0
+1175  --- SIGHUP (Hangup) ---
+1175  --- SIGCONT (Continued) ---
+1175  rt_sigaction(SIGHUP, {SIG_DFL}, {SIG_IGN}, 8) = 0
+1175  wait4(-1,  <unfinished ...>
+1178  --- SIGCONT (Continued) ---
+  >>> 1178  setsid()                           = 1178
+1178  rt_sigaction(SIGHUP, {SIG_DFL}, {SIG_IGN}, 8) = 0
+1178  rt_sigaction(SIGINT, {SIG_DFL}, {SIG_IGN}, 8) = 0
+1178  msgget(501, 0x2|02)               = 0
+1178  chdir("/home/bor")                = 0
+1178  execve("/bin/zsh", ["-zsh"], [/* 6 vars */]) = 0
+
+
+As you see, new login now does setsid(). Unfortunately, this call has a
+side effect of resetting process' ctty, so anything exec'ed next runs
+without controlling tty.
+
+The reason bash still works is that it checks if /dev/tty is available,
+and if not it reopens it:
+
+2916  open("/dev/tty", O_RDWR|O_NONBLOCK|O_LARGEFILE) = -1 ENXIO (No
+such device or address)
+2916  ioctl(0, TCGETS, {B38400 opost isig icanon echo ...}) = 0
+2916  brk(0)                            = 0x80c008c
+2916  brk(0x80c1000)                    = 0x80c1000
+2916  brk(0x80c3000)                    = 0x80c3000
+2916  readlink("/proc/self/fd/0", "/dev/tty3", 4095) = 9
+2916  open("/dev/tty3", O_RDWR|O_NONBLOCK|O_LARGEFILE) = 3
+2916  close(3)                          = 0
+
+the last two open/close pair makes current stdin to controlling tty. Zsh
+does not do it - it inherits std{in,out,err} and opens its SHIN with
+O_NOCTTY.
+
+I still claim it is a /bin/login bug. It should make sure porgram is
+exec'ed with correct environment that includes ctty.
+
+-andrej
+
+P.S. The problem is not limited to zsh - any program that expects
+/dev/tty fails.
+
+

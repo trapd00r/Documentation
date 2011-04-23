@@ -1,0 +1,342 @@
+From zsh-workers-return-6586-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jun 11 06:58:04 1999
+Return-Path: <zsh-workers-return-6586-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4200 invoked from network); 11 Jun 1999 06:58:02 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 Jun 1999 06:58:02 -0000
+Received: (qmail 515 invoked by alias); 11 Jun 1999 06:57:30 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6586
+Received: (qmail 497 invoked from network); 11 Jun 1999 06:57:30 -0000
+Date: Fri, 11 Jun 1999 08:57:28 +0200 (MET DST)
+Message-Id: <199906110657.IAA25468@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Thu, 10 Jun 1999 17:04:50 +0200
+Subject: Re: something strange with compset and/or _normal
+
+
+Peter Stephenson wrote:
+
+> Sven Wischnowsky wrote:
+> > A bug with the execution-optimisation patch that showed up when
+> > shell functions called themselves recursively.
+> 
+> Is it clear this can't happen with arguments to the exec*() functions,
+> which are handled by the same mechanism?
+
+No it isn't. I was aware of this yesterday but first wanted to see if
+there is a better way than the obvious `pass args and flags to all
+exec* functions'. I didn't found one.
+
+The patch also removes the /*--- comments. I investigated the code
+some more and am pretty sure that those set-to-NULLs didn't have an
+effect. The one in lex.c seems to work (and yytext is only used in
+very few places -- the function where it is set and yyerror()).
+The one in stripkshdef() was probably wrong -- the test weren't really 
+different so I just put in the old test again.
+
+Bye
+ Sven
+
+diff -u os/exec.c Src/exec.c
+--- os/exec.c	Fri Jun 11 08:47:39 1999
++++ Src/exec.c	Fri Jun 11 08:47:54 1999
+@@ -297,12 +297,12 @@
+ 
+ /**/
+ static int
+-execcursh(Cmd cmd)
++execcursh(Cmd cmd, LinkList args, int flags)
+ {
+     if (!list_pipe)
+ 	deletejob(jobtab + thisjob);
+-    execlist(cmd->u.list, 1, cmd->flags & CFLAG_EXEC);
+-    /*---- where was this used? cmd->u.list = NULL; */
++    execlist(cmd->u.list, 1, flags & CFLAG_EXEC);
++
+     return lastval;
+ }
+ 
+@@ -1011,10 +1011,9 @@
+ 	    strcpy(list_pipe_text, getjobtext((void *) pline->left));
+ 	else
+ 	    list_pipe_text[0] = '\0';
+-    if (pline->type == END) {
++    if (pline->type == END)
+ 	execcmd(pline->left, input, output, how, last1 ? 1 : 2);
+-	/*---- where was this used? pline->left = NULL; */
+-    } else {
++    else {
+ 	int old_list_pipe = list_pipe;
+ 
+ 	mpipe(pipes);
+@@ -1051,7 +1050,6 @@
+ 	    subsh_close = pipes[0];
+ 	    execcmd(pline->left, input, pipes[1], how, 0);
+ 	}
+-	/*---- where was this used? pline->left = NULL; */
+ 	zclose(pipes[1]);
+ 	if (pline->right) {
+ 	    /* if another execpline() is invoked because the command is *
+@@ -1910,25 +1908,15 @@
+ 	if (is_exec)
+ 	    entersubsh(how, type != SUBSH ? 2 : 1, 1);
+ 	if (type >= CURSH) {
+-	    static int (*func[]) _((Cmd)) = {
++	    static int (*func[]) _((Cmd, LinkList, int)) = {
+ 		execcursh, exectime, execfuncdef, execfor, execwhile,
+ 		execrepeat, execif, execcase, execselect, execcond,
+ 		execarith, execautofn
+ 	    };
+-	    int ofl = cmd->flags;
+ 
+ 	    if (last1 == 1)
+ 		flags |= CFLAG_EXEC;
+-	    cmd->flags = flags;
+-	    if (type != AUTOFN) {
+-		LinkList tmpa = cmd->args;
+-
+-		cmd->args = args;
+-		lastval = (func[type - CURSH]) (cmd);
+-		cmd->args = tmpa;
+-	    } else
+-		lastval = (func[type - CURSH]) (cmd);
+-	    cmd->flags = ofl;
++	    lastval = (func[type - CURSH]) (cmd, args, flags);
+ 	} else if (is_builtin || is_shfunc) {
+ 	    LinkList restorelist = 0, removelist = 0;
+ 	    /* builtin or shell function */
+@@ -1954,7 +1942,6 @@
+ 
+ 	    if (is_shfunc) {
+ 		/* It's a shell function */
+-		int ofl = cmd->flags;
+ 
+ #ifdef PATH_DEV_FD
+ 		int i;
+@@ -1966,9 +1953,7 @@
+ 		if (subsh_close >= 0)
+ 		    zclose(subsh_close);
+ 		subsh_close = -1;
+-		cmd->flags = flags;
+ 		execshfunc(cmd, (Shfunc) hn, args);
+-		cmd->flags = ofl;
+ #ifdef PATH_DEV_FD
+ 		for (i = 10; i <= max_zsh_fd; i++)
+ 		    if (fdtable[i] > 1)
+@@ -2672,7 +2657,7 @@
+ 
+ /**/
+ static int
+-execcond(Cmd cmd)
++execcond(Cmd cmd, LinkList args, int flags)
+ {
+     int stat;
+     if (isset(XTRACE)) {
+@@ -2692,15 +2677,15 @@
+ 
+ /**/
+ static int
+-execarith(Cmd cmd)
++execarith(Cmd cmd, LinkList args, int flags)
+ {
+     char *e;
+     zlong val = 0;
+ 
+     if (isset(XTRACE))
+ 	fprintf(stderr, "%s((", prompt4 ? prompt4 : "");
+-    if (cmd->args)
+-	while ((e = (char *) ugetnode(cmd->args))) {
++    if (args)
++	while ((e = (char *) ugetnode(args))) {
+ 	    if (isset(XTRACE))
+ 		fprintf(stderr, " %s", e);
+ 	    val = matheval(e);
+@@ -2717,7 +2702,7 @@
+ 
+ /**/
+ static int
+-exectime(Cmd cmd)
++exectime(Cmd cmd, LinkList args, int flags)
+ {
+     int jb;
+ 
+@@ -2735,15 +2720,15 @@
+ 
+ /**/
+ static int
+-execfuncdef(Cmd cmd)
++execfuncdef(Cmd cmd, LinkList args, int flags)
+ {
+     Shfunc shf;
+     char *s;
+     int signum;
+ 
+-    if (cmd->args) {
++    if (args) {
+ 	PERMALLOC {
+-	    while ((s = (char *) ugetnode(cmd->args))) {
++	    while ((s = (char *) ugetnode(args))) {
+ 		shf = (Shfunc) zalloc(sizeof *shf);
+ 		shf->funcdef = (List) dupstruct(cmd->u.list);
+ 		shf->flags = 0;
+@@ -2813,7 +2798,7 @@
+ 
+ /**/
+ static int
+-execautofn(Cmd cmd)
++execautofn(Cmd cmd, LinkList args, int flags)
+ {
+     Shfunc shf = cmd->u.autofn->shf;
+     List l = getfpfunc(shf->nam);
+@@ -3056,10 +3041,9 @@
+     c = p->left;
+     if (c->type != FUNCDEF || c->flags ||
+ 	(c->redir && nonempty(c->redir)) || (c->vars && nonempty(c->vars)) ||
+-        /*---- is this ok? the test /was/ different, i think it was wrong */
+-	(c->args && (empty(c->args) ||
+-		     lastnode(c->args) != firstnode(c->args) ||
+-		     strcmp(name, peekfirst(c->args)))))
++	!c->args || empty(c->args) ||
++	lastnode(c->args) != firstnode(c->args) ||
++	strcmp(name, peekfirst(c->args)))
+ 	return l;
+     return c->u.list;
+ }
+diff -u os/lex.c Src/lex.c
+--- os/lex.c	Fri Jun 11 08:47:41 1999
++++ Src/lex.c	Fri Jun 11 08:47:55 1999
+@@ -1393,10 +1393,7 @@
+ 
+     if (!tokstr) {
+ 	yytext = tokstrings[tok];
+-	/*---- is this really needed? should it be?
+-	if (yytext)
+-	    yytext = dupstring(yytext);
+-	*/
++
+ 	return 0;
+     }
+ 
+diff -u os/loop.c Src/loop.c
+--- os/loop.c	Fri Jun 11 08:47:41 1999
++++ Src/loop.c	Fri Jun 11 08:49:15 1999
+@@ -47,15 +47,13 @@
+ 
+ /**/
+ int
+-execfor(Cmd cmd)
++execfor(Cmd cmd, LinkList args, int flags)
+ {
+     Forcmd node;
+     char *str;
+     int val = 0;
+-    LinkList args;
+ 
+     node = cmd->u.forcmd;
+-    args = cmd->args;
+     if (node->condition) {
+ 	str = dupstring(node->name);
+ 	singsub(&str);
+@@ -99,7 +97,7 @@
+ 	    setsparam(node->name, ztrdup(str));
+ 	}
+ 	execlist(node->list, 1,
+-		 (cmd->flags & CFLAG_EXEC) && args && empty(args));
++		 (flags & CFLAG_EXEC) && args && empty(args));
+ 	if (breaks) {
+ 	    breaks--;
+ 	    if (breaks || !contflag)
+@@ -127,18 +125,16 @@
+ 
+ /**/
+ int
+-execselect(Cmd cmd)
++execselect(Cmd cmd, LinkList args, int flags)
+ {
+     Forcmd node;
+     char *str, *s;
+-    LinkList args;
+     LinkNode n;
+     int i;
+     FILE *inp;
+     size_t more;
+ 
+     node = cmd->u.forcmd;
+-    args = cmd->args;
+     if (!node->inflag) {
+ 	char **x;
+ 
+@@ -274,7 +270,7 @@
+ 
+ /**/
+ int
+-execwhile(Cmd cmd)
++execwhile(Cmd cmd, LinkList args, int flags)
+ {
+     struct whilecmd *node;
+     int olderrexit, oldval;
+@@ -315,16 +311,16 @@
+ 
+ /**/
+ int
+-execrepeat(Cmd cmd)
++execrepeat(Cmd cmd, LinkList args, int flags)
+ {
+     int count;
+ 
+     lastval = 0;
+-    if (!cmd->args || empty(cmd->args) || nextnode(firstnode(cmd->args))) {
++    if (!args || empty(args) || nextnode(firstnode(args))) {
+ 	zerr("bad argument for repeat", NULL, 0);
+ 	return 1;
+     }
+-    count = atoi(peekfirst(cmd->args));
++    count = atoi(peekfirst(args));
+     pushheap();
+     loops++;
+     while (count--) {
+@@ -348,7 +344,7 @@
+ 
+ /**/
+ int
+-execif(Cmd cmd)
++execif(Cmd cmd, LinkList args, int flags)
+ {
+     struct ifcmd *node;
+     int olderrexit;
+@@ -371,7 +367,7 @@
+     noerrexit = olderrexit;
+ 
+     if (*t)
+-	execlist(*t, 1, cmd->flags & CFLAG_EXEC);
++	execlist(*t, 1, flags & CFLAG_EXEC);
+     else
+ 	lastval = 0;
+ 
+@@ -380,7 +376,7 @@
+ 
+ /**/
+ int
+-execcase(Cmd cmd)
++execcase(Cmd cmd, LinkList args, int flags)
+ {
+     struct casecmd *node;
+     char *word;
+@@ -402,7 +398,7 @@
+ 	    singsub(&pat);
+ 	    if (matchpat(word, pat)) {
+ 		do {
+-		    execlist(*l++, 1, **p == ';' && (cmd->flags & CFLAG_EXEC));
++		    execlist(*l++, 1, **p == ';' && (flags & CFLAG_EXEC));
+ 		} while(**p++ == '&' && *p);
+ 		break;
+ 	    }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

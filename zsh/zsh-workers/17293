@@ -1,0 +1,301 @@
+From zsh-workers-return-17293-mason-zsh=primenet.com.au@sunsite.dk Wed Jun 05 15:15:53 2002
+Return-Path: <zsh-workers-return-17293-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12544 invoked from network); 5 Jun 2002 15:15:52 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 5 Jun 2002 15:15:52 -0000
+Received: (qmail 12246 invoked by alias); 5 Jun 2002 15:15:46 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17293
+Received: (qmail 12235 invoked from network); 5 Jun 2002 15:15:45 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: poll() support in zle
+Date: Wed, 05 Jun 2002 16:15:15 +0100
+Message-ID: <10442.1023290115@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+This makes poll() available as an alternative to select() in zle.  It's
+the preferred alternative since this is what some system documentation
+suggests.
+
+Two special uses of select() haven't been converted since they are only
+used in rare circumstances; they might even be on systems we don't
+properly support any more.
+
+There is one extra feature that if poll() reports HUP, ERR or NVAL
+in the returned events this is passed on to a function listening using
+`zle -F'.  I haven't documented this, however, since I haven't been able
+to test it.
+
+zselect() should get the same treatment at some point, in which case it
+would be more sensible to call it zpoll which is a more meaningful name.
+
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.23
+diff -u -r1.23 zle_main.c
+--- Src/Zle/zle_main.c	21 May 2002 11:10:17 -0000	1.23
++++ Src/Zle/zle_main.c	5 Jun 2002 15:10:34 -0000
+@@ -30,6 +30,13 @@
+ #include "zle.mdh"
+ #include "zle_main.pro"
+ 
++#ifdef HAVE_POLL_H
++# include <poll.h>
++#endif
++#if defined(HAVE_POLL) && !defined(POLLIN) && !defined(POLLNORM)
++# undef HAVE_POLL
++#endif
++
+ /* != 0 if in a shell function called from completion, such that read -[cl]  *
+  * will work (i.e., the line is metafied, and the above word arrays are OK). */
+ 
+@@ -340,11 +347,13 @@
+ {
+     long exp100ths;
+     int ret;
+-#ifdef HAVE_SELECT
++#ifndef HAVE_POLL
++# ifdef HAVE_SELECT
+     fd_set foofd;
+-#else
+-# ifdef HAS_TIO
++# else
++#  ifdef HAS_TIO
+     struct ttyinfo ti;
++#  endif
+ # endif
+ #endif
+ 
+@@ -364,18 +373,45 @@
+ 	    exp100ths = 500;
+ 	else
+ 	    exp100ths = keytimeout;
+-#ifdef HAVE_SELECT
++#if defined(HAVE_SELECT) || defined(HAVE_POLL)
+ 	if (!keytmout || exp100ths) {
++	    int i, errtry = 0, selret;
++# ifdef HAVE_POLL
++	    int poll_timeout;
++	    int nfds = keytmout ? 1 : 1 + nwatch;
++	    /* First pollfd is SHTTY, following are the nwatch fds */
++	    struct pollfd *fds = zalloc(sizeof(struct pollfd) * nfds);
++	    if (exp100ths)
++		poll_timeout = exp100ths * 10;
++	    else
++		poll_timeout = -1;
++
++	    fds[0].fd = SHTTY;
++	    /*
++	     * POLLIN, POLLIN, POLLIN,
++	     * Keep those fd's POLLIN...
++	     */
++	    fds[0].events = POLLIN;
++	    if (!keytmout) {
++		for (i = 0; i < nwatch; i++) {
++		    fds[i+1].fd = watch_fds[i];
++		    fds[i+1].events = POLLIN;
++		}
++	    }
++# else
++	    int fdmax = SHTTY;
+ 	    struct timeval *tvptr = NULL;
+ 	    struct timeval expire_tv;
+-	    int i, fdmax = SHTTY, errtry = 0;
+ 	    if (exp100ths) {
+ 		expire_tv.tv_sec = exp100ths / 100;
+ 		expire_tv.tv_usec = (exp100ths % 100) * 10000L;
+ 		tvptr = &expire_tv;
+ 	    }
++# endif
+ 	    do {
+-		int selret;
++# ifdef HAVE_POLL
++		selret = poll(fds, errtry ? 1 : nfds, poll_timeout);
++# else
+ 		FD_ZERO(&foofd);
+ 		FD_SET(SHTTY, &foofd);
+ 		if (!keytmout && !errtry) {
+@@ -388,11 +424,12 @@
+ 		}
+ 		selret = select(fdmax+1, (SELECT_ARG_2_T) & foofd,
+ 				NULL, NULL, tvptr);
++# endif
+ 		/*
+ 		 * Make sure a user interrupt gets passed on straight away.
+ 		 */
+ 		if (selret < 0 && errflag)
+-		    return selret;
++		    break;
+ 		/*
+ 		 * Try to avoid errors on our special fd's from
+ 		 * messing up reads from the terminal.  Try first
+@@ -404,9 +441,10 @@
+ 		}
+ 		if (selret == 0) {
+ 		    /* Special value -2 signals nothing ready */
+-		    return -2;
+-		} else if (selret < 0)
+-		    return selret;
++		    selret = -2;
++		}
++		if (selret < 0)
++		    break;
+ 		if (!keytmout && nwatch) {
+ 		    /*
+ 		     * Copy the details of the watch fds in case the
+@@ -418,7 +456,13 @@
+ 		    char **lwatch_funcs = zarrdup(watch_funcs);
+ 		    memcpy(lwatch_fds, watch_fds, lnwatch*sizeof(int));
+ 		    for (i = 0; i < lnwatch; i++) {
+-			if (FD_ISSET(lwatch_fds[i], &foofd)) {
++			if (
++# ifdef HAVE_POLL
++			    (fds[i+1].revents & POLLIN)
++# else
++			    FD_ISSET(lwatch_fds[i], &foofd)
++# endif
++			    ) {
+ 			    /* Handle the fd. */
+ 			    LinkList funcargs = znewlinklist();
+ 			    zaddlinknode(funcargs, ztrdup(lwatch_funcs[i]));
+@@ -427,6 +471,21 @@
+ 				convbase(buf, lwatch_fds[i], 10);
+ 				zaddlinknode(funcargs, ztrdup(buf));
+ 			    }
++# ifdef HAVE_POLL
++#  ifdef POLLERR
++			    if (fds[i+1].revents & POLLERR)
++				zaddlinknode(funcargs, ztrdup("err"));
++#  endif
++#  ifdef POLLHUP
++			    if (fds[i+1].revents & POLLHUP)
++				zaddlinknode(funcargs, ztrdup("hup"));
++#  endif
++#  ifdef POLLNVAL
++			    if (fds[i+1].revents & POLLNVAL)
++				zaddlinknode(funcargs, ztrdup("nval"));
++#  endif
++# endif
++
+ 
+ 			    callhookfunc(lwatch_funcs[i], funcargs);
+ 			    if (errflag) {
+@@ -447,7 +506,18 @@
+ 		    zfree(lwatch_fds, lnwatch*sizeof(int));
+ 		    freearray(lwatch_funcs);
+ 		}
+-	    } while (!FD_ISSET(SHTTY, &foofd));
++	    } while (!
++# ifdef HAVE_POLL
++		     (fds[0].revents & POLLIN)
++# else
++		     FD_ISSET(SHTTY, &foofd)
++# endif
++		);
++# ifdef HAVE_POLL
++	    zfree(fds, sizeof(struct pollfd) * nfds);
++# endif
++	    if (selret < 0)
++		return selret;
+ 	}
+ #else
+ # ifdef HAS_TIO
+@@ -571,10 +641,13 @@
+     int old_errno = errno;
+     int tmout = getiparam("TMOUT");
+ 
+-#ifdef HAVE_SELECT
++#if defined(HAVE_SELECT) || defined(HAVE_POLL)
+     long costmult;
++# ifdef HAVE_POLL
++# else
+     struct timeval tv;
+     fd_set foofd;
++# endif
+ 
+     baud = getiparam("BAUD");
+     costmult = (baud) ? 3840000L / baud : 0;
+@@ -620,8 +693,10 @@
+ 
+     zlereadflags = flags;
+     histline = curhist;
+-#ifdef HAVE_SELECT
++#ifndef HAVE_POLL
++# ifdef HAVE_SELECT
+     FD_ZERO(&foofd);
++# endif
+ #endif
+     undoing = 1;
+     line = (unsigned char *)zalloc((linesz = 256) + 2);
+@@ -683,7 +758,20 @@
+ 	    errflag = 1;
+ 	    break;
+ 	}
+-#ifdef HAVE_SELECT
++#ifdef HAVE_POLL
++	if (baud && !(lastcmd & ZLE_MENUCMP)) {
++	    struct pollfd pfd;
++	    int to = cost * costmult / 1000; /* milliseconds */
++
++	    if (to > 500)
++		to = 500;
++	    pfd.fd = SHTTY;
++	    pfd.events = POLLIN;
++	    if (!kungetct && poll(&pfd, 1, to) <= 0)
++		zrefresh();
++	} else
++#else
++# ifdef HAVE_SELECT
+ 	if (baud && !(lastcmd & ZLE_MENUCMP)) {
+ 	    FD_SET(SHTTY, &foofd);
+ 	    tv.tv_sec = 0;
+@@ -693,6 +781,7 @@
+ 				    NULL, NULL, &tv) <= 0)
+ 		zrefresh();
+ 	} else
++# endif
+ #endif
+ 	    if (!kungetct)
+ 		zrefresh();
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.18
+diff -u -r1.18 zle.yo
+--- Doc/Zsh/zle.yo	21 May 2002 11:10:17 -0000	1.18
++++ Doc/Zsh/zle.yo	5 Jun 2002 15:10:34 -0000
+@@ -413,8 +413,8 @@
+ command line) will start as usual with the `tt(main)' keymap selected.
+ )
+ item(tt(-F) [ tt(-L) ] [ var(fd) [ var(handler) ] ])(
+-Only available if your system support the `select' system call; most
+-modern systems do.
++Only available if your system supports one of the `poll' or `select' system
++calls; most modern systems do.
+ 
+ Installs var(handler) (the name of a shell function) to handle input from
+ file descriptor var(fd).  When zle is attempting to read data, it will
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

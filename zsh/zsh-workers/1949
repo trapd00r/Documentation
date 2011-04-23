@@ -1,0 +1,173 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Mon Aug 12 23:26:30 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id XAA02249 for <mason@primenet.com.au>; Mon, 12 Aug 1996 23:26:25 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id IAA05053; Mon, 12 Aug 1996 08:57:47 -0400 (EDT)
+Resent-Date: Mon, 12 Aug 1996 08:57:47 -0400 (EDT)
+Message-Id: <199608121256.OAA02157@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: histignoredups done properly
+Date: Mon, 12 Aug 1996 14:56:14 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"8Xh0-2.0.uE1.Bfo3o"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1949
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Here's another largely cosmetic patch, though this one is more likely
+to have unpleasant side effects I haven't noticed and should now
+probably be delayed until after 3.0 is released.  (I don't think it
+*does*, but virtually any code with pointers and history lists
+*might*.)
+
+This fixes histignoredups so that only lines which are really
+different are stored; insignificant changes in whitespace are not
+treated as differences.  Significant whitespace changes, for example
+inside quotation marks, are treated as a difference.  The code simply
+uses the extent of command line words which is already recorded.
+
+There is one subtlety:  since you may deliberately alter just the
+whitespace on a line, for example pruning a space at the end which
+resulted from completion, it is the more recent version which is
+stored in the history list, replacing the older one.
+
+One consequent change is that the start time in the extended history
+now always reflects the start time of the last command, rather than
+the start time of the first command of a repeated sequence.  The
+previous behaviour is easy to restore if that seems better (it doesn't
+to me, but I can see possible arguments for it).
+
+*** Src/hist.c.id	Fri Aug  2 15:07:29 1996
+--- Src/hist.c	Mon Aug 12 14:26:51 1996
+***************
+*** 627,632 ****
+--- 627,653 ----
+  	histremmed = 1;
+  }
+  
++ /* compare current line with history entry using only text in words */
++ 
++ /**/
++ int
++ histcmp(Histent he)
++ {
++     int iword, lword;
++     int nwords = chwordpos/2;
++ 
++     if (nwords != he->nwords)
++ 	return 1;
++ 
++     for (iword = 0; iword < 2*nwords; iword += 2)
++ 	if ((lword = chwords[iword+1]-chwords[iword])
++ 	    != he->words[iword+1]-he->words[iword] ||
++ 	    memcmp(he->text+he->words[iword], chline+chwords[iword], lword))
++ 	    return 1;
++ 
++     return 0;
++ }
++ 
+  /* say we're done using the history mechanism */
+  
+  /**/
+***************
+*** 634,640 ****
+  hend(void)
+  {
+      int flag, save = 1;
+!     Histent he;
+  
+      if (!chline)
+  	return 1;
+--- 655,661 ----
+  hend(void)
+  {
+      int flag, save = 1;
+!     Histent he = NULL;
+  
+      if (!chline)
+  	return 1;
+***************
+*** 655,665 ****
+  		*--hptr = '\0';
+  	    } else
+  		save = 0;
+- 	he = gethistent(curhist - 1);
+  	if (!*chline || !strcmp(chline, "\n") ||
+- 	    (isset(HISTIGNOREDUPS) && he->text && !strcmp(he->text, chline)) ||
+  	    (isset(HISTIGNORESPACE) && spaceflag))
+  	    save = 0;
+      }
+      if (flag & (HISTFLAG_DONE | HISTFLAG_RECALL)) {
+  	char *ptr;
+--- 676,701 ----
+  		*--hptr = '\0';
+  	    } else
+  		save = 0;
+  	if (!*chline || !strcmp(chline, "\n") ||
+  	    (isset(HISTIGNORESPACE) && spaceflag))
+  	    save = 0;
++ 	else if (save) {
++ #ifdef DEBUG
++ 	    /* debugging only */
++ 	    if (chwordpos%2) {
++ 		hwend();
++ 		DPUTS(1, "internal:  uncompleted line in history");
++ 	    }
++ #endif
++ 	    /* get rid of pesky \n which we've nulled out:
++ 	     * needed here by HISTIGNOREDUPS code, but needed anyway.
++ 	     */
++ 	    if (!chline[chwords[chwordpos-2]])
++ 		chwordpos -= 2;
++ 	    he = gethistent(curhist - 1);
++ 	    if (isset(HISTIGNOREDUPS) && he->text && !histcmp(he))
++ 		save = 2;
++ 	}
+      }
+      if (flag & (HISTFLAG_DONE | HISTFLAG_RECALL)) {
+  	char *ptr;
+***************
+*** 682,697 ****
+      curhistent->ftim = 0L;
+      curhistent->flags = 0;
+      if (save) {
+! #ifdef DEBUG
+! 	/* debugging only */
+! 	if (chwordpos%2) {
+! 	    hwend();
+! 	    DPUTS(1, "internal:  uncompleted line in history");
+  	}
+- #endif
+- 	/* get rid of pesky \n which we've already nulled out */
+- 	if (!chline[chwords[chwordpos-2]])
+- 	    chwordpos -= 2;
+  	if ((curhistent->nwords = chwordpos/2)) {
+  	    curhistent->words =
+  		(short *)zalloc(curhistent->nwords*2*sizeof(short));
+--- 718,736 ----
+      curhistent->ftim = 0L;
+      curhistent->flags = 0;
+      if (save) {
+! 	if (save == 2) {
+! 	    /* Don't duplicate history entry, but use the current rather than
+! 	     * the previous one, in case minor changes were made to it.
+! 	     */
+! 	    Histent hold = curhistent;
+! 	    zsfree(he->text);
+! 	    if (he->nwords)
+! 		zfree(he->words, he->nwords*2*sizeof(short));
+! 	    curhist--;
+! 	    *he = *curhistent;
+! 	    curhistent = he;
+! 	    hold->text = NULL;
+  	}
+  	if ((curhistent->nwords = chwordpos/2)) {
+  	    curhistent->words =
+  		(short *)zalloc(curhistent->nwords*2*sizeof(short));
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

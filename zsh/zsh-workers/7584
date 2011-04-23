@@ -1,0 +1,138 @@
+From zsh-workers-return-7584-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Aug 31 17:43:38 1999
+Return-Path: <zsh-workers-return-7584-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 116 invoked from network); 31 Aug 1999 17:43:36 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 Aug 1999 17:43:36 -0000
+Received: (qmail 1386 invoked by alias); 31 Aug 1999 17:43:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7584
+Received: (qmail 1379 invoked from network); 31 Aug 1999 17:43:25 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <990831164023.ZM16987@candle.brasslantern.com>
+Date: Tue, 31 Aug 1999 16:40:22 +0000
+In-Reply-To: <199908311125.NAA29655@beta.informatik.hu-berlin.de>
+Comments: In reply to Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+        "Re: prob: fg not sending CONT to 'make' children" (Aug 31,  1:25pm)
+References: <199908311125.NAA29655@beta.informatik.hu-berlin.de>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: prob: fg not sending CONT to 'make' children
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Aug 31,  1:25pm, Sven Wischnowsky wrote:
+} Subject: Re: prob: fg not sending CONT to 'make' children
+}
+} The patch below makes the return value be -1 if at least one of the
+} kill()s failed.
+
+Really?  It doesn't look to me as though it changes that behavior at all.
+And all those #ifdefs make it really hard to read, and testing sig != 0 is
+redundant because the whole thing is inside "if (sig == SIGCONT) ...".
+
+} NOTE: while playing with this I found a bug when I did `ls|sleep 800'
+} where the `ls' finished before the `sleep' process was set up -- the
+} `sleep' put itself in its own little process group and one couldn't fg 
+} the whole thing. I tried several ways to fix this now and the hunks in 
+} `exec.c' and `utils.c' are the only ones which made this work
+
+That's very odd.  I didn't think the PID passed to killpg() should change
+if you still want to signal the whole group, even if the group leader had
+exited.  I wonder what happens if there are more than two processes in
+the group when the leader exits?  Do all the leader's children become
+their own little leaders?
+
+Hmm, this is something I used to know, about 12 years ago ...
+
+Index: Src/jobs.c
+===================================================================
+@@ -835,11 +835,7 @@
+ 
+     /* child_block() around this loop in case #ifndef WNOHANG */
+     child_block();		/* unblocked in child_suspend() */
+-#ifdef BROKEN_KILL_ESRCH
+-    while (!errflag && (kill(pid, 0) >= 0 || (errno != ESRCH && errno != EINVAL))) {
+-#else /* not BROKEN_KILL_ESRCH */
+     while (!errflag && (kill(pid, 0) >= 0 || errno != ESRCH)) {
+-#endif /* BROKEN_KILL_ESRCH */
+ 	if (first)
+ 	    first = 0;
+ 	else
+Index: Src/signals.c
+===================================================================
+@@ -593,38 +593,23 @@
+                 for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+                     if (killpg(pn->pid, sig) == -1)
+ 			if (kill(pn->pid, sig) == -1 && errno != ESRCH)
+-#ifdef BROKEN_KILL_ESRCH
+-			    if(errno != EINVAL || sig != 0)
+-#endif /* BROKEN_KILL_ESRCH */
+-				err = -1;
++			    err |= -1;
+  
+                 for (pn = jn->procs; pn->next; pn = pn->next)
+                     if (kill(pn->pid, sig) == -1 && errno != ESRCH)
+-#ifdef BROKEN_KILL_ESRCH
+-			if(errno != EINVAL || sig != 0)
+-#endif /* BROKEN_KILL_ESRCH */
+-			    err = -1;
++			err |= -1;
+ 
+ 		if (!jobtab[jn->other].procs && pn)
+ 		    if (kill(pn->pid, sig) == -1 && errno != ESRCH)
+-#ifdef BROKEN_KILL_ESRCH
+-			if(errno != EINVAL || sig != 0)
+-#endif /* BROKEN_KILL_ESRCH */
+-			    err = -1;
++			err |= -1;
+ 
+                 return err;
+             }
+             if (killpg(jobtab[jn->other].gleader, sig) == -1 && errno != ESRCH)
+-#ifdef BROKEN_KILL_ESRCH
+-		if(errno != EINVAL || sig != 0)
+-#endif /* BROKEN_KILL_ESRCH */
+-		    err = -1;
++		err = -1;
+ 		
+ 	    if (killpg(jn->gleader, sig) == -1 && errno != ESRCH)
+-#ifdef BROKEN_KILL_ESRCH
+-		if(errno != EINVAL || sig != 0)
+-#endif /* BROKEN_KILL_ESRCH */
+-		    err = -1;
++		err |= -1;
+ 
+ 	    return err;
+         }
+@@ -632,10 +617,7 @@
+ 	    return killpg(jn->gleader, sig);
+     }
+     for (pn = jn->procs; pn; pn = pn->next)
+-        if ((err = kill(pn->pid, sig)) == -1 && errno != ESRCH)
+-#ifdef BROKEN_KILL_ESRCH
+-          if(errno != EINVAL || sig != 0)
+-#endif /* BROKEN_KILL_ESRCH */
++        if ((err = kill(pn->pid, sig)) == -1 && errno != ESRCH && sig != 0)
+             return -1;
+     return err;
+ }
+Index: Src/system.h
+===================================================================
+@@ -620,3 +620,8 @@
+ #ifdef BROKEN_TCSETPGRP
+ #undef JOB_CONTROL
+ #endif /* BROKEN_TCSETPGRP */
++
++#ifdef BROKEN_KILL_ESRCH
++#undef ESRCH
++#define ESRCH EINVAL
++#endif /* BROKEN_KILL_ESRCH */
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

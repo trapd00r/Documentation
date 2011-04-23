@@ -1,0 +1,195 @@
+From zsh-workers-return-6046-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Apr 16 07:37:02 1999
+Return-Path: <zsh-workers-return-6046-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21380 invoked from network); 16 Apr 1999 07:37:01 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 16 Apr 1999 07:37:01 -0000
+Received: (qmail 26143 invoked by alias); 16 Apr 1999 07:36:46 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6046
+Received: (qmail 26136 invoked from network); 16 Apr 1999 07:36:42 -0000
+Date: Fri, 16 Apr 1999 09:36:31 +0200 (MET DST)
+Message-Id: <199904160736.JAA15853@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Thu, 15 Apr 1999 13:10:31 -0700
+Subject: Re: BUG: zsh-3.1.5-pws-14: parameter expansion not working properly
+
+
+[ There is a little patchlet below. I don't suggest using it to
+  everyone just now, it's just that I can think about this better when 
+  I have cod to play with. Didn't have the time for this yesterday. ]
+
+Bart Schaefer wrote:
+
+> Think about it this way:
+> 
+> 1. The expression "${(@)foo}" produces an array of quoted words.
+> 
+> 2. In the expression "${${(@)foo}}", the outer ${ ... } can include both
+> flags in leading () and subscripts in trailing [].  The inner ${(@)foo}
+> should *still* produce an array of quoted words, to which the flags and
+> subscripts of the outer ${ ... } are applied.
+> 
+> 3. To work like the old zsh, the subscripts should apply *before* any
+> split or join operation implied by the flags (or by the lack of a flag).
+> The exception being the (P) flag, because it is defined to change the
+> interpretation of the parameter's name and thus must "bind tighter" than
+> anything including subscripts.
+> 
+> In pws-14+, at step (2), the inner expression does NOT produce an array
+> unless the outer expression uses (@).  This is what I think is wrong.
+
+Agreed (again) -- I mentioned this in 5841.
+
+> I don't think it's possible to "pass down" from paramsubst-->multsub
+> the knowledge of whether an array should be returned [except when (P)];
+> it has to be "passed up," multsub<--prefork<--stringsubst<--paramsubst.
+
+I don't understand the difference between making the the arrows point
+to the left or the right here.
+
+> Beyond those three steps, things get fuzzy.  In trying to reason about
+> this without actually seeing it in action, I *believe* that it's OK if:
+> 
+> 4. *After* the subscripts are applied, the outer ${ ... } joins the
+> quoted words into a single string, *unless*: the (@) flag is present
+> or the [@] subscript was applied, and the (j) flag is not present.
+
+This one is very important. If we make it this way (and the patch
+below does that), it means that we still need the plethora of `(@)'
+flags: with `foo' being an array "${${(@)foo}[1,2]}" selects the first 
+two elements of it, joins them, and returns *one* string.
+So, this doesn't help much to simplify the syntax needed in some of
+the more common cases.
+
+> I know that's still a change from the old behavior, so I can't be sure
+> that it'll work out, but I *think* it will.
+> 
+> 5. Finally, the string is split again according to SHWORDSPLIT or the
+> (s) flag.
+> 
+> 6. If there is a split, or if (@) or [@] was present, an array of quoted
+> words is returned.  If there's another outer ${ ... }, go to step (3).
+
+These two are done in a piece of code I didn't change anyway and were
+only affected by the outcome of the call to multsub().
+> 
+> } With respect to the outer paramsubst()s this would make things
+> } independent of whether the whole thing is in quotes or not, only the
+> } inner paramsubst()s `control' if the outer ones work on an array
+> } by testing if the thing is in quotes and if the `(@)' flag (or
+> } something similar like the `s' flag or `=') is used.
+> 
+> As I just said, I don't *think* it should be independent of whether the
+> whole thing is in quotes.  The quotes should affect what happens at (4),
+> but they should *not* affect what happens at 2-->3 or 6-->3.
+
+Obviously, I wasn't clear enough again. In terms of code: I wanted to
+say that at the call to multsub(), the information about whether we
+are in quotes should not be used. But of course, it should be used
+after that -- as usual. Only make sure that we get correct information 
+about the array-ness whether we are in quotes or not. And of course,
+the quotes also affect the way the inner expression is expanded and
+hence if it yields an array or not.
+
+> Does that make sense?
+
+Yes, and the behavior with the patch looks better than before to
+me. We only need to discuss the `is there a way to avoid the need for
+the many (@) flags' thing.
+
+Bye
+ Sven
+
+--- os/subst.c	Wed Apr 14 11:58:36 1999
++++ Src/subst.c	Fri Apr 16 09:09:32 1999
+@@ -245,35 +245,43 @@
+  * the result is stored in *a. If `a' is zero a multiple word result is *
+  * joined using sep or the IFS parameter if sep is zero and the result  *
+  * is returned in *s.  The return value is true iff the expansion       *
+- * resulted in an empty list                                            */
++ * resulted in an empty list.                                           *
++ * The mult_isarr variable is used by paramsubst() to tell if it yields *
++ * an array.                                                            */
++
++static int mult_isarr;
+ 
+ /**/
+ static int
+ multsub(char **s, char ***a, int *isarr, char *sep)
+ {
+     LinkList foo;
+-    int l;
++    int l, omi = mult_isarr;
+     char **r, **p;
+ 
++    mult_isarr = 0;
+     foo = newlinklist();
+     addlinknode(foo, *s);
+     prefork(foo, 0);
+     if (errflag) {
+ 	if (isarr)
+ 	    *isarr = 0;
++	mult_isarr = omi;
+ 	return 0;
+     }
+-    if ((l = countlinknodes(foo)) > 1 || a) {
++    if ((l = countlinknodes(foo))) {
+ 	p = r = ncalloc((l + 1) * sizeof(char*));
+ 	while (nonempty(foo))
+ 	    *p++ = (char *)ugetnode(foo);
+ 	*p = NULL;
+-	if (a) {
++	if (a && mult_isarr) {
+ 	    *a = r;
+ 	    *isarr = 1;
++	    mult_isarr = omi;
+ 	    return 0;
+ 	}
+ 	*s = sepjoin(r, NULL);
++	mult_isarr = omi;
+ 	return 0;
+     }
+     if (l)
+@@ -282,6 +290,7 @@
+ 	*s = dupstring("");
+     if (isarr)
+ 	*isarr = 0;
++    mult_isarr = omi;
+     return !l;
+ }
+ 
+@@ -977,16 +986,12 @@
+ 	skipparens(*s, *s == Inpar ? Outpar : Outbrace, &s);
+ 	sav = *s;
+ 	*s = 0;
+-	if (multsub(&val, ((!aspar && (!quoted || nojoin)) ? &aval : NULL),
+-		    &isarr, NULL) &&
+-	    quoted) {
++	if (multsub(&val, (aspar ? NULL : &aval), &isarr, NULL) && quoted) {
+ 	    isarr = -1;
+ 	    aval = alloc(sizeof(char *));
+ 	    aspar = 0;
+ 	} else if (aspar)
+ 	    idbeg = val;
+-	if (isarr)
+-	    isarr = -1;
+ 	copied = 1;
+ 	*s = sav;
+ 	v = (Value) NULL;
+@@ -1465,6 +1470,7 @@
+ 	val = dupstring(buf);
+ 	isarr = 0;
+     }
++    mult_isarr = isarr;
+     if (isarr > 0 && !plan9 && (!aval || !aval[0])) {
+ 	val = dupstring("");
+ 	isarr = 0;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

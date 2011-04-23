@@ -1,0 +1,101 @@
+From zsh-workers-request@math.gatech.edu Fri Sep 25 10:28:00 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13031 invoked from network); 25 Sep 1998 10:27:58 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 25 Sep 1998 10:27:58 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id GAA05990;
+	Fri, 25 Sep 1998 06:17:57 -0400 (EDT)
+Resent-Date: Fri, 25 Sep 1998 06:17:57 -0400 (EDT)
+Message-Id: <9809251009.AA12696@ibmth.df.unipi.it>
+To: zsh-workers@math.gatech.edu
+Subject: Re: Insidious exit status bugs 
+In-Reply-To: ""Bart Schaefer""'s message of "Thu, 24 Sep 1998 23:41:27 DFT."
+             <980924234127.ZM15042@candle.brasslantern.com> 
+Date: Fri, 25 Sep 1998 12:09:50 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"Kw2Pb2.0.XT1.Lts2s"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4395
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+"Bart Schaefer" wrote:
+> The following really messed me up, trying to write a script that will work
+> whether sh is bash or zsh.  Here's zsh 3.0.5 (3.1.4 is the same):
+> 
+> zagzig% echo yyy | fgrep -q xxx && echo ok
+> zagzig% echo yyy | fgrep -q `echo xxx` && echo ok
+> ok
+> 
+> It appears that the exit status of `echo xxx` is masking the exit status of
+> `fgrep -q`, but I'm not certain.
+
+Insidious is definitely right.  This is serious harrow-up-thy-soul
+territory.  There appear to be two things happening.  The first I
+think I understand, though not why it's there.  The second currently
+has me stumped.
+
+First: the exit status from the `...` or $(...) is being explicitly
+passed back as lastval, i.e. $?.  Why???  There's a variable cmdoutval
+whose only function in life is to remember that status to be assigned
+to lastval, so someone thought it was a good idea.  Here's the
+offending chunk from getoutput() in exec.c which is for the parent
+side of the forked $(...).
+
+    } else if (pid) {
+	LinkList retval;
+
+	zclose(pipes[1]);
+	retval = readoutput(pipes[0], qt);
+	fdtable[pipes[0]] = 0;
+	child_suspend(0);		/* unblocks */
+	lastval = cmdoutval;
+	return retval;
+    }
+
+`lastval = cmdoutval' is deliberately messing up the return status for
+reasons I can't even guess at.  Perhaps if the second bug wasn't
+there, this wouldn't be seen, but it had me confused anyway.
+
+
+Second:  I commented the cmdoutval stuff out, and now things start to
+go really haywire.  It looks like you have to have a builtin in the
+first part of the pipe, and an external command in the second part to
+see this.  Bearing this in mind, I commented out the chunk in
+execpline2() where `builtin as first command in pipe' is specially
+handled, so as to simplify things, and added some messages; it still
+goes wrong:
+
++11:58% echo yyy | fgrep -q $(echo xxx)
+Got status 0 from process 36923               OK, that's the $(echo xxx)
+...was procsub process.
+Got status 0 from process 36410               This must be the echo yyy...
+Setting status of 36410 to 0 (1)
+Exit status 0 from 36410                      ...and this means that
+                                                 it's being handled
+                                                 as if it were last in
+                                                 the pipeline.
+setting lastval to 0 (1)
+Got status 0 from process -1
+...error: No child processes                  self explanatory, but...
++11:58% Got status 256 from process 36412     now we're back to the
+                                              prompt, and 36412 (fgrep)
+                                              has only just been handled.
+Got status 256 from process -1
+...error: No child processes
+
+
+So it looks like the fgrep is being run, or at least waited for,
+asynchronously instead of synchronously, and all because of the $(echo
+xxx).  I've wasted too much time on this already, so that's it for
+now.
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Gruppo Teorico, Dipartimento di Fisica
+Piazza Torricelli 2, 56100 Pisa, Italy
+

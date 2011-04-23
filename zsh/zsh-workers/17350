@@ -1,0 +1,282 @@
+From zsh-workers-return-17350-mason-zsh=primenet.com.au@sunsite.dk Fri Jun 21 23:34:26 2002
+Return-Path: <zsh-workers-return-17350-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15682 invoked from network); 21 Jun 2002 23:34:25 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 21 Jun 2002 23:34:25 -0000
+Received: (qmail 3787 invoked by alias); 21 Jun 2002 23:34:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17350
+Received: (qmail 3776 invoked from network); 21 Jun 2002 23:34:18 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: zle parameters for kill ring
+Date: Sat, 22 Jun 2002 00:35:56 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20020621233602.A44611C0BC@pwstephenson.fsnet.co.uk>
+
+This makes available to zle widgets $CUTBUFFER, the string from the last
+kill, and $killring, the array of strings in the kill ring, both
+read-write.  In principle you can manage this in the same way as the
+user, i.e. setting the mark and excuting a kill-region, but this seems
+more flexible.  Any particular views?
+
+Note I haven't touched the related vi buffers.
+
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.21
+diff -u -r1.21 zle.yo
+--- Doc/Zsh/zle.yo	7 Jun 2002 18:04:14 -0000	1.21
++++ Doc/Zsh/zle.yo	21 Jun 2002 23:27:35 -0000
+@@ -589,10 +589,10 @@
+ buffer.
+ )
+ vindex(BUFFERLINES)
+-item(tt(BUFFERLINES))(
++item(tt(BUFFERLINES) (integer))(
+ The number of screen lines needed for the edit buffer currently
+ displayed on screen (i.e. without any changes to the preceding
+-parameters done after the last redisplay).
++parameters done after the last redisplay); read-only.
+ )
+ vindex(CURSOR)
+ item(tt(CURSOR) (integer))(
+@@ -601,21 +601,35 @@
+ Attempts to move the cursor outside the buffer will result in the
+ cursor being moved to the appropriate end of the buffer.
+ )
++vindex(CUTBUFFER)
++item(tt(CUTBUFFER) (scalar))(
++The last item to be cut using one of the `tt(kill-)' commands; the
++string which the next yank would insert in the line.
++)
+ vindex(HISTNO)
+ item(tt(HISTNO) (integer))(
+-The current history number.
++The current history number; read-only.
+ )
+ vindex(KEYMAP)
+ item(tt(KEYMAP) (scalar))(
+-The name of the currently selected keymap.
++The name of the currently selected keymap; read-only.
+ )
+ vindex(KEYS)
+ item(tt(KEYS) (scalar))(
+-The keys typed to invoke this widget, as a literal string.
++The keys typed to invoke this widget, as a literal string; read-only.
++)
++vindex(killring)
++item(tt(killring) (array))(
++The array of previously killed items, with the most recently killed first.
++This gives the items that would be retrieved by a tt(yank-pop) in the
++same order, up to eight (which is the maximum stored internally).
++Unlike a normal array, only a maximum of eight elements may be written;
++any extra are ignored.  If fewer than eight elements are given, the
++remaining elements of the kill ring will be treated as undefined.
+ )
+ vindex(LASTWIDGET)
+ item(tt(LASTWIDGET) (scalar))(
+-The name of the last widget that was executed.
++The name of the last widget that was executed; read-only.
+ )
+ vindex(LBUFFER)
+ item(tt(LBUFFER) (scalar))(
+@@ -640,7 +654,7 @@
+ The number of bytes pending for input, i.e. the number of bytes which have
+ already been typed and can immediately be read. On systems where the shell
+ is not able to get this information, this parameter will always have a
+-value of zero.
++value of zero.  Read-only.
+ )
+ vindex(PREBUFFER)
+ item(tt(PREBUFFER) (scalar))(
+@@ -656,7 +670,7 @@
+ )
+ vindex(WIDGET)
+ item(tt(WIDGET) (scalar))(
+-The name of the widget currently being executed.
++The name of the widget currently being executed; read-only.
+ )
+ enditem()
+ sect(Standard Widgets)
+Index: Src/Zle/zle_hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_hist.c,v
+retrieving revision 1.7
+diff -u -r1.7 zle_hist.c
+--- Src/Zle/zle_hist.c	5 Mar 2002 16:33:19 -0000	1.7
++++ Src/Zle/zle_hist.c	21 Jun 2002 23:27:52 -0000
+@@ -250,11 +250,11 @@
+ {
+     Histent he;
+ 
+-    if (!(he = movehistent(quietgethist(histline), 1, HIST_FOREIGN)))
+-	return 1;
+-    zpushnode(bufstack, ztrdup(he->text));
++    if ((he = movehistent(quietgethist(histline), 1, HIST_FOREIGN))) {
++	zpushnode(bufstack, ztrdup(he->text));
++	stackhist = he->histnum;
++    }
+     done = 1;
+-    stackhist = he->histnum;
+     return 0;
+ }
+ 
+Index: Src/Zle/zle_params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_params.c,v
+retrieving revision 1.3
+diff -u -r1.3 zle_params.c
+--- Src/Zle/zle_params.c	3 Sep 2001 01:39:20 -0000	1.3
++++ Src/Zle/zle_params.c	21 Jun 2002 23:27:52 -0000
+@@ -81,6 +81,10 @@
+         zleunsetfn, NULL },
+     { "PENDING", PM_INTEGER | PM_READONLY, NULL, FN(get_pending),
+         zleunsetfn, NULL },
++    { "CUTBUFFER", PM_SCALAR, FN(set_cutbuffer), FN(get_cutbuffer),
++	unset_cutbuffer, NULL },
++    { "killring", PM_ARRAY, FN(set_killring), FN(get_killring),
++	unset_killring, NULL },
+     { NULL, 0, NULL, NULL, NULL, NULL }
+ };
+ 
+@@ -332,4 +336,129 @@
+ get_pending(Param pm)
+ {
+     return noquery(0);
++}
++
++/**/
++static char *
++get_cutbuffer(Param pm)
++{
++    if (cutbuf.buf)
++	return metafy(cutbuf.buf, cutbuf.len, META_HEAPDUP);
++    else
++	return "";
++}
++
++
++/**/
++static void
++set_cutbuffer(Param pm, char *x)
++{
++    if (cutbuf.buf)
++	free(cutbuf.buf);
++    cutbuf.flags = 0;
++    if (x) {
++	unmetafy(x, &cutbuf.len);
++	cutbuf.buf = zalloc(cutbuf.len);
++	strcpy((char *)cutbuf.buf, x);
++	zsfree(x);
++    } else {
++	cutbuf.buf = NULL;
++	cutbuf.len = 0;
++    }
++}
++
++/**/
++static void
++unset_cutbuffer(Param pm, int exp)
++{
++    if (exp) {
++	stdunsetfn(pm, exp);
++	if (cutbuf.buf) {
++	    free(cutbuf.buf);
++	    cutbuf.buf = NULL;
++	    cutbuf.len = 0;
++	}
++    }
++}
++
++/**/
++static void
++set_killring(Param pm, char **x)
++{
++    int kpos, kcnt;
++    char **p;
++
++    kcnt = 0;
++    kpos = kringnum;
++
++    if (x) {
++	/*
++	 * Insert the elements into the kill ring, up to a maximum
++	 * of KRINGCT.  We always handle the ring in the order
++	 * a series of yank-pops would show, i.e. starting with
++	 * the most recently cut and going backwards.
++	 */
++	for (p = x; kcnt < KRINGCT && *p; kcnt++, p++) {
++	    Cutbuffer kptr = kring + kpos;
++	    if (kptr->buf)
++		free(kptr->buf);
++	    kptr->buf = (char *)zalloc(strlen(*p));
++	    strcpy(kptr->buf, *p);
++	    unmetafy(kptr->buf, &kptr->len);
++	    kptr->flags = 0;
++	    kpos = (kpos + KRINGCT - 1) % KRINGCT;
++	}
++	freearray(x);
++    }
++    /*
++     * Any values unsupplied are to be unset.
++     */
++    for (; kcnt < KRINGCT; kcnt++) {
++	Cutbuffer kptr = kring + kpos;
++	if (kptr->buf) {
++	    free(kptr->buf);
++	    kptr->buf = NULL;
++	    kptr->flags = kptr->len = 0;
++	}
++	kpos = (kpos + KRINGCT - 1) % KRINGCT;
++    }
++}
++
++/**/
++static char **
++get_killring(Param pm)
++{
++    /*
++     * Return the kill ring with the most recently killed first.
++     * Stop as soon as we find something which isn't set, i.e.
++     * don't fill in bogus entries.
++     */
++    int kpos, kcnt;
++    char **ret, **p;
++
++    for (kpos = kringnum, kcnt = 0; kcnt < KRINGCT; kcnt++) {
++	if (!kring[kpos].buf)
++	    break;
++	kpos = (kpos + KRINGCT - 1) % KRINGCT;
++    }
++
++    p = ret = (char **)zhalloc((kcnt+1) * sizeof(char *));
++
++    for (kpos = kringnum; kcnt; kcnt--) {
++	*p++ = metafy((char *)kring[kpos].buf, kring[kpos].len, META_HEAPDUP);
++	kpos = (kpos + KRINGCT - 1) % KRINGCT;
++    }
++    *p = NULL;
++
++    return ret;
++}
++
++/**/
++static void
++unset_killring(Param pm, int exp)
++{
++    if (exp) {
++	set_killring(pm, NULL);
++	stdunsetfn(pm, exp);
++    }
+ }
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

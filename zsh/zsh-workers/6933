@@ -1,0 +1,203 @@
+From zsh-workers-return-6933-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jun 30 09:57:13 1999
+Return-Path: <zsh-workers-return-6933-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24596 invoked from network); 30 Jun 1999 09:57:11 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 30 Jun 1999 09:57:11 -0000
+Received: (qmail 13386 invoked by alias); 30 Jun 1999 09:56:39 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6933
+Received: (qmail 13379 invoked from network); 30 Jun 1999 09:56:38 -0000
+Date: Wed, 30 Jun 1999 11:56:36 +0200 (MET DST)
+Message-Id: <199906300956.LAA26599@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Tue, 29 Jun 1999 14:43:01 +0000
+Subject: Re: PATCH: that execution stuff
+
+
+Bart Schaefer wrote:
+
+> Thanks, Sven; this finally seems to have nailed the critical bits.
+
+Ha. One thing I knew already about yesterday:
+
+  % f() { while read a; do :; done; mutt }
+  % cat foo | f
+
+The important bit is that mutt is started when the cat has finished.
+In this case it is put in the group of the parent shell. Bing! Something
+similar happens when we ^Z such a thing when the beginning of the
+pipeline has already exited (the sub-shell is left in the group of the 
+parent shell).
+
+While trying to fix this I also found another one:
+
+  % f() { cat builtin.c }
+  % f | while read a; do :; done
+
+Then ^Z it and try to fg it -- nothing happens. The sub-shell for the
+function is not continued correctly.
+
+There were some other things (like the sub-shell not continuing the
+cat in the second example) I found and which should be fixed now, but
+I don't really remember them. Some were probably caused by me trying
+to get these two to work.
+
+If someone feels adventurous and has spare time (ha!), he could
+probably try more of these combinations (^Z'ing, fg'ing, ^C'ing loops, 
+function, pipes, combinations of all of them) and tell us if he finds
+something that still doesn't work.
+  
+
+Bye
+ Sven
+
+P.S.:   If you have the impression that the execution code is getting
+        more and more complicated, you are right.
+P.P.S.: Execution code is really hard to bug. Sigh.
+
+diff -u os/exec.c Src/exec.c
+--- os/exec.c	Tue Jun 29 17:25:48 1999
++++ Src/exec.c	Wed Jun 30 11:51:09 1999
+@@ -903,7 +903,7 @@
+ 
+ 		    /* If the super-job contains only the sub-shell, the
+ 		       sub-shell is the group leader. */
+-		    if (!jn->procs->next)
++		    if (!jn->procs->next || lpforked == 2)
+ 			jn->gleader = list_pipe_pid;
+ 
+ 		    for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+@@ -961,7 +961,8 @@
+ 		    else if (pid) {
+ 			char dummy;
+ 
+-			lpforked = 1;
++			lpforked = 
++			    (killpg(jobtab[list_pipe_job].gleader, 0) == -1 ? 2 : 1);
+ 			list_pipe_pid = pid;
+ 			nowait = errflag = 1;
+ 			breaks = loops;
+@@ -983,9 +984,12 @@
+ 		    else {
+ 			close(synch[0]);
+ 			entersubsh(Z_ASYNC, 0, 0);
+-			if (jobtab[list_pipe_job].procs)
+-			    setpgrp(0L, mypgrp = jobtab[list_pipe_job].gleader);
+-			else
++			if (jobtab[list_pipe_job].procs) {
++			    if (setpgrp(0L, mypgrp = jobtab[list_pipe_job].gleader)
++				== -1) {
++				setpgrp(0L, mypgrp = getpid());
++			    }
++			} else
+ 			    setpgrp(0L, mypgrp = getpid());
+ 			close(synch[1]);
+ 			kill(getpid(), SIGSTOP);
+@@ -2206,9 +2210,8 @@
+ 	    if (kill(jobtab[list_pipe_job].gleader, 0) == -1 ||
+ 		setpgrp(0L, jobtab[list_pipe_job].gleader) == -1) {
+ 		jobtab[list_pipe_job].gleader =
+-		    jobtab[thisjob].gleader = mypgrp;
+-		setpgrp(0L, mypgrp);
+-
++		    jobtab[thisjob].gleader = (list_pipe_child ? mypgrp : getpid());
++		setpgrp(0L, jobtab[list_pipe_job].gleader);
+ 		if (how & Z_SYNC)
+ 		    attachtty(jobtab[thisjob].gleader);
+ 	    }
+diff -u os/jobs.c Src/jobs.c
+--- os/jobs.c	Tue Jun 29 12:51:16 1999
++++ Src/jobs.c	Wed Jun 30 11:51:48 1999
+@@ -787,9 +787,13 @@
+ 	       what this might be.  --oberon
+ 
+ 	    errflag = 0; */
++	    if (subsh) {
++		killjb(jn, SIGCONT);
++		jn->stat &= ~STAT_STOPPED;
++	    }
+ 	    if (jn->stat & STAT_SUPERJOB) {
+ 		Job sj = jobtab + jn->other;
+-		if (sj->stat & STAT_DONE) {
++		if ((sj->stat & STAT_DONE) || !sj->procs) {
+ 		    struct process *p;
+ 		    
+ 		    for (p = sj->procs; p; p = p->next)
+@@ -803,11 +807,18 @@
+ 			    break;
+ 			}
+ 		    if (!p) {
++			int cp;
++
+ 			jn->stat &= ~STAT_SUPERJOB;
+ 			jn->stat |= STAT_WASSUPER;
+-			if (WIFEXITED(jn->procs->status) &&
+-			    killpg(jn->gleader, 0) == -1)
+-			    jn->gleader = mypgrp;
++
++			if ((cp = ((WIFEXITED(jn->procs->status) ||
++				    WIFSIGNALED(jn->procs->status)) &&
++				   killpg(jn->gleader, 0) == -1))) {
++			    Process p;
++			    for (p = jn->procs; p->next; p = p->next);
++			    jn->gleader = p->pid;
++			}
+ 			/* This deleted the job too early if the parent
+ 			   shell waited for a command in a list that will
+ 			   be executed by the sub-shell (e.g.: if we have
+@@ -819,7 +830,7 @@
+ 			/* If this super-job contains only the sub-shell,
+ 			   we have to attach the tty to our process group
+ 			   (which is shared by the sub-shell) now. */
+-			if (!jn->procs->next)
++			if (!jn->procs->next || cp || jn->procs->pid != jn->gleader)
+ 			    attachtty(jn->gleader);
+ 			kill(sj->other, SIGCONT);
+ 		    }
+@@ -830,7 +841,9 @@
+ 
+ 		    jn->stat |= STAT_STOPPED;
+ 		    for (p = jn->procs; p; p = p->next)
+-			p->status = sj->procs->status;
++			if (p->status == SP_RUNNING ||
++			    (!WIFEXITED(p->status) && !WIFSIGNALED(p->status)))
++			    p->status = sj->procs->status;
+ 		    curjob = jn - jobtab;
+ 		    printjob(jn, !!isset(LONGLISTJOBS), 1);
+ 		    break;
+@@ -1250,7 +1263,10 @@
+ 		if (func != BIN_WAIT) {		/* fg */
+ 		    thisjob = job;
+ 		    if ((jobtab[job].stat & STAT_SUPERJOB) &&
+-			!jobtab[job].procs->next)
++			((!jobtab[job].procs->next ||
++			  WIFEXITED(jobtab[job].procs->status) ||
++			  WIFSIGNALED(jobtab[job].procs->status))) &&
++			jobtab[jobtab[job].other].gleader)
+ 			attachtty(jobtab[jobtab[job].other].gleader);
+ 		    else
+ 			attachtty(jobtab[job].gleader);
+diff -u os/signals.c Src/signals.c
+--- os/signals.c	Tue Jun 29 12:51:17 1999
++++ Src/signals.c	Wed Jun 30 11:43:50 1999
+@@ -586,7 +586,10 @@
+  
+                 for (pn = jn->procs; pn->next; pn = pn->next)
+                     err = kill(pn->pid, sig);
+- 
++
++		if (!jobtab[jn->other].procs && pn)
++		    err = kill(pn->pid, sig);
++
+                 return err;
+             }
+  
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

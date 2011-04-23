@@ -1,0 +1,355 @@
+From zsh-workers-return-22843-mason-zsh=primenet.com.au@sunsite.dk Sun Oct 08 15:39:00 2006
+Return-Path: <zsh-workers-return-22843-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5461 invoked from network); 8 Oct 2006 15:38:56 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.6 (2006-10-03) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.6
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 8 Oct 2006 15:38:56 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 55490 invoked from network); 8 Oct 2006 15:38:48 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 8 Oct 2006 15:38:48 -0000
+Received: (qmail 29577 invoked by alias); 8 Oct 2006 15:38:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22843
+Received: (qmail 29559 invoked from network); 8 Oct 2006 15:38:43 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 8 Oct 2006 15:38:43 -0000
+Received: (qmail 55145 invoked from network); 8 Oct 2006 15:38:43 -0000
+Received: from flock1.newmail.ru (80.68.241.157)
+  by a.mx.sunsite.dk with SMTP; 8 Oct 2006 15:38:42 -0000
+Received: (qmail 30555 invoked from network); 8 Oct 2006 15:38:40 -0000
+Received: from unknown (HELO cooker.local) (arvidjaar@newmail.ru@83.237.13.135)
+  by smtpd.newmail.ru with SMTP; 8 Oct 2006 15:38:40 -0000
+From: Andrey Borzenkov <arvidjaar@newmail.ru>
+To: zsh-workers@sunsite.dk
+Subject: quest for bld_line (was: Re: Stuff to do)
+Date: Sun, 8 Oct 2006 19:38:33 +0400
+User-Agent: KMail/1.9.4
+References: <200609271211.k8RCBW5N023914@news01.csr.com>
+In-Reply-To: <200609271211.k8RCBW5N023914@news01.csr.com>
+Content-Type: text/plain;
+  charset="utf-8"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: inline
+Message-Id: <200610081938.38620.arvidjaar@newmail.ru>
+
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA1
+
+On Wednesday 27 September 2006 16:11, Peter Stephenson wrote:
+> - The matcher specifications in completion don't handle multibyte
+> characters and are currently written in such a way as to make this
+> hard (similar to the old suffix character handling).
+
+OK here is next patch that does not fix the above but tries to remove one more 
+obstacle for it.
+
+bld_line tries to find (and actually build) a line that can match two given 
+words. It does so by building *all* possible lines that match one word and 
+trying to match every built line against second word. Now the word "all" 
+makes possibility to do the same for arbitrary character set rather abstract.
+
+I must admit that I still do not understand why Sven needed this function nor 
+how line that it builds is used later. What I am confident in, the Clines 
+that are built using this function are removed later in compresult and never 
+appear anywhere on command line.
+
+I tried to invent some way to mimic it as close to original as I could. It is 
+incomplete; nor am I sure if there any way to do it differently.
+
+The point of patch is to replace exhaustive enumeration of all possible 
+combinations by comparison of patterns. I.e. it checks if two patterns may 
+have something in common - this can be generalized later using different 
+pattern representations.
+
+I would be happy if we could just toss away this function.
+
+Comments?
+
+Index: Src/Zle/compmatch.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compmatch.c,v
+retrieving revision 1.50
+diff -u -p -r1.50 compmatch.c
+- --- Src/Zle/compmatch.c	30 Sep 2006 06:53:15 -0000	1.50
++++ Src/Zle/compmatch.c	8 Oct 2006 15:27:11 -0000
+@@ -1214,105 +1214,164 @@ bld_parts(char *str, int len, int plen, 
+     return ret;
+ }
+ 
+- -/* This builds all the possible line patterns for the pattern pat in the
+- - * buffer line. Initially line is the same as lp, but during recursive
+- - * calls lp is incremented for storing successive characters. Whenever
+- - * a full possible string is build, we test if this line matches the
+- - * string given by wlen and word.
++/*
++ * Compare two different line patterns if they can have some common character
++ * Insert one of common characters in line we are building (it does not 
+matter
++ * which one)
++ * mlp	- line pattern which has matched before
++ * mwp	- word pattern which has matched before
++ * nlp	- new line pattern that we currently test against mlp
++ * nwp	- new word pattern that we currently test against mwp
++ * line	- line we build; we insert characters there
++ */
++
++/**/
++static int
++pattern_compare(Cpattern mlp, Cpattern mwp, Cpattern nlp, Cpattern nwp,
++		char *line)
++{
++    while (nlp) {
++	int i;
++
++	/*
++	 * test to see if mlp and nlp have something in commons
++	 * nlp cannot be less than mlp (we check pattern length before)
++	 * but word pattern may of course be shorter than line ...
++	 */
++	for (i = 0; i < 256; i++)
++	    if (mlp->tab[i] && nlp->tab[i]) {
++		/* for equiv. class they must also match word pattern */
++		if (mlp->equiv) {
++		    if (!mwp || !nwp || (mlp->tab[i] == mwp->tab[i] &&
++			nlp->tab[i] == nwp->tab[i]))
++			break;
++		} else
++		    break;
++	    }
++	if (i < 256) {
++	    /* OK we found character that matches both matchers */
++	    *line++ = (char)i;
++	} else {
++	    /* No matching character */
++	    return 0;
++	}
++	/* FIXME can this be out of bounds? */
++	mlp = mlp->next;
++	nlp = nlp->next;
++	if (mwp) mwp = mwp->next;
++	if (nwp) nwp = nwp->next;
++    }
++
++    return 1;
++}
++
++/* This tries to find out, if there is common line that may match two
++ * words (possible matches or parts thereof). When this function is called,
++ * it is ensured that `mword' has matched word pattern in `matcher';
++ * we try to find a string that both matches line pattern in `matcher'
++ * and another word `word'
+  *
+- - * wpat contains pattern that matched previously
+- - * lpat contains the pattern for line we build
+- - * mword is a string that matched wpat before
+- - * word is string that we try to match now
++ * matcher - matcher that `mword' has been matched against
++ * line    - buffer for string we build
++ * mword   - word that has matched word pattern in `matcher' before
++ * word    - is string that we try to match now
++ * wlen    - length of `word'
++ * sfx     - if we should match bacwards
+  *
+- - * The return value is the length of the string matched in the word, it
++ * The return value is the length of the string matched in the `word', it
+  * is zero if we couldn't build a line that matches the word.
++ *
++ * FIXME implementation is incomplete. In particular, it won't catch
++ * the case when part of line would have been equal to `word' and part
++ * requires matchers. I cannot find a way to do it without exaustive
++ * building of all possible line's that cannot be done as long as patterns
++ * may contain arbitrary multibyte characters
+  */
+ 
+- -
+ /**/
+ static int
+- -bld_line(Cpattern wpat, Cpattern lpat, char *line, char *lp,
++bld_line(Cmatcher matcher,  char *line,
+ 	 char *mword, char *word, int wlen, int sfx)
+ {
+- -    if (lpat) {
+- -	/* Still working on the pattern. */
+- -
+- -	int i, l;
+- -	unsigned char c = 0;
+- -
+- -	/* Get the number of the character for a correspondence class
+- -	 * if it has a corresponding class. */
+- -	if (lpat->equiv)
+- -	    if (wpat && *mword) {
+- -		c = wpat->tab[STOUC(*mword)];
+- -		wpat = wpat->next;
+- -		mword++;
+- -	    }
++    VARARR(Cpattern, mlpa, matcher->llen);
++    VARARR(Cpattern, mwpa, matcher->wlen);
++    Cmlist ms;
++    Cmatcher mp;
++    Cpattern pat;
++    char *lp;
++    int l = matcher->llen, t, rl = 0, ind, add, il, iw, i;
++
++    /* Quick test if word may be direct input line */
++    if (l == wlen &&
++	pattern_match(matcher->line, word,
++		      matcher->word, mword)) {
++	strncpy(line, word, wlen);
++	line[l] = '\0';
++	return l;
++    }
+ 
++    /* Setup array instead of list; this is required for suffix match */
++    for (i = 0, pat = matcher->line; pat; i++, pat = pat->next)
++	mlpa[i] = pat;
++    for (i = 0, pat = matcher->word; pat; i++, pat = pat->next)
++	mwpa[i] = pat;
+ 
+- -	/* Walk through the table in the pattern and try the characters
+- -	 * that may appear in the current position. */
+- -	for (i = 0; i < 256; i++)
+- -	    if ((lpat->equiv && c) ? (c == lpat->tab[i]) : lpat->tab[i]) {
+- -		*lp = i;
+- -		/* We stored the character, now call ourselves to build
+- -		 * the rest. */
+- -		if ((l = bld_line(wpat, lpat->next, line, lp + 1,
+- -				  mword, word, wlen, sfx)))
+- -		    return l;
+- -	    }
++    if (sfx) {
++	ind = -1; add = -1;
++	il = matcher->llen;
++	iw = matcher->wlen;
++	lp = line + il; word += wlen;
+     } else {
+- -	/* We reached the end, i.e. the line string is fully build, now
+- -	 * see if it matches the given word. */
+- -
+- -	Cmlist ms;
+- -	Cmatcher mp;
+- -	int l = lp - line, t, rl = 0, ind, add;
+- -
+- -	/* Quick test if the strings are exactly the same. */
+- -	if (l == wlen && !strncmp(line, word, l))
+- -	    return l;
++	ind = 0; add = 1;
++	il = iw = 0;
++	lp = line;
++    }
+ 
+- -	if (sfx) {
+- -	    line = lp; word += wlen;
+- -	    ind = -1; add = -1;
+- -	} else {
+- -	    ind = 0; add = 1;
+- -	}
+- -	/* We loop through the whole line string built. */
+- -	while (l && wlen) {
+- -	    if (word[ind] == line[ind]) {
+- -		/* The same character in both strings, skip over. */
+- -		line += add; word += add;
+- -		l--; wlen--; rl++;
+- -	    } else {
+- -		t = 0;
+- -		for (ms = bmatchers; ms && !t; ms = ms->next) {
+- -		    mp = ms->matcher;
+- -		    if (mp && !mp->flags && mp->wlen <= wlen && mp->llen <= l &&
+- -			pattern_match(mp->line, (sfx ? line - mp->llen : line),
+- -				      mp->word, (sfx ? word - mp->wlen : word))) {
+- -			/* Both the line and the word pattern matched,
+- -			 * now skip over the matched portions. */
+- -			if (sfx) {
+- -			    line -= mp->llen; word -= mp->wlen;
+- -			} else {
+- -			    line += mp->llen; word += mp->wlen;
+- -			}
+- -			l -= mp->llen; wlen -= mp->wlen; rl += mp->wlen;
+- -			t = 1;
++    /* Loop through both words */
++    while (l && wlen) {
++#if 0
++	/* FIXME this code is likely wrong and so is disabled for now */
++	if (word[ind] == mword[ind]) {
++	    /* The same character in both strings, add it to line and
++	     * skip over. */
++	    lp[ind] = word[ind];
++	    lp += add; word += add; mword += add;
++	    l--; wlen--; rl++;
++	} else
++#endif
++	{
++	    t = 0;
++	    for (ms = bmatchers; ms && !t; ms = ms->next) {
++		mp = ms->matcher;
++		if (mp && !mp->flags && mp->wlen <= wlen && mp->llen <= l &&
++		    pattern_match(mp->word, (sfx ? word - mp->wlen : word),
++				  NULL, NULL) &&
++		    pattern_compare(mlpa[sfx ? il - mp->llen : il],
++				    mwpa[sfx ? iw - mp->wlen : iw],
++				    mp->line, mp->word,
++				    (sfx ? lp - mp->llen : lp))) {
++		    /* Both the line and the word pattern matched,
++		     * now skip over the matched portions. */
++		    if (sfx) {
++			lp -= mp->llen; word -= mp->wlen;
++			il -= mp->llen; iw   -= mp->wlen;
++		    } else {
++			lp += mp->llen; word += mp->wlen;
++			il += mp->llen; iw   += mp->wlen;
+ 		    }
++		    l -= mp->llen; wlen -= mp->wlen; rl += mp->wlen;
++		    t = 1;
+ 		}
+- -		if (!t)
+- -		    /* Didn't match, give up. */
+- -		    return 0;
+ 	    }
++	    if (!t)
++		/* Didn't match, give up. */
++		return 0;
+ 	}
+- -	if (!l)
+- -	    /* Unmatched portion in the line built, return matched length. */
+- -	    return rl;
+     }
++    if (!l)
++	/* Unmatched portion in the line built, return matched length. */
++	return rl;
++
+     return 0;
+ }
+ 
+@@ -1357,7 +1416,7 @@ join_strs(int la, char *sa, int lb, char
+ 			}
+ 			/* Now try to build a string that matches the other
+ 			 * string. */
+- -			if ((bl = bld_line(mp->word, mp->line, line, line,
++			if ((bl = bld_line(mp, line,
+ 					   *ap, *bp, *blp, 0))) {
+ 			    /* Found one, put it into the return string. */
+ 			    line[mp->llen] = '\0';
+@@ -1560,7 +1619,7 @@ join_sub(Cmdata md, char *str, int len, 
+ 		    else
+ 			mw = nw - (sfx ? mp->wlen : 0);
+ 
+- -		    if ((bl = bld_line(mp->word, mp->line, line, line,
++		    if ((bl = bld_line(mp, line,
+ 				       mw, (t ? nw : ow), (t ? nl : ol), sfx)))  {
+ 			/* Yep, one of the lines matched the other
+ 			 * string. */
+-----BEGIN PGP SIGNATURE-----
+Version: GnuPG v1.4.5 (GNU/Linux)
+
+iD8DBQFFKRt9R6LMutpd94wRAqnyAJ0TDZPQf5XZGTiYyHgi7Kn7KRTxRACgqq2S
+eVFyUpbIOQljAVVl3VV1GnU=
+=jO/g
+-----END PGP SIGNATURE-----
+

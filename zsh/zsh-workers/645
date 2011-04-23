@@ -1,0 +1,298 @@
+From zsh-workers-request@math.gatech.edu  Sat Nov 25 08:46:40 1995
+Received: from math.gatech.edu (euclid.skiles.gatech.edu [130.207.146.50]) by werple.net.au (8.7/8.7.1) with SMTP id IAA12950 for <mason@werple.mira.net.au>; Sat, 25 Nov 1995 08:46:32 +1100 (EST)
+Received: by math.gatech.edu (5.x/SMI-SVR4)
+	id AA05725; Fri, 24 Nov 1995 16:28:56 -0500
+Resent-Date: Fri, 24 Nov 1995 22:29:14 +0100 (MET)
+Old-Return-Path: <kaefer@aglaia.snafu.DE>
+Message-Id: <m0tJ5gJ-000026C@aglaia.snafu.DE>
+Subject: Re: beta12: 8-bit-cleanliness
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Date: Fri, 24 Nov 1995 22:29:14 +0100 (MET)
+In-Reply-To: <9511230908.AA13665@sgi.ifh.de> from "Peter Stephenson" at Nov 23, 95 10:08:43 am
+From: Thorsten Meinecke <kaefer@aglaia.snafu.de>
+Organization: none. Location: Berlin, Germany
+X-Mailer: ELM [version 2.4 PL23]
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-Id: <"tRbaj1.0.NP1.OaZjm"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/645
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Peter Stephenson wrote:
+> a.main@dcs.warwick.ac.uk wrote:
+> > >... nicefputs() ... niceputc() ...
+> > You'll want to modify nicestrlen() as well.
+> 
+> Thanks.  Here's the complete patch for all three routines.
+
+May I have a stab at thee? Think I've spotted 3 flaws in Peter's patch:
+
+1.) The only place where nicestrlen() is called, is in stradd(), to
+  determine the number of chars npputc() will put in the prompt. Which
+  will break. That's why stradd() and npputc() want to be altered, too.
+  
+2.) The return value of isprint() depends on the system's/user's
+  locale setting, leaving lots of ways to be messed with. According
+  to how I understand Peter's approach, we can trust isprint() if it
+  says a char is printable, but not the other way.
+
+  So I'd rather change the order of the tests: first see if it's print-
+  able, and then check if it's non-ascii, i.e. the high-order bit set,
+  and then try if the char with the high-order bit stripped is printable.
+
+  An example is the ISO-8859-1 character LATIN SMALL LETTER Y WITH
+  DIAERESIS, '0xff', which would fail to print even in case a proper
+  locale is provided, because '0x7f' (DEL) wouldn't necessarily print.
+
+   (While we're at it: Is there any reason that npputc() cares about
+    DEL ('0x7f') and nicefputs()/niceputc() don't? I've no trouble
+    to enter that character literally into the history, and now I
+    expect it to be printed nicely: '^?'  :-)
+
+3.) char c; if isprint(c) ... doesn't work for me. The prototype in
+  <ctype.h> says isprint(int). It looks again that c should be cast
+  to (unsigned char), otherwise the sign is preserved when c promotes
+  to int. Will STOUC() do the job here?
+
+
+After my patch, zsh should be able to niceprint characters in the range
+0xa0 - 0xff in addition to those from the ASCII charset. Which is OK
+with ISO-8859 charsets, because characters from 0x80 to 0x9f aren't
+defined (they might dump zsh's core anyway). Furthermore, I tried hard
+not to break prompt truncation. Did I fail?
+
+Forgive my boldness,
+--Thorsten
+
+
+*** 1.74	1995/11/16 06:31:52
+--- Src/utils.c	1995/11/24 17:12:40
+***************
+*** 145,181 ****
+  	return;
+      }
+      c &= 0xff;
+!     if (isprint(c)) {
+! 	putc(c, f);
+!     } else if (c == '\n') {
+! 	putc('\\', f);
+! 	putc('n', f);
+!     } else if (c == '\t') {
+! 	putc('\\', f);
+! 	putc('t', f);
+!     } else {
+! 	putc('^', f);
+! 	putc(c ^ 0x40, f);
+      }
+  }
+  
+  /**/
+  void
+  nicefputs(char *s, FILE *f)
+  {
+!     for (; *s; s++) {
+! 	if (isprint(*s))
+! 	    putc(*s, f);
+! 	else if (*s == '\n') {
+! 	    putc('\\', f);
+! 	    putc('n', f);
+! 	} else if(*s == '\t') {
+! 	    putc('\\', f);
+! 	    putc('t', f);
+! 	} else {
+! 	    putc('^', f);
+! 	    putc(*s ^ 0x40, f);
+  	}
+      }
+  }
+  
+--- 145,185 ----
+  	return;
+      }
+      c &= 0xff;
+!     if(!isprint(c)) {
+! 	if(c & 0x80 && !isprint(c & ~0x80)) {
+! 	    fputs("\\M-", f);
+! 	    c &= ~0x80;
+! 	}
+! 	switch(c) {
+! 	    case '\n': putc('\\', f); c = 'n';			    break;
+! 	    case '\t': putc('\\', f); c = 't';			    break;
+! 	    case 0x7f: putc('^',  f); c = '?';			    break;
+! 	    default:   if(!(c & 0x80)) { putc('^', f); c ^= 0x40; } break;
+! 	}
+      }
++     putc(c, f);
+  }
+  
+  /**/
+  void
+  nicefputs(char *s, FILE *f)
+  {
+!     int c;
+! 
+!     for (; (c = STOUC(*s)); s++) {
+! 	if(!isprint(c)) {
+! 	    if(c & 0x80 && !isprint(c & ~0x80)) {
+! 		fputs("\\M-", f);
+! 		c &= ~0x80;
+! 	    }
+! 	    switch(c) {
+! 		case '\n': putc('\\', f); c = 'n';			break;
+! 		case '\t': putc('\\', f); c = 't';			break;
+! 		case 0x7f: putc('^',  f); c = '?';			break;
+! 		default:   if(!(c & 0x80)) { putc('^', f); c ^= 0x40; } break;
+! 	    }
+  	}
++ 	putc(c, f);
+      }
+  }
+  
+***************
+*** 184,192 ****
+  nicestrlen(char *s)
+  {
+      size_t l = 0;
+  
+!     for(; *s; s++)
+! 	l += 1 + !isprint(*s);
+      return l;
+  }
+  
+--- 188,202 ----
+  nicestrlen(char *s)
+  {
+      size_t l = 0;
++     int c;
+  
+!     for(; (c = STOUC(*s)); s++, l++)
+! 	if(!isprint(c))
+! 	    if(c & 0x80) {
+! 		if(!isprint(c & ~0x80))
+! 		    l += 4;
+! 	    } else
+! 		l++;
+      return l;
+  }
+  
+*** 1.30	1995/10/09 23:53:03
+--- Src/zle_misc.c	1995/11/24 17:09:23
+***************
+*** 644,649 ****
+--- 644,651 ----
+  stradd(char *d)
+  {
+      int dlen = nicestrlen(d);
++     char buf[6]; buf[1] = '\0';
++ 
+      addbufspc(dlen);
+      if (trunclen && dlen > trunclen) {
+  	char *t = truncstr + 1;
+***************
+*** 652,678 ****
+  	addbufspc(tlen);
+  	len = tlen < trunclen ? trunclen - tlen : 0;
+  	if (*truncstr == '>') {
+! 	    while (len-- > 0) {
+! 		if(!isprint(*d))
+! 		    len--;
+  		npputc(*d++);
+  	    }
+! 	    if(len == -2)
+! 		bp--;
+  	    while (*t) pputc(*t++);
+  	} else {
+  	    while (*t) pputc(*t++);
+  	    d = strchr(d, 0);
+! 	    for(; len > 0; len--)
+! 		if(!isprint(*--d))
+! 		    len--;
+! 	    if(len == -1)
+! 		switch(*d) {
+! 		    case '\n': *bp++ = 'n'; d++; break;
+! 		    case '\t': *bp++ = 't'; d++; break;
+! 		    case 0x7f: *bp++ = '?'; d++; break;
+! 		    default:   *bp++ = (*d++) | 0x40;
+! 		}
+  	    while (*d) npputc(*d++);
+  	}
+  	return;
+--- 654,684 ----
+  	addbufspc(tlen);
+  	len = tlen < trunclen ? trunclen - tlen : 0;
+  	if (*truncstr == '>') {
+! 	    while (len > 0) {
+! 		buf[0] = *d;
+! 		len -= nicestrlen(buf);
+  		npputc(*d++);
+  	    }
+! 	    if(len < 0)
+! 		bp += len;
+  	    while (*t) pputc(*t++);
+  	} else {
+  	    while (*t) pputc(*t++);
+  	    d = strchr(d, 0);
+! 	    while(len > 0) {
+! 		buf[0] = *--d;
+! 		len -= nicestrlen(buf);
+! 	    }
+! 	    if(len < 0) {
+! 		char *sav = bp;
+! 
+! 		bp = buf;
+! 		npputc(*d++);
+! 		*bp = '\0';
+! 		for(bp = buf + -len; *bp; *sav++ = *bp++);
+! 
+! 		bp = sav;
+! 	    }
+  	    while (*d) npputc(*d++);
+  	}
+  	return;
+***************
+*** 1261,1277 ****
+  
+  /**/
+  void
+! npputc(char c)
+  {
+!     if(isprint(c))
+! 	*bp++ = c;
+!     else
+  	switch(c) {
+! 	    case '\n': *bp++ = '\\'; *bp++ = 'n';      break;
+! 	    case '\t': *bp++ = '\\'; *bp++ = 't';      break;
+! 	    case 0x7f: *bp++ = '^';  *bp++ = '?';      break;
+! 	    default:   *bp++ = '^';  *bp++ = c | 0x40; break;
+  	}
+  }
+  
+  /**/
+--- 1267,1288 ----
+  
+  /**/
+  void
+! npputc(char t)
+  {
+!     int c = STOUC(t);
+! 
+!     if(!isprint(c)) {
+! 	if(c & 0x80 && !isprint(c & ~0x80)) {
+! 	    *bp++ = '\\'; *bp++ = 'M'; *bp++ = '-'; c &= ~0x80;
+! 	}	
+  	switch(c) {
+! 	    case '\n': *bp++ = '\\'; c = 'n';			   break;
+! 	    case '\t': *bp++ = '\\'; c = 't';			   break;
+! 	    case 0x7f: *bp++ = '^';  c = '?';			   break;
+! 	    default:   if(!(c & 0x80)) { *bp++ = '^'; c |= 0x40; } break;
+  	}
++     }
++     *bp++ = c;
+  }
+  
+  /**/
+

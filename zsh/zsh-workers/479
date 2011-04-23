@@ -1,0 +1,343 @@
+From zsh-workers-request@math.gatech.edu  Wed Oct 18 23:20:32 1995
+Received: from gatech.edu (gatech.edu [130.207.244.244]) by werple.net.au (8.7/8.7) with SMTP id XAA15548 for <mason@werple.mira.net.au>; Wed, 18 Oct 1995 23:20:21 +1000 (EST)
+Received: from euclid (euclid.skiles.gatech.edu) by gatech.edu with SMTP id AA01837
+  (5.65c/Gatech-10.0-IDA for <mason@werple.mira.net.au>); Wed, 18 Oct 1995 09:16:53 -0400
+Received: by euclid (5.x/SMI-SVR4)
+	id AA05085; Wed, 18 Oct 1995 09:14:50 -0400
+Resent-Date: Wed, 18 Oct 95 10:38:04 +0100
+Old-Return-Path: <P.Stephenson@swan.ac.uk>
+Message-Id: <26293.9510180938@pygmy.swan.ac.uk>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: [1] + suspended (tty output) zsh -fc 'echo bug' 
+In-Reply-To: "hzoli@cs.elte.hu"'s message of "Wed, 04 Oct 95 20:50:01 BST."             <199510041950.UAA00706@bolyai.cs.elte.hu> 
+Date: Wed, 18 Oct 95 10:38:04 +0100
+From: P.Stephenson@swansea.ac.uk
+X-Mts: smtp
+Resent-Message-Id: <"Snsl72.0.NF1.AtFXm"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/479
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+hzoli@cs.elte.hu wrote:
+> On some machines, e.g. on Solaris 2.4 or on AIX the following happens:
+> 
+> % zsh -fc 'echo hehe' &            
+> [1] 6100
+> % <RETURN>
+> [1]  + suspended (tty output)  zsh -fc 'echo hehe'
+> % 
+
+It's happening on the SGI here, as well.
+
+The problem beforehand was certainly the termcap library --- Sven
+produced a patch for that and I made a more primitive one --- but this
+seems to be coming from the terminal set up in init_io(), so more work
+is needed.
+
+This solution delays doing things like setting up the terminal and the
+termcap entry when non-interactive until called for.  This happens in
+two places (1) in the echotc builtin, which needs a proper termcap
+entry, (2) in zleread() which needs everything (and before there
+weren't any sanity checks, either).  I've made two functions
+init_shout() and init_term() (in init.c, surprisingly enough) to take
+care of the initialisation and called them where it seems appropriate.
+
+This seems to work.  I've tried (1) the example above and (2) zsh -fc
+'vared DISPLAY' and (3) zsh -fc 'echotc am' and everything looks OK.
+There are probably some faintly pathological examples I haven't
+handled which we shall no doubt find out about.
+
+The other point is that I've made zleread() return NULL if it couldn't
+get anything by the usual route.  What we really need is a general
+input routine which will use zleread() if possible and read() if not.
+This would be useful for the read builtin as well as (perhaps) vared.
+In fact, most of the code to do this is already there in inputline(),
+except that's currently hard-wired to the shell input.  It wouldn't be
+hard to fix all this, except I haven't the stamina at the moment.
+Anyone else is welcome to have a go.  Just (1) rewrite inputline() to
+return the line, adding the test I just put in zleread() and thinking
+about what to do with prompts and when isset(ZLE) needs checking (2)
+rewrite ingetc() to use the new inputline(), moving the inputsetline()
+call here (3) rewrite anything which needs to read a complete input
+line to call the new input line (4) all the bits I've forgotten ---
+and Bob's your uncle, 'read' will now use zle.
+
+*** Src/builtin.c.term	Tue Oct 10 01:25:52 1995
+--- Src/builtin.c	Wed Oct 18 10:06:14 1995
+***************
+*** 4185,4191 ****
+      int num, argct;
+  
+      s = *argv++;
+!     if (!termok)
+  	return 1;
+      /* if the specified termcap has a numeric value, display it */
+      if ((num = tgetnum(s)) != -1) {
+--- 4185,4191 ----
+      int num, argct;
+  
+      s = *argv++;
+!     if (!termok && (isset(INTERACTIVE) || !init_term()))
+  	return 1;
+      /* if the specified termcap has a numeric value, display it */
+      if ((num = tgetnum(s)) != -1) {
+*** Src/init.c.term	Tue Oct 10 01:26:10 1995
+--- Src/init.c	Wed Oct 18 10:09:42 1995
+***************
+*** 314,319 ****
+--- 314,339 ----
+  
+  /**/
+  void
++ init_shout(void)
++ {
++ #if defined(JOB_CONTROL) && defined(TIOCSETD) && defined(NTTYDISC)
++   int ldisc = NTTYDISC;
++ 
++   ioctl(SHTTY, TIOCSETD, (char *)&ldisc);
++ #endif
++ 
++   /* Associate terminal file descriptor with a FILE pointer */
++   shout = fdopen(SHTTY, "w");
++   
++   gettyinfo(&shttyinfo);	/* get tty state */
++ #if defined(__sgi)
++   if (shttyinfo.tio.c_cc[VSWTCH] <= 0)	/* hack for irises */
++       shttyinfo.tio.c_cc[VSWTCH] = CSWTCH;
++ #endif
++ }
++ 
++ /**/
++ void
+  init_io(void)
+  {
+      long ttpgrp;
+***************
+*** 348,372 ****
+      if (SHTTY == -1)
+  	SHTTY = movefd(open("/dev/tty", O_RDWR));
+  
+!     if (SHTTY != -1) {
+! #if defined(JOB_CONTROL) && defined(TIOCSETD) && defined(NTTYDISC)
+! 	int ldisc = NTTYDISC;
+! 
+! 	ioctl(SHTTY, TIOCSETD, (char *)&ldisc);
+! #endif
+! 
+! 	/* Associate terminal file descriptor with a FILE pointer */
+! 	shout = fdopen(SHTTY, "w");
+  
+          /* We will only use zle if shell is interactive, *
+           * SHTTY != -1, and shout != 0                   */
+  	opts[USEZLE] = (interact && shout) ? OPT_SET : OPT_UNSET;
+- 
+- 	gettyinfo(&shttyinfo);	/* get tty state */
+- #if defined(__sgi)
+- 	if (shttyinfo.tio.c_cc[VSWTCH] <= 0)	/* hack for irises */
+- 	    shttyinfo.tio.c_cc[VSWTCH] = CSWTCH;
+- #endif
+      } else {
+  	opts[USEZLE] = OPT_UNSET;
+      }
+--- 368,379 ----
+      if (SHTTY == -1)
+  	SHTTY = movefd(open("/dev/tty", O_RDWR));
+  
+!     if (SHTTY != -1 && isset(INTERACTIVE)) {
+! 	init_shout();
+  
+          /* We will only use zle if shell is interactive, *
+           * SHTTY != -1, and shout != 0                   */
+  	opts[USEZLE] = (interact && shout) ? OPT_SET : OPT_UNSET;
+      } else {
+  	opts[USEZLE] = OPT_UNSET;
+      }
+***************
+*** 393,398 ****
+--- 400,467 ----
+  #else
+      opts[MONITOR] = OPT_UNSET;
+  #endif
++ }
++ 
++ /* Initialise termcap. */
++ extern hasam;
++ 
++ /**/
++ int
++ init_term(void)
++ {
++     if (!*term)
++ 	return termok = 0;
++ 
++     if (tgetent(termbuf, term) != 1) {
++ 	if (isset(INTERACTIVE))
++ 	    zerr("can't find termcap info for %s", term, 0);
++ 	errflag = 0;
++ 	return termok = 0;
++     } else {
++ 	char tbuf[1024], *pp;
++ 	int t0;
++ 
++ 	termok = 1;
++ 	for (t0 = 0; t0 != TC_COUNT; t0++) {
++ 	    pp = tbuf;
++ 	    zsfree(tcstr[t0]);
++ 	/* AIX tgetstr() ignores second argument */
++ 	    if (!(pp = tgetstr(tccapnams[t0], &pp)))
++ 		tcstr[t0] = NULL, tclen[t0] = 0;
++ 	    else {
++ 		tcstr[t0] = (char *) zalloc(tclen[t0] = strlen(pp) + 1);
++ 		memcpy(tcstr[t0], pp, tclen[t0]);
++ 	    }
++ 	}
++ 
++     /* if there's no termcap entry for cursor up, use single line mode. */
++ 
++ 	if (!tccan(TCUP)) {
++ 		tcstr[TCUP] = NULL;
++ 		opts[SINGLELINEZLE] = OPT_SET;
++ 	}
++ 	hasam = tgetflag("am");
++     /* if there's no termcap entry for cursor left, use \b. */
++ 
++ 	if (!tccan(TCLEFT)) {
++ 	    tcstr[TCLEFT] = ztrdup("\b");
++ 	    tclen[TCLEFT] = 1;
++ 	}
++     /* if there's no termcap entry for clear, use ^L. */
++ 
++ 	if (!tccan(TCCLEARSCREEN)) {
++ 	    tcstr[TCCLEARSCREEN] = ztrdup("\14");
++ 	    tclen[TCCLEARSCREEN] = 1;
++ 	}
++     /* if the termcap entry for down is \n, don't use it. */
++ 
++ 	if (tccan(TCDOWN) && tcstr[TCDOWN][0] == '\n') {
++ 	    tclen[TCDOWN] = 0;
++ 	    zsfree(tcstr[TCDOWN]);
++ 	    tcstr[TCDOWN] = NULL;
++ 	}
++     }
++     return termok;
+  }
+  
+  /* Initialize lots of global variables and hash tables */
+*** Src/params.c.term	Tue Oct 10 01:26:24 1995
+--- Src/params.c	Wed Oct 18 10:09:45 1995
+***************
+*** 1700,1707 ****
+      return term;
+  }
+  
+- extern hasam;
+- 
+  /* Function to set value of special parameter `TERM' */
+  
+  /**/
+--- 1700,1705 ----
+***************
+*** 1710,1765 ****
+  {
+      zsfree(term);
+      term = x ? x : ztrdup("");
+!     if (!*term) {
+! 	termok = 0;
+!     } else if (tgetent(termbuf, term) != 1) {
+! 	zerr("can't find termcap info for %s", term, 0);
+! 	errflag = 0;
+  	termok = 0;
+!     } else {
+! 	char tbuf[1024], *pp;
+! 	int t0;
+! 
+! 	termok = 1;
+! 	for (t0 = 0; t0 != TC_COUNT; t0++) {
+! 	    pp = tbuf;
+! 	    zsfree(tcstr[t0]);
+! 	/* AIX tgetstr() ignores second argument */
+! 	    if (!(pp = tgetstr(tccapnams[t0], &pp)))
+! 		tcstr[t0] = NULL, tclen[t0] = 0;
+! 	    else {
+! 		tcstr[t0] = (char *) zalloc(tclen[t0] = strlen(pp) + 1);
+! 		memcpy(tcstr[t0], pp, tclen[t0]);
+! 	    }
+! 	}
+! 
+!     /* if there's no termcap entry for cursor up, use single line mode. */
+! 
+! 	if (!tccan(TCUP)) {
+! 		tcstr[TCUP] = NULL;
+! 		opts[SINGLELINEZLE] = OPT_SET;
+! 	}
+! 	hasam = tgetflag("am");
+!     /* if there's no termcap entry for cursor left, use \b. */
+! 
+! 	if (!tccan(TCLEFT)) {
+! 	    tcstr[TCLEFT] = ztrdup("\b");
+! 	    tclen[TCLEFT] = 1;
+! 	}
+!     /* if there's no termcap entry for clear, use ^L. */
+! 
+! 	if (!tccan(TCCLEARSCREEN)) {
+! 	    tcstr[TCCLEARSCREEN] = ztrdup("\14");
+! 	    tclen[TCCLEARSCREEN] = 1;
+! 	}
+!     /* if the termcap entry for down is \n, don't use it. */
+! 
+! 	if (tccan(TCDOWN) && tcstr[TCDOWN][0] == '\n') {
+! 	    tclen[TCDOWN] = 0;
+! 	    zsfree(tcstr[TCDOWN]);
+! 	    tcstr[TCDOWN] = NULL;
+! 	}
+!     }
+  }
+  
+  /* We could probably replace the replenv with the actual code to *
+--- 1708,1718 ----
+  {
+      zsfree(term);
+      term = x ? x : ztrdup("");
+!     if (!*term || !isset(INTERACTIVE)) {
+! 	/* If non-interactive, delay setting up term till we need it. */
+  	termok = 0;
+!     } else 
+! 	init_term();
+  }
+  
+  /* We could probably replace the replenv with the actual code to *
+*** Src/zle_main.c.term	Tue Oct 17 09:44:34 1995
+--- Src/zle_main.c	Wed Oct 18 10:26:29 1995
+***************
+*** 354,359 ****
+--- 354,372 ----
+      tv.tv_sec = 0;
+  #endif
+  
++     if (!shout) {
++ 	if (SHTTY != -1)
++ 	    init_shout();
++ 
++ 	if (!shout)
++ 	    return NULL;
++ 	/* We could be smarter and default to a system read. */
++ 
++ 	/* If we just got a new shout, make sure the terminal is set up. */
++ 	if (!termok)
++ 	    init_term();
++     }
++ 
+      fflush(shout);
+      fflush(stderr);
+      intr();
+
+
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

@@ -1,0 +1,146 @@
+From zsh-workers-return-27947-mason-zsh=primenet.com.au@zsh.org Tue May 04 21:33:17 2010
+Return-Path: <zsh-workers-return-27947-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2531 invoked by alias); 4 May 2010 21:33:17 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27947
+Received: (qmail 4138 invoked from network); 4 May 2010 21:33:14 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.48 as permitted sender)
+Message-Id: <201005042133.o44LX7J3019132@pws-pc.ntlworld.com>
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@zsh.org
+Subject: Re: Bug with trap?
+In-Reply-To: Message from Peter Stephenson <p.w.stephenson@ntlworld.com>
+   of "Tue, 04 May 2010 20:28:28 BST." <20100504202828.5e8b443f@pws-pc>
+Date: Tue, 04 May 2010 22:33:07 +0100
+X-Cloudmark-Analysis: v=1.1 cv=1ggfb5FlKZQUfF3vzm9UBYZ2uTfLsbs/8dSljwg5+mE= c=1 sm=0 a=DogomfpGjd0A:10 a=NLZqzBF-AAAA:8 a=cb0LZ2Ecn5ym0hpGhX4A:9 a=WelSwkJtU8YX3KNmeakA:7 a=TSeCCfpSCXAgID04fZjt0--Axh0A:4 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+Peter Stephenson wrote:
+> bash (4.0.35) does what zsh does before this patch, only executes the
+> trap on an explicit exit.
+
+(This is getting hairy so I've moved it to zsh-workers.)
+
+It's occurred to me that I'm falling for the old chestnut that bash,
+unlike zsh, excutes the left (not the right) of a pipeline in the current
+shell---which, of course, doesn't exit implicitly after the pipeline.
+This suggests there's some ambiguity in what should happen here.
+
+  ( trap 'echo exiting' EXIT; ) | cat
+
+does print a message in bash but not zsh, even after the previous patch
+(another bug, fixed below), but
+
+  true | { trap 'echo exiting' EXIT; } | cat
+
+doesn't in bash though does in in zsh after the patch, which I can't
+quite rationalise, but I'm certainly not sure it's wrong.
+
+There's obviously a lot of subtlety here.
+
+In any case I got the previous patch wrong; it's actually too eager to
+execute traps for anything run in the left hand side of the pipeline.
+It should only be for a list of shell commands that exits.
+
+Other cases I missed before include anything along the lines of:
+
+echo $( trap 'echo exiting' EXIT)
+
+or similar substitutions.  That's quite clearly a subshell entering to
+the same extent a ( ... ) is.
+
+It looks like there's a simple fix for a whole heap of these: detect
+that we're about to exit at the end of execlist(), but make sure the
+trap is then reset (since we're about to exit we obviously don't need it
+again).  Then the flag I added to execcmd() comes into its own.
+
+One case I'm not sure about is the final effect here:
+
+% trap 'echo exiting' EXIT
+% ( true; ) | cat
+% { true; } | cat
+exiting
+
+That's explicit in the code---see the ESUB_KEEPTRAP flag near the top of
+the second hunk below.  But is it correct, since we not only forked, but
+always fork on the left hand side of a pipe?  Surely we're being too
+clever for our own good here?
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.177
+diff -p -u -r1.177 exec.c
+--- Src/exec.c	24 Feb 2010 21:38:10 -0000	1.177
++++ Src/exec.c	4 May 2010 21:23:18 -0000
+@@ -1299,6 +1299,12 @@ sublist_done:
+     lineno = oldlineno;
+     if (dont_change_job)
+ 	thisjob = cj;
++
++    if (exiting && sigtrapped[SIGEXIT]) {
++	dotrap(SIGEXIT);
++	/* Make sure this doesn't get executed again. */
++	sigtrapped[SIGEXIT] = 0;
++    }
+ }
+ 
+ /* Execute a pipeline.                                                *
+@@ -1631,7 +1637,7 @@ execpline2(Estate state, wordcode pcode,
+ 		entersubsh(((how & Z_ASYNC) ? ESUB_ASYNC : 0)
+ 			   | ESUB_PGRP | ESUB_KEEPTRAP);
+ 		close(synch[1]);
+-		execcmd(state, input, pipes[1], how, 0);
++		execcmd(state, input, pipes[1], how, 1);
+ 		_exit(lastval);
+ 	    }
+ 	} else {
+Index: Test/C03traps.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/C03traps.ztst,v
+retrieving revision 1.17
+diff -p -u -r1.17 C03traps.ztst
+--- Test/C03traps.ztst	31 Aug 2008 19:50:49 -0000	1.17
++++ Test/C03traps.ztst	4 May 2010 21:23:18 -0000
+@@ -350,6 +350,26 @@
+ >trap
+ >Working 0
+ 
++   { trap 'echo This subshell is exiting' EXIT; } | cat
++0: EXIT trap set in current shell at left of pipeline
++>This subshell is exiting
++
++   ( trap 'echo This subshell is also exiting' EXIT; ) | cat
++0: EXIT trap set in subshell at left of pipeline
++>This subshell is also exiting
++
++   ( trap 'echo Should only appear once at the end' EXIT
++     ( : trap reset here ) | cat
++     : trap not reset but not part of shell command list | cat
++     echo nothing after this should appear $( : trap reset here too)
++   )
++0: EXIT trap set in subshell reset in subsubshell
++>nothing after this should appear
++>Should only appear once at the end
++
++   echo $( trap 'echo command substitution exited' EXIT )
++0: EXIT trap set in command substitution
++>command substitution exited
+ 
+ %clean
+ 
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

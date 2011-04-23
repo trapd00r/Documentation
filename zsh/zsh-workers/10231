@@ -1,0 +1,356 @@
+From zsh-workers-return-10231-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Mar 24 12:28:37 2000
+Return-Path: <zsh-workers-return-10231-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21719 invoked from network); 24 Mar 2000 12:28:33 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 24 Mar 2000 12:28:33 -0000
+Received: (qmail 20510 invoked by alias); 24 Mar 2000 12:28:26 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10231
+Received: (qmail 20497 invoked from network); 24 Mar 2000 12:28:25 -0000
+Date: Fri, 24 Mar 2000 13:28:21 +0100 (MET)
+Message-Id: <200003241228.NAA25974@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Wed, 22 Mar 2000 13:56:55 +0100
+	(MET)
+Subject: Re: PATCH: tag aliases
+
+
+[ Like the alternate set thing, this patch probably shouldn't go into
+dev-20... ]
+
+
+Here is a patch for the other things I suggested in 10195.
+
+- Allowing pattern in the tag-order style.
+- The new tag-aliases style.
+- Make aliases starting with a hyphen be appended to the offered tag
+  to do the lookup.
+
+No need to repeat all the examples here, I think (look either at 10195 
+or at the docs (or the patch below), you'll find them all there).
+
+
+I find it quite satisfying how simple the tag aliases stuff made these 
+(really powerful) changes -- the patch is mostly docs and changing the 
+interpretation of the tag-order value twice, once in _tags and once in 
+_next_tags (one day I should put that into a separate function, maybe).
+
+
+As I said... maybe some of you want to play with it and can make
+suggestions for improvements or for completely different ways to do
+such things.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Completion/Builtins/_zstyle Completion/Builtins/_zstyle
+--- ../z.old/Completion/Builtins/_zstyle	Fri Mar 24 10:32:11 2000
++++ Completion/Builtins/_zstyle	Fri Mar 24 10:58:22 2000
+@@ -55,6 +55,7 @@
+   remove-all-dups	 c:bool
+   single-ignored         c:single-ignored
+   sort			 c:bool
++  tag-aliases            c:tag
+   tag-order		 c:tag
+   special-dirs		 c:sdirs
+   squeeze-slashes	 c:bool
+diff -ru ../z.old/Completion/Commands/_next_tags Completion/Commands/_next_tags
+--- ../z.old/Completion/Commands/_next_tags	Fri Mar 24 10:32:13 2000
++++ Completion/Commands/_next_tags	Fri Mar 24 10:50:34 2000
+@@ -46,7 +46,7 @@
+ # Helper function for sorting tags. Most of this is copied from _tags.
+ 
+ _next_tags_sort() {
+-  local order tags tag nodef
++  local order tags tag nodef tmp tmp2
+ 
+   if ! zstyle -a ":completion:${curcontext}:" tag-order order; then
+     if (( $+_comp_default_tags )); then
+@@ -69,12 +69,49 @@
+     case $tag in
+     -)     nodef=yes;;
+     *\(\)) "${${tag%%[ 	]#\(\)}##[ 	]#}" "$@";;
+-    \!*)   comptry "${(@)argv:#(${(j:|:)~${=tag[2,-1]}})}";;
+-    ?*)    comptry ${=tag};;
++    \!*)   comptry "${(@)argv:#(${(j:|:)~${=~tag[2,-1]}})}";;
++    ?*)    tmp=( ${${(s: :)${tag//\\\\ /$'\0'}}//$'\0'/ } ) tmp2=() tmp3=()
++           for tag in "$tmp[@]"; do
++	     if [[ "$tag" = *:* ]]; then
++	       tmp2=( "$tmp2[@]" "${(@M)^argv:#${~tag%%:*}}:${tag#*:}" )
++	     else
++	       for atag in "${(@M)argv:#${~tag}}"; do
++	         if zstyle -a ":completion:${curcontext}:${atag}" tag-aliases als; then
++		   tmp3=( "$tmp3[@]" "$als[@]" )
++		   tmp=( "${(@)tmp:#${atag}}" )
++                 else
++	           tmp2=( "$tmp2[@]" "$atag" )
++		 fi
++	       done
++	     fi
++	   done
++
++	   comptry "${(@)tmp2:#(${(j:|:)~${(q)tmp%%:*}})}" "$tmp3[@]" "$tmp[@]"
++	   ;;
+     esac
+   done
+ 
+-  [[ -z "$nodef" ]] && comptry "$@"
++  if [[ -z "$nodef" ]]; then
++    if (( $+_comp_default_tags )); then
++      for tag in "$_comp_default_tags[@]"; do
++        if zstyle -a ":completion:${curcontext}:${tag}" tag-aliases als; then
++          comptry "$als[@]"
++        else
++          comptry "$tag"
++	fi
++      done
++    else
++      tmp2=()
++      for tag; do
++	if zstyle -a ":completion:${curcontext}:${tag}" tag-aliases als; then
++	  tmp2=( "$tmp2[@]" "$als[@]" )
++        else
++	  tmp2=( "$tmp2[@]" "$tag" )
++	fi
++      done
++      comptry "$tmp2[@]"
++    fi
++  fi
+ }
+ 
+ [[ -o kshautoload ]] || _next_tags "$@"
+diff -ru ../z.old/Completion/Core/_tags Completion/Core/_tags
+--- ../z.old/Completion/Core/_tags	Fri Mar 24 10:32:16 2000
++++ Completion/Core/_tags	Fri Mar 24 11:52:59 2000
+@@ -16,7 +16,7 @@
+ 
+   # We have arguments: the tags supported in this context.
+ 
+-  local curcontext="$curcontext" order tag nodef
++  local curcontext="$curcontext" order tag nodef tmp tmp2 tmp3 als atag
+ 
+   if [[ "$1" = -C?* ]]; then
+     curcontext="${curcontext%:*}:${1[3,-1]}"
+@@ -51,7 +51,13 @@
+ 
+   if [[ -n "$_sort_tags" ]]; then
+     "$_sort_tags" "$@"
+-  elif zstyle -a ":completion:${curcontext}:" tag-order order; then
++  else
++    zstyle -a ":completion:${curcontext}:" tag-order order ||
++      if [[ "$*" = *(arguments|values)* || "$*" = *options* ]] ;then
++        order=( 'arguments values' options )
++      else
++        order=()
++      fi
+ 
+     for tag in $order; do
+       case $tag in
+@@ -61,33 +67,49 @@
+                break
+              fi
+              ;;
+-      \!*)   comptry "${(@)argv:#(${(j:|:)~${=tag[2,-1]}})}";;
+-      ?*)    comptry ${${(ps: :)${tag//\\\\ /$'\0'}}//$'\0'/ };;
++      \!*)   comptry "${(@)argv:#(${(j:|:)~${=~tag[2,-1]}})}";;
++      ?*)    tmp=( ${${(s: :)${tag//\\\\ /$'\0'}}//$'\0'/ } ) tmp2=() tmp3=()
++             for tag in "$tmp[@]"; do
++	       if [[ "$tag" = *:* ]]; then
++	         tmp2=( "$tmp2[@]" "${(@M)^argv:#${~tag%%:*}}:${tag#*:}" )
++	       else
++	         for atag in "${(@M)argv:#${~tag}}"; do
++	           if zstyle -a ":completion:${curcontext}:${atag}" tag-aliases als; then
++		     tmp3=( "$tmp3[@]" "$als[@]" )
++		     tmp=( "${(@)tmp:#${atag}}" )
++                   else
++	             tmp2=( "$tmp2[@]" "$atag" )
++		   fi
++		 done
++	       fi
++	     done
++
++	     comptry "${(@)tmp2:#(${(j:|:)~${(q)tmp%%:*}})}" "$tmp3[@]" "$tmp[@]"
++	     ;;
+       esac
+     done
+ 
+     if [[ -z "$nodef" ]]; then
+       if (( $+_comp_default_tags )); then
+         for tag in "$_comp_default_tags[@]"; do
+-          comptry "$tag"
++	  if zstyle -a ":completion:${curcontext}:${tag}" tag-aliases als; then
++            comptry "$als[@]"
++          else
++            comptry "$tag"
++	  fi
+         done
+       else
+-        comptry "$@"
++        tmp2=()
++	for tag; do
++	  if zstyle -a ":completion:${curcontext}:${tag}" tag-aliases als; then
++	    tmp2=( "$tmp2[@]" "$als[@]" )
++          else
++	    tmp2=( "$tmp2[@]" "$tag" )
++	  fi
++	done
++        comptry "$tmp2[@]"
+       fi
+     fi
+-  else
+-
+-    # Use default tags...
+-
+-    if (( $+_comp_default_tags )); then
+-      for tag in "$_comp_default_tags[@]"; do
+-        comptry "$tag"
+-      done
+-    else
+-      comptry arguments values
+-      comptry options
+-    fi
+-    comptry "$@"
+   fi
+ 
+   # Return non-zero if at least one set of tags should be used.
+diff -ru ../z.old/Doc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- ../z.old/Doc/Zsh/compsys.yo	Fri Mar 24 10:31:56 2000
++++ Doc/Zsh/compsys.yo	Fri Mar 24 11:43:11 2000
+@@ -1388,6 +1388,34 @@
+ substitution will be performed only if given an explicit numeric
+ argument other than `tt(1)', as by typing `tt(ESC 2 TAB)'.
+ )
++item(tt(tag-aliases))(
++This allows to give aliases for tags that are to be used whenever the
++tag this style is set for is used (see the tt(tag-order) style below
++for a description of tag aliases).
++
++The value is a list of strings of the same form used by the
++tt(tag-order) style: `var(tag)tt(:)var(alias)', optionally followed by 
++a second colon and a description.
++
++The effect of using this style is that the var(tag) is offered more
++than once, once for each alias. For example, together with the
++tt(ignored-patterns) style this allows to split the matches for the
++tag into different groups, as in:
++
++example(zstyle ':completion:*:options' tag-aliases \
++    'options:-long:long options' \
++    'options:-short:short options' \
++    'options:-single-letter:single letter options'
++
++zstyle ':completion:*:options-long' ignored-patterns '[-+](|-|[^-]*)'
++zstyle ':completion:*:options-short' ignored-patterns '--*' '[-+]?'
++zstyle ':completion:*:options-single-letter' ignored-patterns '???*')
++
++With the tt(group-names) style set, this makes options beginning with
++`tt(-)tt(-)', options beginning with a single `tt(-)' or `tt(+)' but
++containing multiple characters and single-letter options be displayed
++in separate groups with different descriptions.
++)
+ item(tt(tag-order))(
+ This provides a mechanism for sorting how the tags available in a
+ particular context will be used.
+@@ -1420,22 +1448,20 @@
+ by the completion function for the current context and var(alias) is a 
+ name. For this, the completion function will generate matches in the
+ same way as for the var(tag) but it will use the var(alias) in place
+-of the tag in the context names used to look up styles. This can be
++of the tag in the context names used to look up styles. If the
++var(alias) starts with a hyphen, the var(tag) is prepended to the
++var(alias) to form the name used for lookup. This can be
+ used to make the completion system try a certain tag more than once,
+ supplying different style settings for each attempt. For example,
+ 
+ example(zstyle ':completion:*:*:-command-:*' tag-order 'functions:-non-comp'
+-zstyle '*:-non-comp' ignored-patterns '_*')
++zstyle ':completion:*:functions-non-comp' ignored-patterns '_*')
+ 
+ Makes completion in command position first try only names of shell
+ functions that don't match the pattern `tt(_*)'. If that generates no
+ matches, the default of trying all the other things that can be
+ completed in command position is used, including the names of all
+-shell functions. Note that the var(alias) used in this example
+-`tt(-non-comp)' with the hyphen at the bginning is not in any way
+-special to the completion system. But since no other tag starts with a 
+-hyphen, using such a name allows to use a context pattern as short as
+-the one in the second line without making it ambiguous.
++shell functions.
+ 
+ The var(alias) may optionally be followed by a second colon and a
+ description. This description will then be used for the `tt(%d)' in
+@@ -1444,6 +1470,53 @@
+ be quoted by preceding them with a backslash and a `tt(%d)' appearing
+ in the description is replaced with the description given by the
+ completion function.
++
++In each of the cases above, the tag may also be a pattern. In this
++case all of the offered tags matching this pattern will be used except 
++for those that are given explicitly in the same string. There are
++probably two main uses of this. One is the case where one wants to try
++one of the tags more than once, setting other styles differently for
++each try, but still wants to use all the other tags without having to
++bother to repeat them all. For example, to make completion of function
++names in command position first ignore all the completion functions
++starting with an underscore one could do:
++
++example(zstyle ':completion:*:*:-command-:*' tag-order \
++    'functions:-non-comp *' functions
++zstyle ':completion:*:functions-non-comp' ignored-patterns '_*')
++
++Here, the completion system will first try all tags offered, but will
++use the tag alias tt(functions-non-comp) when looking up styles for
++the function names completed. For this, the tt(ignored-patterns) style 
++is set to make functions starting with an underscore be not considered 
++as possible matches. If none of the generated matches match the string 
++on the line, the completion system will use the second value of the
++tt(tag-order) style and complete functions names again, but this time
++using so name tt(functions) to look up styles, so that the
++tt(ignored-patterns) style will not be used and all function names
++will be considered.
++
++The second interesting use of patterns is the case where one wants to
++try multiple match specifications one after another. The
++tt(atcher-list) style offers something similar, but it is tested very
++early in the completion system and hence can't be set for single
++commands or even more specific contexts. So, to make completion for
++the arguments of the command tt(foo) and only for this command first
++try normal completion with out any match specification and, if that
++generates no matches, try again with case-insensitive matching, one
++could do:
++
++example(zstyle ':completion:*:*:foo:*' tag-order '*' '*:-case'
++zstyle ':completion:*-case' matcher 'm:{a-z}={A-Z}')
++
++This will make the completion system first try all the tags offered
++when completing after tt(foo) and use the tags to do the lookup. If
++that generates no matches, the second value of tt(tag-order) is
++used. This will make all tags be tried again, but this time using the
++names of the tags with the tt(-case) appended to them for lookup of
++styles. I.e. in this second attempt, the value for the tt(matcher)
++style from the second call to tt(zstyle) in the example will be used
++to make completion case-insensitive.
+ 
+ Strings in the value may also be of the form `var(func)tt(())'. In
+ this case the function var(func) will be called which can then define
+diff -ru ../z.old/Src/Zle/computil.c Src/Zle/computil.c
+--- ../z.old/Src/Zle/computil.c	Fri Mar 24 10:31:50 2000
++++ Src/Zle/computil.c	Fri Mar 24 10:50:35 2000
+@@ -2363,7 +2363,7 @@
+ 		    return 1;
+ 		}
+ 		s->ptr = q + 1;
+-		setsparam(args[2], ztrdup(v));
++		setsparam(args[2], ztrdup(*v == '-' ? dyncat(args[1], v) : v));
+ 		return 0;
+ 	    }
+ 	    return 1;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

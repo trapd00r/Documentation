@@ -1,0 +1,219 @@
+From zsh-workers-return-19361-mason-zsh=primenet.com.au@sunsite.dk Mon Jan 12 11:40:31 2004
+Return-Path: <zsh-workers-return-19361-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5029 invoked from network); 12 Jan 2004 11:40:30 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 12 Jan 2004 11:40:30 -0000
+Received: (qmail 8889 invoked by alias); 12 Jan 2004 11:40:20 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19361
+Received: (qmail 8865 invoked from network); 12 Jan 2004 11:40:19 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 12 Jan 2004 11:40:19 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.183.235] by sunsite.dk (MessageWall 1.0.8) with SMTP; 12 Jan 2004 11:40:19 -0000
+Received: from EXCHANGE02.csr.com (unverified) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T6716470938c0a88d0183c@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Mon, 12 Jan 2004 11:36:25 +0000
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.5329);
+	 Mon, 12 Jan 2004 11:38:37 +0000
+To: zsh-workers@sunsite.dk
+Subject: Re: Memory leaks found by valgrind and zsh tests 
+In-reply-to: "Felix Rosencrantz"'s message of "Thu, 18 Dec 2003 17:00:13 PST."
+             <20031219010013.7064.qmail@web10401.mail.yahoo.com> 
+Date: Mon, 12 Jan 2004 11:36:36 +0000
+Message-ID: <1020.1073907396@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 12 Jan 2004 11:38:37.0424 (UTC) FILETIME=[9E388F00:01C3D900]
+
+Felix Rosencrantz wrote:
+> Here are leaks found via valgrind and running zsh against our tests.  For
+> some reason the completion tests hung, but the other tests seemed to mostly
+> work.    Latest version from CVS. 
+
+With no context at all, these are quite hard to work out.
+
+>
+>  28 bytes in 4 blocks are definitely lost in loss record 2 of 13
+>     at  malloc (vg_replace_malloc.c:153)
+>     by  zalloc (mem.c:490)
+>     by  ztrdup (string.c:52)
+>     by  bin_typeset (builtin.c:2258)
+
+I think this is when reusing a tied array.  pm->ename isn't checked to
+see if it already exists.  It's only deleted when the structure itself is.
+
+>  7 bytes in 1 blocks are definitely lost in loss record 1 of 13
+>     at  malloc (vg_replace_malloc.c:153)
+>     by  zalloc (mem.c:490)
+>     by  ztrdup (string.c:52)
+>     by  addvars (exec.c:1627)
+
+This is tricky without the associated code that's running.  The only
+leak I could see following through an assignment was in an error case,
+an attempt to set the slice of an associative array.  It could do with
+someone else following through the code.
+
+>  1157 bytes in 28 blocks are definitely lost in loss record 11 of 13
+>     at malloc (vg_replace_malloc.c:153)
+>     by 0x40269EFE: (within /lib/libtermcap.so.2.0.8)
+>     by 0x4026AE47: tgetstr (in /lib/libtermcap.so.2.0.8)
+>     by  init_term (init.c:561)
+
+I don't think we can do anything about this.
+
+>  5 bytes in 1 blocks are definitely lost in loss record 1 of 13
+>     at  malloc (vg_replace_malloc.c:153)
+>     by  zalloc (mem.c:490)
+>     by  ztrdup (string.c:52)
+>     by  addvars (exec.c:1627)
+
+This is the same as the second one.
+
+>  2434 bytes in 1 blocks are possibly lost in loss record 12 of 14
+>     at  malloc (vg_replace_malloc.c:153)
+>     by  zalloc (mem.c:490)
+>     by  mkenvstr (params.c:3412)
+>     by  addenv (params.c:3375)
+
+Can't see this one.  Is HAVE_PUTENV defined?  I think Andrej's fixups
+for Cygwin should catch leaks here anyway.  The library putenv
+returning failure for some reason is the only logical possibility I can
+see.
+
+(I may be confused about what valgrind is actually reporting.  Somebody
+with more familiarity with these tools should look at all these.  But as
+far as I can remember that's never happened yet.)
+
+>  24 bytes in 6 blocks are definitely lost in loss record 1 of 13
+>     at  malloc (vg_replace_malloc.c:153)
+>     by  zalloc (mem.c:490)
+>     by  mkarray (utils.c:2191)
+>     by  arrvarsetfn (params.c:2580)
+>     by  stdunsetfn (params.c:2308)
+
+We unset variables by setting the value to NULL, but user tied variables
+use mkarray(NULL) to protect against NULLs later.  I've done the latter
+more consistently with normal variables and only set special tied
+variables to a new null array if the value is empty.  It shouldn't be
+possible to leak memory that way since the specials are linked to
+internal variables.
+
+>  68 bytes in 1 blocks are definitely lost in loss record 2 of 14
+>     at  malloc (vg_replace_malloc.c:153)
+>     by  zshcalloc (mem.c:508)
+>     by  newhashtable (hashtable.c:99)
+>     by 0x41C8D016: ???
+>     by 0x41C8D6AA: ???
+>     by  dyn_boot_module (module.c:625)
+
+This isn't much use.  Somewhere creating some module we make a hashtable
+that leaks.  The obvious candidate is parameter.c, but I can't see how
+a hash table can leak since it should only be possible to assign it to a
+parameter in the main parameter table.
+
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.110
+diff -u -r1.110 builtin.c
+--- Src/builtin.c	5 Jan 2004 17:07:21 -0000	1.110
++++ Src/builtin.c	12 Jan 2004 11:28:47 -0000
+@@ -2255,7 +2255,15 @@
+ 	    return 1;
+ 	}
+ 
++	/*
++	 * pm->ename is only deleted when the struct is, so
++	 * we need to free it here if it already exists.
++	 */
++	if (pm->ename)
++	    zsfree(pm->ename);
+ 	pm->ename = ztrdup(asg->name);
++	if (apm->ename)
++	    zsfree(apm->ename);
+ 	apm->ename = ztrdup(asg0.name);
+ 	if (oldval)
+ 	    setsparam(asg0.name, oldval);
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.74
+diff -u -r1.74 params.c
+--- Src/params.c	29 Oct 2003 19:17:30 -0000	1.74
++++ Src/params.c	12 Jan 2004 11:28:47 -0000
+@@ -1599,6 +1599,7 @@
+     }
+     if (v->pm->flags & PM_HASHED) {
+ 	zerr("%s: attempt to set slice of associative array", v->pm->nam, 0);
++	zsfree(val);
+ 	return;
+     }
+     v->pm->flags &= ~PM_UNSET;
+@@ -2377,12 +2378,12 @@
+ 
+ /* Function to get value of an array parameter */
+ 
++static char *nullarray = NULL;
++
+ /**/
+ char **
+ arrgetfn(Param pm)
+ {
+-    static char *nullarray = NULL;
+-
+     return pm->u.arr ? pm->u.arr : &nullarray;
+ }
+ 
+@@ -2558,7 +2559,9 @@
+ mod_export char **
+ arrvargetfn(Param pm)
+ {
+-    return *((char ***)pm->u.data);
++    char **arrptr = *((char ***)pm->u.data);
++
++    return arrptr ? arrptr : &nullarray;
+ }
+ 
+ /* Function to set value of generic special array parameter.    *
+@@ -2577,7 +2580,15 @@
+ 	freearray(*dptr);
+     if (pm->flags & PM_UNIQUE)
+ 	uniqarray(x);
+-    *dptr = x ? x : mkarray(NULL);
++    /*
++     * Special tied arrays point to variables accessible in other
++     * ways which need to be set to NULL.  We can't do this
++     * with user tied variables since we can leak memory.
++     */
++    if ((pm->flags & PM_SPECIAL) & !x)
++	*dptr = mkarray(NULL);
++    else
++	*dptr = x;
+     if (pm->ename && x)
+ 	arrfixenv(pm->ename, x);
+ }
+
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

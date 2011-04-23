@@ -1,0 +1,175 @@
+From zsh-workers-return-10909-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Apr 25 10:27:13 2000
+Return-Path: <zsh-workers-return-10909-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23231 invoked from network); 25 Apr 2000 10:26:41 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Apr 2000 10:26:41 -0000
+Received: (qmail 16265 invoked by alias); 25 Apr 2000 10:26:18 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10909
+Received: (qmail 16252 invoked from network); 25 Apr 2000 10:26:17 -0000
+Date: Tue, 25 Apr 2000 12:26:00 +0200 (MET DST)
+Message-Id: <200004251026.MAA03662@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Wed, 19 Apr 2000 14:55:31 +0100
+Subject: Re: _expand_word
+
+
+Peter Stephenson wrote:
+
+> ...
+> 
+> Another problem is one we've met before, that things like $PATH have the
+> `$' stripped before the ever get here and can't be expanded.  This is highly
+> counterintuitive in this case.
+
+I'm not exactly sure anymore when I changed that so that the parameter 
+expansion prefix/suffix wasn't reported in IPREFIX/ISUFFIX anymore.
+I've spent most of last Thursday trying to find it out, but still...
+
+Anyway, let's try it. This makes it be stuffed into IPREFIX/ISUFFIX
+again and changes _expand to allow expansion of `$foo'. It seems to
+work, i.e. I couldn't find a case where it fails, maybe someone else
+remembers something about this? It might have had to do with
+completion in quotes-in-expansions (`${"foo<TAB>') which may then have 
+been changed by the last completion-in-nested-quotes patch.
+
+
+Bye
+ Sven
+
+Index: Completion/Core/_expand
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_expand,v
+retrieving revision 1.3
+diff -u -r1.3 _expand
+--- Completion/Core/_expand	2000/04/20 08:04:56	1.3
++++ Completion/Core/_expand	2000/04/25 10:24:30
+@@ -11,8 +11,14 @@
+ 
+ [[ _matcher_num -gt 1 ]] && return 1
+ 
+-local exp word="$PREFIX$SUFFIX" sort expr expl subd suf=" "
++local exp word sort expr expl subd suf=" "
+ 
++if [[ "$funcstack[2]" = _prefix ]]; then
++  word="$IPREFIX$PREFIX$SUFFIX"
++else
++  word="$IPREFIX$PREFIX$SUFFIX$ISUFFIX"
++fi
++
+ # First, see if we should insert all *completions*.
+ 
+ if zstyle -s ":completion:${curcontext}:" completions expr &&
+@@ -29,7 +35,7 @@
+ # changes quoted spaces, tabs, and newlines into spaces.
+ 
+ { zstyle -s ":completion:${curcontext}:" substitute expr ||
+-  [[ "$curcontext" = expand-word:* ]] && expr=1 } &&
++  { [[ "$curcontext" = expand-word:* ]] && expr=1 } } &&
+     [[ "${(e):-\$[$expr]}" -eq 1 ]] &&
+     exp=( "${(e)exp//\\[ 	
+ ]/ }" )
+@@ -43,7 +49,7 @@
+ # Now try globbing.
+ 
+ { zstyle -s ":completion:${curcontext}:" glob expr ||
+-  [[ "$curcontext" = expand-word:* ]] && expr=1 } &&
++  { [[ "$curcontext" = expand-word:* ]] && expr=1 } } &&
+     [[ "${(e):-\$[$expr]}" -eq 1 ]] &&
+     exp=( ${~exp} )
+ 
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.9
+diff -u -r1.9 compcore.c
+--- Src/Zle/compcore.c	2000/04/17 11:17:10	1.9
++++ Src/Zle/compcore.c	2000/04/25 10:24:31
+@@ -492,6 +492,8 @@
+ 
+ /* This calls the given completion widget function. */
+ 
++static int parwb, parwe, paroffs;
++
+ /**/
+ static void
+ callcompfunc(char *s, char *fn)
+@@ -637,9 +639,24 @@
+ 	    compsuffix = ztrdup(ss);
+ 	}
+ 	zsfree(compiprefix);
+-	compiprefix = ztrdup("");
+ 	zsfree(compisuffix);
+-	compisuffix = ztrdup("");
++	if (parwb < 0) {
++	    compiprefix = ztrdup("");
++	    compisuffix = ztrdup("");
++	} else {
++	    int l;
++
++	    compiprefix = (char *) zalloc((l = wb - parwb) + 1);
++	    memcpy(compiprefix, line + parwb, l);
++	    compiprefix[l] = '\0';
++	    compisuffix = (char *) zalloc((l = parwe - we) + 1);
++	    memcpy(compisuffix, line + we, l);
++	    compisuffix[l] = '\0';
++
++	    wb = parwb;
++	    we = parwe;
++	    offs = paroffs;
++	}
+ 	zsfree(compqiprefix);
+ 	compqiprefix = ztrdup(qipre ? qipre : "");
+ 	zsfree(compqisuffix);
+@@ -829,10 +846,16 @@
+ makecomplist(char *s, int incmd, int lst)
+ {
+     char *p;
++    int owb = wb, owe = we, ooffs = offs;
+ 
+     /* Inside $... ? */
+-    if (compfunc && (p = check_param(s, 0, 0)))
++    if (compfunc && (p = check_param(s, 0, 0))) {
+ 	s = p;
++	parwb = owb;
++	parwe = owe;
++	paroffs = ooffs;
++    } else
++	parwb = -1;
+ 
+     linwhat = inwhat;
+ 
+@@ -1073,7 +1096,7 @@
+ 	    }
+ 	    /* Save the prefix. */
+ 	    if (compfunc) {
+-		parflags = (br >= 2 ? CMF_PARBR : 0);
++		parflags = (br >= 2 ? CMF_PARBR | (nest ? CMF_PARNEST : 0) : 0);
+ 		sav = *b;
+ 		*b = '\0';
+ 		untokenize(parpre = ztrdup(s));
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.8
+diff -u -r1.8 compresult.c
+--- Src/Zle/compresult.c	2000/04/17 11:17:10	1.8
++++ Src/Zle/compresult.c	2000/04/25 10:24:32
+@@ -1030,8 +1030,6 @@
+ 	else if (cs > ll)
+ 	    cs = ll;
+ 	inststrlen(" ", 1, 1);
+-	if (parpre)
+-	    inststr(parpre);
+ 	minfo.insc = minfo.len = 0;
+ 	minfo.pos = cs;
+ 	minfo.we = 1;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

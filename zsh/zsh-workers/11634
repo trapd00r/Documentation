@@ -1,0 +1,146 @@
+From zsh-workers-return-11634-mason-zsh=primenet.com.au@sunsite.auc.dk Mon May 29 12:41:32 2000
+Return-Path: <zsh-workers-return-11634-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10146 invoked from network); 29 May 2000 12:41:31 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 29 May 2000 12:41:31 -0000
+Received: (qmail 10394 invoked by alias); 29 May 2000 12:41:23 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11634
+Received: (qmail 10386 invoked from network); 29 May 2000 12:41:22 -0000
+Date: Mon, 29 May 2000 14:41:20 +0200 (MET DST)
+Message-Id: <200005291241.OAA07844@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Felix Rosencrantz's message of Thu, 25 May 2000 18:10:26 -0700
+	(PDT)
+Subject: PATCH: Re: Possible matching control bug
+
+
+Felix Rosencrantz wrote:
+
+> I hit a strange behavior, that I think is wrong.  
+> zsh -f 
+> mkdir foo
+> cd foo
+> touch c00.abc c01.abc.def.00.0
+> bindkey -e; autoload -U compinit; compinit -D 
+> zstyle ':completion:*:complete:*' matcher-list 'r:|.=** r:[^0-9]||[0-9]=**'
+> more c00<TAB>   --->  more c0[]
+
+This is *very* ugly. The second `0' on the line is used as an anchor
+for the c01*, but as a normal string for the c00.abc. This is because
+I made the rule for matching anchors for patterns with two anchors
+slightly different because I wanted FB to match FooBar. The patch
+tries to work around the bug, but for a real solution we would have to 
+remove the special treatment for the doubly-anchored patterns.
+
+>    and sometimes 
+> more c00<TAB>	--->  more c0.abc[]
+
+I couldn't reproduce this.
+
+>    and 
+> more c00.<TAB>  --->  more c0.abc[]
+
+This was rather simpler, it didn't find the right clines to merge.
+
+Bye
+ Sven
+
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.24
+diff -u -r1.24 compcore.c
+--- Src/Zle/compcore.c	2000/05/23 14:23:27	1.24
++++ Src/Zle/compcore.c	2000/05/29 12:40:50
+@@ -49,6 +49,11 @@
+ /**/
+ mod_export int oldlist, oldins;
+ 
++/* Original prefix/suffix lengths. Flag saying if they changed. */
++
++/**/
++int origlpre, origlsuf, lenchanged;
++
+ /* This is used to decide when the cursor should be moved to the end of    *
+  * the inserted word: 0 - never, 1 - only when a single match is inserted, *
+  * 2 - when a full match is inserted (single or menu), 3 - always.         */
+@@ -691,6 +696,11 @@
+ 	compqiprefix = ztrdup(qipre ? qipre : "");
+ 	zsfree(compqisuffix);
+ 	compqisuffix = ztrdup(qisuf ? qisuf : "");
++	origlpre = (strlen(compqiprefix) + strlen(compiprefix) +
++		    strlen(compprefix));
++	origlsuf = (strlen(compqisuffix) + strlen(compisuffix) +
++		    strlen(compsuffix));
++	lenchanged = 0;
+ 	compcurrent = (usea ? (clwpos + 1 - aadd) : 0);
+ 
+ 	zsfree(complist);
+@@ -1700,6 +1710,11 @@
+ 	    lsuf = dupstring(compsuffix);
+ 	    llpl = strlen(lpre);
+ 	    llsl = strlen(lsuf);
++
++	    if (llpl + strlen(compqiprefix) + strlen(lipre) != origlpre ||
++		llsl + strlen(compqisuffix) + strlen(lisuf) != origlsuf)
++		lenchanged = 1;
++
+ 	    /* Test if there is an existing -P prefix. */
+ 	    if (dat->pre && *dat->pre) {
+ 		pl = pfxlen(dat->pre, lpre);
+Index: Src/Zle/compmatch.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compmatch.c,v
+retrieving revision 1.15
+diff -u -r1.15 compmatch.c
+--- Src/Zle/compmatch.c	2000/05/22 12:14:37	1.15
++++ Src/Zle/compmatch.c	2000/05/29 12:40:50
+@@ -473,7 +473,7 @@
+ 	bp = bp->next;
+     }
+     /*** This once was: `while (ll && lw)', but then ignored characters at
+-     *   the end or not, well, ignored. */
++     *   the end were not, well, ignored. */
+     while (ll) {
+ 
+ 	/* Hm, we unconditionally first tried the matchers for the cases
+@@ -1859,8 +1859,10 @@
+ 	    if (!(o->flags & CLF_NEW) && (n->flags & CLF_NEW)) {
+ 		Cline t, tn;
+ 
+-		for (t = n; (tn = t->next) && (tn->flags & CLF_NEW); t = tn);
+-		if (tn && cmp_anchors(o, tn, 0)) {
++		for (t = n; (tn = t->next) &&
++			 ((tn->flags & CLF_NEW) || !cmp_anchors(o, tn, 0));
++		     t = tn);
++		if (tn) {
+ 		    diff = sub_join(o, n, tn, 0);
+ 
+ #if 0
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.15
+diff -u -r1.15 compresult.c
+--- Src/Zle/compresult.c	2000/05/19 08:33:07	1.15
++++ Src/Zle/compresult.c	2000/05/29 12:40:51
+@@ -656,7 +656,8 @@
+ 	/* Sometimes the different match specs used may result in a cline
+ 	 * that gives an empty string. If that happened, we re-insert the
+          * old string. Unless there were matches added with -U, that is. */
+-	if (!(lastend - wb) && !hasunmatched) {
++
++	if (lastend < we && !lenchanged && !hasunmatched) {
+ 	    cs = wb;
+ 	    foredel(lastend - wb);
+ 	    inststrlen(old, 0, we - wb);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

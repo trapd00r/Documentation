@@ -1,0 +1,201 @@
+From zsh-workers-return-11015-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Apr 29 06:23:41 2000
+Return-Path: <zsh-workers-return-11015-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9579 invoked from network); 29 Apr 2000 06:23:39 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 29 Apr 2000 06:23:39 -0000
+Received: (qmail 24713 invoked by alias); 29 Apr 2000 06:23:33 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11015
+Received: (qmail 24683 invoked from network); 29 Apr 2000 06:23:31 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000429062326.ZM31758@candle.brasslantern.com>
+Date: Sat, 29 Apr 2000 06:23:25 +0000
+In-Reply-To: <1000429044220.ZM30544@candle.brasslantern.com>
+Comments: In reply to "Bart Schaefer" <schaefer@candle.brasslantern.com>
+        "Re: localtraps causing core dump in 3.1.6+" (Apr 29,  4:42am)
+References: <20000428161546.A8208@tdc134.comm.mot.com> 
+	<1000429044220.ZM30544@candle.brasslantern.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Re: localtraps causing core dump in 3.1.6+
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Apr 29,  4:42am, Bart Schaefer wrote:
+} Subject: Re: localtraps causing core dump in 3.1.6+
+}
+} } I recently started doing `setopt localtraps && unset -f TRAPZERR'
+} } because of some changes that took place for 3.1.7-pre-1.
+} } 
+} } However that led me to try the above, which dumps core
+} } on both 3.1.7-pre-1 and 3.1.6 when changing directory.
+} 
+} There is a bug in unsetting TRAPxxx (as opposed to resetting them to
+} something else) when localtraps is set.  You might try `trap - ZERR' or
+} `disable -f TRAPZERR' instead for now.
+
+This is a bit ugly.
+
+Both unsettrap() and removeshfuncnode() want to call removenode().
+
+removeshfuncnode() returns the hashnode, and a warning is generated if
+it's NULL, so it has to get the node before unsettrap() removes it.
+But unsettrap() subsequently calls freenode(), so it doesn't work to
+grab the node with gethashnode2() before calling unsettrap().
+
+The standard trick is `sigtrapped[sig] &= ~ZSIG_FUNC;' before calling
+unsettrap(), but if that's done then dosavetrap() doesn't save the
+shell function body and localtraps is foiled.
+
+In the current state, dosavetrap() thinks there's a function and tries
+to save the body, but it can't because removeshfuncnode() has already
+removed it from the table.  Thus the core dump when endtrapscope() tries
+to restore the nonexistent body.
+
+If we let dosavetrap() do its work, then *that* removes the node to save
+it, so again we can't pass it back up through removeshfuncnode() to stop
+the error message.  Which is just as well, because if it did make it up
+to bin_unhash(), it'd get freed, when the whole point is to save it.
+
+Gaah.
+
+If anyone can think of a better fix for this than diddling with `noerrs',
+don't be shy.
+
+By the way, the more I see of the "compiler-like error messages" from 8779,
+the more I hate them.  Please let's back out that change, or at least put
+the space back in after each colon.
+
+Oh, yeah:  One side-effect of this patch is that `unfunction TRAPxxx' has
+the same effect as `trap - xxx', which is symmetrical with `trap - xxx'
+having the effect of `unfunction TRAPxxx'.  The "no such ..." warning is
+suppressed when such a trap is removed, but that can be changed by moving
+`noerrs = !!st->list;' up four lines to above `} else {'.
+
+Index: Src/builtin.c
+===================================================================
+@@ -2592,12 +2592,14 @@
+ 
+     /* Take arguments literally -- do not glob */
+     for (; *argv; argv++) {
++	int ne = noerrs;
+ 	if ((hn = ht->removenode(ht, *argv))) {
+ 	    ht->freenode(hn);
+ 	} else {
+ 	    zwarnnam(name, "no such hash table element: %s", *argv, 0);
+-	    returnval = 1;
++	    returnval |= !noerrs;
+ 	}
++	noerrs = ne;
+     }
+     return returnval;
+ }
+Index: Src/hashtable.c
+===================================================================
+@@ -788,12 +788,12 @@
+ {
+     HashNode hn;
+ 
+-    if ((hn = removehashnode(shfunctab, nam))) {
+-	if (!strncmp(hn->nam, "TRAP", 4))
+-	    unsettrap(getsignum(hn->nam + 4));
+-	return hn;
+-    } else
+-	return NULL;
++    if (!strncmp(nam, "TRAP", 4))
++	hn = removetrap(getsignum(nam + 4));
++    else
++	hn = removehashnode(shfunctab, nam);
++
++    return hn;
+ }
+ 
+ /* Disable an entry in the shell function hash table.    *
+@@ -822,11 +822,10 @@
+ enableshfuncnode(HashNode hn, int flags)
+ {
+     Shfunc shf = (Shfunc) hn;
+-    int signum;
+ 
+     shf->flags &= ~DISABLED;
+     if (!strncmp(shf->nam, "TRAP", 4)) {
+-	signum = getsignum(shf->nam + 4);
++	int signum = getsignum(shf->nam + 4);
+ 	if (signum != -1) {
+ 	    settrap(signum, shf->funcdef);
+ 	    sigtrapped[signum] |= ZSIG_FUNC;
+Index: Src/signals.c
+===================================================================
+@@ -670,6 +670,7 @@
+ 	st->list = sigfuncs[sig];
+ 	sigfuncs[sig] = NULL;
+     }
++    noerrs = !!st->list;
+     if (!savetraps)
+ 	savetraps = znewlinklist();
+     /*
+@@ -726,11 +727,22 @@
+ void
+ unsettrap(int sig)
+ {
++    int ne = noerrs;
++    HashNode hn = removetrap(sig);
++    noerrs = ne;
++    if (hn)
++	shfunctab->freenode(hn);
++}
++
++/**/
++HashNode
++removetrap(int sig)
++{
+     int trapped;
+ 
+     if (sig == -1 ||
+ 	(jobbing && (sig == SIGTTOU || sig == SIGTSTP || sig == SIGTTIN)))
+-	return;
++	return NULL;
+ 
+     trapped = sigtrapped[sig];
+     /*
+@@ -743,7 +755,7 @@
+ 	dosavetrap(sig, locallevel);
+ 
+     if (!trapped)
+-        return;
++        return NULL;
+ 
+     sigtrapped[sig] = 0;
+     if (sig == SIGINT && interact) {
+@@ -769,19 +781,19 @@
+      */
+     if (trapped & ZSIG_FUNC) {
+ 	char func[20];
+-	HashNode hn;
+ 
+ 	sprintf(func, "TRAP%s", sigs[sig]);
+ 	/*
+ 	 * As in dosavetrap(), don't call removeshfuncnode() because
+ 	 * that calls back into unsettrap();
+ 	 */
+-	if ((hn = removehashnode(shfunctab, func)))
+-	    shfunctab->freenode(hn);
++	return removehashnode(shfunctab, func);
+     } else if (sigfuncs[sig]) {
+ 	freeeprog(sigfuncs[sig]);
+ 	sigfuncs[sig] = NULL;
+     }
++
++    return NULL;
+ }
+ 
+ /**/
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

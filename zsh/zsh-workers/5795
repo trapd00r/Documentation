@@ -1,0 +1,135 @@
+From zsh-workers-return-5795-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Mar 15 09:52:10 1999
+Return-Path: <zsh-workers-return-5795-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25849 invoked from network); 15 Mar 1999 09:52:09 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 Mar 1999 09:52:09 -0000
+Received: (qmail 2630 invoked by alias); 15 Mar 1999 09:51:47 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5795
+Received: (qmail 2616 invoked from network); 15 Mar 1999 09:51:40 -0000
+Date: Mon, 15 Mar 1999 10:46:41 +0100 (MET)
+Message-Id: <199903150946.KAA09918@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Sat, 13 Mar 1999 16:03:05 +0100
+Subject: PATCH: param stuff and was: PATCH: 3.1.5-pws-12: _brace_parameter
+
+
+Peter Stephenson wrote:
+
+> This wasn't working for me.  The following version is.  Do I really need
+> all those (@)?  I was too lazy to experiment.  In fact, why do I need the
+> double quotes in this case?  There's no harm here in eliding empty
+> elements.
+
+In this case (and some others in the example functions) we almost
+certainly don't need the double quotes (and hence no `(@)'), this is
+just a habit of mine...
+
+Over the weekend I had prepared the patch below, which
+
+- improves the parsing of a subscript on the left hand side of an
+  parameter assignment. Previously somthing like `a[${i%%\=*}]=foo'
+  didn't work because the (very simple) parsing done found the `='
+  inside the brackets and then tried to use that to separate the two
+  sides of the assignment. For array-assignments it worked.
+  The hunk in `compinit' makes use of this -- that's the place where I 
+  discovered it.
+- makes the treatment of `${${...}...}' (hopefully) consistent (and
+  this is a answer to one of Peter's questions above). The rule is:
+  the inner `${...}' is broken into array elements if it yields more
+  than one word and the whole thing is not quoted or if it is quoted and
+  the `@' flag is used. I'd like to hear comments if you think that
+  this looks and feels like the right thing.
+- allows the `${#:-foo}' Peter found. I think there is no harm in
+  allowing it.
+  The behavior is a bit weird, though, because `${foo-bar}' uses
+  `multsub', too. I haven't changed the call to it, yet, so the result 
+  is that the `bar' is broken into an array -- always. This means that 
+  `${#:-$foo}' will yield `1' for strings and the number of elements
+  if `bar' is `$baz' where `baz' is an array. I didn't change it
+  because I wanted to ask what it should do first, suggestions are:
+
+  1) let it treat the `bar' always as a string (i.e. let it never be
+     split into array elements); I guess this is what most people
+     would expect (and in the manual the thing is called `word')
+  2) like 1), but if combined with the `A' flag, let it be treated as
+     an array
+  3) do the same as for `${${...}...}', i.e., treat it as an array
+     unless the whole thing is quoted (or quoted and with the `@')
+     flag
+
+  Note that none of these will change the behavior of things that
+  worked before, the difference appears only if it is combined with `#'.
+
+Bye
+ Sven
+
+diff -u os/parse.c Src/parse.c
+--- os/parse.c	Fri Mar 12 20:47:16 1999
++++ Src/parse.c	Fri Mar 12 21:31:35 1999
+@@ -955,9 +955,17 @@
+ 	    nocorrect = 1;
+ 	else if (tok == ENVSTRING) {
+ 	    struct varasg *v = (struct varasg *)make_varnode();
++	    char *p;
+ 
+ 	    v->type = PM_SCALAR;
+-	    equalsplit(v->name = tokstr, &v->str);
++	    v->name = tokstr;
++	    for (p = tokstr; *p && *p != Inbrack && *p != '='; p++);
++	    if (*p == Inbrack && !skipparens(Inbrack, Outbrack, &p) &&
++		*p == '=') {
++		*p = '\0';
++		v->str = p + 1;
++	    } else
++		equalsplit(tokstr, &v->str);
+ 	    addlinknode(c->vars, v);
+ 	    isnull = 0;
+ 	} else if (tok == ENVARRAY) {
+diff -u os/subst.c Src/subst.c
+--- os/subst.c	Fri Mar 12 20:47:16 1999
++++ Src/subst.c	Fri Mar 12 21:16:49 1999
+@@ -941,6 +941,7 @@
+ 	} else if ((*s == '#' || *s == Pound) &&
+ 		   (iident(s[1])
+ 		    || s[1] == '*' || s[1] == Star || s[1] == '@'
++		    || s[1] == '-' || (s[1] == ':' && s[2] == '-')
+ 		    || (isstring(s[1]) && (s[2] == Inbrace || s[2] == Inpar))))
+ 	    getlen = 1 + whichlen, s++;
+ 	else if (*s == '~' || *s == Tilde) {
+@@ -976,7 +977,7 @@
+ 	skipparens(*s, *s == Inpar ? Outpar : Outbrace, &s);
+ 	sav = *s;
+ 	*s = 0;
+-	if (multsub(&val, (((quoted || aspar) && !nojoin) ? NULL : &aval),
++	if (multsub(&val, ((!aspar && (!quoted || nojoin)) ? &aval : NULL),
+ 		    &isarr, NULL) &&
+ 	    quoted) {
+ 	    isarr = -1;
+diff -u oc/Core/compinit Completion/Core/compinit
+--- oc/Core/compinit	Fri Mar 12 20:40:19 1999
++++ Completion/Core/compinit	Fri Mar 12 21:33:23 1999
+@@ -221,12 +221,11 @@
+ # set key `baz' to the empty string.
+ 
+ compconf() {
+-  local i name
++  local i
+ 
+   for i; do
+     if [[ "$i" = *\=* ]]; then
+-      name="${i%%\=*}"
+-      compconfig[$name]="${i#*\=}"
++      compconfig[${i%%\=*}]="${i#*\=}"
+     else
+       compconfig[$i]=''
+     fi
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

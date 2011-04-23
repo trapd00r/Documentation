@@ -1,0 +1,351 @@
+From zsh-workers-request@math.gatech.edu Sun Dec 13 23:38:28 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6415 invoked from network); 13 Dec 1998 23:38:25 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 13 Dec 1998 23:38:25 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id SAA21436;
+	Sun, 13 Dec 1998 18:34:39 -0500 (EST)
+Resent-Date: Sun, 13 Dec 1998 18:34:39 -0500 (EST)
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <981213153332.ZM15459@candle.brasslantern.com>
+Date: Sun, 13 Dec 1998 15:33:32 -0800
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: zsh-workers@math.gatech.edu
+Subject: PATCH: 3.1.5 + associative arrays: keys, values, and pattern subscripts
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"Nhlkx.0.tE5.Fy4Ts"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4763
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+The appended patch improves the implementation of the (kv) parameter flags
+and their interaction with the (iIrR) subscripting flags.  This is pretty
+much as was discussed in zsh-workers/4656 and its follow-ups, but differs
+slightly.  In particular, ordinary arrays do NOT yet return both keys and
+values when (kv) are specified together.
+
+Because it was easy (it actually was harder to avoid it) the behavior of
+the (IR) flags on AAs has changed; previously they were the same as (ir),
+but now (IR) return an array of ALL the matching entries, whereas (ir)
+still return a single entry as before.
+
+The complete table is as follows:
+
+                        Associative Array        Ordinary Array
+                        -----------------        --------------
+  $param[key]           Value in param at key    Value in param at key
+                        or empty if none         or empty if none
+
+  ${(k)param[key]}      If key has a value,      If key has a value,
+                        then key, else empty     then key, else empty
+
+  $param[(r)pat]        A value in param that    First value in param that
+                        matches pattern pat      matches pattern pat
+
+  $param[(R)pat]        All values in param      Last value in param that
+                        that match pattern pat   matches pattern pat
+
+  $param[(i)pat]        A key in param that      Index of first value that
+                        matches pattern pat      matches pattern pat
+
+  $param[(I)pat]        All keys in param that   Index of last value that
+                        match pattern pat        matches pattern pat
+
+  ${(k)param[(r)pat]}   Keys of values that      Same as $param[(i)pat]
+  ${(k)param[(R)pat]}   match pattern pat (not   and $param[(I)pat])
+                        of keys that match)
+
+  ${(k)param[(i)pat]}   As $param[(i)pat]        As $param[(i)pat]
+  ${(k)param[(I)pat]}   and $param[(I)pat]       and $param[(I)pat]
+
+  ${(v)param[(i)pat]}   Values at keys that      As $param[(r)pat]
+  ${(v)param[(I)pat]}   match pat                and $param[(R)pat]
+
+  ${(kv)param[(r)pat]}  Key and value pair of    As $param[(r)pat]    
+  ${(kv)param[(R)pat]}  value that matches pat   and $param[(R)pat]  
+
+  ${(kv)param[(i)pat]}  Key and value pair of    As $param[(i)pat]
+  ${(kv)param[(I)pat]}  key that matches pat     and $param[(I)pat]
+
+The rule for ordinary arrays is that (k) beats (rR) and (v) beats (iI), but
+(kv) cancel each other out.  This may be considered interim behavior.
+
+If everybody thinks this is cool so far -- the (IR) behavior being the only
+real point of contention that I can see -- I'll produce a documentation
+patch sometime next week, before I run off for holiday break.
+
+Implementation notes:
+
+I overloaded the `isarr' field of struct value to hold flag bits for all
+this, and backed out the previous hack of overloading both the `a' and `b'
+fields.  The difference between $array[*] and $array[@] is still stashed
+in the sign bit, mostly to minimize the number of lines changed.  I don't
+believe this has broken anything, but keep your eyes open.
+
+I changed scanparamvals() and took advantage of one of the parameters of
+scanhashtable() to specify which table entries should be skipped.
+
+The entire body of getvalue() is now in a new function fetchvalue() which
+takes an additional parameter for the AA flags; getvalue() simply calls
+fetchvalue() with flags == 0 to produce the old behavior.  paramsubst()
+calls fetchvalue() directly in order to pass bits for the (kv) flags.
+
+Index: Src/params.c
+===================================================================
+--- params.c	1998/11/17 16:11:35	1.11
++++ params.c	1998/12/13 22:25:17
+@@ -303,7 +303,11 @@
+ 
+ #define SCANPM_WANTVALS   (1<<0)
+ #define SCANPM_WANTKEYS   (1<<1)
+-#define SCANPM_WANTINDEX  (1<<2)
++#define SCANPM_WANTINDEX  (1<<2)	/* Useful only if nested arrays */
++#define SCANPM_MATCHKEY   (1<<3)
++#define SCANPM_MATCHVAL   (1<<4)
++#define SCANPM_MATCHMANY  (1<<5)
++#define SCANPM_ISVAR_AT   ((-1)<<15)	/* Only sign bit is significant */
+ 
+ static unsigned numparamvals;
+ 
+@@ -311,13 +315,12 @@
+ static void
+ scancountparams(HashNode hn, int flags)
+ {
+-    if (!(((Param)hn)->flags & PM_UNSET)) {
++    ++numparamvals;
++    if ((flags & SCANPM_WANTKEYS) && (flags & SCANPM_WANTVALS))
+ 	++numparamvals;
+-	if ((flags & SCANPM_WANTKEYS) && (flags & SCANPM_WANTVALS))
+-	    ++numparamvals;
+-    }
+ }
+ 
++static Comp scancomp;
+ static char **paramvals;
+ 
+ /**/
+@@ -325,33 +328,45 @@
+ scanparamvals(HashNode hn, int flags)
+ {
+     struct value v;
++    if (numparamvals && (flags & (SCANPM_MATCHVAL|SCANPM_MATCHKEY)) &&
++	!(flags & SCANPM_MATCHMANY))
++	return;
+     v.pm = (Param)hn;
+-    if (!(v.pm->flags & PM_UNSET)) {
+-	if (flags & SCANPM_WANTKEYS) {
+-	    paramvals[numparamvals++] = v.pm->nam;
+-	    if (!(flags & SCANPM_WANTVALS))
+-		return;
+-	}
+-	v.isarr = (PM_TYPE(v.pm->flags) & (PM_ARRAY|PM_HASHED));
+-	v.inv = (flags & SCANPM_WANTINDEX);
+-	v.a = 0;
+-	v.b = -1;
+-	paramvals[numparamvals++] = getstrvalue(&v);
++    if ((flags & SCANPM_MATCHKEY) && !domatch(v.pm->nam, scancomp, 0)) {
++	return;
+     }
++    if (flags & SCANPM_WANTKEYS) {
++	paramvals[numparamvals++] = v.pm->nam;
++	if (!(flags & (SCANPM_WANTVALS|SCANPM_MATCHVAL)))
++	    return;
++    }
++    v.isarr = (PM_TYPE(v.pm->flags) & (PM_ARRAY|PM_HASHED));
++    v.inv = 0;
++    v.a = 0;
++    v.b = -1;
++    paramvals[numparamvals] = getstrvalue(&v);
++    if (flags & SCANPM_MATCHVAL) {
++	if (domatch(paramvals[numparamvals], scancomp, 0)) {
++	    numparamvals += ((flags & SCANPM_WANTVALS) ? 1 :
++			     !(flags & SCANPM_WANTKEYS));
++	} else if (flags & SCANPM_WANTKEYS)
++	    --numparamvals;	/* Value didn't match, discard key */
++    } else
++	++numparamvals;
+ }
+ 
+ /**/
+ char **
+-paramvalarr(HashTable ht, unsigned flags)
++paramvalarr(HashTable ht, int flags)
+ {
+     MUSTUSEHEAP("paramvalarr");
+     numparamvals = 0;
+     if (ht)
+-	scanhashtable(ht, 0, 0, 0, scancountparams, flags);
++	scanhashtable(ht, 0, 0, PM_UNSET, scancountparams, flags);
+     paramvals = (char **) alloc((numparamvals + 1) * sizeof(char *));
+     if (ht) {
+ 	numparamvals = 0;
+-	scanhashtable(ht, 0, 0, 0, scanparamvals, flags);
++	scanhashtable(ht, 0, 0, PM_UNSET, scanparamvals, flags);
+     }
+     paramvals[numparamvals] = 0;
+     return paramvals;
+@@ -369,15 +384,10 @@
+     else if (PM_TYPE(v->pm->flags) == PM_ARRAY)
+ 	return v->arr = v->pm->gets.afn(v->pm);
+     else if (PM_TYPE(v->pm->flags) == PM_HASHED) {
+-	unsigned flags = 0;
+-	if (v->a)
+-	    flags |= SCANPM_WANTKEYS;
+-	if (v->b > v->a)
+-	    flags |= SCANPM_WANTVALS;
+-	v->arr = paramvalarr(v->pm->gets.hfn(v->pm), flags);
++	v->arr = paramvalarr(v->pm->gets.hfn(v->pm), v->isarr);
+ 	/* Can't take numeric slices of associative arrays */
+ 	v->a = 0;
+-	v->b = -1;
++	v->b = numparamvals;
+ 	return v->arr;
+     } else
+ 	return NULL;
+@@ -737,7 +747,12 @@
+ 	down = !down;
+ 	num = -num;
+     }
+-    *inv = ind;
++    if (v->isarr & SCANPM_WANTKEYS)
++	*inv = (ind || !(v->isarr & SCANPM_WANTVALS));
++    else if (v->isarr & SCANPM_WANTVALS)
++	*inv = 0;
++    else
++	*inv = ind;
+ 
+     for (t=s, i=0; *t && ((*t != ']' && *t != Outbrack && *t != ',') || i); t++)
+ 	if (*t == '[' || *t == Inbrack)
+@@ -829,7 +844,21 @@
+ 
+ 	if ((c = parsereg(s))) {
+ 	    if (v->isarr) {
+-		ta = getarrvalue(v);
++		if (PM_TYPE(v->pm->flags) == PM_HASHED) {
++		    scancomp = c;
++		    if (ind)
++			v->isarr |= SCANPM_MATCHKEY;
++		    else
++			v->isarr |= SCANPM_MATCHVAL;
++		    if (down)
++			v->isarr |= SCANPM_MATCHMANY;
++		    if ((ta = getvaluearr(v)) && *ta) {
++			*inv = v->inv;
++			*w = v->b;
++			return 1;
++		    }
++		} else
++		    ta = getarrvalue(v);
+ 		if (!ta || !*ta)
+ 		    return 0;
+ 		if (down)
+@@ -920,8 +949,8 @@
+     if (*tbrack == Outbrack)
+ 	*tbrack = ']';
+     if ((s[0] == '*' || s[0] == '@') && s[1] == ']') {
+-	if (v->isarr)
+-	    v->isarr = (s[0] == '*') ? 1 : -1;
++	if (v->isarr && s[0] == '@')
++	    v->isarr |= SCANPM_ISVAR_AT;
+ 	v->a = 0;
+ 	v->b = -1;
+ 	s += 2;
+@@ -941,7 +970,7 @@
+ 		} else
+ 		    a = -ztrlen(t + a + strlen(t));
+ 	    }
+-	    if (a > 0 && isset(KSHARRAYS))
++	    if (a > 0 && (isset(KSHARRAYS) || (v->pm->flags & PM_HASHED)))
+ 		a--;
+ 	    v->inv = 1;
+ 	    v->isarr = 0;
+@@ -985,6 +1014,13 @@
+ Value
+ getvalue(char **pptr, int bracks)
+ {
++  return fetchvalue(pptr, bracks, 0);
++}
++
++/**/
++Value
++fetchvalue(char **pptr, int bracks, int flags)
++{
+     char *s, *t;
+     char sav;
+     Value v;
+@@ -1039,8 +1075,10 @@
+ 	if (!pm || (pm->flags & PM_UNSET))
+ 	    return NULL;
+ 	v = (Value) hcalloc(sizeof *v);
+-	if (PM_TYPE(pm->flags) & (PM_ARRAY|PM_HASHED))
+-	    v->isarr = isvarat ? -1 : 1;
++	if (PM_TYPE(pm->flags) & (PM_ARRAY|PM_HASHED)) {
++	    /* Overload v->isarr as the flag bits for hashed arrays. */
++	    v->isarr = flags | (isvarat ? SCANPM_ISVAR_AT : 0);
++	}
+ 	v->pm = pm;
+ 	v->inv = 0;
+ 	v->a = 0;
+@@ -1079,7 +1117,7 @@
+     if (!v)
+ 	return hcalloc(1);
+     HEAPALLOC {
+-	if (v->inv) {
++	if (v->inv && !(v->pm->flags & PM_HASHED)) {
+ 	    sprintf(buf, "%d", v->a);
+ 	    s = dupstring(buf);
+ 	    LASTALLOC_RETURN s;
+Index: Src/subst.c
+===================================================================
+--- subst.c	1998/12/12 07:25:53	1.5
++++ subst.c	1998/12/13 22:22:42
+@@ -721,7 +721,7 @@
+     int nojoin = 0;
+     char inbrace = 0;		/* != 0 means ${...}, otherwise $... */
+     char hkeys = 0;		/* 1 means get keys from associative array */
+-    char hvals = 1;		/* > hkeys get values of associative array */
++    char hvals = 0;		/* > hkeys get values of associative array */
+ 
+     *s++ = '\0';
+     if (!ialnum(*s) && *s != '#' && *s != Pound && *s != '-' &&
+@@ -978,8 +978,12 @@
+ 	copied = 1;
+ 	*s = sav;
+ 	v = (Value) NULL;
+-    } else if (!(v = getvalue(&s, (unset(KSHARRAYS) || inbrace) ? 1 : -1)))
+-	vunset = 1;
++    } else {
++	/* 2 == SCANPM_WANTKEYS, 1 == SCANPM_WANTVALS, see params.c */
++	if (!(v = fetchvalue(&s, (unset(KSHARRAYS) || inbrace) ? 1 : -1,
++			     (hkeys ? 2 : 0) + ((hvals > hkeys) ? 1 : 0))))
++	    vunset = 1;
++    }
+     while (v || ((inbrace || (unset(KSHARRAYS) && vunset)) && isbrack(*s))) {
+ 	if (!v) {
+ 	    Param pm;
+@@ -1004,13 +1008,8 @@
+ 		break;
+ 	}
+ 	if ((isarr = v->isarr)) {
+-	    /* No way to reach here with v->inv != 0, so getvaluearr() *
+-	     * will definitely be called by getarrvalue().  Slicing of *
+-	     * associations isn't done, so use v->a and v->b for flags */
+-	    if (PM_TYPE(v->pm->flags) == PM_HASHED) {
+-		v->a = hkeys;
+-		v->b = hvals;
+-	    }
++	    /* No way to get here with v->inv != 0, so getvaluearr() *
++	     * is called by getarrvalue(); needn't test PM_HASHED.   */
+ 	    aval = getarrvalue(v);
+ 	} else {
+ 	    if (v->pm->flags & PM_ARRAY) {
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

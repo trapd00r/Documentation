@@ -1,0 +1,670 @@
+From zsh-workers-return-10230-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Mar 24 12:20:01 2000
+Return-Path: <zsh-workers-return-10230-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19119 invoked from network); 24 Mar 2000 12:19:50 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 24 Mar 2000 12:19:50 -0000
+Received: (qmail 16712 invoked by alias); 24 Mar 2000 12:19:31 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10230
+Received: (qmail 16702 invoked from network); 24 Mar 2000 12:19:30 -0000
+Date: Fri, 24 Mar 2000 13:19:21 +0100 (MET)
+Message-Id: <200003241219.NAA25929@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: alternate set
+
+
+[ I don't know if this should go into dev-20. Maybe after that or
+maybe never, depending on how people like it. ]
+
+
+I suggested to remove the alternate set stuff from new completion,
+letting the shell code decide what to do with ignored matches. Just to 
+try it out, I implemented it (anyone surprised?) and here is the
+patch.
+
+- The -a option of compadd is gone.
+- So is $compstate[alternate_nmatches].
+- But there is the new $compstate[ignored] which gives the number of
+  matches that were ignored. But for the new completion system they
+  are really ignored. No automatic falling back on them.
+
+But of course it is possible to complete ignored matches (doesn't that 
+sound weird?):
+
+- The new completer `_ignored' (should that be `_no_ignore',
+  `_ignore_not' or `_don\'t_ignore'? ;-) can be used to generate
+  matches that were otherwise ignored.
+- Internally this works by not using ignored-patterns and $fignore
+  while _ignored is active.
+  _ignored calls completer in the same way as _prefix.
+- The prefer-ignored style is gone. That's possible because one can
+  say much more conveniently by just putting _ignored into the list of 
+  completers, e.g.:
+
+    zstyle ... completers _complete _ignored
+
+  Would be the old standard behaviour of first trying normal
+  completion and then trying the ignored matches. Or:
+
+    zstyle ... completers _complete _ignored _correct _ignored
+
+  Completion, ignored completions, correction, ignored corrections.
+- The single-ignored style is *kept*. But now tested by _ignored.
+
+Ok, maybe someone would like to try this...
+
+I'd like to point out that only with this change it is possible to
+really ignore matches. Before, the alternate set made that impossible.
+
+And I'd like to ask: should we change the default completer list to
+the one in the first example? Only that would give the ignore-$fignore 
+behaviour, but I'm not sure if people expect it or if it is going on
+their nerves or what.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Completion/Builtins/_zstyle Completion/Builtins/_zstyle
+--- ../z.old/Completion/Builtins/_zstyle	Fri Mar 24 09:09:50 2000
++++ Completion/Builtins/_zstyle	Fri Mar 24 10:01:56 2000
+@@ -49,7 +49,6 @@
+   packageset		 c:packageset
+   path			 'c:_wanted directories expl directory _path_files -/'
+   ports			 c:_ports
+-  prefer-ignored         c:bool
+   prefix-hidden		 c:bool
+   prefix-needed		 c:bool
+   prompt		 c:
+@@ -215,7 +214,7 @@
+       ;;
+ 
+     single-ignored)
+-      _wanted values expl 'how to handle single alternate match' \
++      _wanted values expl 'how to handle a single ignored match' \
+           compadd - show menu
+       ;;
+ 
+diff -ru ../z.old/Completion/Core/_description Completion/Core/_description
+--- ../z.old/Completion/Core/_description	Fri Mar 24 09:09:54 2000
++++ Completion/Core/_description	Fri Mar 24 10:01:56 2000
+@@ -29,8 +29,9 @@
+     opts=($opts -M "${(q)match}")
+ [[ -n "$_matcher" ]] && opts=($opts -M "${(q)_matcher}")
+ 
+-if zstyle -a ":completion:${curcontext}:$1" ignored-patterns _comp_ignore; then
+-  opts=( $opts -F _comp_ignore)
++if [[ -z "$_comp_no_ignore" ]] &&
++   zstyle -a ":completion:${curcontext}:$1" ignored-patterns _comp_ignore; then
++  opts=( $opts -F _comp_ignore )
+ else
+   _comp_ignore=()
+ fi
+diff -ru ../z.old/Completion/Core/_ignored Completion/Core/_ignored
+--- ../z.old/Completion/Core/_ignored	Fri Mar 24 13:09:31 2000
++++ Completion/Core/_ignored	Fri Mar 24 10:15:52 2000
+@@ -0,0 +1,32 @@
++#autoload
++
++# Use ignored matches.
++
++(( $compstate[ignored] )) || return 1
++
++local curcontext="${curcontext/:[^:]#:/:ignored-${(M)#_completers[1,_completer_num]:#_ignored}:}"
++local comp i _comp_no_ignore=yes tmp expl
++
++zstyle -a ":completion:${curcontext}:" completer comp ||
++  comp=( "${(@)_completers[1,_completer_num-1][(R)_ignored,-1]}" )
++
++for i in "$comp[@]"; do
++  if [[ "$i" != _ignored ]] && "$i"; then
++    if zstyle -s ":completion:${curcontext}:" single-ignored tmp &&
++       [[ $compstate[old_list] != shown && $compstate[nmatches] -eq 1 ]]; then
++      case "$tmp" in
++      show) compstate[insert]='' compstate[list]='list force' tmp='' ;;
++      menu)
++        compstate[insert]=menu
++        _description original expl original    
++        compadd "$expl[@]" -S '' - "$PREFIX$SUFFIX"
++        ;;
++      *) tmp='' ;;
++      esac
++    fi
++
++    return 0
++  fi
++done
++
++return 1
+diff -ru ../z.old/Completion/Core/_main_complete Completion/Core/_main_complete
+--- ../z.old/Completion/Core/_main_complete	Fri Mar 24 09:09:54 2000
++++ Completion/Core/_main_complete	Fri Mar 24 10:02:30 2000
+@@ -19,7 +19,7 @@
+ setopt localoptions nullglob rcexpandparam extendedglob
+ unsetopt markdirs globsubst shwordsplit nounset ksharrays
+ 
+-local ctxt func funcs ret=1 tmp _compskip format _comp_ignore \
++local func funcs ret=1 tmp _compskip format _comp_ignore \
+       _completers _completer _completer_num curtag \
+       _matchers _matcher _matcher_num _comp_tags \
+       context state line opt_args val_args curcontext="$curcontext" \
+@@ -61,7 +61,8 @@
+ 
+ # Get the names of the completers to use in the positional parameters.
+ 
+-(( $# )) || zstyle -a ":completion:${curcontext}:" completer argv || set _complete
++(( $# )) || zstyle -a ":completion:${curcontext}:" completer argv ||
++    set _complete
+ 
+ # And now just call the completer functions defined.
+ 
+@@ -77,14 +78,8 @@
+ done
+ 
+ for _completer; do
+-  ctxt=":completion:${curcontext/::/:${_completer[2,-1]}-${(M)#_completers[1,_completer_num]:#$_completer}:}:"
+ 
+-  if zstyle -t "$ctxt" prefer-ignored && (( $compstate[alternate_nmatches] )); then
+-    ret=0
+-    break;
+-  fi
+-
+-  zstyle -a "$ctxt" matcher-list _matchers ||
++  zstyle -a ":completion:${curcontext/::/:${_completer[2,-1]}-${(M)#_completers[1,_completer_num]:#$_completer}:}:" matcher-list _matchers ||
+       _matchers=( '' )
+ 
+   _matcher_num=1
+@@ -98,26 +93,9 @@
+   (( _completer_num++ ))
+ done
+ 
+-if zstyle -s ":completion:${curcontext}:" single-ignored tmp &&
+-   [[ $compstate[old_list] != shown &&
+-      $compstate[alternate_nmatches] = 1 ]]; then
+-  case "$tmp" in
+-  show) compstate[insert]='' compstate[list]='list force' tmp='' ;;
+-  menu)
+-    local expl
+-
+-    compstate[insert]='menu'
+-    _description original expl original    
+-    compadd "$expl[@]" -a -S '' - "$PREFIX$SUFFIX"
+-    ;;
+-  *) tmp='' ;;
+-  esac
+-fi
+-
+ if [[ -n "$tmp" || $compstate[old_list] = keep ||
+-      $compstate[nmatches]+$compstate[alternate_nmatches] -gt 1 ]]; then
+-  [[ _last_nmatches -ge 0 &&
+-     _last_nmatches -ne $compstate[nmatches]+$compstate[alternate_nmatches] ]] &&
++      $compstate[nmatches] -gt 1 ]]; then
++  [[ _last_nmatches -ge 0 && _last_nmatches -ne $compstate[nmatches] ]] &&
+       _menu_style=( "$_last_menu_style[@]" "$_menu_style[@]" )
+ 
+   if [[ "$compstate[insert]" = "$_saved_insert" ]]; then
+@@ -170,7 +148,7 @@
+       fi
+     fi
+   fi
+-elif [[ $compstate[nmatches]+$compstate[alternate_nmatches] -eq 0 &&
++elif [[ $compstate[nmatches] -eq 0 &&
+         $#_lastdescr -ne 0 && $compstate[old_list] != keep ]] &&
+      zstyle -s ":completion:${curcontext}:warnings" format format; then
+ 
+diff -ru ../z.old/Completion/Core/_path_files Completion/Core/_path_files
+--- ../z.old/Completion/Core/_path_files	Fri Mar 24 09:09:55 2000
++++ Completion/Core/_path_files	Fri Mar 24 10:01:57 2000
+@@ -141,8 +141,9 @@
+ 
+ # If given no `-F' option, we may want to use $fignore, turned into patterns.
+ 
+-[[ $#ignore -eq 0 && ( -z $gopt || "$pats" = \ #\*\ # ) && -n $FIGNORE ]] && 
+-   ignore=( "?*${^fignore[@]}" )
++[[ -z "$_comp_no_ignore" && $#ignore -eq 0 &&
++   ( -z $gopt || "$pats" = \ #\*\ # ) && -n $FIGNORE ]] && 
++    ignore=( "?*${^fignore[@]}" )
+ 
+ if (( $#ignore )); then
+   _comp_ignore=( "$_comp_ignore[@]" "$ignore[@]" )
+@@ -349,7 +350,7 @@
+       continue 2
+     fi
+ 
+-    if [[ "$tpre$tsuf" != */* && $#tmp1 -ne 0 ]] &&
++    if [[ -z "$_comp_no_ignore" && "$tpre$tsuf" != */* && $#tmp1 -ne 0 ]] &&
+        zstyle -s ":completion:${curcontext}:files" ignore-parents rem &&
+        [[ ( "$rem" != *dir* || "$pats" = '*(-/)' ) &&
+ 	  ( "$rem" != *..* || "$tmp1" = *../* ) ]]; then
+diff -ru ../z.old/Completion/Core/_prefix Completion/Core/_prefix
+--- ../z.old/Completion/Core/_prefix	Fri Mar 24 09:09:56 2000
++++ Completion/Core/_prefix	Fri Mar 24 10:15:29 2000
+@@ -7,7 +7,7 @@
+ local curcontext="${curcontext/:[^:]#:/:prefix-${(M)#_completers[1,_completer_num]:#_prefix}:}" comp i
+ 
+ zstyle -a ":completion:${curcontext}:" completer comp ||
+-  comp=( "${(@)_completers[1,_completer_num][(R)_prefix,-1]}" )
++  comp=( "${(@)_completers[1,_completer_num-1][(R)_prefix,-1]}" )
+ 
+ if zstyle -t ":completion:${curcontext}:" add-space; then
+   ISUFFIX=" $SUFFIX"
+diff -ru ../z.old/Completion/Core/_setup Completion/Core/_setup
+--- ../z.old/Completion/Core/_setup	Fri Mar 24 09:09:55 2000
++++ Completion/Core/_setup	Fri Mar 24 10:01:57 2000
+@@ -54,7 +54,7 @@
+     _menu_style=( "$_last_menu_style[@]" "$_menu_style[@]" )
+ 
+ if zstyle -a ":completion:${curcontext}:$1" menu val; then
+-  _last_nmatches=$(( $nm + $compstate[alternate_nmatches] ))
++  _last_nmatches=$nm
+   _last_menu_style=( "$val[@]" )
+ else
+   _last_nmatches=-1
+diff -ru ../z.old/Doc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- ../z.old/Doc/Zsh/compsys.yo	Fri Mar 24 09:09:33 2000
++++ Doc/Zsh/compsys.yo	Fri Mar 24 10:01:58 2000
+@@ -979,8 +979,9 @@
+ only be performed if only names of directories are completed.
+ 
+ Note that names of directories ignored because of one of the tests
+-will be placed in the alternate set of completions so that they will
+-be completed if there are no other possible completions.
++will be ignored in the same way as the matches ignored because of the
++tt(ignored-patterns) style. I.e. by using the tt(_ignored) completer
++it is possible to complete these directories nonetheless.
+ )
+ item(tt(ignored-patterns))(
+ This style is used with the tags used when adding matches and defines a
+@@ -1283,26 +1284,6 @@
+ not set by the user, the service names from `tt(/etc/services)' will
+ be used.
+ )
+-item(tt(prefer-ignored))(
+-This style is tested by the main completion function before calling a
+-completer. The context name is formed in the same way as for the
+-tt(matcher-list) style, i.e. it contains the name of the completer
+-that will be called plus a hyphen and the number of the call to that
+-completer.
+-
+-If the style is set to true and completion did not generate any normal 
+-matches yet, but there are matches that were ignored because they
+-matched one of the patterns given with the tt(fignore) array or the
+-tt(ignored-patterns) style, these ignored matches are used immediatly
+-and no other completer will be called.
+-
+-It is sometimes useful to set this style for the tt(correct) or
+-tt(approximate) completer so that ignored matches are prefered over
+-corrections.
+-
+-example(zstyle ':completion:*:complete-2:*' prefer-ignored yes
+-zstyle ':completion:*:(correct|approximate)-1:*' prefer-ignored yes)
+-)
+ item(tt(prefix-hidden))(
+ This is used when matches with a common prefix are added (e.g. option
+ names). If it is `true', this prefix will not be shown in the list of
+@@ -1330,11 +1311,8 @@
+ if there is such a common prefix, respectively. The sequence `tt(%c)'
+ is replaced by the name of the completer function that generated the
+ matches (without the leading underscore). Finally, `tt(%n)' is
+-replaced by the number of matches generated, `tt(%a)' is replaced by
+-an empty string if the matches are in the normal set (i.e. the one
+-without file names with one of the suffixes from the
+-tt(ignored-suffixes) style) and with `tt( -alt-)' if the matches are
+-in the alternate set, and if the tt(list) style is set, `tt(%l)' is
++replaced by the number of matches generated
++and if the tt(list) style is set, `tt(%l)' is
+ replaced by `tt(...)' if the list of matches is too long to fit on the
+ screen and with an empty string otherwise. If the tt(list) style is
+ `false', `tt(%l)' will always be removed.
+@@ -1345,12 +1323,9 @@
+ duplicates.
+ )
+ item(tt(single-ignored))(
+-Using styles like tt(ignored-patterns) allows one to put some matches
+-in the alternate set of matches which is only used if there are no
+-`normal' matches. Having only one such normally ignored match is often 
+-a special case because one probably doesn't want that match to be
+-inserted immediatly. This style allows to configure what to do in such 
+-a case. If its value is tt(show), the single match will only be shown, 
++This is used by the tt(_ignored) completer. It allows to specify what
++should be done if it can generate only one match, which is often a
++special case. If its value is tt(show), the single match will only be shown, 
+ not inserted. If the value is tt(menu), then the single match and the
+ original string are both added as matches and menucompletion is
+ started so that one can easily select either of them.
+@@ -1836,6 +1811,20 @@
+ tt(COMPLETE_IN_WORD) option is set. Because otherwise the cursor will
+ be set after the word before the completion code is called and hence
+ there will be no suffix.
++)
++findex(_ignored)
++item(tt(_ignored))(
++Using the tt(ignored-patterns) style it is possible to make some
++matches be ignored. This completer allows to complete these matches as 
++if no tt(ignored-patterns) style were set. Which completers are called 
++for this is determined in the same way as for the tt(_prefix)
++completer.
++
++Finally, tt(_ignored) uses the tt(single-ignored) style if only one
++match could be generated. It can be set to tt(show) to make that match 
++be only displayed, not inserted into the line or it can be set to
++tt(menu) to make the single match and the original string from the
++line be offered in a menucompletion.
+ )
+ findex(_menu)
+ item(tt(_menu))(
+diff -ru ../z.old/Doc/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- ../z.old/Doc/Zsh/compwid.yo	Fri Mar 24 09:09:33 2000
++++ Doc/Zsh/compwid.yo	Fri Mar 24 10:01:58 2000
+@@ -197,15 +197,12 @@
+ )
+ item(tt(nmatches))(
+ The number of matches generated and accepted by the completion code so
+-far, excluding those matches that are only accepted by ignoring the
+-tt(fignore) parameter and the tt(-a) option of the tt(compadd) builtin 
+-command.
++far.
+ )
+-item(tt(alternate_nmatches))(
+-Like tt(nmatches), but counts only matches in the alternate set. I.e. file
+-names with one of the suffixes from the tt(fignore) array and matches
+-put into the alternate set using the tt(-a) option of the tt(compadd)
+-builtin command (see below) are not counted.
++item(tt(ignored))(
++The number of words that were ignored because they matched one of the
++patterns given with the tt(-F) option to the tt(compadd) builtin
++command.
+ )
+ item(tt(restore))(
+ This is set to tt(auto) before a function is entered, which forces the
+@@ -518,23 +515,9 @@
+ for testing.  Hence it is only useful if combined with the tt(-f) flag, as
+ the tests will not otherwise be performed.
+ )
+-item(tt(-a))(
+-The completion code may build two sets of matches: the normal and the
+-alternate set. Normally only the matches in the first set are used,
+-but if this set is empty, the words from the alternate set are
+-used. The completion code uses this mechanism, for example, to make
+-filenames without one of the suffixes defined with the tt(fignore)
+-shell parameter be preferred over filenames with one of these
+-suffixes.
+-
+-With the tt(-a)-flag given, the var(words) are stored in the alternate
+-set unless this flag is overridden by the tt(-F) option.
+-)
+ item(tt(-F) var(array))(
+-Specifies an array containing patterns.
+-Words matching one of these patterns are stored in
+-the alternate set of matches and words that match none of the patterns
+-are stored in the normal set.
++Specifies an array containing patterns. Words matching one of these
++patterns are ignored, i.e. not considered to be possible matches.
+ 
+ The var(array) may be the name of an array parameter or a list of
+ literal patterns enclosed in parentheses and quoted, as in `tt(-F "(*?.o
+diff -ru ../z.old/Functions/Zle/incremental-complete-word Functions/Zle/incremental-complete-word
+--- ../z.old/Functions/Zle/incremental-complete-word	Fri Mar 24 09:10:21 2000
++++ Functions/Zle/incremental-complete-word	Fri Mar 24 10:01:58 2000
+@@ -17,7 +17,7 @@
+   unsetopt autolist menucomplete automenu # doesn't work well
+ 
+   local key lbuf="$LBUFFER" rbuf="$RBUFFER" pmpt pstr word
+-  local lastl lastr wid twid num alt post toolong
++  local lastl lastr wid twid num post toolong
+   local curcontext="${curcontext}" stop brk
+ 
+   [[ -z "$curcontext" ]] && curcontext=:::
+@@ -42,10 +42,6 @@
+   RBUFFER="$rbuf"
+   num=$_lastcomp[nmatches]
+   if (( ! num )); then
+-    num="${_lastcomp[alternate_nmatches]}"
+-    alt=' -alt-'
+-  fi
+-  if (( ! num )); then
+     word=''
+     state='-no match-'
+   elif [[ "${LBUFFER}${RBUFFER}" = *${_lastcomp[unambiguous]}* ]]; then
+@@ -55,7 +51,7 @@
+     word="${_lastcomp[unambiguous]}"
+     state=''
+   fi
+-  zformat -f pstr "$pmpt" "u:${word}" "s:$state" "n:$num" "a:$alt" \
++  zformat -f pstr "$pmpt" "u:${word}" "s:$state" "n:$num" \
+                           "l:$toolong" "c:${_lastcomp[completer][2,-1]}"
+   zle -R "$pstr"
+   read -k key
+@@ -88,12 +84,6 @@
+     RBUFFER="$lastr"
+     num=$_lastcomp[nmatches]
+     if (( ! num )); then
+-      num="${_lastcomp[alternate_nmatches]}"
+-      alt=' -alt-'
+-    else
+-      alt=''
+-    fi
+-    if (( ! num )); then
+       word=''
+       state='-no match-'
+     elif [[ "${LBUFFER}${RBUFFER}" = *${_lastcomp[unambiguous]}* ]]; then
+@@ -103,7 +93,7 @@
+       word="${_lastcomp[unambiguous]}"
+       state=''
+     fi
+-    zformat -f pstr "$pmpt" "u:${word}" "s:$state" "n:$num" "a:$alt" \
++    zformat -f pstr "$pmpt" "u:${word}" "s:$state" "n:$num" \
+                             "l:$toolong" "c:${_lastcomp[completer][2,-1]}"
+     zle -R "$pstr"
+     read -k key
+diff -ru ../z.old/Src/Zle/comp.h Src/Zle/comp.h
+--- ../z.old/Src/Zle/comp.h	Fri Mar 24 09:09:26 2000
++++ Src/Zle/comp.h	Fri Mar 24 10:01:59 2000
+@@ -229,10 +229,9 @@
+ 
+ #define CAF_QUOTE    1
+ #define CAF_NOSORT   2
+-#define CAF_ALT      4
+-#define CAF_MATCH    8
+-#define CAF_UNIQCON 16
+-#define CAF_UNIQALL 32
++#define CAF_MATCH    4
++#define CAF_UNIQCON  8
++#define CAF_UNIQALL 16
+ 
+ /* Data for compadd and addmatches() */
+ 
+@@ -351,12 +350,12 @@
+ #define CP_OLDINS      (1 << CPN_OLDINS)
+ #define CPN_VARED      20
+ #define CP_VARED       (1 << CPN_VARED)
+-#define CPN_ANMATCHES  21
+-#define CP_ANMATCHES   (1 << CPN_ANMATCHES)
+-#define CPN_LISTLINES  22
++#define CPN_LISTLINES  21
+ #define CP_LISTLINES   (1 << CPN_LISTLINES)
+-#define CPN_QUOTES     23
++#define CPN_QUOTES     22
+ #define CP_QUOTES      (1 << CPN_QUOTES)
++#define CPN_IGNORED    23
++#define CP_IGNORED     (1 << CPN_IGNORED)
+ 
+ #define CP_KEYPARAMS   24
+ #define CP_ALLKEYS     ((unsigned int) 0xffffff)
+diff -ru ../z.old/Src/Zle/compcore.c Src/Zle/compcore.c
+--- ../z.old/Src/Zle/compcore.c	Fri Mar 24 09:09:26 2000
++++ Src/Zle/compcore.c	Fri Mar 24 10:01:59 2000
+@@ -307,6 +307,7 @@
+     hasmatched = hasunmatched = 0;
+     minmlen = 1000000;
+     maxmlen = -1;
++    compignored = 0;
+ 
+     /* Make sure we have the completion list and compctl. */
+     if (makecomplist(s, incmd, lst)) {
+@@ -1463,7 +1464,7 @@
+     int lpl, lsl, pl, sl, bcp = 0, bcs = 0, bpadd = 0, bsadd = 0;
+     int ppl = 0, psl = 0;
+     int llpl = 0, llsl = 0, nm = mnum, gflags = 0, ohp = haspattern;
+-    int oisalt = 0, isalt, isexact, doadd, ois = instring, oib = inbackt;
++    int isexact, doadd, ois = instring, oib = inbackt;
+     Cline lc = NULL, pline = NULL, sline = NULL;
+     Cmatch cm;
+     struct cmlist mst;
+@@ -1743,7 +1744,6 @@
+ 	    } else
+ 		dat->prpre = dupstring(dat->prpre);
+ 	    /* Select the set of matches. */
+-	    oisalt = (dat->aflags & CAF_ALT);
+ 
+ 	    if (dat->remf) {
+ 		dat->remf = dupstring(dat->remf);
+@@ -1761,7 +1761,7 @@
+ 	/* Walk through the matches given. */
+ 	obpl = bpl;
+ 	obsl = bsl;
+-	if (!oisalt && (aign || pign)) {
++	if (aign || pign) {
+ 	    int max = 0;
+ 	    char **ap = argv;
+ 
+@@ -1780,9 +1780,8 @@
+ 		    disp = NULL;
+ 	    }
+ 	    sl = strlen(s);
+-	    isalt = oisalt;
+-	    if (!isalt && (aign || pign)) {
+-		int il = ppl + sl + psl;
++	    if (aign || pign) {
++		int il = ppl + sl + psl, addit = 1;
+ 
+ 		if (ppl)
+ 		    memcpy(ibuf, dat->ppre, ppl);
+@@ -1796,15 +1795,19 @@
+ 		    char **pt = aign;
+ 		    int filell;
+ 
+-		    for (isalt = 0; !isalt && *pt; pt++)
+-			isalt = ((filell = strlen(*pt)) < il &&
+-				 !strcmp(*pt, ibuf + il - filell));
++		    for (; addit && *pt; pt++)
++			addit = !((filell = strlen(*pt)) < il &&
++				  !strcmp(*pt, ibuf + il - filell));
+ 		}
+-		if (!isalt && pign) {
++		if (addit && pign) {
+ 		    Patprog *pt = pign;
+ 
+-		    for (isalt = 0; !isalt && *pt; pt++)
+-			isalt = pattry(*pt, ibuf);
++		    for (; addit && *pt; pt++)
++			addit = !pattry(*pt, ibuf);
++		}
++		if (!addit) {
++		    compignored++;
++		    continue;
+ 		}
+ 	    }
+ 	    if (!(dat->aflags & CAF_MATCH)) {
+@@ -1832,7 +1835,7 @@
+ 		for (bp = obsl; bp; bp = bp->next)
+ 		    bp->curpos += bsadd;
+ 
+-		if ((cm = add_match_data(isalt, ms, lc, dat->ipre, NULL,
++		if ((cm = add_match_data(0, ms, lc, dat->ipre, NULL,
+ 					 dat->isuf, dat->pre, dat->prpre,
+ 					 dat->ppre, pline,
+ 					 dat->psuf, sline,
+@@ -2175,6 +2178,8 @@
+ 
+     newmatches = 1;
+     mgroup->new = 1;
++    if (alt)
++	compignored++;
+ 
+     if (!complastprompt || !*complastprompt)
+ 	dolastprompt = 0;
+diff -ru ../z.old/Src/Zle/complete.c Src/Zle/complete.c
+--- ../z.old/Src/Zle/complete.c	Fri Mar 24 09:09:27 2000
++++ Src/Zle/complete.c	Fri Mar 24 10:01:59 2000
+@@ -36,7 +36,8 @@
+ mod_export zlong compcurrent;
+ /**/
+ zlong complistmax,
+-      complistlines;
++      complistlines,
++      compignored;
+ 
+ /**/
+ mod_export
+@@ -476,9 +477,6 @@
+ 		sp = &(dat.prpre);
+ 		e = "string expected after -%c";
+ 		break;
+-	    case 'a':
+-		dat.aflags |= CAF_ALT;
+-		break;
+ 	    case 'M':
+ 		sp = &m;
+ 		e = "matching specification expected after -%c";
+@@ -912,9 +910,9 @@
+     { "old_list", PM_SCALAR, VAL(compoldlist), NULL, NULL },
+     { "old_insert", PM_SCALAR, VAL(compoldins), NULL, NULL },
+     { "vared", PM_SCALAR, VAL(compvared), NULL, NULL },
+-    { "alternate_nmatches", PM_INTEGER | PM_READONLY, NULL, NULL, VAL(get_anmatches) },
+     { "list_lines", PM_INTEGER | PM_READONLY, NULL, NULL, VAL(get_listlines) },
+     { "all_quotes", PM_SCALAR | PM_READONLY, VAL(compqstack), NULL, NULL },
++    { "ignored", PM_INTEGER | PM_READONLY, VAL(compignored), NULL, NULL },
+     { NULL, 0, NULL, NULL, NULL }
+ };
+ 
+@@ -1025,14 +1023,7 @@
+ static zlong
+ get_nmatches(Param pm)
+ {
+-    return num_matches(1);
+-}
+-
+-/**/
+-static zlong
+-get_anmatches(Param pm)
+-{
+-    return num_matches(0);
++    return (permmatches(0) ? 0 : nmatches);
+ }
+ 
+ /**/
+diff -ru ../z.old/Src/Zle/compresult.c Src/Zle/compresult.c
+--- ../z.old/Src/Zle/compresult.c	Fri Mar 24 09:09:27 2000
++++ Src/Zle/compresult.c	Fri Mar 24 10:01:59 2000
+@@ -1102,22 +1102,6 @@
+     minfo.cur = mc;
+ }
+ 
+-/* Return the real number of matches. */
+-
+-/**/
+-zlong
+-num_matches(int normal)
+-{
+-    int alt;
+-
+-    alt = permmatches(0);
+-
+-    if (normal)
+-	return (alt ? 0 : nmatches);
+-    else
+-	return (alt ? nmatches : 0);
+-}
+-
+ /* Return the number of screen lines needed for the list. */
+ 
+ /**/
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

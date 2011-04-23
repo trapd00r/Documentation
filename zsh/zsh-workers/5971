@@ -1,0 +1,651 @@
+From zsh-workers-return-5971-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Mar 29 09:48:49 1999
+Return-Path: <zsh-workers-return-5971-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15654 invoked from network); 29 Mar 1999 09:48:47 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 29 Mar 1999 09:48:47 -0000
+Received: (qmail 3679 invoked by alias); 29 Mar 1999 09:48:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5971
+Received: (qmail 3665 invoked from network); 29 Mar 1999 09:48:25 -0000
+Date: Mon, 29 Mar 1999 11:48:19 +0200 (MET DST)
+Message-Id: <199903290948.LAA01291@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: old lists compstate
+
+
+The last one of the patches I prepared over the weekend...
+
+This is an example implementation (as experimental as I can get)
+giving information about a pre-existing list of completions to
+completion widgets. Changes to `compstate' are:
+
+  - The `insert' key may be set to a number or a string of the form
+    `group:match' (where `group' and `match' are both numbers) to make 
+    the n'th match (or the n'th match from the m'th group) be
+    inserted.
+  - The new key `old_list' is unset of no valid older list exists, and 
+    `yes' or `shown' if such a list exists (and it is displayed when
+    `shown' is given).
+    This may be set to `keep' by the completion widget, making the
+    rest of the completion code use the old list instead of the one
+    build by the widget (which will normally be empty if a widgets
+    sets this to `keep').
+  - The new key `old_insert' reports the number of the match that is
+    currently inserted in the command line. Like `old_list' this may
+    be set to `keep' if the match should not be replaced by the one
+    inserted by the current invocation of widget (this allows one to
+    get the `accept-and-menu-complete'-behavior).
+
+I've added a small example completer function `_menu' that may be put
+before the normal `_complete' completer and that gives menucompletion
+implemented fully in shell code (note that this does not work together 
+with normal menucompletion).
+
+Also, people trying this may note a slightly different behavior: with
+the `_menu' completer, the cursor is left after a space inserted by
+the completion code. This looks weird when used for menucompletion,
+but if the new possibilities for the `insert' key are used for
+something different, this is probably better -- suggestions and
+comments are welcome.
+
+Bye
+ Sven
+
+diff -u oos/Zle/comp.h Src/Zle/comp.h
+--- oos/Zle/comp.h	Mon Mar 29 11:04:25 1999
++++ Src/Zle/comp.h	Mon Mar 29 11:19:02 1999
+@@ -190,6 +190,7 @@
+     LinkList lmatches;		/* list of matches */
+     LinkList lfmatches;		/* list of matches without fignore */
+     LinkList lallccs;		/* list of used compctls */
++    int num;			/* number of this group */
+ };
+ 
+ 
+@@ -213,6 +214,8 @@
+     int brsl;			/* ...and the suffix */
+     char *rems;			/* when to remove the suffix */
+     char *remf;			/* shell function to call for suffix-removal */
++    int rnum;			/* group relative number */
++    int gnum;			/* global number */
+ };
+ 
+ #define CMF_FILE     1		/* this is a file */
+@@ -301,7 +304,9 @@
+ #define CP_LISTMAX    (1 << 26)
+ #define CP_LASTPROMPT (1 << 27)
+ #define CP_TOEND      (1 << 28)
++#define CP_OLDLIST    (1 << 29)
++#define CP_OLDINS     (1 << 30)
+ 
+-#define CP_NUM              29
++#define CP_NUM              31
+ 
+ #define CP_ALLMASK    ((1 << CP_NUM) - 1)
+diff -u oos/Zle/comp1.c Src/Zle/comp1.c
+--- oos/Zle/comp1.c	Mon Mar 29 11:04:25 1999
++++ Src/Zle/comp1.c	Mon Mar 29 11:19:03 1999
+@@ -127,7 +127,9 @@
+      *comppatmatch,
+      *comppatinsert,
+      *complastprompt,
+-     *comptoend;
++     *comptoend,
++     *compoldlist,
++     *compoldins;
+ 
+ /**/
+ Param *comppms;
+@@ -442,7 +444,8 @@
+ 	compcontext = compparameter = compredirect = compquote =
+ 	compquoting = comprestore = complist = compinsert =
+ 	compexact = compexactstr = comppatmatch = comppatinsert =
+-	compforcelist = complastprompt = comptoend = NULL;
++	compforcelist = complastprompt = comptoend = 
++	compoldlist = compoldins = NULL;
+     makecompparamsptr = NULL;
+     comp_setunsetptr = NULL;
+     return 0;
+@@ -492,6 +495,8 @@
+     zsfree(comppatinsert);
+     zsfree(complastprompt);
+     zsfree(comptoend);
++    zsfree(compoldlist);
++    zsfree(compoldins);
+     return 0;
+ }
+ 
+diff -u oos/Zle/compctl.c Src/Zle/compctl.c
+--- oos/Zle/compctl.c	Mon Mar 29 11:04:25 1999
++++ Src/Zle/compctl.c	Mon Mar 29 11:19:03 1999
+@@ -2157,6 +2157,8 @@
+     { "list_max", PM_INTEGER, VAL(complistmax), NULL, NULL },
+     { "last_prompt", PM_SCALAR, VAL(complastprompt), NULL, NULL },
+     { "to_end", PM_SCALAR, VAL(comptoend), NULL, NULL },
++    { "old_list", PM_SCALAR, VAL(compoldlist), NULL, NULL },
++    { "old_insert", PM_SCALAR, VAL(compoldins), NULL, NULL },
+     { NULL, 0, NULL, NULL, NULL }
+ };
+ 
+diff -u oos/Zle/zle_main.c Src/Zle/zle_main.c
+--- oos/Zle/zle_main.c	Mon Mar 29 11:04:26 1999
++++ Src/Zle/zle_main.c	Mon Mar 29 11:19:03 1999
+@@ -883,7 +883,7 @@
+ 	moveto(nlnct, 0);
+ 	if (clearflag && tccan(TCCLEAREOD)) {
+ 	    tcout(TCCLEAREOD);
+-	    clearflag = 0;
++	    clearflag = listshown = 0;
+ 	}
+ 	if (postedit)
+ 	    fprintf(shout, "%s", postedit);
+@@ -927,6 +927,7 @@
+     /* miscellaneous initialisations */
+     stackhist = stackcs = -1;
+     kungetbuf = (char *) zalloc(kungetsz = 32);
++    hasperm = 0;
+ 
+     /* initialise the keymap system */
+     init_keymaps();
+diff -u oos/Zle/zle_refresh.c Src/Zle/zle_refresh.c
+--- oos/Zle/zle_refresh.c	Mon Mar 29 11:04:26 1999
++++ Src/Zle/zle_refresh.c	Mon Mar 29 11:19:03 1999
+@@ -53,6 +53,11 @@
+ /**/
+ int showinglist;
+ 
++/* Non-zero if a completion list was displayed. */
++
++/**/
++int listshown;
++
+ /* Non-zero if ALWAYS_LAST_PROMPT has been used, meaning that the *
+  * screen below the buffer display should not be cleared by       *
+  * zrefresh(), but should be by trashzle().                       */
+@@ -253,7 +258,7 @@
+     if (inlist)
+ 	return;
+ 
+-    if (clearlist) {
++    if (clearlist && listshown) {
+ 	if (tccan(TCCLEAREOD)) {
+ 	    int ovln = vln, ovcs = vcs;
+ 
+@@ -266,8 +271,10 @@
+ 	    clearflag = 0;
+ 	    resetneeded = 1;
+ 	}
+-	clearlist = 0;
++	listshown = 0;
+     }
++    clearlist = 0;
++
+ #ifdef HAVE_SELECT
+     cost = 0;			/* reset */
+ #endif
+@@ -295,6 +302,7 @@
+ 	    moveto(0, 0);
+ 	    t0 = olnct;		/* this is to clear extra lines even when */
+ 	    winchanged = 0;	/* the terminal cannot TCCLEAREOD	  */
++	    listshown = 0;
+ 	}
+ #endif
+ 	resetvideo();
+@@ -311,6 +319,7 @@
+                 tcout(TCCLEAREOD);
+             else
+                 cleareol = 1;   /* request: clear to end of line */
++	    listshown = 0;
+ 	}
+         if (t0 > -1)
+             olnct = t0;
+diff -u oos/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- oos/Zle/zle_tricky.c	Mon Mar 29 11:04:27 1999
++++ Src/Zle/zle_tricky.c	Mon Mar 29 11:22:02 1999
+@@ -72,12 +72,21 @@
+ 
+ static int offs;
+ 
+-/* These control the type of completion that will be done.  They are    *
+- * affected by the choice of ZLE command and by relevant shell options. *
+- * usemenu is set to 2 if we have to start automenu.                    */
++/* These control the type of completion that will be done.  They are      *
++ * affected by the choice of ZLE command and by relevant shell options.   *
++ * usemenu is set to 2 if we have to start automenu and 3 if we have to   *
++ * insert a match as if for menucompletion but without really stating it. */
+ 
+ static int usemenu, useglob, useexact, useline, uselist;
+ 
++/* Non-zero if we should keep an old list. */
++
++static int oldlist, oldins;
++
++/* The match and group number to insert when starting menucompletion.   */
++
++static int insmnum, insgnum, insgroup;
++
+ /* This is used to decide when the cursor should be moved to the end of    *
+  * the inserted word: 0 - never, 1 - only when a single match is inserted, *
+  * 2 - when a full match is inserted (single or menu), 3 - always.         */
+@@ -120,7 +129,16 @@
+ /* This holds the list of matches-groups. lmatches is a pointer to the  *
+  * last element in this list. */
+ 
+-static Cmgroup amatches, lmatches;
++static Cmgroup pmatches, amatches, lmatches;
++
++/* Non-zero if we have permanently allocated matches. */
++
++/**/
++int hasperm;
++
++/* Number of permanently allocated matches and groups. */
++
++static int permmnum, permgnum;
+ 
+ /* The total number of matches and the number of matches to be listed. */
+ 
+@@ -492,14 +510,9 @@
+  * with the next completions. This gives you a way to   *
+  * accept several selections from the list of matches.  */
+ 
+-/**/
+-void
+-acceptandmenucomplete(void)
++static void
++acceptlast(void)
+ {
+-    if (!menucmp) {
+-	feep();
+-	return;
+-    }
+     if (brbeg && *brbeg) {
+ 	int l;
+ 
+@@ -521,6 +534,17 @@
+ 	menupos = cs;
+ 	menuwe = 1;
+     }
++}
++
++/**/
++void
++acceptandmenucomplete(void)
++{
++    if (!menucmp) {
++	feep();
++	return;
++    }
++    acceptlast();
+     menucomplete();
+ }
+ 
+@@ -4077,7 +4101,7 @@
+ 	    /* We have matches. */
+ 	    if (nmatches > 1)
+ 		/* There is more than one match. */
+-		do_ambiguous();
++		    do_ambiguous();
+ 
+ 	    else if (nmatches == 1) {
+ 		/* Only one match. */
+@@ -4085,6 +4109,7 @@
+ 
+ 		while (!m->mcount)
+ 		    m = m->next;
++		menucur = NULL;
+ 		do_single(m->matches[0]);
+ 		invalidatelist();
+ 	    }
+@@ -4144,7 +4169,8 @@
+ {
+     List list;
+     int lv = lastval;
+-    
++    char buf[20];
++
+     if ((list = getshfunc(fn)) != &dummy_list) {
+ 	char **p, *tmp;
+ 	int set, aadd = 0, usea = 1, icf = incompfunc, osc = sfcontext;
+@@ -4153,7 +4179,8 @@
+ 	comppms = (Param *) zalloc(CP_NUM * sizeof(Param));
+ 
+ 	set = -1 & ~(CP_PARAMETER | CP_REDIRECT | CP_QUOTE | CP_QUOTING |
+-		     CP_EXACTSTR | CP_FORCELIST | (useglob ? 0 : CP_PATMATCH));
++		     CP_EXACTSTR | CP_FORCELIST | CP_OLDLIST | CP_OLDINS |
++		     (useglob ? 0 : CP_PATMATCH));
+ 	if (!*complastprompt)
+ 	    set &= ~CP_LASTPROMPT;
+ 	zsfree(compcontext);
+@@ -4309,6 +4336,25 @@
+ 	    comptoend = ztrdup("single");
+ 	else
+ 	    comptoend = ztrdup("match");
++	zsfree(compoldlist);
++	zsfree(compoldins);
++	if (hasperm && permmnum) {
++	    if (listshown)
++		compoldlist = "shown";
++	    else
++		compoldlist = "yes";
++	    set |= CP_OLDLIST;
++	    if (menucur) {
++		sprintf(buf, "%d", (*menucur)->gnum);
++		compoldins = buf;
++		set |= CP_OLDINS;
++	    } else
++		compoldins = "";
++	} else
++	    compoldlist = compoldins = "";
++	compoldlist = ztrdup(compoldlist);
++	compoldins = ztrdup(compoldins);
++
+ 	incompfunc = 1;
+ 	startparamscope();
+ 	makecompparamsptr();
+@@ -4343,7 +4389,16 @@
+ 	else if (!strcmp(compinsert, "auto") ||
+ 		 !strcmp(compinsert, "automenu"))
+ 	    useline = 1, usemenu = 2;
+-	else
++	else if (idigit(*compinsert)) {
++	    char *m;
++
++	    useline = 1; usemenu = 3;
++	    insmnum = atoi(compinsert);
++	    if ((m = strchr(compinsert, ':'))) {
++		insgroup = 1;
++		insgnum = atoi(m + 1);
++	    }
++	} else
+ 	    useline = usemenu = 0;
+ 	useexact = (compexact && !strcmp(compexact, "accept"));
+ 
+@@ -4356,6 +4411,10 @@
+ 	else
+ 	    movetoend = 2;
+ 
++	oldlist = (hasperm && compoldlist && !strcmp(compoldlist, "keep"));
++	oldins = (hasperm && menucur &&
++		  compoldins && !strcmp(compoldins, "keep"));
++
+ 	zfree(comppms, CP_NUM * sizeof(Param));
+ 	comppms = ocpms;
+     }
+@@ -4385,6 +4444,7 @@
+     struct cmlist ms;
+     Cmlist m;
+     char *p, *os = s;
++    int onm = nmatches;
+ 
+     /* Inside $... ? */
+     if (compfunc && (p = check_param(s, 0)))
+@@ -4440,10 +4500,12 @@
+ 
+ 	if (!validlist)
+ 	    lastambig = 0;
+-	amatches = 0;
++	amatches = NULL;
+ 	mnum = 0;
+ 	unambig_mnum = -1;
+ 	isuf = NULL;
++	insmnum = insgnum = 1;
++	insgroup = oldlist = oldins = 0;
+ 	begcmgroup("default", 0);
+ 
+ 	ccused = newlinklist();
+@@ -4457,7 +4519,7 @@
+ 
+ 	endcmgroup(NULL);
+ 
+-	if (amatches)
++	if (amatches && !oldlist)
+ 	    amatches->ccs = (Compctl *) makearray(ccused, 0,
+ 						  &(amatches->ccount), NULL);
+ 	else {
+@@ -4466,7 +4528,13 @@
+ 	    for (n = firstnode(ccused); n; incnode(n))
+ 		freecompctl((Compctl) getdata(n));
+ 	}
++	if (oldlist) {
++	    nmatches = onm;
++	    validlist = 1;
++	    amatches = pmatches;
+ 
++	    return 0;
++	}
+ 	PERMALLOC {
+ 	    permmatches();
+ 	} LASTALLOC;
+@@ -5054,7 +5122,6 @@
+     delit = ispattern = 0;
+     usemenu = um;
+     patcomp = filecomp = NULL;
+-    menucur = NULL;
+     rpre = rsuf = lpre = lsuf = ppre = psuf = lppre = lpsuf =
+ 	fpre = fsuf = ipre = ripre = prpre = 
+ 	qfpre = qfsuf = qrpre = qrsuf = qlpre = qlsuf = NULL;
+@@ -6203,7 +6270,10 @@
+     Cmatch *p, *q;
+     Cexpl *ep, *eq, e, o;
+     Compctl *cp, *cq;
+-    int nn, nl, fi = 0;
++    int nn, nl, fi = 0, gn = 1, mn = 1, rn;
++
++    if (hasperm)
++	freematches();
+ 
+     amatches = lmatches = NULL;
+     nmatches = smatches = 0;
+@@ -6245,13 +6315,17 @@
+ 	n->next = amatches;
+ 	amatches = n;
+ 	n->prev = 0;
++	n->num = gn++;
+ 
+ 	n->flags = g->flags;
+ 	n->mcount = g->mcount;
+ 	n->matches = p = (Cmatch *) ncalloc((n->mcount + 1) *
+ 					    sizeof(Cmatch));
+-	for (q = g->matches; *q; q++, p++)
++	for (rn = 1, q = g->matches; *q; q++, p++, rn) {
+ 	    *p = dupmatch(*q);
++	    (*p)->rnum = rn++;
++	    (*p)->gnum = mn++;
++	}
+ 	*p = NULL;
+ 
+ 	n->lcount = g->lcount;
+@@ -6282,6 +6356,10 @@
+ 	    n->ccs = NULL;
+ 	g = g->next;
+     }
++    pmatches = amatches;
++    hasperm = 1;
++    permmnum = mn - 1;
++    permgnum = gn - 1;
+ }
+ 
+ /* This frees one match. */
+@@ -6313,7 +6391,7 @@
+ static void
+ freematches(void)
+ {
+-    Cmgroup g = amatches, n;
++    Cmgroup g = pmatches, n;
+     Cmatch *m;
+     Cexpl *e;
+     Compctl *c;
+@@ -6347,6 +6425,7 @@
+ 
+ 	g = n;
+     }
++    hasperm = 0;
+ }
+ 
+ /* Insert the given string into the command line.  If move is non-zero, *
+@@ -6675,6 +6754,7 @@
+      * how REC_EXACT takes effect.  We effectively turn the ambiguous   *
+      * completion into an unambiguous one.                              */
+     if (ainfo && ainfo->exact == 1 && useexact && !(fromcomp & FC_LINE)) {
++	menucur = NULL;
+ 	do_single(ainfo->exactm);
+ 	invalidatelist();
+ 	return;
+@@ -6697,6 +6777,8 @@
+ 	int atend = (cs == we), oll = ll, la;
+ 	VARARR(char, oline, ll);
+ 
++	menucur = NULL;
++
+ 	/* Copy the line buffer to be able to easily test if it changed. */
+ 	memcpy(oline, line, ll);
+ 
+@@ -6747,7 +6829,8 @@
+      * if it is needed.                                                     */
+     if (isset(LISTBEEP))
+ 	feep();
+-    if (uselist && usemenu != 2 && !showinglist &&
++    if (uselist && usemenu != 2 &&
++	(!showinglist || (usemenu == 3 && !oldlist)) &&
+ 	(smatches >= 2 || (compforcelist && *compforcelist)))
+ 	showinglist = -2;
+ }
+@@ -6899,19 +6982,67 @@
+ 	cs = menuend;
+ }
+ 
++/* This maps the value in v into the range [0,m-1], decrementing v
++ * if it is non-negative and making negative values cound backwards. */
++
++static int
++comp_mod(int v, int m)
++{
++    if (v >= 0)
++	v--;
++    if (v >= 0)
++	return v % m;
++    else {
++	while (v < 0)
++	    v += m;
++	return v;
++    }
++}
++
+ /* This handles the beginning of menu-completion. */
+ 
+ /**/
+ static void
+ do_ambig_menu(void)
+ {
+-    menucmp = 1;
+-    menucur = NULL;
+-    menugrp = amatches;
+-    while (!menugrp->mcount)
+-	menugrp = menugrp->next;
+-    do_single(menugrp->matches[0]);
+-    menucur = menugrp->matches;
++    Cmatch *mc;
++
++    if (usemenu != 3) {
++	menucmp = 1;
++	menucur = NULL;
++    } else {
++	if (oldlist) {
++	    if (oldins)
++		acceptlast();
++	} else
++	    menucur = NULL;
++    }
++    if (insgroup) {
++	insgnum = comp_mod(insgnum, permgnum);
++	for (menugrp = amatches;
++	     menugrp && menugrp->num != insgnum + 1;
++	     menugrp = menugrp->next);
++	if (!menugrp || !menugrp->mcount) {
++	    menucur = NULL;
++	    return;
++	}
++	insmnum = comp_mod(insmnum, menugrp->mcount);
++    } else {
++	int c = 0;
++
++	insmnum = comp_mod(insmnum, permmnum);
++	for (menugrp = amatches;
++	     menugrp && (c += menugrp->mcount) <= insmnum;
++	     menugrp = menugrp->next)
++	    insmnum -= menugrp->mcount;
++	if (!menugrp) {
++	    menucur = NULL;
++	    return;
++	}
++    }
++    mc = menugrp->matches + insmnum;
++    do_single(*mc);
++    menucur = mc;
+ }
+ 
+ /* Return the length of the common prefix of s and t. */
+@@ -7055,7 +7186,7 @@
+ 
+     /* Set the cursor below the prompt. */
+     trashzle();
+-    showinglist = 0;
++    showinglist = listshown = 0;
+ 
+     clearflag = (isset(USEZLE) && !termflags &&
+ 		 complastprompt && *complastprompt);
+@@ -7276,6 +7407,7 @@
+ 	if ((nlines += nlnct - 1) < lines) {
+ 	    tcmultout(TCUP, TCMULTUP, nlines);
+ 	    showinglist = -1;
++	    listshown = 1;
+ 	} else
+ 	    clearflag = 0, putc('\n', shout);
+     } else
+diff -u Completion/Core/_menu Completion/Core/_menu
+--- Completion/Core/_menu	Mon Mar 29 11:34:03 1999
++++ Completion/Core/_menu	Mon Mar 29 11:35:18 1999
+@@ -0,0 +1,21 @@
++#autoload
++
++# This completer is an example showing how menucompletion can be
++# implemented with the new completion system.
++# Use this one before the normal _complete completer, as in:
++#
++#   compconf completer=_menu:_complete
++
++if [[ -n "$compstate[old_list]" ]]; then
++
++  # We have an old list, keep it and insert the next match.
++
++  compstate[old_list]=keep
++  compstate[insert]=$((compstate[old_insert]+1))
++else
++  # No old list, make completion insert the first match.
++
++  compstate[insert]=1
++fi
++
++return 1
+--- ooc/README	Mon Mar 29 11:04:06 1999
++++ Completion/README	Mon Mar 29 11:34:44 1999
+@@ -58,6 +58,9 @@
+     completer functions like _complete, either those given as arguments
+     or (if it is called without arguments) those from the completer
+     configuration key (see below).
++  _menu
++    A small example completer function showing how menucompletion can be
++    implemented.
+   _multi_parts
+     Utility for completion parts of words given a separator character and 
+     a list of words.
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

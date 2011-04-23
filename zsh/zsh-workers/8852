@@ -1,0 +1,469 @@
+From zsh-workers-return-8852-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Dec 02 14:02:05 1999
+Return-Path: <zsh-workers-return-8852-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7683 invoked from network); 2 Dec 1999 14:01:58 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 2 Dec 1999 14:01:58 -0000
+Received: (qmail 14553 invoked by alias); 2 Dec 1999 14:01:52 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8852
+Received: (qmail 14545 invoked from network); 2 Dec 1999 14:01:49 -0000
+Date: Thu, 2 Dec 1999 15:01:43 +0100 (MET)
+Message-Id: <199912021401.PAA20977@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Thu, 2 Dec 1999 11:39:07 +0100
+	(MET)
+Subject: Re: PATCH: groups in ZLS_COLOURS (and questions)
+
+
+I wrote:
+
+> One last comment about this colouring: I guess with this per-group and 
+> pattern matching stuff going on somebody will ask if it wouldn't be
+> possible to highlight different line-parts of, say, a process listing
+> differently (e.g. pids in red cmd-line in blue or whatever).
+
+Certainly one of the sicker things I've ever written...
+
+This allows pattern specs to define different codes for different
+parts of the matched pattern. The pattern has to use `(#b)' and the
+codes for the parts are defined by additional `=<values>'
+strings. E.g.:
+
+  ZLS_COLOURS='(processes)=(#b)?(?????)???????????????????????????(*)=0=1=4'
+
+gives (me, at least; with the ps(1) I have here) process ids in bold
+and underlined command lines. (That first `=0', btw, gives the code to 
+use for `the rest'.)
+
+On the C-code side there are only some changes in complist.c, the
+private versions of printfmt() and nicezputs() as I already said (but
+both are very small), and the function pattryrefs() in pattern.c which 
+allows one to easily get at the positions for backreferences.
+
+Dunno if this is considered worth including. But it was fun writing
+it, I'm still chuckling...
+
+
+Bye
+ Sven
+
+diff -u -r oldsrc/Zle/complist.c Src/Zle/complist.c
+--- oldsrc/Zle/complist.c	Thu Dec  2 11:39:40 1999
++++ Src/Zle/complist.c	Thu Dec  2 14:30:52 1999
+@@ -60,6 +60,10 @@
+ 
+ #define NUM_COLS 16
+ 
++/* Maximum number of in-string colours supported. */
++
++#define MAX_POS 11
++
+ /* Names of the terminal strings. */
+ 
+ static char *colnames[] = {
+@@ -91,7 +95,7 @@
+ struct patcol {
+     Patprog prog;
+     Patprog pat;		/* pattern for match */
+-    char *col;
++    char *cols[MAX_POS + 1];
+     Patcol next;
+ };
+ 
+@@ -120,11 +124,11 @@
+  * The return value is a pointer to the character after it. */
+ 
+ static char *
+-getcolval(char *s)
++getcolval(char *s, int multi)
+ {
+     char *p;
+ 
+-    for (p = s; *s && *s != ':'; p++, s++) {
++    for (p = s; *s && *s != ':' && (!multi || *s != '='); p++, s++) {
+ 	if (*s == '\\' && s[1]) {
+ 	    switch (*++s) {
+ 	    case 'a': *p = '\007'; break;
+@@ -212,7 +216,7 @@
+ 	if (!*s)
+ 	    return s;
+ 	*s++ = '\0';
+-	p = getcolval(s);
++	p = getcolval(s, 0);
+ 	ec = (Extcol) zhalloc(sizeof(*ec));
+ 	ec->prog = gprog;
+ 	ec->ext = n;
+@@ -228,7 +232,8 @@
+ 	    *p++ = '\0';
+ 	return p;
+     } else if (*s == '=') {
+-	char *p = ++s, *t;
++	char *p = ++s, *t, *cols[MAX_POS];
++	int ncols = 0;
+ 	Patprog prog;
+ 
+ 	/* This is for a pattern. */
+@@ -238,15 +243,26 @@
+ 	if (!*s)
+ 	    return s;
+ 	*s++ = '\0';
+-	t = getcolval(s);
++	while (1) {
++	    t = getcolval(s, 1);
++	    if (ncols < MAX_POS)
++		cols[ncols++] = s;
++	    s = t;
++	    if (*s != '=')
++		break;
++	    *s++ = '\0';
++	}
+ 	tokenize(p);
+ 	if ((prog = patcompile(p, 0, NULL))) {
+ 	    Patcol pc, po;
++	    int i;
+ 
+ 	    pc = (Patcol) zhalloc(sizeof(*pc));
+ 	    pc->prog = gprog;
+ 	    pc->pat = prog;
+-	    pc->col = s;
++	    for (i = 0; i < ncols; i++)
++		pc->cols[i] = cols[i];
++	    pc->cols[i] = NULL;
+ 	    pc->next = NULL;
+ 	    if ((po = c->pats)) {
+ 		while (po->next)
+@@ -272,7 +288,7 @@
+ 	for (i = 0, nn = colnames; *nn; i++, nn++)
+ 	    if (!strcmp(n, *nn))
+ 		break;
+-	p = getcolval(s);
++	p = getcolval(s, 0);
+ 	if (*nn) {
+ 	    Filecol fc, fo;
+ 
+@@ -369,6 +385,14 @@
+ static Cmgroup *mgtab, *mgtabp;
+ static struct listcols mcolors;
+ 
++/* Information for in-string colours. */
++
++static int nrefs;
++static int begpos[MAX_POS], curisbeg;
++static int endpos[MAX_POS], curisend;
++static char **patcols, *curiscols[MAX_POS];
++static int curiscol;
++
+ /* The last color used. */
+ 
+ static char *last_cap;
+@@ -414,28 +438,131 @@
+ 	zcputs(&mcolors, NULL, COL_NO);
+ }
+ 
+-/* Get the terminal color string for the given match. */
+ 
+ static void
++initiscol(Listcols c)
++{
++    int i;
++
++    zlrputs(c, patcols[0]);
++
++    curiscols[curiscol = 0] = *patcols++;
++
++    curisbeg = curisend = 0;
++
++    for (i = nrefs;  i < MAX_POS; i++)
++	begpos[i] = -1, endpos[i] = 0xfffffff;
++}
++
++static void
++doiscol(Listcols c, int pos)
++{
++    if (pos > endpos[curisend]) {
++	curisend++;
++	if (curiscol) {
++	    zcputs(c, NULL, COL_NO);
++	    zlrputs(c, curiscols[--curiscol]);
++	}
++    }
++    if (pos == begpos[curisbeg] && *patcols) {
++	curisbeg++;
++
++	zcputs(c, NULL, COL_NO);
++	zlrputs(c, *patcols);
++
++	curiscols[++curiscol] = *patcols++;
++    }
++}
++
++/* Stripped-down version of printfmt(). But can do in-string colouring. */
++
++static void
++clprintfmt(Listcols c, char *p)
++{
++    int cc = 0, i = 0;
++
++    initiscol(c);
++
++    for (; *p; p++) {
++	doiscol(c, i++);
++	cc++;
++	if (*p == '\n') {
++	    if (tccan(TCCLEAREOL))
++		tcout(TCCLEAREOL);
++	    else {
++		int s = columns - 1 - (cc % columns);
++
++		while (s-- > 0)
++		    putc(' ', shout);
++	    }
++	    cc = 0;
++	}
++	putc(*p, shout);
++    }
++    if (tccan(TCCLEAREOL))
++	tcout(TCCLEAREOL);
++    else {
++	int s = columns - 1 - (cc % columns);
++
++	while (s-- > 0)
++	    putc(' ', shout);
++    }
++}
++
++/* Local version of nicezputs() with in-string colouring. */
++
++static void
++clnicezputs(Listcols c, char *s)
++{
++    int cc, i = 0;
++
++    initiscol(c);
++
++    while ((cc = *s++)) {
++	doiscol(c, i++);
++	if (itok(cc)) {
++	    if (cc <= Comma)
++		cc = ztokens[cc - Pound];
++	    else 
++		continue;
++	}
++	if (cc == Meta)
++	    cc = *s++ ^ 32;
++	fputs(nicechar(cc), shout);
++    }
++}
++
++/* Get the terminal color string for the given match. */
++
++static int
+ putmatchcol(Listcols c, char *group, char *n)
+ {
+     Patcol pc;
+ 
++    nrefs = MAX_POS - 1;
++
+     for (pc = c->pats; pc; pc = pc->next)
+ 	if ((!pc->prog || !group || pattry(pc->prog, group)) &&
+-	    pattry(pc->pat, n)) {
+-	    zlrputs(c, pc->col);
++	    pattryrefs(pc->pat, n, &nrefs, begpos, endpos)) {
++	    if (pc->cols[1]) {
++		patcols = pc->cols;
+ 
+-	    return;
++		return 1;
++	    }
++	    zlrputs(c, pc->cols[0]);
++
++	    return 0;
+ 	}
+ 
+     zcputs(c, group, COL_NO);
++
++    return 0;
+ }
+ 
+ /* Get the terminal color string for the file with the given name and
+  * file modes. */
+ 
+-static void
++static int
+ putfilecol(Listcols c, char *group, char *n, mode_t m)
+ {
+     int colour;
+@@ -447,14 +574,22 @@
+ 	    (!ec->prog || !group || pattry(ec->prog, group))) {
+ 	    zlrputs(c, ec->col);
+ 
+-	    return;
++	    return 0;
+ 	}
++
++    nrefs = MAX_POS - 1;
++
+     for (pc = c->pats; pc; pc = pc->next)
+ 	if ((!pc->prog || !group || pattry(pc->prog, group)) &&
+-	    pattry(pc->pat, n)) {
+-	    zlrputs(c, pc->col);
++	    pattryrefs(pc->pat, n, &nrefs, begpos, endpos)) {
++	    if (pc->cols[1]) {
++		patcols = pc->cols;
+ 
+-	    return;
++		return 1;
++	    }
++	    zlrputs(c, pc->cols[0]);
++
++	    return 0;
+ 	}
+ 
+     if (S_ISDIR(m))
+@@ -475,6 +610,8 @@
+ 	colour = COL_FI;
+ 
+     zcputs(c, group, colour);
++
++    return 0;
+ }
+ 
+ static void
+@@ -482,7 +619,7 @@
+ 	 char *path, struct stat *buf)
+ {
+     Cmatch m;
+-    int len;
++    int len, subcols = 0;
+ 
+     if (!mp) {
+ 	zcputs(&mcolors, g->name, COL_MI);
+@@ -511,8 +648,11 @@
+ 	    mmlen = mcols;
+ 	    zcputs(&mcolors, g->name, COL_MA);
+ 	} else
+-	    putmatchcol(&mcolors, g->name, m->disp);
+-	printfmt(m->disp, 0, 1, 0);
++	    subcols = putmatchcol(&mcolors, g->name, m->disp);
++	if (subcols)
++	    clprintfmt(&mcolors, m->disp);
++	else
++	    printfmt(m->disp, 0, 1, 0);
+ 	zcoff();
+     } else {
+ 	int mx;
+@@ -543,11 +683,14 @@
+ 	    mmlen = width;
+ 	    zcputs(&mcolors, g->name, COL_MA);
+ 	} else if (buf)
+-	    putfilecol(&mcolors, g->name, path, buf->st_mode);
++	    subcols = putfilecol(&mcolors, g->name, path, buf->st_mode);
+ 	else
+-	    putmatchcol(&mcolors, g->name, (m->disp ? m->disp : m->str));
++	    subcols = putmatchcol(&mcolors, g->name, (m->disp ? m->disp : m->str));
+ 
+-	nicezputs((m->disp ? m->disp : m->str), shout);
++	if (subcols)
++	    clnicezputs(&mcolors, (m->disp ? m->disp : m->str));
++	else
++	    nicezputs((m->disp ? m->disp : m->str), shout);
+ 	len = niceztrlen(m->disp ? m->disp : m->str);
+ 
+ 	 if (isset(LISTTYPES) && buf) {
+diff -u -r oldsrc/pattern.c Src/pattern.c
+--- oldsrc/pattern.c	Thu Dec  2 11:39:37 1999
++++ Src/pattern.c	Thu Dec  2 14:16:49 1999
+@@ -1283,10 +1283,25 @@
+ mod_export int
+ pattry(Patprog prog, char *string)
+ {
+-    int i;
++    return pattryrefs(prog, string, NULL, NULL, NULL);
++}
++
++/* The last three arguments are used to report the positions for the
++ * backreferences. On entry, *nump should contain the maximum number
++ * positions to report. */
++
++/**/
++mod_export int
++pattryrefs(Patprog prog, char *string, int *nump, int *begp, int *endp)
++{
++    int i, maxnpos;
+     char **sp, **ep;
+     char *progstr = (char *)prog + prog->startoff;
+ 
++    if (nump) {
++	maxnpos = *nump;
++	*nump = 0;
++    }
+     /* inherited from domatch, but why, exactly? */
+     if (*string == Nularg)
+ 	string++;
+@@ -1350,7 +1365,28 @@
+ 		setiparam("MEND",
+ 			  (zlong)(mlen + patoffset + !isset(KSHARRAYS) - 1));
+ 	    }
+-	    if (prog->patnpar && !(patflags & PAT_FILE)) {
++	    if (prog->patnpar && nump) {
++		/*
++		 * b flag: for backreferences using parentheses. Reported
++		 * directly.
++		 */
++		*nump = prog->patnpar;
++
++		sp = patbeginp;
++		ep = patendp;
++
++		for (i = 0; i < prog->patnpar && i < maxnpos; i++) {
++		    DPUTS(!*sp || !*ep, "BUG: backrefs not set.");
++
++		    if (begp)
++			*begp++ = ztrsub(*sp, patinstart) + patoffset;
++		    if (endp)
++			*endp++ = ztrsub(*ep, patinstart) + patoffset - 1;
++
++		    sp++;
++		    ep++;
++		}
++	    } else if (prog->patnpar && !(patflags & PAT_FILE)) {
+ 		/*
+ 		 * b flag: for backreferences using parentheses.
+ 		 */
+diff -u olddoc/Zsh/mod_complist.yo Doc/Zsh/mod_complist.yo
+--- olddoc/Zsh/mod_complist.yo	Thu Dec  2 11:39:46 1999
++++ Doc/Zsh/mod_complist.yo	Thu Dec  2 14:49:42 1999
+@@ -78,10 +78,23 @@
+ string will be used for all files whose name ends with the string.
+ The var(name) may also be a equal sign (`tt(=)') followed by a
+ pattern. The var(value) given for this pattern will be used for all
+-matches (not only filenames) that whose display string are matched by
++matches (not only filenames) whose display string are matched by
+ the pattern. Definitions for both of these take precedence over the
+ values defined for file types and the form with the leading asterisk 
+ takes precedence over the form with the leading equal sign.
++
++The last form also allows to color separate parts of the displayed
++strings using different colors. For this, the pattern has to use the
++`tt((#b))' globbing flag and pairs of parentheses surrounding the
++parts of the strings that are to be colored differently. In this case 
++the var(value) may consist of more than one color code separated by
++equal signs. The first code will be used for all parts for which no
++explicit code is specified and the following codes will be used for
++the parts matched by the sub-patterns in parentheses. For example,
++the specification `tt(=(#b)(?)*(?)=0=3=7)' will be used for all
++matches which are at least two characters long and will make the use
++the code `tt(3)' for the first character, `tt(7)' for the last
++character and `tt(0)' for the rest.
+ 
+ All three forms of var(name) may be preceded by a pattern in
+ parentheses. If such a pattern is given, the var(value) will be used
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

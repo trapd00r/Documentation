@@ -1,0 +1,274 @@
+From zsh-workers-return-5978-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Mar 30 05:58:33 1999
+Return-Path: <zsh-workers-return-5978-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28479 invoked from network); 30 Mar 1999 05:58:31 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 30 Mar 1999 05:58:31 -0000
+Received: (qmail 24923 invoked by alias); 30 Mar 1999 05:57:56 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5978
+Received: (qmail 24916 invoked from network); 30 Mar 1999 05:57:55 -0000
+Message-ID: <19990330075751.S85194@niksula.cs.hut.fi>
+Date: Tue, 30 Mar 1999 07:57:51 +0200
+From: Ville Herva <vherva@niksula.hut.fi>
+To: Bret Martin <bam@student.net>
+Cc: zsh-workers@sunsite.auc.dk
+Subject: Summary so far [was Re: clock() after 248.5 days]
+References: <19990329234632.29707.qmail@miranda.org>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+X-Mailer: Mutt 0.93.2i
+In-Reply-To: <19990329234632.29707.qmail@miranda.org>; from Bret Martin on Mon, Mar 29, 1999 at 06:46:32PM -0500
+
+On Mon, Mar 29, 1999 at 06:46:32PM -0500, you [Bret Martin] claimed:
+> Ville,
+> 
+> Did you ever find a solution to the problem with clock() after 248.5 
+> days on glibc-based Linux systems?  
+
+I think I found the reason, but no solution.
+
+> I discovered the issue the same way 
+> you did (weird behavior with zsh on the terminal) and saw your posts on 
+> the zsh list and linux-kernel.
+
+Brief summary of the problem: I first noticed that zsh's terminal began
+behaving incorrectly on a linux-2.0.34 after 248.5 days of uptime. Then I
+noticed that clock() consistently returned -1 after 248.5 days uptime,
+too. However, zsh does not use clock() in any relevant place, so it seems
+there is another libc function that has the same problem.
+
+I did some investigation with the glibc and liux kernel source. It turned
+out that Linux returned unsigned jiffies from sys_times, and this value
+was then used as a signed value in glibc clock(). However, glibc clock()
+also supposed negative values to be erraneous, so it returned -1 as soon
+as jiffies in kernel got past 2^31. To make the issue a bit more complex
+the Linux kernel _did_ return negative _error_ values (ranging from -501
+to -1). (Both 2.2 and 2.0 did although the code had been changed.) I found
+that inconvenient, but Alan Cox seemed to have no problem with it. I
+reported that to the glibc developers, and they removed the error check in
+clock() in the latest development version. Perhaps that's satisfactory (it
+only fails duirng 5 seconds in 500 days), but I still think it's little
+bit kludgy.
+
+The issue with zsh still remains, since I haven't had the time to catch
+the libc function that is failing in zsh. As said, there is propably
+another similar issue somewhere in glibc. I'll try to find the time to
+debug it.
+
+For now, I'm just waiting that the uptime exceeds 500 days, and I can
+begin using zsh again... Only 150 days or so to go. ;)
+
+> I haven't investigated deeply and am not really an expert, but it seems 
+> like this could be solved with a change to glibc -- or would that break 
+> other things?
+
+The code was changed in libc, AFAIK, it should only break the clock it
+self in sense that it will not return error values. Even if something goes
+wrong in the kernel. But I think you can't blaim glibc, since kernel
+happily returns  values from -501 to -1 both as normal clock values and
+error values.
+
+
+=======================================================================
+From: Ville Herva <vherva@niksula.hut.fi>
+Date: Tue, 23 Feb 1999 01:56:53 +0200
+Subject: Re: linux-kernel-digest V1 #3387
+
+On Thu, Feb 18, 1999 at 04:00:04PM -0500, you wrote:
+> From: hans@grumbeer.inka.de (Hans-Joachim Baader)
+> Date: Thu, 18 Feb 99 07:41 MET
+> Subject: Re: 2.0.34: clock() returns -1 after 248.5 days uptime
+>
+> Certainly a result of -1 is less than useful. But perhaps it conforms
+> to some standard ;-|
+
+I did crawl through some source, but I did not check the standards on this
+issue.
+
+>From what I can conclude from the sources, it's just one typical
+unsigned->signed issue ending disgracefully into a "if (value < 0) return
+- -1;" check.
+
+The glibc-2.0.7 (and glibc-2.0.108-0.981221 - the version numbers are
+from RedHat packages, but I doubt the function below varies all that much
+across versions) seems to define clock() in
+sysdeps/unix/sysv/linux/clock.c as follows:
+
+#include <sys/times.h>
+#include <time.h>
+#include <unistd.h>
+
+/* Return the time used by the program so far (user time + system time).
+*/
+clock_t
+clock (void)
+{
+  struct tms buf;
+  long clk_tck = __sysconf (_SC_CLK_TCK);
+
+  if (__times (&buf) < 0)
+    return (clock_t) -1;
+
+  return
+    (clk_tck <= CLOCKS_PER_SEC)
+    ? ((unsigned long) buf.tms_utime + buf.tms_stime) * (CLOCKS_PER_SEC
+                                                         / clk_tck)
+    : ((unsigned long) buf.tms_utime + buf.tms_stime) / (clk_tck
+                                                         /
+CLOCKS_PER_SEC);
+}
+
+A closer inspection revealed that Linux seems return a signed long
+as the return value of sys_times:
+
+linux-2.0.3[46]/kernel/sys.c:
+asmlinkage long sys_times(struct tms * tbuf)
+{
+        if (tbuf) {
+                int error = verify_area(VERIFY_WRITE,tbuf,sizeof *tbuf);
+                if (error)
+                        return error;
+                put_user(current->utime,&tbuf->tms_utime);
+                put_user(current->stime,&tbuf->tms_stime);
+                put_user(current->cutime,&tbuf->tms_cutime);
+                put_user(current->cstime,&tbuf->tms_cstime);
+        }
+        return jiffies;
+}
+
+linux-2.2.1/kernel/sys.c:
+asmlinkage long sys_times(struct tms * tbuf)
+{
+        /*
+         *      In the SMP world we might just be unlucky and have one of
+         *      the times increment as we use it. Since the value is an
+         *      atomically safe type this is just fine. Conceptually its
+         *      as if the syscall took an instant longer to occur.
+         */
+        if (tbuf)
+                if (copy_to_user(tbuf, &current->times, sizeof(struct
+tms)))
+                        return -EFAULT;
+        return jiffies;
+}
+
+However, jiffies is a unsigned variable:
+
+linux-2.2.1/kernel/sched.c: unsigned long volatile jiffies=0;
+linux-2.0.3[46]/kernel/sched.c: unsigned long volatile jiffies=0;
+
+Now, glibc seems to treat this value as signed:
+
+glibc-2.0.6:
+posix/sys/times.h:extern clock_t __times __P ((struct tms *__buffer));
+
+glibc-2.0.108-0.981221:
+include/sys/times.h:extern clock_t __times __P ((struct tms *__buffer));
+
+which makes clock() to return -1 after 248.5 days due to the
+(__times() < 0) return -1; -line.
+
+(Hopefully I did not miss anything crucial in that...)
+
+Although the real problem lies in the fact that 32 bit is not enough
+for these counters, it would make more sense to me to return something
+else that a consistent -1.
+
+Hopefully, this problem will go away as our server reaches 500 day
+uptime... But only for another 248 days.
+
+> Since clock() is a libc function you should ask the
+> libc maintainers about it.
+
+I did that. Waiting for results...
+There are propably other points of code in glibc that get broken after
+248.5 days, since zsh's terminal handling begun working improperly after
+248.5 days of uptime.
+
+
+- -- v --
+
+v@iki.fi
+
+=================================================================
+Date: Thu, 25 Feb 1999 06:00:16 -0500
+From: Andreas Jaeger <jaeger@gnu.org>
+Subject: Re: libc/990: [50 character or so descriptive subject here (for
++reference)]
+To: GNU libc gnats list <libc-gnats@gnu.org>, vherva@netspan.fi
+
+
+        `Andreas Jaeger' changed the state to `closed'.
+
+
+State-Changed-From-To: open-closed
+State-Changed-By: jaeger
+State-Changed-When: Thu Feb 25 05:59:16 1999
+State-Changed-Why:
+Thanks, we've changed this for glibc 2.1.1:
+1999-02-22  Ulrich Drepper  <drepper@cygnus.com>
+
+        * sysdeps/unix/sysv/linux/clock.c: Don't test return value of
+        __times [PR libc/990].
+
+Andreas
+--
+ Andreas Jaeger   aj@arthur.rhein-neckar.de    jaeger@gnu.org
+
+
+
+To: Alan Cox <alan@lxorguk.ukuu.org.uk>
+Subject: Re: Linux 2.2.3ac1
+
+On Thu, Mar 11, 1999 at 12:35:47PM +0000, you [Alan Cox] said:
+> > Hmm, is there a change to get that fixed then? It seems to me that it
+> > would only require stripping the sign bit in sys_times to fix this.
+>
+> That wont work.
+>
+> > A closer inspection revealed that Linux seems return a signed long
+> > as the return value of sys_times:
+>
+> Yes.
+>
+> >         if (tbuf) {
+> >                 int error = verify_area(VERIFY_WRITE,tbuf,sizeof
+*tbuf);
+> >                 if (error)
+> >                         return error;
+>          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+> Error is negative
+
+Well, glibc did assume that the error is negative -- and no other return
+values are negative. This is why I thought forcing jiffies positive before
+returning it could solve this. The counter wraps around anyway, so I
+figured it had no significance whether it does so after 248 or 497 days.
+
+> > a consistent -1 from libc times(). Perhaps the sign bit should be
+stripped
+> > in sys_times() before returning jiffies in the kernel?
+>
+> Thats up to glibc. The kernel returns a value which is either a small
+> integer (-1 to -511) or a value that should be taken as unsigned time.
+> So its good for 490 days
+
+But wouldn't this mean that the error values can occur either due to an
+error or due to the jiffies having value between 2**32-511 and 2**32-1?
+
+AFAIK, the current devel glibc is patched not to return any error
+regardless of the sys_times() return value. I'm not sure whether it would
+be better to return error if the sys_times() return value is in the range
+(-501, -1). Anyway, I'll forward this as your opinion to the correspondent
+glibc maintainer (Andreas Jaeger, jaeger@gnu.org) so that he can decide
+what to do.
+
+
+
+-- v --
+
+v@iki.fi
+

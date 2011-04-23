@@ -1,0 +1,189 @@
+From zsh-workers-return-11026-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Apr 30 14:29:51 2000
+Return-Path: <zsh-workers-return-11026-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23294 invoked from network); 30 Apr 2000 14:29:50 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 30 Apr 2000 14:29:50 -0000
+Received: (qmail 15811 invoked by alias); 30 Apr 2000 14:29:41 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11026
+Received: (qmail 15798 invoked from network); 30 Apr 2000 14:29:40 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: Re: PATCH: Re: localtraps causing core dump in 3.1.6+ 
+In-reply-to: ""Bart Schaefer""'s message of "Sat, 29 Apr 2000 06:23:25 -0000."
+             <1000429062326.ZM31758@candle.brasslantern.com> 
+Date: Sun, 30 Apr 2000 15:29:31 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E12luix-0008EL-00.2000-04-30-15-29-31@cmailg4.svr.pol.co.uk>
+
+"Bart Schaefer" wrote:
+> On Apr 29,  4:42am, Bart Schaefer wrote:
+> } Subject: Re: localtraps causing core dump in 3.1.6+
+> }
+> } } I recently started doing `setopt localtraps && unset -f TRAPZERR'
+> } } because of some changes that took place for 3.1.7-pre-1.
+> } } 
+> } } However that led me to try the above, which dumps core
+> } } on both 3.1.7-pre-1 and 3.1.6 when changing directory.
+> 
+> This is a bit ugly.
+
+The following is less ugly, although a bit more inefficient, so I've backed
+out Bart's noerr changes.
+
+dosavetrap() now always copies the trap its saving.  In fact, we always
+call it when we're unsetting a trap, so in most cases (this bug is the
+exception) we don't need to do that.  However, it's much more logical and
+fixes the bug neatly, since we are free to return the function node without
+worrying where it's come from.  Since the changes in the code structure,
+copying a chunk of shell code is now very much more efficient (thanks,
+Sven).
+
+I've merged it round Bart's changes, which were neater than mine in some
+places, and added a minimal localtraps test.
+
+It probably should be pointed out that `trap - ZERR' is a better thing to
+use in general, since it's more standard and picks up both sorts of trap.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.9
+diff -u -r1.9 builtin.c
+--- Src/builtin.c	2000/04/29 06:33:48	1.9
++++ Src/builtin.c	2000/04/30 14:23:02
+@@ -2592,14 +2592,12 @@
+ 
+     /* Take arguments literally -- do not glob */
+     for (; *argv; argv++) {
+-	int ne = noerrs;
+ 	if ((hn = ht->removenode(ht, *argv))) {
+ 	    ht->freenode(hn);
+ 	} else {
+ 	    zwarnnam(name, "no such hash table element: %s", *argv, 0);
+-	    returnval |= !noerrs;
++	    returnval = 1;
+ 	}
+-	noerrs = ne;
+     }
+     return returnval;
+ }
+Index: Src/hashtable.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hashtable.c,v
+retrieving revision 1.4
+diff -u -r1.4 hashtable.c
+--- Src/hashtable.c	2000/04/29 06:33:48	1.4
++++ Src/hashtable.c	2000/04/30 14:23:04
+@@ -787,8 +787,9 @@
+ removeshfuncnode(HashTable ht, char *nam)
+ {
+     HashNode hn;
++    int signum;
+ 
+-    if (!strncmp(nam, "TRAP", 4))
++    if (!strncmp(nam, "TRAP", 4) && (signum = getsignum(nam +4)) != -1)
+ 	hn = removetrap(getsignum(nam + 4));
+     else
+ 	hn = removehashnode(shfunctab, nam);
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.3
+diff -u -r1.3 signals.c
+--- Src/signals.c	2000/04/29 06:33:48	1.3
++++ Src/signals.c	2000/04/30 14:23:06
+@@ -644,7 +644,8 @@
+ static LinkList savetraps;
+ 
+ /*
+- * Save the current trap and unset it.
++ * Save the current trap by copying it.  This does nothing to
++ * the existing value of sigtrapped or sigfuncs.
+  */
+ 
+ static void
+@@ -660,15 +661,18 @@
+ 	 * the new one yet.
+ 	 */
+ 	char func[20];
++	Shfunc shf, newshf = NULL;
+ 	sprintf(func, "TRAP%s", sigs[sig]);
+-	/* We call removehashnode() directly because otherwise
+-	 * removeshfuncnode() would be called which in turn would
+-	 * call us again so that we would end up with a NULL pointer
+-	 * instead of the list for the trap. */
+-	st->list = removehashnode(shfunctab, func);
++	if ((shf = (Shfunc)shfunctab->getnode2(shfunctab, func))) {
++	    /* Copy the node for saving */
++	    newshf = (Shfunc) zalloc(sizeof(*newshf));
++	    newshf->nam = ztrdup(shf->nam);
++	    newshf->flags = shf->flags;
++	    newshf->funcdef = dupeprog(shf->funcdef, 0);
++	}
++	st->list = newshf;
+     } else {
+-	st->list = sigfuncs[sig];
+-	sigfuncs[sig] = NULL;
++	st->list = sigfuncs[sig] ? dupeprog(sigfuncs[sig], 0) : NULL;
+     }
+     noerrs = !!st->list;
+     if (!savetraps)
+@@ -774,10 +778,11 @@
+ 
+     /*
+      * At this point we free the appropriate structs.  If we don't
+-     * want that to happen (e.g. we are saving the trap), then
+-     * either the function should already have been removed from shfunctab,
+-     * or the entry in sigfuncs should have been set to NULL, and then
+-     * we're laughing, in a sort of vague virtual sense.
++     * want that to happen then either the function should already have been
++     * removed from shfunctab, or the entry in sigfuncs should have been set
++     * to NULL.  This is no longer necessary for saving traps as that
++     * copies the structures, so here we are remove the originals.
++     * That causes a little inefficiency, but a good deal more reliability.
+      */
+     if (trapped & ZSIG_FUNC) {
+ 	char func[20];
+Index: Test/08traps.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/08traps.ztst,v
+retrieving revision 1.1.1.1
+diff -u -r1.1.1.1 08traps.ztst
+--- Test/08traps.ztst	2000/01/07 22:31:15	1.1.1.1
++++ Test/08traps.ztst	2000/04/30 14:23:06
+@@ -126,3 +126,25 @@
+   sleep 2
+ 0: Nested `trap ... TERM', triggered on outer loop
+ >TERM1
++
++  TRAPZERR() { print error activated; }
++  fn() { print start of fn; false; print end of fn; }
++  fn
++  fn() {
++    setopt localoptions localtraps
++    unfunction TRAPZERR
++    print start of fn
++    false
++    print end of fn
++  }
++  fn
++  unfunction TRAPZERR
++  print finish
++0: basic localtraps handling
++>start of fn
++>error activated
++>end of fn
++>start of fn
++>end of fn
++>finish
++
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@CambridgeSiliconRadio.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

@@ -1,0 +1,147 @@
+From zsh-workers-return-5831-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Mar 17 08:52:03 1999
+Return-Path: <zsh-workers-return-5831-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28122 invoked from network); 17 Mar 1999 08:52:01 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 Mar 1999 08:52:01 -0000
+Received: (qmail 17004 invoked by alias); 17 Mar 1999 08:48:57 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5831
+Received: (qmail 10434 invoked from network); 17 Mar 1999 08:33:14 -0000
+Date: Tue, 16 Mar 1999 11:49:28 +0100 (MET)
+Message-Id: <199903161049.LAA25462@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Mon, 15 Mar 1999 17:18:38 +0100
+Subject: Re: -subscript- completion for assoc array
+
+
+Peter Stephenson wrote:
+
+> I wouldn't have thought it would be too hard just to pass the whole string
+> to the -subscript- handler, and inside that, if the parameter is not an
+> assoc, simply IPREFIXify anything which is not alphanumeric before handing
+> the rest on to the -math- handler.  You don't even need special handling
+> for variables with funny names, since they're always a single character so
+> can't be completed further.  Unless I've missed something.
+
+Ok, the patch below makes completion functions get the whole string -- 
+almost. This has a small problem with things like `(( 8*((x-1+f<TAB>'.
+Here it stops at the `((' before the `x', thinking it is the beginning 
+of a `((...' or a `$((...'.
+
+And this finally could me implement a `ISUFFIX' parameter, so that we
+could make this correctly if there is something after the cursor. I've 
+been wishing for this when implementing `_tilde' already. Maybe I
+build this into the tricky.c-cleanup I'm currently busy with.
+
+> (Except, of course, when calling old completion, in which case you've got
+> to do as much as is reasonable in C.)
+
+This will behave the same way it ever did, i.e. I haven't built in
+some magic to complete the keys of assoc arrays.
+
+> By the way, it's a bit annoying that the command is called `compdef' while
+> the lines at the tops of the functions to do the same thing automatically
+> are still `defcomp' etc.  If it's not yet too late, it might be a good idea
+> to change these to `compdef', `compdefpat' and `compdefkey'.
+
+Yes, I've been thinking about this, too. Although I probably would
+prefer `#compdef -p ...' and `#compdef -k ...'.
+
+Bye
+ Sven
+
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Mon Mar 15 16:57:14 1999
++++ Src/Zle/zle_tricky.c	Tue Mar 16 11:38:47 1999
+@@ -1346,12 +1346,35 @@
+ 	    }
+ 	}
+ 	if (inwhat == IN_MATH) {
+-	    /* In mathematical expression, we complete parameter names (even *
+-	     * if they don't have a `$' in front of them).  So we have to    *
+-	     * find that name.                                               */
+-	    for (we = cs; iident(line[we]); we++);
+-	    for (wb = cs; --wb >= 0 && iident(line[wb]););
+-	    wb++;
++	    if (compfunc) {
++		int lev;
++		char *p;
++
++		for (wb = cs - 1, lev = 0; wb > 0; wb--)
++		    if (line[wb] == ']' || line[wb] == ')')
++			lev++;
++		    else if (line[wb] == '[') {
++			if (!lev--)
++			    break;
++		    } else if (line[wb] == '(') {
++			if (!lev && line[wb - 1] == '(')
++			    break;
++			if (lev)
++			    lev--;
++		    }
++		wb++;
++		p = (char *) line + wb;
++		if (wb && (*p == '[' || *p == '(') &&
++		    !skipparens(*p, (*p == '[' ? ']' : ')'), &p))
++			we = p - (char *) line;
++	    } else {
++		/* In mathematical expression, we complete parameter names  *
++		 * (even if they don't have a `$' in front of them).  So we *
++		 * have to find that name.                                  */
++		for (we = cs; iident(line[we]); we++);
++		for (wb = cs; --wb >= 0 && iident(line[wb]););
++		wb++;
++	    }
+ 	    zsfree(s);
+ 	    s = zalloc(we - wb + 1);
+ 	    strncpy(s, (char *) line + wb, we - wb);
+@@ -5240,14 +5263,20 @@
+ 	zsfree(compprefix);
+ 	zsfree(compsuffix);
+ 	if (unset(COMPLETEINWORD)) {
+-	    tmp = quotename(s, NULL, NULL, NULL);
++	    if (inwhat == IN_MATH)
++		tmp = s;
++	    else
++		tmp = quotename(s, NULL, NULL, NULL);
+ 	    untokenize(tmp);
+ 	    compprefix = ztrdup(tmp);
+ 	    compsuffix = ztrdup("");
+ 	} else {
+ 	    char *ss = s + offs, sav;
+ 	    
+-	    tmp = quotename(s, &ss, NULL, NULL);
++	    if (inwhat == IN_MATH)
++		tmp = s;
++	    else
++		tmp = quotename(s, &ss, NULL, NULL);
+ 	    sav = *ss;
+ 	    *ss = '\0';
+ 	    untokenize(tmp);
+diff -u oc/Base/_math Completion/Base/_math
+--- oc/Base/_math	Tue Mar 16 10:29:34 1999
++++ Completion/Base/_math	Tue Mar 16 11:43:35 1999
+@@ -0,0 +1,6 @@
++#defcomp -math-
++
++IPREFIX="$IPREFIX${PREFIX%[a-zA-Z0-9_]*}"
++PREFIX="${PREFIX##*[^a-zA-Z0-9_]}"
++
++compgen -v
+diff -u oc/Base/_vars Completion/Base/_vars
+--- oc/Base/_vars	Mon Mar 15 16:57:24 1999
++++ Completion/Base/_vars	Tue Mar 16 10:29:20 1999
+@@ -1,3 +1,3 @@
+-#defcomp -math- getopts read unset vared
++#defcomp getopts read unset vared
+ 
+ compgen -v
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

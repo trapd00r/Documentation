@@ -1,0 +1,214 @@
+From zsh-workers-return-15123-mason-zsh=primenet.com.au@sunsite.dk Wed Jun 27 13:13:28 2001
+Return-Path: <zsh-workers-return-15123-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1958 invoked from network); 27 Jun 2001 13:13:26 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Jun 2001 13:13:26 -0000
+Received: (qmail 25750 invoked by alias); 27 Jun 2001 13:12:34 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15123
+Received: (qmail 25733 invoked from network); 27 Jun 2001 13:12:32 -0000
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+Date: Wed, 27 Jun 2001 15:11:21 +0200 (MET DST)
+Message-Id: <200106271311.PAA31162@beta.informatik.hu-berlin.de>
+To: zsh-workers@sunsite.dk
+Subject: Re: PATCH (?) Re: [zsh 4.0.1 bug] filename completion
+In-Reply-To: <1010627062637.ZM4464@candle.brasslantern.com>
+
+Bart Schaefer wrote:
+
+> ...
+>
+> } Otherwise completing `soft/f<TAB>' might surprise users who would expect
+> } it to complete to `software/foo'.
+> 
+> Shouldn't it simply do -both-, e.g. offering two possible completions if
+> there exists both a ~soft/f* and a software/f* ?
+
+Of course.  If possible.  I saw a problem that can be looked at in
+action with your patch applied (see below).
+
+> Anyway, here's a patch for assorted changes related to this.  Tell me if
+> I've gone wildly astray here.
+
+It looks as good as we can currently get... (after replacing the
+`_alternative ... && ret=2' with `... && ret=0').
+
+> There appeared to be a whole lot of excess
+> locals in _tilde (leftover from extricating _directory_stack, I think).
+
+Yes, my fault, I'm sure.
+
+
+Now for the problem: just sticking a tilde in front of $PREFIX won't
+work in a case like the one we're discussing (a named directory `soft'
+and a directory `software').  Try it with `cd soft/<TAB>'.  The `soft'
+vanishes.  That's because the call on line 46/47 adds matches like
+`~soft/foo' and the calls on lines 59/60 add matches like `software/foo'.
+Of course it can't be able to merge these into a sensible unambiguous
+string to insert in the line.
+
+We can almost get to where we want to get by changing it to what you can
+see in the patch below.  It first stuffs the parameter into $IPREFIX and
+then calls _path_files with a -W containing the expanded directory.  For
+that to work, we also need the patch to compmatch.c, which I'm going to
+commit.
+
+But this isn't a really good solution, because with that and directories
+`~soft/foo' and `software/foo' completion after `cd soft/f<TAB>' lists
+the `foo's, not the ambiguous prefix, because _path_files can't know
+that the ambiguity is in the prefix (which it was told to ignore in one
+case anyway).
+
+Because of that I'm not going to commit that part of the patch (nor the
+_tilde part, for completeness' sake).  But it's probably the best result
+we're ever going to be able to get there.  At least I don't see how to
+resolve this without some serious changes to the completion system.
+
+
+Bye
+  Sven
+
+Index: Completion/Zsh/Command/_cd
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Zsh/Command/_cd,v
+retrieving revision 1.2
+diff -u -r1.2 _cd
+--- Completion/Zsh/Command/_cd	2001/06/21 09:33:16	1.2
++++ Completion/Zsh/Command/_cd	2001/06/27 13:06:35
+@@ -5,7 +5,7 @@
+ #    and the string doesn't begin with ~, /, ./ or ../.
+ #  - In the second argument to cd for the form `cd old new', completes
+ #    possible `new' strings by examining `old' and $PWD.
+-#  - After - or +, completes numbers, but the listing
++#  - After - or +, _directory_stack completes numbers, but the listing
+ #    gives you the list of directories to complete.  This turns on
+ #    menu-completion and lists the possibilities automatically, otherwise
+ #    it's not a lot of use.  If you don't type the + or - it will
+@@ -24,31 +24,55 @@
+   rep=(${${rep#${PWD%%$words[2]*}}%${PWD#*$words[2]}})
+   (( $#rep )) && _wanted -C replacement strings expl replacement compadd -a rep
+ else
+-  [[ CURRENT -gt 1 ]] && _directory_stack && ret=0
+-
+-  if [[ $PREFIX != (\~|/|./|../)* && $#cdpath -ne 0 ]]; then
+-    local tdir tdir2
++  # Complete directory stack entries with ~ or when not in command position
++  # (the rest of this test is optimization for the _tilde call below)
++  if [[ "$PREFIX" == (#b)(\~|)[^/]# &&
++      ( -n "$match[1]" || ( CURRENT -gt 1 && ! -o cdablevars ) ) ]]; then
++    _directory_stack && ret=0
++  fi
+ 
+-    # With cdablevars, we can convert foo/bar/... to ~foo/bar/... if
+-    # there is no directory foo.  In that case we could also complete
+-    # variable names, but it hardly seems worth it.
+-    # Note we need a tilde because cdablevars also allows user home
+-    # directories, hence we also need nonomatch to suppress error messages.
+-    if [[ -o cdablevars && -n "$PREFIX" && ! -d ${tdir::=${PREFIX%%/*}} &&
+-          -d ${~tdir2::="~$tdir"} ]]; then
+-      PREFIX="~$PREFIX"
+-      _wanted directories expl directory _path_files -/ && ret=0
+-    else
+-      local tmpcdpath
+-
+-      tmpcdpath=(${${(@)cdpath:#.}:#$PWD})
+-      _alternative \
+-          'local-directories:local directories:_path_files -/' \
++  if [[ $PREFIX != (\~|/|./|../)* ]]; then
++    local tmpcdpath
++    tmpcdpath=(${${(@)cdpath:#.}:#$PWD})
++
++    # With cdablevars, we can complete foo as if ~foo/
++    if [[ -o cdablevars && -n "$PREFIX" ]]; then
++      if [[ "$PREFIX" != */* ]]; then
++        _tilde && ret=0
++      else
++        local oipre="$IPREFIX" opre="$PREFIX" dirpre dir
++
++	# Note we need a tilde because cdablevars also allows user home
++	# directories, hence nonomatch (above) to suppress error messages.
++
++        dirpre="${PREFIX%%/*}/"
++        IPREFIX="$IPREFIX$dirpre"
++        eval "dir=( ~$dirpre )"
++        PREFIX="${PREFIX#*/}"
++
++        [[ $#dir -eq 1 && "$dir[1]" != "~$dirpre" ]] &&
++          _wanted named-directories expl 'directories after cdablevar' \
++	      _path_files -W dir -/ && ret=0
++
++        PREFIX="$opre"
++        IPREFIX="$oipre"
++      fi
++    fi
++    if [[ $#tmpcdpath -ne 0 ]]; then
++      # Don't complete local directories in command position, that's
++      # already handled by _command_names (see _autocd)
++      if [[ CURRENT -eq 1 ]]; then
++	_wanted path-directories expl 'directories in cdpath' \
++	  _path_files -W tmpcdpath -/ && ret=0
++      else
++        _alternative \
++	  'local-directories:local directories:_path_files -/' \
+ 	  "path-directories:directories in cdpath:_path_files -W tmpcdpath -/" && ret=0
++      fi
++      return ret
+     fi
+-  else
+-    _wanted directories expl directory _path_files -/ && ret=0
+   fi
++  _wanted directories expl directory _path_files -/ && ret=0
+ 
+   return ret
+ fi
+Index: Completion/Zsh/Context/_tilde
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Zsh/Context/_tilde,v
+retrieving revision 1.1
+diff -u -r1.1 _tilde
+--- Completion/Zsh/Context/_tilde	2001/04/02 11:24:49	1.1
++++ Completion/Zsh/Context/_tilde	2001/06/27 13:06:35
+@@ -6,7 +6,7 @@
+ 
+ [[ -n "$compstate[quote]" ]] && return 1
+ 
+-local expl suf dirs list lines revlines i ret disp nm="$compstate[nmatches]"
++local expl suf ret
+ 
+ if [[ "$SUFFIX" = */* ]]; then
+   ISUFFIX="/${SUFFIX#*/}$ISUFFIX"
+Index: Src/Zle/compmatch.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compmatch.c,v
+retrieving revision 1.35
+diff -u -r1.35 compmatch.c
+--- Src/Zle/compmatch.c	2001/04/03 11:25:13	1.35
++++ Src/Zle/compmatch.c	2001/06/27 13:06:35
+@@ -1178,14 +1178,18 @@
+     }
+     /* This is the cline struct for the remaining string at the end. */
+ 
+-    *q = n = get_cline(NULL, 0, NULL, 0, NULL, 0, (plen <= 0 ? CLF_NEW : 0));
+     if (p != str) {
+ 	int olen = str - p, llen = (op < 0 ? 0 : op);
+ 
++        *q = n = get_cline(NULL, 0, NULL, 0, NULL, 0, (plen <= 0 ? CLF_NEW : 0));
++
+ 	if (llen > olen)
+ 	    llen = olen;
+ 	n->prefix = get_cline(NULL, llen, p, olen, NULL, 0, 0);
+     }
++    else if (!ret)
++        *q = n = get_cline(NULL, 0, NULL, 0, NULL, 0, (plen <= 0 ? CLF_NEW : 0));
++
+     n->next = NULL;
+ 
+     if (lp)
+
+-- 
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

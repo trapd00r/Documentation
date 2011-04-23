@@ -1,0 +1,299 @@
+From zsh-workers-return-21171-mason-zsh=primenet.com.au@sunsite.dk Sun Apr 24 00:48:17 2005
+Return-Path: <zsh-workers-return-21171-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6774 invoked from network); 24 Apr 2005 00:48:15 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 24 Apr 2005 00:48:15 -0000
+Received: (qmail 45463 invoked from network); 24 Apr 2005 00:48:09 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 24 Apr 2005 00:48:09 -0000
+Received: (qmail 3762 invoked by alias); 24 Apr 2005 00:48:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 21171
+Received: (qmail 3730 invoked from network); 24 Apr 2005 00:47:58 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 24 Apr 2005 00:47:58 -0000
+Received: (qmail 45224 invoked from network); 24 Apr 2005 00:47:57 -0000
+Received: from vms046pub.verizon.net (206.46.252.46)
+  by a.mx.sunsite.dk with SMTP; 24 Apr 2005 00:47:50 -0000
+Received: from candle.brasslantern.com ([4.11.1.68])
+ by vms046.mailsrvcs.net (Sun Java System Messaging Server 6.2 HotFix 0.04
+ (built Dec 24 2004)) with ESMTPA id <0IFF009M1E7OKA51@vms046.mailsrvcs.net> for
+ zsh-workers@sunsite.dk; Sat, 23 Apr 2005 19:47:49 -0500 (CDT)
+Received: from candle.brasslantern.com (IDENT:schaefer@localhost [127.0.0.1])
+	by candle.brasslantern.com (8.12.11/8.12.11) with ESMTP id j3O0llIO024640	for
+ <zsh-workers@sunsite.dk>; Sat, 23 Apr 2005 17:47:47 -0700
+Received: (from schaefer@localhost)	by candle.brasslantern.com
+ (8.12.11/8.12.11/Submit) id j3O0llQa024639	for zsh-workers@sunsite.dk; Sat,
+ 23 Apr 2005 17:47:47 -0700
+Date: Sun, 24 Apr 2005 00:47:46 +0000
+From: Bart Schaefer <schaefer@brasslantern.com>
+Subject: PATCH: Re: replacement slowdown
+In-reply-to: <1050423171206.ZM5141@candle.brasslantern.com>
+To: zsh-workers@sunsite.dk
+Message-id: <1050424004746.ZM24638@candle.brasslantern.com>
+MIME-version: 1.0
+X-Mailer: Z-Mail (5.0.0 30July97)
+Content-type: text/plain; charset=us-ascii
+References: <20050422232316.GA27665@scowler.net>
+	<1050423031422.ZM3881@candle.brasslantern.com>
+	<20050423031907.GA27233@scowler.net>
+	<1050423160721.ZM4469@candle.brasslantern.com>
+	<20050423162635.GA30862@scowler.net>
+	<1050423171206.ZM5141@candle.brasslantern.com>
+Comments: In reply to Bart Schaefer <schaefer@brasslantern.com>
+ "Re: replacement slowdown" (Apr 23,  5:12pm)
+X-Spam-Checker-Version: SpamAssassin 3.0.2 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=6.0 tests=AWL,BAYES_00 autolearn=ham 
+	version=3.0.2
+X-Spam-Hits: -2.6
+
+On Apr 23,  5:12pm, Bart Schaefer wrote:
+}
+} But pattry() recomputes the unmetafied length of the *entire* string on
+} each call.  So that length computation is going to have to be factored
+} out of pattry(), possibly by storing it in the Patprog
+
+Here's a patch that does this.  The speed with this patch is back to
+approximately the same as 4.0.6 on 20 repeats of processing the same
+string, plus I think I caught a few more places that should have been
+using METAINC().
+
+Line numbers may be off slightly due to the state of the CVS sandbox in
+which I was working.
+
+Index: Src/zsh.h
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/zsh.h,v
+retrieving revision 1.26
+diff -c -r1.26 zsh.h
+--- Src/zsh.h	14 Apr 2005 04:33:51 -0000	1.26
++++ Src/zsh.h	23 Apr 2005 18:15:03 -0000
+@@ -1113,6 +1124,12 @@
+     int			flags;	   /* PAT_* flags */
+     int			patnpar;   /* number of active parentheses */
+     char		patstartch;
++    /* The following is for optimization of repeated comparisons against
++     * The same target string.
++     */
++    char *		repeatstr;
++    long		unmetalen;
++    long		unmetalenp;
+ };
+ 
+ /* Flags used in pattern matchers (Patprog) and passed down to patcompile */
+Index: Src/pattern.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/pattern.c,v
+retrieving revision 1.11
+diff -c -r1.11 pattern.c
+--- Src/pattern.c	6 Dec 2004 16:51:18 -0000	1.11
++++ Src/pattern.c	23 Apr 2005 19:35:10 -0000
+@@ -463,6 +463,8 @@
+     p->size = patsize;
+     p->patmlen = len;
+     p->patnpar = patnpar-1;
++    p->repeatstr = 0;
++    p->unmetalen = p->unmetalenp = 0;
+ 
+     if (!strp) {
+ 	pscan = (Upat)(patout + startoff);
+@@ -1564,11 +1566,16 @@
+     needfullpath = (patflags & PAT_HAS_EXCLUDP) && pathpos;
+ 
+     /* Get the length of the full string when unmetafied. */
+-    unmetalen = ztrsub(string + stringlen, string);
+-    if (needfullpath)
+-	unmetalenp = ztrsub(pathbuf + pathpos, pathbuf);
+-    else
+-	unmetalenp = 0;
++    if (prog->repeatstr) {
++	unmetalen = prog->unmetalen;
++	unmetalenp = prog->unmetalenp;
++    } else {
++	unmetalen = ztrsub(string + stringlen, string);
++	if (needfullpath)
++	    unmetalenp = ztrsub(pathbuf + pathpos, pathbuf);
++	else
++	    unmetalenp = 0;
++    }
+ 
+     DPUTS(needfullpath && (patflags & (PAT_PURES|PAT_ANY)),
+ 	  "rum sort of file exclusion");
+Index: Src/glob.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/glob.c,v
+retrieving revision 1.17
+diff -c -r1.17 glob.c
+--- Src/glob.c	26 Mar 2005 16:14:05 -0000	1.17
++++ Src/glob.c	24 Apr 2005 00:33:47 -0000
+@@ -2218,6 +2218,30 @@
+ }
+ 
+ /**/
++static void
++set_pat_repeat(Patprog p, char *string, int stringlen)
++{
++    int needfullpath = (p->flags & PAT_HAS_EXCLUDP) && pathpos;
++
++    p->repeatstr = string;
++    if (!string) {
++	p->unmetalen = p->unmetalenp = 0;
++	return;
++    }
++    if (stringlen < 0)
++	stringlen = strlen(string);
++
++    p->unmetalen = ztrsub(string + stringlen, string);
++    if (needfullpath)
++	p->unmetalenp = ztrsub(pathbuf + pathpos, pathbuf);
++    else
++	p->unmetalenp = 0;
++}
++
++#define PATDECR(p) (p->unmetalen--)
++#define PATINCR(p) (p->unmetalen++)
++
++/**/
+ static int
+ igetmatch(char **sp, Patprog p, int fl, int n, char *replstr)
+ {
+@@ -2273,13 +2297,15 @@
+ 		     * ... now we know whether it's worth looking for the
+ 		     * shortest, which we do by brute force.
+ 		     */
+-		    for (t = s; t < s + mlen; METAINC(t)) {
++		    set_pat_repeat(p, s, 0);
++		    for (t = s; t < s + mlen; METAINC(t), PATINCR(p)) {
+ 			set_pat_end(p, *t);
+ 			if (pattrylen(p, s, t - s, 0)) {
+ 			    mlen = patmatchlen();
+ 			    break;
+ 			}
+ 		    }
++		    set_pat_repeat(p, 0, 0);
+ 		}
+ 		*sp = get_match_ret(*sp, 0, mlen, fl, replstr);
+ 		return 1;
+@@ -2290,30 +2316,38 @@
+ 	    /* Smallest possible match at tail of string:  *
+ 	     * move back down string until we get a match. *
+ 	     * There's no optimization here.               */
+-	    for (ioff = ml, t = s + l; t >= s; t--, ioff--) {
++	    set_pat_repeat(p, (t = s + l), -1);
++	    for (ioff = ml; t >= s; t--, PATINCR(p), ioff--) {
++		if (t > s && t[-1] == Meta)
++		    t--;
+ 		set_pat_start(p, t-s);
+ 		if (pattrylen(p, t, -1, ioff)) {
+ 		    *sp = get_match_ret(*sp, t - s, l, fl, replstr);
++		    set_pat_repeat(p, 0, 0);
+ 		    return 1;
+ 		}
+ 		if (t > s+1 && t[-2] == Meta)
+ 		    t--;
+ 	    }
++	    set_pat_repeat(p, 0, 0);
+ 	    break;
+ 
+ 	case (SUB_END|SUB_LONG):
+ 	    /* Largest possible match at tail of string:       *
+ 	     * move forward along string until we get a match. *
+ 	     * Again there's no optimisation.                  */
+-	    for (ioff = 0, t = s; t < s + l; ioff++, t++) {
++	    set_pat_repeat(p, (t = s), -1);
++	    for (ioff = 0; t < s + l; ioff++, METAINC(t), PATDECR(p)) {
+ 		set_pat_start(p, t-s);
+ 		if (pattrylen(p, t, -1, ioff)) {
+ 		    *sp = get_match_ret(*sp, t-s, l, fl, replstr);
++		    set_pat_repeat(p, 0, 0);
+ 		    return 1;
+ 		}
+ 		if (*t == Meta)
+ 		    t++;
+ 	    }
++	    set_pat_repeat(p, 0, 0);
+ 	    break;
+ 
+ 	case SUB_SUBSTR:
+@@ -2332,20 +2366,24 @@
+ 	    do {
+ 		/* loop over all matches for global substitution */
+ 		matched = 0;
+-		for (; t < s + l; t++, ioff++) {
++		set_pat_repeat(p, t, -1);
++		for (; t < s + l; METAINC(t), PATDECR(p), ioff++) {
+ 		    /* Find the longest match from this position. */
+ 		    set_pat_start(p, t-s);
+ 		    if (pattrylen(p, t, -1, ioff)) {
+ 			char *mpos = t + patmatchlen();
+ 			if (!(fl & SUB_LONG) && !(p->flags & PAT_PURES)) {
+ 			    char *ptr;
+-			    for (ptr = t; ptr < mpos; METAINC(ptr)) {
++			    set_pat_repeat(p, t, 0);
++			    for (ptr = t; ptr < mpos;
++				 METAINC(ptr), PATINCR(p)) {
+ 				set_pat_end(p, *ptr);
+ 				if (pattrylen(p, t, ptr - t, ioff)) {
+ 				    mpos = t + patmatchlen();
+ 				    break;
+ 				}
+ 			    }
++			    set_pat_repeat(p, t, -1);
+ 			}
+ 			if (!--n || (n <= 0 && (fl & SUB_GLOBAL))) {
+ 			    *sp = get_match_ret(*sp, t-s, mpos-s, fl, replstr);
+@@ -2362,6 +2400,7 @@
+ 				 */
+ 				continue;
+ 			    } else {
++				set_pat_repeat(p, 0, 0);
+ 				return 1;
+ 			    }
+ 			}
+@@ -2379,6 +2418,7 @@
+ 			t++;
+ 		}
+ 	    } while (matched);
++	    set_pat_repeat(p, 0, 0);
+ 	    /*
+ 	     * check if we can match a blank string, if so do it
+ 	     * at the start.  Goodness knows if this is a good idea
+@@ -2402,7 +2442,8 @@
+ 		    return 1;
+ 		}
+ 	    }
+-	    for (ioff = ml - 1, t = s + l - 1; t >= s; t--, ioff--) {
++	    set_pat_repeat(p, (t = s + l - 1), -1);
++	    for (ioff = ml - 1; t >= s; --t, PATINCR(p), ioff--) {
+ 		if (t > s && t[-1] == Meta)
+ 		    t--;
+ 		set_pat_start(p, t-s);
+@@ -2411,7 +2452,9 @@
+ 		    char *mpos = t + patmatchlen();
+ 		    if (!(fl & SUB_LONG) && !(p->flags & PAT_PURES)) {
+ 			char *ptr;
+-			for (ptr = t; ptr < mpos; METAINC(ptr)) {
++			set_pat_repeat(p, t, 0);
++			for (ptr = t; ptr < mpos;
++			     METAINC(ptr), PATINCR(p)) {
+ 			    set_pat_end(p, *ptr);
+ 			    if (pattrylen(p, t, ptr - t, ioff)) {
+ 				mpos = t + patmatchlen();
+@@ -2420,9 +2463,11 @@
+ 			}
+ 		    }
+ 		    *sp = get_match_ret(*sp, t-s, mpos-s, fl, replstr);
++		    set_pat_repeat(p, 0, 0);
+ 		    return 1;
+ 		}
+ 	    }
++	    set_pat_repeat(p, 0, 0);
+ 	    set_pat_start(p, l);
+ 	    if ((fl & SUB_LONG) && pattrylen(p, s + l, -1, ml) && !--n) {
+ 		*sp = get_match_ret(*sp, l, l, fl, replstr);
+

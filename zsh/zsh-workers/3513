@@ -1,0 +1,238 @@
+From zsh-workers-request@math.gatech.edu Tue Sep 23 10:21:54 1997
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 3533 invoked from network); 23 Sep 1997 10:21:52 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 23 Sep 1997 10:21:52 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id GAA03070;
+	Tue, 23 Sep 1997 06:07:14 -0400 (EDT)
+Resent-Date: Tue, 23 Sep 1997 06:07:14 -0400 (EDT)
+Message-Id: <199709231007.MAA15229@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Purported fix for nested closures
+Date: Tue, 23 Sep 1997 12:07:38 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"T2dTd.0.vl.HJv9q"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3513
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+This is supposed to fix the bug that nested closures in pattern
+matching, e.g.
+
+  [[ fofo = (fo#)# ]]
+
+don't work (this one fails incorrectly).  This sort of thing ought to
+be done by people with lots of qualifications in computer science:
+instead, you've got a physicist who grew up with a Commodore 64 and
+went on to FORTRAN, and heard the word `backtracking' somewhere.
+Still, it works on all the things I've tried it on and you'll no doubt
+let me know if it breaks on something.  I've appended a set of tests;
+some of them occurred to me and some are pinched from perl, but they
+are in any case far from exhaustive.  (It prints out every test
+result, because I'm paranoid, but if there's a problem it will say
+so.)
+
+It's bound to be slower than before, since all closures (except final
+*'s, which are specially handled) now match as many times as possible
+before backtracking over the matches if necessary, which involves
+list-handling and subroutine-calling.  There are no doubt some more
+optimisations; I've just made the simple one that the top-level
+closure handling routine is skipped in favour of tail recursion when
+the next pattern isn't a closure because it's obviously right.
+
+*** Src/glob.c.clos	Thu Sep 18 09:58:41 1997
+--- Src/glob.c	Tue Sep 23 11:13:36 1997
+***************
+*** 1916,1926 ****
+  int
+  domatch(char *str, Comp c, int fist)
+  {
+      pptr = str;
+      first = fist;
+      if (*pptr == Nularg)
+  	pptr++;
+!     return doesmatch(c);
+  }
+  
+  #define untok(C)  (itok(C) ? ztokens[(C) - Pound] : (C))
+--- 1916,1930 ----
+  int
+  domatch(char *str, Comp c, int fist)
+  {
++     int ret;
+      pptr = str;
+      first = fist;
+      if (*pptr == Nularg)
+  	pptr++;
+!     PERMALLOC {
+! 	ret = doesmatch(c);
+!     } LASTALLOC;
+!     return ret;
+  }
+  
+  #define untok(C)  (itok(C) ? ztokens[(C) - Pound] : (C))
+***************
+*** 1959,1980 ****
+  static int
+  doesmatch(Comp c)
+  {
+!     char *pat = c->str;
+!     int done = 0;
+! 
+!   tailrec:
+!     if (ONEHASHP(c) || (done && TWOHASHP(c))) {
+! 	/* Do multiple matches like (pat)# and (pat)## */
+! 	char *saves = pptr;
+  
+  	if (first && *pptr == '.')
+  	    return 0;
+! 	if (doesmatch(c->next))
+! 	    return 1;
+! 	pptr = saves;
+! 	first = 0;
+!     }
+!     done++;
+      for (;;) {
+  	/* loop until success or failure of pattern */
+  	if (!pat || !*pat) {
+--- 1963,2007 ----
+  static int
+  doesmatch(Comp c)
+  {
+!     if (CLOSUREP(c)) {
+! 	int done, retflag = 0;
+! 	char *saves;
+! 	LinkList closlist;
+  
+  	if (first && *pptr == '.')
+  	    return 0;
+! 
+! 	closlist = newlinklist();
+! 
+! 	for (done = 0; ; done++) {
+! 	    saves = pptr;
+! 	    if (!matchonce(c) || saves == pptr) {
+! 		pptr = saves;
+! 		break;
+! 	    }
+! 	    pushnode(closlist, saves);
+! 	}
+! 	if (ONEHASHP(c) || done) {
+! 	    while(pptr) {
+! 		if ((!c->next && (!LASTP(c) || !*pptr)) ||
+! 		    (c->next && doesmatch(c->next))) {
+! 		    retflag = 1;
+! 		    break;
+! 		}
+! 		pptr = (char *)getlinknode(closlist);
+! 	    }
+! 	}
+! 	freelinklist(closlist, (FreeFunc) NULL);
+! 	return retflag;
+!     } else
+! 	return matchonce(c);
+! }
+! 
+! /**/
+! static int
+! matchonce(Comp c)
+! {
+!     char *pat = c->str;
+      for (;;) {
+  	/* loop until success or failure of pattern */
+  	if (!pat || !*pat) {
+***************
+*** 2000,2016 ****
+  			    return 0;
+  		    } else
+  			return 0;
+! 	    if (*pptr && CLOSUREP(c)) {
+! 		/* With a closure (#), need to keep trying */
+! 		pat = c->str;
+! 		goto tailrec;
+! 	    }
+  	    if (!c->next)	/* no more patterns left */
+  		return (!LASTP(c) || !*pptr);
+! 	    c = c->next;
+! 	    done = 0;
+! 	    pat = c->str;
+! 	    goto tailrec;
+  	}
+  	/* Don't match leading dot if first is set */
+  	if (first && *pptr == '.' && *pat != '.')
+--- 2027,2043 ----
+  			    return 0;
+  		    } else
+  			return 0;
+! 	    if (CLOSUREP(c))
+! 		return 1;
+  	    if (!c->next)	/* no more patterns left */
+  		return (!LASTP(c) || !*pptr);
+! 	    /* optimisation when next pattern is not a closure */
+! 	    if (!CLOSUREP(c->next)) {
+! 		c = c->next;
+! 		pat = c->str;
+! 		continue;
+! 	    }
+! 	    return doesmatch(c->next);
+  	}
+  	/* Don't match leading dot if first is set */
+  	if (first && *pptr == '.' && *pat != '.')
+*** /dev/null	Tue Sep 23 11:50:35 1997
+--- Misc/globtests	Tue Sep 23 11:49:45 1997
+***************
+*** 0 ****
+--- 1,42 ----
++ while read res str pat; do
++   [[ $str = ${~pat} ]]
++   ts=$?
++   print "$ts:  [[ $str = $pat ]]"
++   if [[ ( $ts -gt 0 && $res = t) || ($ts -eq 0 && $res = f) ]]; then
++     print "Test failed:  [[ $str = $pat ]]"
++   fi
++ done <<EOT
++ t fofo                (fo#)#
++ t ffo                 (fo#)#
++ t foooofo             (fo#)#
++ t foooofof            (fo#)#
++ t fooofoofofooo       (fo#)#
++ f foooofof            (fo##)#
++ f xfoooofof           (fo#)#
++ f foooofofx           (fo#)#
++ t ofxoofxo            ((ofo#x)#o)#
++ f ofooofoofofooo      (fo#)#
++ t foooxfooxfoxfooox   (fo#x)#
++ f foooxfooxofoxfooox  (fo#x)#
++ t foooxfooxfxfooox    (fo#x)#
++ t ofxoofxo            ((ofo#x)#o)#
++ t ofoooxoofxo         ((ofo#x)#o)#
++ t ofoooxoofxoofoooxoofxo            ((ofo#x)#o)#
++ t ofoooxoofxoofoooxoofxoo           ((ofo#x)#o)#
++ f ofoooxoofxoofoooxoofxofo          ((ofo#x)#o)#
++ t ofoooxoofxoofoooxoofxooofxofxo    ((ofo#x)#o)#
++ t aac    ((a))#a(c)
++ t ac     ((a))#a(c)
++ f c      ((a))#a(c)
++ t aaac   ((a))#a(c)
++ f baaac  ((a))#a(c)
++ t abcd   ?(a|b)c#d
++ t abcd   (ab|ab#)c#d
++ t acd    (ab|ab#)c#d
++ t abbcd  (ab|ab#)c#d
++ t effgz  (bc##d|ef#g?|(h|)i(j|k))
++ t efgz   (bc##d|ef#g?|(h|)i(j|k))
++ t egz    (bc##d|ef#g?|(h|)i(j|k))
++ t egzefffgzbcdij    (bc##d|ef#g?|(h|)i(j|k))#
++ f egz    (bc##d|ef##g?|(h|)i(j|k))
++ EOT
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, Platanenallee 6, 15738 Zeuthen, Germany.
+

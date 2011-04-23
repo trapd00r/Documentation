@@ -1,0 +1,157 @@
+From zsh-workers-return-20845-mason-zsh=primenet.com.au@sunsite.dk Tue Feb 22 21:20:47 2005
+Return-Path: <zsh-workers-return-20845-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22354 invoked from network); 22 Feb 2005 21:20:46 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 22 Feb 2005 21:20:46 -0000
+Received: (qmail 36395 invoked from network); 22 Feb 2005 21:20:40 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 22 Feb 2005 21:20:40 -0000
+Received: (qmail 16163 invoked by alias); 22 Feb 2005 21:20:34 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 20845
+Received: (qmail 16148 invoked from network); 22 Feb 2005 21:20:33 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 22 Feb 2005 21:20:33 -0000
+Received: (qmail 36125 invoked from network); 22 Feb 2005 21:20:32 -0000
+Received: from morda.newmail.ru (HELO flock1.newmail.ru) (212.48.140.150)
+  by a.mx.sunsite.dk with SMTP; 22 Feb 2005 21:20:29 -0000
+Received: (qmail 24531 invoked from network); 22 Feb 2005 21:05:28 -0000
+Received: from unknown (HELO ?10.0.0.1?) (arvidjaar@newmail.ru@83.237.208.168)
+  by smtpd.newmail.ru with SMTP; 22 Feb 2005 21:05:28 -0000
+From: Andrey Borzenkov <arvidjaar@newmail.ru>
+To: zsh-workers@sunsite.dk
+Subject: [PATCH] fix mulibyte input/mbstate_t problem
+Date: Wed, 23 Feb 2005 00:20:17 +0300
+User-Agent: KMail/1.7.2
+MIME-Version: 1.0
+Content-Type: Multipart/Mixed;
+  boundary="Boundary-00=_SI6GCyeo5QZ63GO"
+Message-Id: <200502230020.18269.arvidjaar@newmail.ru>
+X-Spam-Checker-Version: SpamAssassin 3.0.2 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=6.0 tests=BAYES_00 autolearn=ham 
+	version=3.0.2
+X-Spam-Hits: -2.6
+
+--Boundary-00=_SI6GCyeo5QZ63GO
+Content-Type: text/plain;
+  charset="us-ascii"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: inline
+
+Attached patch fixes multibyte input (verified with UTF-8). As it turns out, 
+mbstate_t works quite differently from expectation :)
+
+The patch makes it static (with implicit initialization). It is fundamentally 
+wrong to reinitialize it every time. mbstate_t is a function of all preceding 
+input; for shift state encoding it will also keep current shift state among 
+other things. It also means that in the long run every input must have own 
+mbstate_t which is initialized when stream is first opened. We need one 
+mbstate_t for zle.
+
+It also has small fixes in zsh_utils.
+
+Editing Russian is funny; "echo xxxx" outputs correct text but during line 
+editing display is wrong (it counts every UTF-8 as 2 screen characters).
+
+BTW calling getbyte from getsrestchar resets lastchar_wide_valid.
+
+-andrey
+
+PS am I the only one to have problems with SourceForge ssh CVS? It does not 
+hang completely but it is painfully slow.
+
+--Boundary-00=_SI6GCyeo5QZ63GO
+Content-Type: text/x-diff;
+  charset="us-ascii";
+  name="mbrtowc.diff"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment;
+	filename="mbrtowc.diff"
+
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.60
+diff -u -p -r1.60 zle_main.c
+--- Src/Zle/zle_main.c	22 Feb 2005 13:13:05 -0000	1.60
++++ Src/Zle/zle_main.c	22 Feb 2005 21:01:07 -0000
+@@ -749,10 +749,10 @@ mod_export ZLE_INT_T
+ getrestchar(int inchar)
+ {
+     /* char cnull = '\0'; */
+-    char buf[MB_CUR_MAX], *ptr;
++    char c = inchar;
+     wchar_t outchar;
+     int ret;
+-    mbstate_t ps;
++    static mbstate_t ps;
+ 
+     /*
+      * We are guaranteed to set a valid wide last character,
+@@ -764,28 +764,23 @@ getrestchar(int inchar)
+     if (inchar == EOF)
+ 	return lastchar_wide = WEOF;
+ 
+-    /* reset shift state by converting null */
+-    /* mbrtowc(&outchar, &cnull, 1, &ps); */
+-    memset (&ps, '\0', sizeof (ps));
+-
+-    ptr = buf;
+-    *ptr++ = inchar;
+     /*
+      * Return may be zero if we have a NULL; handle this like
+      * any other character.
+      */
+-    while ((ret = mbrtowc(&outchar, buf, ptr - buf, &ps)) < 0) {
++    while ((ret = mbrtowc(&outchar, &c, 1, &ps)) < 0) {
+ 	if (ret == -1) {
+ 	    /*
+ 	     * Invalid input.  Hmm, what's the right thing to do here?
+ 	     */
+ 	    return lastchar_wide = WEOF;
+ 	}
++
+ 	/* No timeout here as we really need the character. */
+ 	inchar = getbyte(0);
+ 	if (inchar == EOF)
+ 	    return lastchar_wide = WEOF;
+-	*ptr++ = inchar;
++	c = inchar;
+     }
+     return lastchar_wide = (ZLE_INT_T)outchar;
+ }
+Index: Src/Zle/zle_utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_utils.c,v
+retrieving revision 1.19
+diff -u -p -r1.19 zle_utils.c
+--- Src/Zle/zle_utils.c	22 Feb 2005 13:13:08 -0000	1.19
++++ Src/Zle/zle_utils.c	22 Feb 2005 21:01:07 -0000
+@@ -116,8 +116,8 @@ zlelineasstring(ZLE_STRING_T instr, int 
+ 
+     s = zalloc(inll * MB_CUR_MAX + 1);
+ 
+-    for(i=0; i < inll; i++) {
+-	if (outcs != NULL && i == incs)
++    for(i=0; i < inll; i++, incs--) {
++	if (outcs != NULL && incs == 0)
+ 	    *outcs = mb_len;
+ 	j = wctomb(s + mb_len, instr[i]);
+ 	if (j == -1) {
+@@ -206,7 +206,7 @@ stringaszleline(unsigned char *instr, in
+ 	wchar_t *outptr = outstr;
+ 
+ 	/* mbrtowc(outstr, &cnull, 1, &ps); */
+-	memset(&ps, \0, sizeof(ps));
++	memset(&ps, '\0', sizeof(ps));
+ 
+ 	while (ll) {
+ 	    size_t ret = mbrtowc(outptr, inptr, ll, &ps);
+
+--Boundary-00=_SI6GCyeo5QZ63GO--
+

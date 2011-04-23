@@ -1,0 +1,241 @@
+From zsh-workers-return-12318-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jul 19 21:31:39 2000
+Return-Path: <zsh-workers-return-12318-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5321 invoked from network); 19 Jul 2000 21:31:37 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 19 Jul 2000 21:31:37 -0000
+Received: (qmail 18158 invoked by alias); 19 Jul 2000 21:31:28 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12318
+Received: (qmail 18151 invoked from network); 19 Jul 2000 21:31:26 -0000
+Date: Wed, 19 Jul 2000 14:30:58 -0700 (PDT)
+From: Wayne Davison <wayned@users.sourceforge.net>
+X-Sender: wayne@phong.blorf.net
+To: Zsh Workers <zsh-workers@sunsite.auc.dk>
+Subject: PATCH: removed remhist()
+Message-ID: <Pine.LNX.4.21.0007191418080.2348-100000@phong.blorf.net>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+The following patch removes the remhist() function.  We now use a new
+function named shouldIgnoreLine() from inside hend() to determine in
+advance if a line should be stored in the history or not.  This makes
+the incremental updating of the history file work properly, since
+remhist() could never retroactively remove the line from the history
+file when it removed it from the internal history list.
+
+The code also fixes a bug in HIST_IGNORE_SPACE so that it once again
+ignores a line if an expanded alias starts with a space.
+
+I am much more satisfied with this code than I was a few days ago, so
+I went ahead and checked it into CVS.
+
+..wayne..
+
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/builtin.c
+@@ -1208,8 +1208,6 @@
+ 	savehistfile(*argv, 1, HFILE_APPEND | (ops['I'] ? HFILE_SKIPOLD : 0));
+ 	return 0;
+     }
+-    if (!(ops['l'] && unset(HISTNOSTORE)))
+-	remhist();
+     /* put foo=bar type arguments into the substitution list */
+     while (*argv && equalsplit(*argv, &s)) {
+ 	Asgment a = (Asgment) zhalloc(sizeof *a);
+Index: Src/exec.c
+@@ -3120,8 +3120,6 @@
+ 	}
+ 	shfunctab->addnode(shfunctab, ztrdup(s), shf);
+     }
+-    if (isset(HISTNOFUNCTIONS))
+-	remhist();
+     state->pc = end;
+     return 0;
+ }
+Index: Src/hist.c
+@@ -126,8 +126,7 @@
+ /* Bits of histactive variable */
+ #define HA_ACTIVE	(1<<0)	/* History mechanism is active */
+ #define HA_NOSTORE	(1<<1)	/* Don't store the line when finished */
+-#define HA_JUNKED	(1<<2)	/* Last history line was already junked */
+-#define HA_NOINC	(1<<3)	/* Don't store, curhist not incremented */
++#define HA_NOINC	(1<<2)	/* Don't store, curhist not incremented */
+ 
+ /* Array of word beginnings and endings in current history line. */
+ 
+@@ -679,7 +678,7 @@
+ mod_export void
+ strinend(void)
+ {
+-    hend();
++    hend(NULL);
+     DPUTS(!strin, "BUG: strinend() called without strinbeg()");
+     strin--;
+     isfirstch = 1;
+@@ -763,8 +762,6 @@
+     }
+     chwordpos = 0;
+ 
+-    if (histactive & HA_JUNKED)
+-	curhist--;
+     if (hist_ring && !hist_ring->ftim)
+ 	hist_ring->ftim = time(NULL);
+     if (interact && isset(SHINSTDIN) && !strin) {
+@@ -945,11 +942,54 @@
+     return he;
+ }
+ 
++/* A helper function for hend() */
++
++static int
++shouldIgnoreLine(Eprog prog)
++{
++    if (!prog)
++	return 0;
++
++    if (isset(HISTIGNORESPACE)) {
++	if (*chline == ' ' || aliasspaceflag)
++	    return 1;
++    }
++
++    if (isset(HISTNOFUNCTIONS)) {
++	Wordcode pc = prog->prog;
++	wordcode code = *pc;
++	if (wc_code(code) == WC_LIST && WC_LIST_TYPE(code) & Z_SIMPLE
++	 && wc_code(pc[2]) == WC_FUNCDEF)
++	    return 1;
++    }
++
++    if (isset(HISTNOSTORE)) {
++	char *b = getpermtext(prog, NULL);
++	if (*b == 'h' && strncmp(b, "history", 7) == 0
++	 && (!b[7] || b[7] == ' ')) {
++	    zsfree(b);
++	    return 1;
++	}
++	if (*b == 'f' && b[1] == 'c' && b[2] == ' ' && b[3] == '-') {
++	    b += 3;
++	    do {
++		if (*++b == 'l') {
++		    zsfree(b);
++		    return 1;
++		}
++	    } while (isalpha(*b));
++	}
++	zsfree(b);
++    }
++
++    return 0;
++}
++
+ /* say we're done using the history mechanism */
+ 
+ /**/
+ mod_export int
+-hend(void)
++hend(Eprog prog)
+ {
+     int flag, save = 1;
+     char *hf = getsparam("HISTFILE");
+@@ -987,7 +1027,7 @@
+ 	    } else
+ 		save = 0;
+ 	}
+-	if (chwordpos <= 2 || (isset(HISTIGNORESPACE) && *chline == ' '))
++	if (chwordpos <= 2 || shouldIgnoreLine(prog))
+ 	    save = 0;
+     }
+     if (flag & (HISTFLAG_DONE | HISTFLAG_RECALL)) {
+@@ -1059,24 +1099,6 @@
+ 	savehistfile(hf, 0, HFILE_USE_OPTIONS | HFILE_FAST);
+     unlockhistfile(hf); /* It's OK to call this even if we aren't locked */
+     return !(flag & HISTFLAG_NOEXEC || errflag);
+-}
+-
+-/* remove the current line from the history List */
+-
+-/**/
+-void
+-remhist(void)
+-{
+-    if (hist_ring == &curline)
+-	return;
+-    if (!(histactive & HA_ACTIVE)) {
+-	if (!(histactive & HA_JUNKED) && curline.histnum == curhist) {
+-	    freehistnode((HashNode)hist_ring);
+-	    histactive |= HA_JUNKED;
+-	    /* curhist-- is delayed until the next hbegin() */
+-	}
+-    } else
+-	histactive |= HA_NOSTORE;
+ }
+ 
+ /* Gives current expansion word if not last word before chwordpos. */
+Index: Src/init.c
+@@ -119,14 +119,14 @@
+ 	intr();			/* interrupts on            */
+ 	lexinit();              /* initialize lexical state */
+ 	if (!(prog = parse_event())) {	/* if we couldn't parse a list */
+-	    hend();
++	    hend(NULL);
+ 	    if ((tok == ENDINPUT && !errflag) ||
+ 		(tok == LEXERR && (!isset(SHINSTDIN) || !toplevel)) ||
+ 		justonce)
+ 		break;
+ 	    continue;
+ 	}
+-	if (hend()) {
++	if (hend(prog)) {
+ 	    int toksav = tok;
+ 	    Eprog preprog;
+ 
+Index: Src/lex.c
+@@ -1561,9 +1561,8 @@
+ 	    if (an && !an->inuse && ((an->flags & ALIAS_GLOBAL) || incmdpos ||
+ 				     inalmore)) {
+ 		inpush(an->text, INP_ALIAS, an);
+-		/* remove from history if it begins with space */
+-		if (isset(HISTIGNORESPACE) && an->text[0] == ' ')
+-		    remhist();
++		if (an->text[0] == ' ')
++		    aliasspaceflag = 1;
+ 		lexstop = 0;
+ 		if (yytext == copy)
+ 		    yytext = tokstr;
+Index: Src/parse.c
+@@ -34,7 +34,10 @@
+  
+ /**/
+ mod_export int incmdpos;
+- 
++
++/**/
++int aliasspaceflag;
++
+ /* != 0 if we are in the middle of a [[ ... ]] */
+  
+ /**/
+@@ -418,6 +421,7 @@
+ {
+     tok = ENDINPUT;
+     incmdpos = 1;
++    aliasspaceflag = 0;
+     yylex();
+     init_parse();
+     return ((par_event()) ? bld_eprog() : NULL);
+Index: Src/Zle/zle_main.c
+@@ -852,7 +852,7 @@
+ 	hbegin(1);
+     t = (char *) zleread(p1, p2, ops['h'] ? ZLRF_HISTORY : 0);
+     if (ops['h'])
+-	hend();
++	hend(NULL);
+     isfirstln = ifl;
+     varedarg = ova;
+     if (haso) {
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

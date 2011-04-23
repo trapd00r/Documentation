@@ -1,0 +1,153 @@
+From zsh-workers-return-12138-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jul 03 09:56:47 2000
+Return-Path: <zsh-workers-return-12138-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24880 invoked from network); 3 Jul 2000 09:56:47 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Jul 2000 09:56:47 -0000
+Received: (qmail 2473 invoked by alias); 3 Jul 2000 09:56:18 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12138
+Received: (qmail 2466 invoked from network); 3 Jul 2000 09:56:17 -0000
+Date: Mon, 03 Jul 2000 10:55:44 +0100
+From: Peter Stephenson <pws@cambridgesiliconradio.com>
+Subject: PATCH Re: BUG: parameter not created
+In-reply-to: "Your message of Sun, 02 Jul 2000 00:38:35 PDT."
+ <20000702073835.14099.qmail@web1303.mail.yahoo.com>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Message-id: <0FX40041R8WWW3@la-la.cambridgesiliconradio.com>
+Content-transfer-encoding: 7BIT
+
+> I'm able to generate a BUG message and stack trace with the following command
+> :
+> zsh -f
+> % (( aarray[abc]++ ))
+> % (( aarray[abc]++ ))
+> BUG: parameter not created
+> zsh: segmentation fault (core dumped)
+
+Looks like this has been there forever --- math eval checks for array
+element syntax, but the code that sets numeric parameters doesn't, and as
+far as I know never did.  The problem was really on the first call; the
+parameter was created with the square brackets, and the second time the
+attempt to retrieve the value (which interpreted the syntax correctly)
+failed, while so did the parameter creation because the bogus parameter
+already existed.  This confused it totally.
+
+setnparam() is actually new, but it's more or less a direct copy of
+setiparam().  I've patched both of them, though it's quite possible that
+setiparam() doesn't currently get called in a context where the square
+brackets would be present.  The patch is quite simple, because the rest of
+the code called from here already handles the square brackets.
+
+Bart, this is in 3.0.8 too, but the patch for that should be obvious from
+the setiparam() chunk.
+
+Note that currently array elements are all scalar.  There's no particular
+reason why we shouldn't have numeric arrays, except that adding to the
+current parameter code is complicated and bug-prone.
+
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.20
+diff -u -r1.20 params.c
+--- Src/params.c	2000/06/28 17:10:05	1.20
++++ Src/params.c	2000/07/03 09:53:04
+@@ -1898,7 +1898,7 @@
+ {
+     struct value vbuf;
+     Value v;
+-    char *t = s;
++    char *t = s, *ss;
+     Param pm;
+     mnumber mnval;
+ 
+@@ -1908,10 +1908,18 @@
+ 	return NULL;
+     }
+     if (!(v = getvalue(&vbuf, &s, 1))) {
+-	pm = createparam(t, PM_INTEGER);
++	if ((ss = strchr(s, '[')))
++	    *ss = '\0';
++	pm = createparam(t, ss ? PM_ARRAY : PM_INTEGER);
+ 	DPUTS(!pm, "BUG: parameter not created");
+-	pm->u.val = val;
+-	return pm;
++	if (ss) {
++	    *ss = '[';
++	    v = getvalue(&vbuf, &t, 1);
++	    DPUTS(!v, "BUG: value not found for new parameter");
++	} else {
++	    pm->u.val = val;
++	    return pm;
++	}
+     }
+     mnval.type = MN_INTEGER;
+     mnval.u.l = val;
+@@ -1930,7 +1938,7 @@
+ {
+     struct value vbuf;
+     Value v;
+-    char *t = s;
++    char *t = s, *ss = NULL;
+     Param pm;
+ 
+     if (!isident(s)) {
+@@ -1939,15 +1947,23 @@
+ 	return NULL;
+     }
+     if (!(v = getvalue(&vbuf, &s, 1))) {
+-	pm = createparam(t, (val.type & MN_INTEGER) ? PM_INTEGER
+-			 : PM_FFLOAT);
++	if ((ss = strchr(s, '[')))
++	    *ss = '\0';
++	pm = createparam(t, ss ? PM_ARRAY :
++			 (val.type & MN_INTEGER) ? PM_INTEGER : PM_FFLOAT);
+ 	DPUTS(!pm, "BUG: parameter not created");
+-	if (val.type & MN_INTEGER) {
+-	    pm->ct = outputradix;
+-	    pm->u.val = val.u.l;
+-	} else
+-	    pm->u.dval = val.u.d;
+-	return pm;
++	if (ss) {
++	    *ss = '[';
++	    v = getvalue(&vbuf, &t, 1);
++	    DPUTS(!v, "BUG: value not found for new parameter");
++	} else {
++	    if (val.type & MN_INTEGER) {
++		pm->ct = outputradix;
++		pm->u.val = val.u.l;
++	    } else
++		pm->u.dval = val.u.d;
++	    return pm;
++	}
+     }
+     setnumvalue(v, val);
+     return v->pm;
+Index: Test/06arith.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/06arith.ztst,v
+retrieving revision 1.1.1.1
+diff -u -r1.1.1.1 06arith.ztst
+--- Test/06arith.ztst	1999/12/21 23:12:01	1.1.1.1
++++ Test/06arith.ztst	2000/07/03 09:53:04
+@@ -82,3 +82,9 @@
+ 0:use of scalars to store integers and floats
+ >3.5
+ >4
++
++  (( newarray[unsetvar]++ ))
++  (( newarray[unsetvar]++ ))
++  print ${(t)newarray} ${#newarray} ${newarray[1]}
++0:setting array elements in math context
++>array 1 2
+
+-- 
+Peter Stephenson <pws@cambridgesiliconradio.com>
+Cambridge Silicon Radio, Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+

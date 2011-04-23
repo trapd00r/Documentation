@@ -1,0 +1,181 @@
+From schaefer@candle.brasslantern.com Thu Jul 11 05:21:17 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id FAA12794 for <mason@werple.mira.net.au>; Thu, 11 Jul 1996 05:21:15 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id PAA07941; Wed, 10 Jul 1996 15:10:32 -0400 (EDT)
+Resent-Date: Wed, 10 Jul 1996 15:10:32 -0400 (EDT)
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <960710121111.ZM4060@candle.brasslantern.com>
+Date: Wed, 10 Jul 1996 12:11:09 -0700
+In-Reply-To: Zoltan Hidvegi <hzoli@cs.elte.hu>
+        "Re: Remaining zsh3.0-pre2 bugs" (Jul  9,  4:06pm)
+References: <199607091406.QAA15086@bolyai.cs.elte.hu>
+Reply-To: schaefer@nbn.com
+X-Mailer: Z-Mail (4.0b.702 02jul96)
+To: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Subject: Re: Remaining zsh3.0-pre2 bugs
+Cc: zsh-workers@math.gatech.edu
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"ddhHh3.0._x1.d00vn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1600
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 4549
+Status: OR
+
+On Jul 9,  4:06pm, Zoltan Hidvegi wrote:
+} Subject: Re: Remaining zsh3.0-pre2 bugs
+}
+} > } In that case zsh simply gives up the completion
+} > } attempt, restores the original line and returns.
+} > 
+} > Why is that necessary?  Maybe it's necessary if the word *ends* in the
+} > previous line for some reason, but ...
+} 
+} The problem is that that:
+} 
+} % echo 'z'\
+} > l<TAB>
+} 
+} Here get_comp_string removes the quotes around 'z' but it does not work
+} since the already entered part cannot be modified.  The quotes have to be
+} removed for completing filenames.  This later causes a SEGV.
+
+Well, then, why not catch that special case (backslash-newline) and let
+other cases of embedded newlines keep working?  Patch below.
+
+} > Hmm.  Your patch does a couple of things.  One, it removes the loop that
+} > folds embedded newlines into semicolons; two, it attempts to save and
+} 
+} Yes, it seems that it is not necessary.  That mainly caused problems after
+} a backslash <newline>.  Perhaps that's the bug mentioned in Etc/BUGS.
+
+Could very well be that bug.  With your patches plus mine below, completion
+doesn't work at all for words that cross a backslash-newline (which seems
+to me to be the correct behavior), but works for words later on the line
+and words that contain quoted newlines.
+
+There's one other bug that this patch does NOT address; and maybe it's not
+a bug at all.  However, here's the example:
+
+zagzig<6> touch cegi efgh
+zagzig<7> echo c'e<TAB>
+zagzig<7> echo c'efgh
+
+If I do it with TWO quotes (I don't have rcquotes set):
+
+zagzig<8> echo c''e<TAB>
+zagzig<8> echo cegi
+
+zagzig<9> echo c'e'<TAB>
+zagzig<9> echo cegi
+
+And yet:
+
+zagzig<10> echo c'e'<C-b><TAB>		<-- Complete inside second quote
+zagzig<10> echo c'efg '			<-- Cursor ends on second quote
+
+Seems to me that case <7> should just feep at me; I'm not sure whether
+I think <10> should feep or work like <9>, or whether completeinword
+should make a difference, but what it did seems wrong.
+
+Here's the patch for backslash-newline.  It includes (rather than
+follows onto) my previous patch for quoted newlines.
+
+*** Src/zle_tricky.c.0	Tue Jul  9 00:50:55 1996
+--- Src/zle_tricky.c	Wed Jul 10 12:02:51 1996
+***************
+*** 497,503 ****
+  docomplete(int lst)
+  {
+      char *s, *ol;
+!     int olst = lst, chl = 0, ne = noerrs, ocs = 0;
+  
+      /* If we are doing a menu-completion... */
+  
+--- 497,503 ----
+  docomplete(int lst)
+  {
+      char *s, *ol;
+!     int olst = lst, chl = 0, ne = noerrs, ocs = 0, oll = 0;
+  
+      /* If we are doing a menu-completion... */
+  
+***************
+*** 554,559 ****
+--- 554,560 ----
+  	/* Append the original line contents. */
+  	strcpy(q, ol);
+  	cs += chl;
++ 	oll = ll;
+  	ll = strlen((char *)line);
+      }
+      else
+***************
+*** 573,592 ****
+  	viinsbegin = ztrsub((char *) line + wb, (char *) line);
+      /* If we added chline to the line buffer, reset the original contents. */
+      if (ol) {
+! 	cs -= chl;
+  	wb -= chl;
+  	we -= chl;
+! 	if (wb < 0 || we < 0 || cs < 0) {
+  	    strcpy((char *) line, ol);
+! 	    ll = strlen((char *) line);
+  	    cs = ocs;
+  	    unmetafy_line();
+  	    return;
+  	}
+- 	ocs = cs;
+  	cs = 0;
+  	foredel(chl);
+! 	cs = ocs;
+      }
+      freeheap();
+      /* Save the lexer state, in case the completion code uses the lexer *
+--- 574,594 ----
+  	viinsbegin = ztrsub((char *) line + wb, (char *) line);
+      /* If we added chline to the line buffer, reset the original contents. */
+      if (ol) {
+! 	int tcs = (cs -= chl);
+  	wb -= chl;
+  	we -= chl;
+! 	/* If completion has to back up across a backslash-newline pair, *
+! 	 * the necessary rewrites are impossible.  Give up and bail out. */
+! 	if (wb < (oll - ll) || we < (oll - ll) || cs < (oll - ll)) {
+  	    strcpy((char *) line, ol);
+! 	    ll = oll;
+  	    cs = ocs;
+  	    unmetafy_line();
+  	    return;
+  	}
+  	cs = 0;
+  	foredel(chl);
+! 	cs = tcs;
+      }
+      freeheap();
+      /* Save the lexer state, in case the completion code uses the lexer *
+***************
+*** 741,746 ****
+--- 743,753 ----
+  	    docompletion(s, lst, lincmd);
+  	zsfree(s);
+      }
++     if (ol && !nmatches && (wb < 0 || we < 0 || cs < 0)) {
++ 	strcpy((char *) line, ol);
++ 	ll = oll;
++ 	cs = ocs;
++     }
+      /* Reset the lexer state, pop the heap. */
+      lexrestore();
+      popheap();
+
+-- 
+Bart Schaefer                             Brass Lantern Enterprises
+http://www.well.com/user/barts            http://www.nbn.com/people/lantern
+
+New male in /home/schaefer:
+>N  2 Justin William Schaefer  Sat May 11 03:43  53/4040  "Happy Birthday"
+
+

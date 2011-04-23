@@ -1,0 +1,714 @@
+From zsh-workers-return-23537-mason-zsh=primenet.com.au@sunsite.dk Fri Jun 08 13:43:08 2007
+Return-Path: <zsh-workers-return-23537-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24959 invoked from network); 8 Jun 2007 13:43:06 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.0 (2007-05-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=no
+	version=3.2.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 8 Jun 2007 13:43:06 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 57217 invoked from network); 8 Jun 2007 13:43:00 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 8 Jun 2007 13:43:00 -0000
+Received: (qmail 22730 invoked by alias); 8 Jun 2007 13:42:57 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23537
+Received: (qmail 22721 invoked from network); 8 Jun 2007 13:42:56 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 8 Jun 2007 13:42:56 -0000
+Received: (qmail 56961 invoked from network); 8 Jun 2007 13:42:56 -0000
+Received: from cluster-d.mailcontrol.com (217.69.20.190)
+  by a.mx.sunsite.dk with SMTP; 8 Jun 2007 13:42:52 -0000
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly51d.srv.mailcontrol.com (MailControl) with ESMTP id l58Dghqp005520
+	for <zsh-workers@sunsite.dk>; Fri, 8 Jun 2007 14:42:46 +0100
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.1830);
+	 Fri, 8 Jun 2007 14:42:44 +0100
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.13.8/8.13.4) with ESMTP id l58DgiFM032156
+	for <zsh-workers@sunsite.dk>; Fri, 8 Jun 2007 14:42:44 +0100
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.13.8/8.13.8/Submit) with ESMTP id l58Dghth032153
+	for <zsh-workers@sunsite.dk>; Fri, 8 Jun 2007 14:42:44 +0100
+Message-Id: <200706081342.l58Dghth032153@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: make zstyle use hash
+Date: Fri, 08 Jun 2007 14:42:43 +0100
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 08 Jun 2007 13:42:44.0330 (UTC) FILETIME=[E4637CA0:01C7A9D2]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A-07-07-05 (www.mailcontrol.com) on 10.68.0.161
+
+I'm fed up with styles not being listed in alphabetic order.  It's high
+time they were stored in a hash rather than a linked list anyway, since
+they're widely used.  The old doc for listing styles half implied there
+was something magic about the ordering of styles ("listed in the order
+zstyle will test them"), but that's only true for patterns; looking up
+of style names was always by exact match, it just happened to traverse a
+list to find them which is an implementation detail.
+
+I've added some tests to try to assure myself I haven't broken anything.
+
+Index: Src/Modules/zutil.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/zutil.c,v
+retrieving revision 1.21
+diff -u -r1.21 zutil.c
+--- Src/Modules/zutil.c	28 May 2007 22:57:41 -0000	1.21
++++ Src/Modules/zutil.c	8 Jun 2007 13:40:23 -0000
+@@ -38,9 +38,8 @@
+ /* A pattern and the styles for it. */
+ 
+ struct style {
+-    Style next;			/* next in stypat list */
++    struct hashnode node;
+     Stypat pats;		/* patterns */
+-    char *name;
+ };
+ 
+ struct stypat {
+@@ -51,13 +50,42 @@
+     Eprog eval;			/* eval-on-retrieve? */
+     char **vals;
+ };
+-    
+-/* List of styles. */
+ 
+-static Style zstyles;
++/* Hash table of styles and associated functions. */
++
++static HashTable zstyletab;
+ 
+ /* Memory stuff. */
+ 
++static void
++freestylepatnode(Stypat p)
++{
++    zsfree(p->pat);
++    freepatprog(p->prog);
++    if (p->vals)
++	freearray(p->vals);
++    if (p->eval)
++	freeeprog(p->eval);
++    zfree(p, sizeof(*p));
++}
++
++static void
++freestylenode(HashNode hn)
++{
++    Style s = (Style) hn;
++    Stypat p, pn;
++
++    p = s->pats;
++    while (p) {
++	pn = p->next;
++	freestylepatnode(p);
++	p = pn;
++    }
++
++    zsfree(s->node.nam);
++    zfree(s, sizeof(struct style));
++}
++
+ /*
+  * Free the information for one of the patterns associated with
+  * a style.
+@@ -79,60 +107,135 @@
+ 	    s->pats = p->next;
+     }
+ 
+-    zsfree(p->pat);
+-    freepatprog(p->prog);
+-    if (p->vals)
+-	freearray(p->vals);
+-    if (p->eval)
+-	freeeprog(p->eval);
+-    zfree(p, sizeof(*p));
++    freestylepatnode(p);
+ 
+     if (s && !s->pats) {
+ 	/* No patterns left, free style */
+-	if (s == zstyles) {
+-	    zstyles = s->next;
+-	} else {
+-	    Style s2;
+-	    for (s2 = zstyles; s2->next != s; s2 = s2->next)
+-		;
+-	    s2->next = s->next;
+-	}
+-	zsfree(s->name);
++	zstyletab->removenode(zstyletab, s->node.nam);
++	zsfree(s->node.nam);
+ 	zfree(s, sizeof(*s));
+     }
+ }
+ 
++/* Pattern to match context when printing nodes */
++
++static Patprog zstyle_contprog;
++
++/*
++ * Print a node.  Print flags as shown.
++ */
++enum {
++    ZSLIST_NONE,
++    ZSLIST_BASIC,
++    ZSLIST_SYNTAX,
++};
++
+ static void
+-freeallstyles(void)
++printstylenode(HashNode hn, int printflags)
+ {
+-    Style s, sn;
+-    Stypat p, pn;
++    Style s = (Style)hn;
++    Stypat p;
++    char **v;
++
++    if (printflags == ZSLIST_BASIC) {
++	quotedzputs(s->node.nam, stdout);
++	putchar('\n');
++    }
+ 
+-    for (s = zstyles; s; s = sn) {
+-	sn = s->next;
+-	for (p = s->pats; p; p = pn) {
+-	    pn = p->next;
+-	    freestypat(p, NULL, NULL);
++    for (p = s->pats; p; p = p->next) {
++	if (zstyle_contprog && !pattry(zstyle_contprog, p->pat))
++	    continue;
++	if (printflags == ZSLIST_BASIC)
++	    printf("%s  %s", (p->eval ? "(eval)" : "      "), p->pat);
++	else {
++	    printf("zstyle %s", (p->eval ? "-e " : ""));
++	    quotedzputs(p->pat, stdout);
++	    printf(" %s", s->node.nam);
++	}
++	for (v = p->vals; *v; v++) {
++	    putchar(' ');
++	    quotedzputs(*v, stdout);
+ 	}
+-	zsfree(s->name);
+-	zfree(s, sizeof(*s));
++	putchar('\n');
+     }
+-    zstyles = NULL;
+ }
+ 
+-/* Get the style struct for a name. */
++/*
++ * Scan the list for a particular pattern, maybe adding matches to
++ * the link list (heap memory).  Value to be added as
++ * shown in enum
++ */
++static LinkList zstyle_list;
++static char *zstyle_patname;
+ 
+-static Style
+-getstyle(char *name)
++enum {
++    ZSPAT_NAME,		/* Add style names for matched pattern to list */
++    ZSPAT_PAT,		/* Add all patterns to list, doesn't use patname */
++    ZSPAT_REMOVE,	/* Remove matched pattern, doesn't use list */
++};
++
++static void
++scanpatstyles(HashNode hn, int spatflags)
+ {
+-    Style s;
++    Style s = (Style)hn;
++    Stypat p, q;
++    LinkNode n;
++
++    for (q = NULL, p = s->pats; p; q = p, p = p->next) {
++	switch (spatflags) {
++	case ZSPAT_NAME:
++	    if (!strcmp(p->pat, zstyle_patname)) {
++		addlinknode(zstyle_list, s->node.nam);
++		return;
++	    }
++	    break;
++
++	case ZSPAT_PAT:
++	    /* Check pattern isn't already there */
++	    for (n = firstnode(zstyle_list); n; incnode(n))
++		if (!strcmp(p->pat, (char *) getdata(n)))
++		    break;
++	    if (!n)
++		addlinknode(zstyle_list, p->pat);
++	    break;
+ 
+-    for (s = zstyles; s; s = s->next)
+-	if (!strcmp(name, s->name)) {
+-	    return s;
++	case ZSPAT_REMOVE:
++	    if (!strcmp(p->pat, zstyle_patname)) {
++		freestypat(p, s, q);
++		/*
++		 * May remove link node itself; that's OK
++		 * when scanning but we need to make sure
++		 * we don't look at it any more.
++		 */
++		return;
++	    }
++	    break;
+ 	}
++    }
++}
+ 
+-    return NULL;
++
++static HashTable
++newzstyletable(int size, char const *name)
++{
++    HashTable ht;
++    ht = newhashtable(size, name, NULL);
++
++    ht->hash        = hasher;
++    ht->emptytable  = emptyhashtable;
++    ht->filltable   = NULL;
++    ht->cmpnodes    = strcmp;
++    ht->addnode     = addhashnode;
++    /* DISABLED is not supported */
++    ht->getnode     = gethashnode2;
++    ht->getnode2    = gethashnode2;
++    ht->removenode  = removehashnode;
++    ht->disablenode = NULL;
++    ht->enablenode  = NULL;
++    ht->freenode    = freestylenode;
++    ht->printnode   = printstylenode;
++
++    return ht;
+ }
+ 
+ /* Store a value for a style. */
+@@ -226,15 +329,9 @@
+ static Style
+ addstyle(char *name)
+ {
+-    Style s;
+-
+-    s = (Style) zalloc(sizeof(*s));
+-    s->next = NULL;
+-    s->pats = NULL;
+-    s->name = ztrdup(name);
++    Style s = (Style) zshcalloc(sizeof(*s));
+ 
+-    s->next = zstyles;
+-    zstyles = s;
++    zstyletab->addnode(zstyletab, ztrdup(name), s);
+ 
+     return s;
+ }
+@@ -274,11 +371,12 @@
+     Style s;
+     Stypat p;
+ 
+-    for (s = zstyles; s; s = s->next)
+-	if (!strcmp(s->name, style))
+-	    for (p = s->pats; p; p = p->next)
+-		if (pattry(p->prog, ctxt))
+-		    return (p->eval ? evalstyle(p) : p->vals);
++    s = (Style)zstyletab->getnode2(zstyletab, style);
++    if (!s)
++	return NULL;
++    for (p = s->pats; p; p = p->next)
++	if (pattry(p->prog, ctxt))
++	    return (p->eval ? evalstyle(p) : p->vals);
+ 
+     return NULL;
+ }
+@@ -286,10 +384,10 @@
+ static int
+ bin_zstyle(char *nam, char **args, UNUSED(Options ops), UNUSED(int func))
+ {
+-    int min, max, n, add = 0, list = 0, eval = 0;
++    int min, max, n, add = 0, list = ZSLIST_NONE, eval = 0;
+ 
+     if (!args[0])
+-	list = 1;
++	list = ZSLIST_BASIC;
+     else if (args[0][0] == '-') {
+ 	char oc;
+ 
+@@ -299,7 +397,7 @@
+ 		return 1;
+ 	    }
+ 	    if (oc == 'L') {
+-		list = 2;
++		list = ZSLIST_SYNTAX;
+ 		args++;
+ 	    } else if (oc == 'e') {
+ 		eval = add = 1;
+@@ -328,16 +426,13 @@
+ 	    zwarnnam(nam, "invalid pattern: %s", args[0]);
+ 	    return 1;
+ 	}
+-	if (!(s = getstyle(args[1])))
++	if (!(s = (Style)zstyletab->getnode2(zstyletab, args[1])))
+ 	    s = addstyle(args[1]);
+ 	return setstypat(s, args[0], prog, args + 2, eval);
+     }
+     if (list) {
+ 	Style s;
+-	Stypat p;
+-	char **v;
+ 	char *context, *stylename;
+-	Patprog contprog;
+ 
+ 	switch (arrlen(args)) {
+ 	case 2:
+@@ -360,34 +455,23 @@
+ 	}
+ 	if (context) {
+ 	    tokenize(context);
+-	    contprog = patcompile(context, PAT_STATIC, NULL);
++	    zstyle_contprog = patcompile(context, PAT_STATIC, NULL);
++
++	    if (!zstyle_contprog)
++		return 1;
+ 	} else
+-	    contprog = NULL;
++	    zstyle_contprog = NULL;
+ 
+-	for (s = zstyles; s; s = s->next) {
+-	    if (list == 1) {
+-		quotedzputs(s->name, stdout);
+-		putchar('\n');
+-	    }
+-	    if (stylename && strcmp(s->name, stylename) != 0)
+-		continue;
+-	    for (p = s->pats; p; p = p->next) {
+-		if (contprog && !pattry(contprog, p->pat))
+-		    continue;
+-		if (list == 1)
+-		    printf("%s  %s", (p->eval ? "(eval)" : "      "), p->pat);
+-		else {
+-		    printf("zstyle %s", (p->eval ? "-e " : ""));
+-		    quotedzputs(p->pat, stdout);
+-		    printf(" %s", s->name);
+-		}
+-		for (v = p->vals; *v; v++) {
+-		    putchar(' ');
+-		    quotedzputs(*v, stdout);
+-		}
+-		putchar('\n');
+-	    }
++	if (stylename) {
++	    s = (Style)zstyletab->getnode2(zstyletab, stylename);
++	    if (!s)
++		return 1;
++	    zstyletab->printnode(&s->node, list);
++	} else {
++	    scanhashtable(zstyletab, 1, 0, 0,
++			  zstyletab->printnode, list);
+ 	}
++
+ 	return 0;
+     }
+     switch (args[0][1]) {
+@@ -421,7 +505,8 @@
+ 		    char *pat = args[1];
+ 
+ 		    for (args += 2; *args; args++) {
+-			if ((s = getstyle(*args))) {
++			if ((s = (Style)zstyletab->getnode2(zstyletab,
++							    *args))) {
+ 			    Stypat p, q;
+ 
+ 			    for (q = NULL, p = s->pats; p;
+@@ -434,22 +519,14 @@
+ 			}
+ 		    }
+ 		} else {
+-		    Style next;
+-		    Stypat p, q;
++		    zstyle_patname = args[1];
+ 
+-		    /* careful! style itself may be deleted */
+-		    for (s = zstyles; s; s = next) {
+-			next = s->next;
+-			for (q = NULL, p = s->pats; p; q = p, p = p->next) {
+-			    if (!strcmp(p->pat, args[1])) {
+-				freestypat(p, s, q);
+-				break;
+-			    }
+-			}
+-		    }
++		    /* sorting not needed for deletion */
++		    scanhashtable(zstyletab, 0, 0, 0, scanpatstyles,
++				  ZSPAT_REMOVE);
+ 		}
+ 	    } else
+-		freeallstyles();
++		zstyletab->emptytable(zstyletab);
+ 	}
+ 	break;
+     case 's':
+@@ -554,20 +631,21 @@
+ 	break;
+     case 'g':
+ 	{
+-	    LinkList l = newlinklist();
+ 	    int ret = 1;
+ 	    Style s;
+ 	    Stypat p;
+ 
++	    zstyle_list = newlinklist();
++
+ 	    if (args[2]) {
+ 		if (args[3]) {
+-		    if ((s = getstyle(args[3]))) {
++		    if ((s = (Style)zstyletab->getnode2(zstyletab, args[3]))) {
+ 			for (p = s->pats; p; p = p->next) {
+ 			    if (!strcmp(args[2], p->pat)) {
+ 				char **v = p->vals;
+ 
+ 				while (*v)
+-				    addlinknode(l, *v++);
++				    addlinknode(zstyle_list, *v++);
+ 
+ 				ret = 0;
+ 				break;
+@@ -575,28 +653,17 @@
+ 			}
+ 		    }
+ 		} else {
+-		    for (s = zstyles; s; s = s->next)
+-			for (p = s->pats; p; p = p->next)
+-			    if (!strcmp(args[2], p->pat)) {
+-				addlinknode(l, s->name);
+-				break;
+-			    }
++		    zstyle_patname = args[2];
++		    scanhashtable(zstyletab, 1, 0, 0, scanpatstyles,
++				  ZSPAT_NAME);
+ 		    ret = 0;
+ 		}
+ 	    } else {
+-		LinkNode n;
+-
+-		for (s = zstyles; s; s = s->next)
+-		    for (p = s->pats; p; p = p->next) {
+-			for (n = firstnode(l); n; incnode(n))
+-			    if (!strcmp(p->pat, (char *) getdata(n)))
+-				break;
+-			if (!n)
+-			    addlinknode(l, p->pat);
+-		    }
++		scanhashtable(zstyletab, 1, 0, 0, scanpatstyles,
++			      ZSPAT_PAT);
+ 		ret = 0;
+ 	    }
+-	    set_list_array(args[1], l);
++	    set_list_array(args[1], zstyle_list);
+ 
+ 	    return ret;
+ 	}
+@@ -1752,7 +1819,7 @@
+ int
+ setup_(UNUSED(Module m))
+ {
+-    zstyles = NULL;
++    zstyletab = newzstyletable(17, "zstyletab");
+ 
+     return 0;
+ }
+@@ -1790,7 +1857,7 @@
+ int
+ finish_(UNUSED(Module m))
+ {
+-    freeallstyles();
++    deletehashtable(zstyletab);
+ 
+     return 0;
+ }
+Index: Test/V05styles.ztst
+===================================================================
+RCS file: Test/V05styles.ztst
+diff -N Test/V05styles.ztst
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Test/V05styles.ztst	8 Jun 2007 13:40:23 -0000
+@@ -0,0 +1,145 @@
++%prep
++
++# Test the use of styles, if the zsh/zutil module is available.
++
++  if (zmodload zsh/zutil >/dev/null 2>/dev/null); then
++    zmodload zsh/zutil
++  else
++    ZTST_unimplemented="can't load the zsh/zutil module for testing"
++  fi
++
++%test
++  zstyle :random:stuff any-old-style with any old value
++  zstyle :randomly:chosen some-other-style I can go on and on
++  zstyle -d
++  zstyle
++0:zstyle -d restores a pristine state
++
++# patterns should be ordered by weight, so add in reverse order to check
++  zstyle ':ztst:context*' scalar-style other-scalar-value
++  zstyle ':ztst:context:*' scalar-style second-scalar-value
++  zstyle ':ztst:context:sub1' scalar-style scalar-value
++  zstyle ':ztst:context:sub1' array-style array value elements 'with spaces'
++  zstyle ':ztst:context*' boolean-style false
++  zstyle ':ztst:context:sub1' boolean-style true
++0:defining styles
++
++# styles are now sorted, but patterns are in order of definition
++  zstyle
++0:listing styles in default format
++>array-style
++>        :ztst:context:sub1 array value elements 'with spaces'
++>boolean-style
++>        :ztst:context:sub1 true
++>        :ztst:context* false
++>scalar-style
++>        :ztst:context:sub1 scalar-value
++>        :ztst:context:* second-scalar-value
++>        :ztst:context* other-scalar-value
++
++  zstyle -L
++0:listing styles in zstyle format
++>zstyle :ztst:context:sub1 array-style array value elements 'with spaces'
++>zstyle :ztst:context:sub1 boolean-style true
++>zstyle ':ztst:context*' boolean-style false
++>zstyle :ztst:context:sub1 scalar-style scalar-value
++>zstyle ':ztst:context:*' scalar-style second-scalar-value
++>zstyle ':ztst:context*' scalar-style other-scalar-value
++
++  zstyle -b :ztst:context:sub1 boolean-style bool; print $bool
++  zstyle -t :ztst:context:sub1 boolean-style
++0:boolean test -b/-t + true
++>yes
++
++  zstyle -b :ztst:context:sub2 boolean-style bool; print $bool
++  zstyle -t :ztst:context:sub2 boolean-style
++1:boolean test -b/-t + false
++>no
++
++  zstyle -b :ztst:context:sub1 boolean-unset-style bool; print $bool
++  zstyle -t :ztst:context:sub1 boolean-unset-style
++2:boolean test -b/-t + unset
++>no
++
++  zstyle -T :ztst:context:sub1 boolean-style
++0:boolean test -T + true
++
++  zstyle -T :ztst:context:sub2 boolean-style
++1:boolean test -T + false
++
++  zstyle -T :ztst:context:sub1 boolean-unset-style
++0:boolean test -T + unset
++
++  zstyle -s :ztst:context:sub1 scalar-style scalar && print $scalar
++  zstyle -s :ztst:context:sub2 scalar-style scalar && print $scalar
++  zstyle -s :ztst:contextual-psychedelia scalar-style scalar && print $scalar
++  zstyle -s :ztst:contemplative scalar-style scalar || print no match
++0:pattern matching rules
++>scalar-value
++>second-scalar-value
++>other-scalar-value
++>no match
++
++  zstyle -s :ztst:context:sub1 array-style scalar + && print $scalar
++0:scalar with separator
++>array+value+elements+with spaces
++
++  zstyle -e :ztst:\* eval-style 'reply=($something)'
++  something=(one two three)
++  zstyle -a :ztst:eval eval-style array && print -l $array
++0:zstyle -e evaluations
++>one
++>two
++>three
++
++# pattern ordering on output is not specified, so although in the
++# current implementation it's deterministic we shouldn't
++# assume it's always the same.  Thus we sort the array.
++# (It might be a nice touch to order patterns by weight, which is
++# the way they are stored for each separate style.)
++  zstyle -g array && print -l ${(o)array}
++0:retrieving patterns
++>:ztst:*
++>:ztst:context*
++>:ztst:context:*
++>:ztst:context:sub1
++
++  zstyle -m :ztst:context:sub1 array-style 'w* *s'
++0:positive pattern match
++
++  zstyle -m :ztst:context:sub1 array-style 'v'
++1:negative pattern match
++
++  zstyle -g array ':ztst:context*' && print -l $array
++0:retrieving styles by pattern
++>boolean-style
++>scalar-style
++
++  zstyle -g array ':ztst:context:sub1' array-style && print -l $array
++0:retrieving values by pattern and name
++>array
++>value
++>elements
++>with spaces
++
++  zstyle -d :ztst:context:sub1
++  zstyle
++0:deleting styles by pattern only
++>boolean-style
++>        :ztst:context* false
++>eval-style
++>(eval)  :ztst:* 'reply=($something)'
++>scalar-style
++>        :ztst:context:* second-scalar-value
++>        :ztst:context* other-scalar-value
++
++  zstyle -d :ztst:context\* scalar-style
++  zstyle
++0:deleting styles by pattern and style name
++>boolean-style
++>        :ztst:context* false
++>eval-style
++>(eval)  :ztst:* 'reply=($something)'
++>scalar-style
++>        :ztst:context:* second-scalar-value
++
+Index: Doc/Zsh/mod_zutil.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/mod_zutil.yo,v
+retrieving revision 1.18
+diff -u -r1.18 mod_zutil.yo
+--- Doc/Zsh/mod_zutil.yo	16 Aug 2006 09:06:40 -0000	1.18
++++ Doc/Zsh/mod_zutil.yo	8 Jun 2007 13:40:24 -0000
+@@ -30,7 +30,8 @@
+ complex patterns are considered to be more specific than the pattern
+ `tt(*)'.
+ 
+-The first form (without arguments) lists the definitions in the order
++The first form (without arguments) lists the definitions.  Styles
++are shown in alphabetic order and patterns are shown in the order
+ tt(zstyle) will test them.
+ 
+ If the tt(-L) option is given, listing is done in the form of calls to
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+To access the latest news from CSR copy this link into a web browser:  http://www.csr.com/email_sig.php
+
+To get further information regarding CSR, please visit our Investor Relations page at http://ir.csr.com/csr/about/overview
+

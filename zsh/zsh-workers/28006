@@ -1,0 +1,187 @@
+From zsh-workers-return-28006-mason-zsh=primenet.com.au@zsh.org Mon Jun 07 17:00:58 2010
+Return-Path: <zsh-workers-return-28006-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8897 invoked by alias); 7 Jun 2010 17:00:58 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28006
+Received: (qmail 8322 invoked from network); 7 Jun 2010 17:00:55 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Mon, 7 Jun 2010 18:00:46 +0100
+From: Peter Stephenson <Peter.Stephenson@csr.com>
+To: zsh-workers@zsh.org
+Subject: Re: Bug in zsh builtin pwd when option CHASE_LINKS is set
+Message-ID: <20100607180046.20860b48@csr.com>
+In-Reply-To: <20100607174358.551f2350@csr.com>
+References: <20040924074842.GJ2973@ay.vinc17.org>
+	<20100607131339.GA21964@prunille.vinc17.org>
+	<20100607174358.551f2350@csr.com>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.5 (GTK+ 2.18.9; i686-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 07 Jun 2010 17:00:46.0229 (UTC) FILETIME=[F8E1A450:01CB0662]
+X-Scanned-By: MailControl A_09_40_00 (www.mailcontrol.com) on 10.68.0.153
+
+Looks like we need to be more careful in case zgetcwd() is being used to
+set a new value of pwd.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.242
+diff -p -u -r1.242 builtin.c
+--- Src/builtin.c	27 May 2010 18:57:34 -0000	1.242
++++ Src/builtin.c	7 Jun 2010 17:00:13 -0000
+@@ -805,6 +805,7 @@ bin_cd(char *nam, char **argv, Options o
+     if (stat(unmeta(pwd), &st1) < 0) {
+ 	setjobpwd();
+ 	zsfree(pwd);
++	pwd = NULL;
+ 	pwd = metafy(zgetcwd(), -1, META_DUP);
+     } else if (stat(".", &st2) < 0) {
+ 	if (chdir(unmeta(pwd)) < 0)
+@@ -813,6 +814,7 @@ bin_cd(char *nam, char **argv, Options o
+ 	if (chasinglinks) {
+ 	    setjobpwd();
+ 	    zsfree(pwd);
++	    pwd = NULL;
+ 	    pwd = metafy(zgetcwd(), -1, META_DUP);
+ 	} else if (chdir(unmeta(pwd)) < 0)
+ 	    zwarn("unable to chdir(%s): %e", pwd, errno);
+Index: Src/compat.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/compat.c,v
+retrieving revision 1.19
+diff -p -u -r1.19 compat.c
+--- Src/compat.c	22 Feb 2010 10:12:22 -0000	1.19
++++ Src/compat.c	7 Jun 2010 17:00:14 -0000
+@@ -275,11 +275,7 @@ zgetdir(struct dirsav *d)
+     buf[pos] = '\0';
+     strcpy(nbuf, "../");
+     if (stat(".", &sbuf) < 0) {
+-	if (d)
+-	    return NULL;
+-	buf[0] = '.';
+-	buf[1] = '\0';
+-	return buf;
++	return NULL;
+     }
+ 
+     /* Record the initial inode and device */
+@@ -354,6 +350,11 @@ zgetdir(struct dirsav *d)
+ 	closedir(dir);
+ 	if (!de)
+ 	    break;		/* Not found */
++	/*
++	 * We get the "/" free just by copying from nbuf+2 instead
++	 * of nbuf+3, which is where we copied the path component.
++	 * This means buf[pos] is always a "/".
++	 */
+ 	len = strlen(nbuf + 2);
+ 	pos -= len;
+ 	while (pos <= 1) {
+@@ -371,15 +372,22 @@ zgetdir(struct dirsav *d)
+ 	if (chdir(".."))
+ 	    break;
+     }
++
++    /*
++     * Fix up the directory, if necessary.
++     * We're changing back down the hierarchy, ignore the
++     * "/" at buf[pos].
++     */
+     if (d) {
+ #ifndef HAVE_FCHDIR
+-	if (*buf)
++	if (buf[pos])
+ 	    zchdir(buf + pos + 1);
+ 	noholdintr();
+ #endif
+ 	return NULL;
+     }
+-    if (*buf)
++
++    if (buf[pos])
+ 	zchdir(buf + pos + 1);
+     noholdintr();
+ 
+@@ -397,16 +405,36 @@ zgetdir(struct dirsav *d)
+     }
+ #endif
+ 
+-    buf[0] = '.';
+-    buf[1] = '\0';
+-    return buf;
++    /*
++     * Something bad happened.
++     * This has been seen when inside a special directory,
++     * such as the Netapp .snapshot directory, that doesn't
++     * appear as a directory entry in the parent directory.
++     * We'll just need our best guess.
++     *
++     * We only get here from zgetcwd(); let that fall back to pwd.
++     */
++
++    return NULL;
+ }
+ 
++/*
++ * Try to find the current directory.
++ * If it fails, fall back to pwd; if zgetcwd() is being used
++ * to set pwd, pwd should be NULL and we just return ".".
++ * We could fall back to getcwd() instead.
++ */
++
+ /**/
+ char *
+ zgetcwd(void)
+ {
+-    return zgetdir(NULL);
++    char *ret = zgetdir(NULL);
++    if (!ret)
++	ret = pwd;
++    if (!ret)
++	ret = dupstring(".");
++    return ret;
+ }
+ 
+ /* chdir with arbitrary long pathname.  Returns 0 on success, -1 on normal *
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.114
+diff -p -u -r1.114 init.c
+--- Src/init.c	12 May 2010 10:07:01 -0000	1.114
++++ Src/init.c	7 Jun 2010 17:00:14 -0000
+@@ -861,8 +861,10 @@ setupvals(void)
+     else if ((ptr = zgetenv("PWD")) && (strlen(ptr) < PATH_MAX) &&
+ 	     (ptr = metafy(ptr, -1, META_STATIC), ispwd(ptr)))
+ 	pwd = ztrdup(ptr);
+-    else
++    else {
++	pwd = NULL;
+ 	pwd = metafy(zgetcwd(), -1, META_DUP);
++    }
+ 
+     oldpwd = ztrdup(pwd);  /* initialize `OLDPWD' = `PWD' */
+ 
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

@@ -1,0 +1,163 @@
+From zsh-workers-return-6128-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Apr 28 07:20:09 1999
+Return-Path: <zsh-workers-return-6128-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24372 invoked from network); 28 Apr 1999 07:20:07 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 Apr 1999 07:20:07 -0000
+Received: (qmail 882 invoked by alias); 28 Apr 1999 07:19:53 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6128
+Received: (qmail 873 invoked from network); 28 Apr 1999 07:19:52 -0000
+Date: Wed, 28 Apr 1999 09:19:04 +0200 (MET DST)
+Message-Id: <199904280719.JAA16812@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Oliver Kiddle's message of Tue, 27 Apr 1999 16:45:27 +0100
+Subject: Re: Completion in braces limitation
+
+
+Oliver Kiddle wrote:
+
+> One thing which I did notice while testing a few things out with
+> completion in braces is that it doesn't work quite as I'd like with
+> things of the form $(...).
+> Try:
+> zsh -f
+> sw() { echo /home/native_rs6000 }
+> cd $(sw)/{<tab>
+> 
+> This expands $(sw) and quotes the brace. There may be a reason for doing
+> this but I can't think of one.
+> 
+> Also (not using a brace), typing a bit more before the tab:
+> cd $(sw)/tes<tab>
+> will expand $(sw), leave '/tes' on the end and add a space. What would
+> be nice is if it had completed to the 'test' directory which I have
+> there. Back quotes behave in the same way.
+> 
+> Another way that $(...) is treated differently to a variable regards
+> when zsh expands it:
+> cd $PWD<tab> - expands the value of $PWD
+> cd $PWD/<tab> - does not expand $PWD. I find this useful.
+> cd $(sw)/<tab> - this will expand $(sw).
+
+This is (again) intentional. To get rid of it, use complete-word
+instead of expand-or-complete.
+I vaguely remember a discussion about this (several years ago), where, 
+if I remember correctly, most people said that one sometimes want to
+complete after a parameter expansion, but almost never after a command 
+substitution.
+So, I'm reluctant to change this behavior (even more so, because it
+would be a rather serious incompatibility).
+
+The patch at least tries to make brace-handling after command
+substitutions work, with $(...), that is, it may have problems with
+braces inside backticks. But there are other constructs that are too
+complicated for it anyway.
+
+> Finally, I noticed this behaviour:
+> 
+> bindkey "^G" list-expand
+> cd $PWD/<tab><^G><tab>
+> This lists directories in $PWD after the first tab. I then listed the
+> value of PWD with Ctrl-G, then wanting to go back to the list of
+> directories, I pressed tab again. This started menu completion instead
+> of returning to the list. I suppose I should remember to use Ctrl-D
+> instead of tab again but if it's a simple change, it might be useful if
+> things which overwrite the list (such as list-expand) revert things as
+> if the original tab had not been pressed.
+
+Hm. I wouldn't like it to completely ignore the current completion
+state (you may be in a menucompletion and that shouldn't be
+stopped). But the patch makes a completion list be displayed again if
+it was displayed before one of the widgets showing another kind of
+list was invoked.
+
+Bye
+ Sven
+
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Tue Apr 27 18:11:30 1999
++++ Src/Zle/zle_tricky.c	Wed Apr 28 09:05:13 1999
+@@ -87,6 +87,10 @@
+ 
+ static int oldlist, oldins;
+ 
++/* Non-zero if we have to redisplay the list of matches. */
++
++static int showagain = 0;
++
+ /* The match and group number to insert when starting menucompletion.   */
+ 
+ static int insmnum, insgnum, insgroup;
+@@ -758,6 +762,10 @@
+     char *s, *ol;
+     int olst = lst, chl = 0, ne = noerrs, ocs;
+ 
++    if (showagain && validlist)
++	showinglist = -2;
++    showagain = 0;
++
+     /* If we are doing a menu-completion... */
+ 
+     if (menucmp && lst != COMP_LIST_EXPAND && 
+@@ -872,7 +880,7 @@
+ 	    }
+ 	    if (lst == COMP_EXPAND_COMPLETE)
+ 		do {
+-		    /* check if there is a parameter expresiion. */
++		    /* Check if there is a parameter expression. */
+ 		    for (; *q && *q != String; q++);
+ 		    if (*q == String && q[1] != Inpar && q[1] != Inbrack) {
+ 			if (*++q == Inbrace) {
+@@ -1519,9 +1527,11 @@
+ 		 * but this may fail sometimes. sorry.
+ 		 */
+ 		if (*p == String || *p == Qstring) {
+-		    if (p[1] == Inbrace) {
++		    if (p[1] == Inbrace || p[1] == Inpar || p[1] == Inbrack) {
+ 			char *tp = p + 1;
+-			if (skipparens(Inbrace, Outbrace, &tp)) {
++			if (skipparens(*tp, (*tp == Inbrace ? Outbrace :
++					     (*tp == Inpar ? Outpar : Outbrack)),
++				       &tp)) {
+ 			    tt = NULL;
+ 			    break;
+ 			}
+@@ -1530,6 +1540,11 @@
+ 		    } else {
+ 			char *tp = p + 1;
+ 
++			for (; *tp == '^' || *tp == Hat ||
++				 *tp == '=' || *tp == Equals ||
++				 *tp == '~' || *tp == Tilde ||
++				 *tp == '#' || *tp == Pound || *tp == '+';
++			     tp++);
+ 			if (*tp == Quest || *tp == Star || *tp == String ||
+ 			    *tp == Qstring || *tp == '?' || *tp == '*' ||
+ 			    *tp == '$' || *tp == '-' || *tp == '!' ||
+@@ -4175,6 +4190,7 @@
+ 				(unset(ALWAYSLASTPROMPT) && zmult != 1)) ?
+ 				"yes" : "");
+ 	movetoend = ((cs == we || isset(ALWAYSTOEND)) ? 2 : 1);
++	showinglist = 0;
+ 
+ 	/* Make sure we have the completion list and compctl. */
+ 	if (makecomplist(s, incmd, lst)) {
+@@ -7546,6 +7562,9 @@
+     struct cmgroup dg;
+     Cmgroup am = amatches;
+     int vl = validlist, sm = smatches;
++
++    if (listshown)
++	showagain = 1;
+ 
+     smatches = 1;
+     validlist = 1;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

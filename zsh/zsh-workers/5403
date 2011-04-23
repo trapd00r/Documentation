@@ -1,0 +1,175 @@
+From zsh-workers-return-5403-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Feb 16 16:33:58 1999
+Return-Path: <zsh-workers-return-5403-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1363 invoked from network); 16 Feb 1999 16:33:56 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 16 Feb 1999 16:33:56 -0000
+Received: (qmail 27500 invoked by alias); 16 Feb 1999 16:33:14 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5403
+Received: (qmail 27488 invoked from network); 16 Feb 1999 16:33:10 -0000
+Message-Id: <9902161617.AA20242@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.5-pws-8: magicequalsubst
+Date: Tue, 16 Feb 1999 17:17:06 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Here's the proposed patch simplifying the behaviour of the magicequalsubst
+option.  I had no messages objecting, and two saying `why wasn't it like
+that before', so I suppose that's positive.
+
+I also took the opportunity of replacing the flags passed to and by
+prefork() by macros for readability.
+
+--- Doc/Zsh/options.yo.fsub	Fri Feb  5 10:16:00 1999
++++ Doc/Zsh/options.yo	Mon Feb 15 18:25:21 1999
+@@ -544,12 +544,14 @@
+ )
+ pindex(MAGIC_EQUAL_SUBST)
+ item(tt(MAGIC_EQUAL_SUBST))(
+-All unquoted arguments of the form `var(identifier)tt(=)var(expression)'
++All unquoted arguments of the form `var(anything)tt(=)var(expression)'
+ appearing after the command name have filename expansion (that is,
+ where var(expression) has a leading `tt(~)' or `tt(=)') performed on
+ var(expression) as if it were a parameter assignment.  The argument is
+ not otherwise treated specially; it is passed to the command as a single
+-argument, and not used as an actual parameter assignment.
++argument, and not used as an actual parameter assignment.  For example, in
++tt(echo foo=~/bar:~/rod), both occurrences of tt(~) would be replaced.
++Note that this happens anyway with tt(typeset) and similar statements.
+ )
+ pindex(MAIL_WARNING)
+ cindex(mail, warning of reading)
+--- Src/exec.c.fsub	Mon Feb  1 09:42:00 1999
++++ Src/exec.c	Mon Feb 15 18:10:51 1999
+@@ -1208,7 +1208,7 @@
+ 	    addlinknode(vl, v->str);
+ 	} else
+ 	    vl = v->arr;
+-	prefork(vl, v->type == PM_SCALAR ? 7 : 3);
++	prefork(vl, v->type == PM_SCALAR ? (PF_SINGLE|PF_ASSIGN) : PF_ASSIGN);
+ 	if (errflag)
+ 	    return;
+ 	if (isset(GLOBASSIGN) || v->type != PM_SCALAR)
+@@ -1356,7 +1356,7 @@
+     }
+ 
+     /* Do prefork substitutions */
+-    prefork(args, assign ? 2 : isset(MAGICEQUALSUBST));
++    prefork(args, (assign || isset(MAGICEQUALSUBST)) ? PF_TYPESET : 0);
+ 
+     if (type == SIMPLE) {
+ 	int unglobbed = 0;
+--- Src/glob.c.fsub	Wed Feb  3 12:14:49 1999
++++ Src/glob.c	Mon Feb 15 18:10:51 1999
+@@ -1810,7 +1810,7 @@
+     fake = newlinklist();
+     addlinknode(fake, fn->name);
+     /* ...which undergoes all the usual shell expansions */
+-    prefork(fake, isset(MULTIOS) ? 0 : 4);
++    prefork(fake, isset(MULTIOS) ? 0 : PF_SINGLE);
+     /* Globbing is only done for multios. */
+     if (!errflag && isset(MULTIOS))
+ 	globlist(fake);
+--- Src/subst.c.fsub	Fri Feb  5 10:08:47 1999
++++ Src/subst.c	Mon Feb 15 18:15:20 1999
+@@ -42,11 +42,7 @@
+  *  - Brace expansion
+  *  - Tilde and equals substitution
+  *
+- * Bits 0 and 1 of flags are used in filesub.
+- * bit 0 is set when we are doing MAGIC_EQUALSUBST or normal
+- *	 assignment but not a typeset.
+- * bit 1 is set on a real assignment (both typeset and normal).
+- * bit 2 is a flag to paramsubst (single word sub)
++ * PF_* flags are defined in zsh.h
+  */
+ 
+ /**/
+@@ -70,20 +66,22 @@
+ 		return;
+ 	} else {
+ 	    if (isset(SHFILEEXPANSION))
+-		filesub((char **)getaddrdata(node), flags & 3);
+-	    if (!(node = stringsubst(list, node, flags & 4)))
++		filesub((char **)getaddrdata(node),
++			flags & (PF_TYPESET|PF_ASSIGN));
++	    if (!(node = stringsubst(list, node, flags & PF_SINGLE)))
+ 		return;
+ 	}
+     }
+     for (node = firstnode(list); node; incnode(node)) {
+ 	if (*(char *)getdata(node)) {
+ 	    remnulargs(getdata(node));
+-	    if (unset(IGNOREBRACES) && !(flags & 4))
++	    if (unset(IGNOREBRACES) && !(flags & PF_SINGLE))
+ 		while (hasbraces(getdata(node)))
+ 		    xpandbraces(list, &node);
+ 	    if (unset(SHFILEEXPANSION))
+-		filesub((char **)getaddrdata(node), flags & 3);
+-	} else if (!(flags & 4))
++		filesub((char **)getaddrdata(node),
++			flags & (PF_TYPESET|PF_ASSIGN));
++	} else if (!(flags & PF_SINGLE))
+ 	    uremnode(list, node);
+ 	if (errflag)
+ 	    return;
+@@ -234,7 +232,7 @@
+ 
+     foo = newlinklist();
+     addlinknode(foo, *s);
+-    prefork(foo, 4);
++    prefork(foo, PF_SINGLE);
+     if (errflag)
+ 	return;
+     *s = (char *) ugetnode(foo);
+@@ -287,8 +285,10 @@
+     return !l;
+ }
+ 
+-/* ~, = subs: assign = 2 => typeset; assign = 1 => something that looks
+-	like an assignment but may not be; assign = 3 => normal assignment */
++/*
++ * ~, = subs: assign & PF_TYPESET => typeset or magic equals
++ *            assign & PF_ASSIGN => normal assignment
++ */
+ 
+ /**/
+ void
+@@ -302,12 +302,8 @@
+     if (!assign)
+ 	return;
+ 
+-    if (assign < 3) {
++    if (assign & PF_TYPESET) {
+ 	if ((*namptr)[1] && (sub = strchr(*namptr + 1, Equals))) {
+-	    if (assign == 1)
+-		for (ptr = *namptr; ptr != sub; ptr++)
+-		    if (!iident(*ptr) && !INULL(*ptr))
+-			return;
+ 	    str = sub + 1;
+ 	    if ((sub[1] == Tilde || sub[1] == Equals) && filesubstr(&str, assign)) {
+ 		sub[1] = '\0';
+--- Src/zsh.h.fsub	Sat Feb 13 14:14:24 1999
++++ Src/zsh.h	Tue Feb 16 10:15:51 1999
+@@ -950,6 +950,11 @@
+ #define SUB_ALL		0x0100	/* match complete string */
+ #define SUB_GLOBAL	0x0200	/* global substitution ${..//all/these} */
+ 
++/* Flags as the second argument to prefork */
++#define PF_TYPESET	0x01	/* argument handled like typeset foo=bar */
++#define PF_ASSIGN	0x02	/* argument handled like the RHS of foo=bar */
++#define PF_SINGLE	0x04	/* single word substitution */
++
+ /* node for named directory hash table (nameddirtab) */
+ 
+ struct nameddir {
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

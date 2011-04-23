@@ -1,0 +1,276 @@
+From zsh-workers-return-20381-mason-zsh=primenet.com.au@sunsite.dk Sun Sep 19 06:50:38 2004
+Return-Path: <zsh-workers-return-20381-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9689 invoked from network); 19 Sep 2004 06:50:37 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 19 Sep 2004 06:50:37 -0000
+Received: (qmail 44558 invoked from network); 19 Sep 2004 06:50:30 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 19 Sep 2004 06:50:30 -0000
+Received: (qmail 29675 invoked by alias); 19 Sep 2004 06:50:28 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 20381
+Received: (qmail 29663 invoked from network); 19 Sep 2004 06:50:28 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 19 Sep 2004 06:50:28 -0000
+Received: (qmail 44323 invoked from network); 19 Sep 2004 06:50:28 -0000
+Received: from moonbase.zanshin.com (64.84.47.139)
+  by a.mx.sunsite.dk with SMTP; 19 Sep 2004 06:50:26 -0000
+Received: from toltec.zanshin.com (toltec.zanshin.com [64.84.47.166])
+	by moonbase.zanshin.com (8.13.1/8.13.1) with ESMTP id i8J6oO7t017989
+	for <zsh-workers@sunsite.dk>; Sat, 18 Sep 2004 23:50:24 -0700
+Date: Sat, 18 Sep 2004 23:50:24 -0700 (PDT)
+From: Bart Schaefer <schaefer@brasslantern.com>
+Reply-To: zsh-workers@sunsite.dk
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: PATCH: exit after 10 EOF's
+In-Reply-To: <200409131118.i8DBIM5B005245@news01.csr.com>
+Message-ID: <Pine.LNX.4.61.0409181943300.6971@toltec.zanshin.com>
+References: <200409131118.i8DBIM5B005245@news01.csr.com>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.0 required=6.0 tests=none autolearn=no version=2.63
+X-Spam-Hits: 0.0
+
+On Mon, 13 Sep 2004, Peter Stephenson wrote:
+
+> This ought to be part of the test suite, but with zle it needs zpty and 
+> I don't understand the tests with zpty.
+
+I meant to reply to this before and got distracted by later developments
+in the thread.
+
+The idea behind the zpty-based tests isn't much different from the way the 
+"nslookup" wrapper function is implemented.  You start a shell as pristine 
+as possible on the pty; initialize it by feeding it some commands to set 
+the environment, and to change the prompts to something distinctive so 
+that it can be recognized later; and then start alternately scanning for
+your special prompt and sending more commands, checking to see that the 
+stuff that gets output between prompts is what you expected.
+
+The completion tests use the same idea but in a considerably more complex 
+manner, e.g., arranging to have every item in a completion listing emit 
+markers before and after each actual list entry, so that all the entries
+can be parsed out and verified.
+
+On Thu, 16 Sep 2004, Peter Stephenson wrote:
+> 
+> [...] the previous broken ignore_eof behaviour (sometimes you get EOF 
+> after 10 ^D's and a message, sometimes [in the editor] you get the same 
+> message but it doesn't exit and doesn't call the bound widget, some 
+> [non-completion] widgets suppress the message and work normally, some 
+> [completion] widgets don't suppress the message and don't run...  I may 
+> have got some of that wrong, and I don't particularly care.)
+
+I'm going to try to get it right anyway, because unless we know what it 
+does we don't know what to "fix."  (I confess to slight bafflement over 
+why this suddenly needs to be changed, when it has been the way it is for 
+at least five and possibly as many as ten years without causing any flood 
+of complaints, but ...)  So here I go.  This is divided into two parts, 
+"HOW THE WORLD GOT THIS WAY" and "THE WAY OF THE WORLD WE GOT".  You can 
+search forward for the second part if you'd prefer to avoid a historical 
+reenactment.
+
+Part One: HOW THE WORLD GOT THIS WAY
+
+There are two base cases, which ultimately resolve to: (1) it is possible 
+to differentiate the typing of the TTY driver EOF character from the true 
+closing of the TTY file descriptor, and (2) it's not possible.  It turns 
+out that (1) occurs only when ZLE is active and (2) occurs only when ZLE 
+is not active.
+
+Now, a detour into history.  I wasn't actually at University of California
+Berkeley during the three years or so when the following would have taken
+place, but I've seen the csh source code and was puttering around USENET 
+at the time, encountering writings from the personalities involved, so I 
+think this is a fair approximation of reality.
+
+When csh introduced completion, there was no such thing as a line editor.  
+The TTY driver was all there was.  So the writers of csh hijacked some of 
+the TTY driver behaviors and abused them to implement completion.  One of 
+the behaviors they hijacked is that it's possible to partly fill the 
+driver input buffer, then type the EOF character to force that buffer to 
+be flushed (written to the shell).  The shell would see some characters of 
+input followed by an EOF (but without a newline), interpret that as a 
+request for a completion listing, output one, and then go back to reading 
+from the TTY.  If the TTY descriptor was not closed -- i.e., if the driver 
+was only "pretending" it had been closed, because of the EOF character -- 
+then the new read would block, awaiting more input from the user.  Bunnies
+were gamboling.
+
+However, some characters of input followed by an EOF is also what the 
+shell would see in the event that the TTY descriptor really was closed.  
+So the csh authors had a dilemma -- they had to come up with a heuristic 
+to "guess" when an EOF really was an EOF, despite lack of direct evidence 
+one way or another.  So the first heuristic they tried was "an EOF on an 
+empty buffer is a real EOF."  All well and good, except that users got 
+used to typing the EOF character for completion listings and would 
+sometimes accidentally do so when the buffer was empty, and got really 
+upset when this logged them off (this was before windowing systems, too). 
+So the csh authors introduced "set ignoreeof", but then they needed a new 
+heuristic to stop the shell from going into an infinite loop when the TTY 
+line dropped.  So they picked "10 EOFs in a row is a real EOF."  Nobody 
+who set ignoreeof ever really hammered the EOF key 10 times, as a way to 
+exit the shell or otherwise, so the bunnies gamboled some more.
+
+Unfortunately, some sysadmins put "set ignoreeof" in /etc/cshrc, and a few 
+power users who _never_ made the mistake of typing EOF in an empty buffer, 
+except when they wanted to log off, got confused when their shell would 
+not exit.  Nobody can bully a shell author like an annoyed power user 
+(recall those bunnies with pitchforks), so a warning message was added to 
+explain that the shell really had seen the EOF, it just wasn't paying any 
+attention to it.  The power users would mutter under their breath about 
+sysadmins catering to newbie lusers and fix their own ~/.cshrc to unset 
+ignoreeof, and then go quietly back to typing the EOF character when they 
+wanted to exit from the shell.  The bunnies didn't exactly gambol, but
+the didn't storm the castle.
+
+Now we return to the present day.  Keep in mind, though, that an EOF, 
+whether from a "pretending" TTY driver or from a real closed descriptor, 
+is a read() that returns zero bytes.  Nothing.  Nada.  It's not a 
+keystroke, so in spite of the perception of the user that he pressed some 
+keys, the shell can't use what it read to look up a keybinding.
+
+There is, in addition to the aforementioned two base cases, an assumption 
+that the _default_ behavior of the shell upon receipt of a TTY driver EOF 
+character should be the same whether or not ZLE is active.  Nearly all the 
+early users of zsh were converting from csh, so both the default behavior 
+and the heuristic for telling when an EOF really is an EOF were copied 
+from csh.  Except that zsh can, when ZLE is active, do something that csh 
+never could: really know when it has an EOF _character_ as opposed to a 
+closed descriptor.  Exactly what zsh can do with this knowledge is limited
+in two ways:
+
+a. In any situation where csh would have read zero bytes, zsh has to 
+behave (by _default_ only; not necessarily after it's been reconfigured) 
+as if it read zero bytes.  That means no widgets are called on the EOF 
+character unless csh would have treated it as a completion request.
+
+b. In any situation where csh would have printed a warning, zsh has to
+print a warning.  This applies only when ignoreeof is set, so for the
+following discussion I'll subdivide base cases 1 and 2 into 1, 1i, 2, and
+2i, where the "i" designates ignoreeof being set.
+
+However, because no one ever intended for 10 consecutive EOF _characters_ 
+to be treated as a real EOF -- rather, they intended 10 consecutive zero- 
+byte reads to be treated as _not_ an EOF character, and nobody ever typed 
+10 EOF characters on purpose -- zsh does _not_ have to play dumb and exit
+on 10 EOF characters.
+
+Another historical detour:  At about the same time this decision was put 
+into effect, somebody introduced a terminal emulator bug (probably having 
+to do with switching from BSD descriptor handling to STREAMS) such that on 
+at least one popular operating system, zsh could not tell whether a zero- 
+byte read meant the terminal window had been closed.  So the old heuristic 
+was revived, although at a different place in the code, and with a larger 
+count (for no good reason that I recall), to prevent an infinite loop when 
+such a terminal emulator was, in fact, closed.  However, this has nothing
+to do with how zsh behaves on normal input, so we can set it aside.
+
+So we now have cases 1, 1i, 2, and 2i, and we further subdivide those into 
+two more categories: (A) default behavior, and (B) behavior after zsh has 
+been reconfigured.  However, zsh can't be reconfigured in any way that is 
+interesting for terminal input when ZLE is not active, so cases 1A and 1B 
+collapse to the same, as do 1Ai and 1Bi.  Leaving us with cases:
+
+(1) Zsh must silently exit on a zero-byte read.
+
+(1i) Zsh must print a warning on a zero-byte read, and must exit after 10 
+     zero-byte reads.
+
+(2A) ZLE must cause zsh to silently exit on reading the EOF character in 
+     an empty buffer or upon a true EOF.
+
+(2Ai) ZLE must print a warning on reading the EOF character in an empty 
+      buffer.  It may not call any widget instead or as well.  It must 
+      cause zsh to silently exit on a true EOF.
+
+(2B) ZLE need not cause zsh to exit on reading the EOF character, and may 
+     call a widget.  It must cause zsh to silently exit on a true EOF.
+
+(2Bi) ZLE need not print a warning on the EOF character, and may call a 
+      widget.  It must cause zsh to silently exit on a true EOF.
+
+This brings us at last to the crucial bits:  How does zsh know when it has 
+been reconfigured, and what reconfigurations change the behavior?
+
+Part Two: THE WAY OF THE WORLD WE GOT
+
+The choice was made to assume that:
+
+- zsh has been reconfigured if the keystroke that corresponds to the EOF 
+character is bound to a widget that is not an internal widget;
+
+- the behavior should only change if in fact the aforementioned not- 
+internal widget is also not a completion widget, because replacing "old" 
+completion with "new" completion should be otherwise transparent.
+
+Hence the following should, presently, be true statements:
+
+* Zsh exits on 10 EOF characters only when ZLE is not active, and only 
+  because 10 EOF characters are indistinguishable from 10 zero-byte reads,
+  which is what really causes it to exit.
+
+* When the binding for the key corresponding to the EOF character is a
+  binding to _any_ internal widget, pressing the EOF character in an empty
+  buffer _either_ exits _or_ prints a warning, and does _not_ call that
+  widget.
+
+* When the binding for the key corresponding to the EOF character is a
+  binding to _any_ completion widget, pressing the EOF character in an 
+  empty buffer _either_ exits _or_ prints a warning, and does _not_ call 
+  the widget.  (This happens to overlap with the foregoing statement for 
+  internal completion widgets.)
+
+* When the binding for the key corresponding to the EOF character is any
+  _other_ widget, the EOF character _either_ exits _or_ calls the widget
+  (which implies not printing the warning).  "Other" happens at this time
+  to be limited to widgets created with "zle -N".
+
+* In each "either" choice above, the setting of the ignoreeof option is
+  used to determine whether to exit (option unset) or to do whatever it
+  is that happens when the shell does not exit (option set).
+
+One could argue, then, that a better name for the option would have been 
+"no_exit_on_tty_eof_character" -- but historical precedent was "ignoreeof" 
+and, prior to this thread, nobody ever expressed serious concern over the 
+naming inaccuracy.
+
+In any case, if you can find a situation that violates any of those five
+statements, I'd agree that said situation is a bug.
+
+Returning to your excerpt far above, you appear to object to the fact that 
+the conditions of "not internal" and "not completion" are simultaneously 
+required in order for a widget binding to override the default behavior of 
+setopt ignoreeof.  Is that an accurate summation?
+
+You also feel that there shouldn't be a distinction on the behavior of 10 
+EOF characters, but my assertion is that 10 EOF characters was never 
+intended to have any semantics of its own and shouldn't be given any now.
+It's nothing but an unfortunate side-effect, and one that ZLE correctly
+avoided before, which is why I think 20363 should be backed out.
+
+On Thu, 16 Sep 2004, Peter Stephenson wrote:
+> 
+> I'm prepared to consider another option, such as zle_ignore_eof (meaning
+> that ignore_eof really did what csh used to, and zle_ignore_eof would be
+> my current proposal, or something such), or anything other than what was
+> there just before...
+
+Given all that I just explained, do you still feel that we have arrived in
+a bad place?  Every decision along the way was made for a clear reason, at
+the time.  Do you still think that bifurcating yet _again_, with another
+option, would truly improve matters?
+
+My own preference would be that we _do_ have exactly what was there just 
+before, except perhaps to include in the documentation some (hopefully 
+small) portion of what I have exposited in this message, in order that we
+don't ever have to go through this again.
+
+Whew.  Bunnies look around uncertainly, wondering if it's OK to gambol.
+

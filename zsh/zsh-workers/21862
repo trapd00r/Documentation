@@ -1,0 +1,114 @@
+From zsh-workers-return-21862-mason-zsh=primenet.com.au@sunsite.dk Tue Oct 11 11:36:43 2005
+Return-Path: <zsh-workers-return-21862-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12951 invoked from network); 11 Oct 2005 11:36:38 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 11 Oct 2005 11:36:38 -0000
+Received: (qmail 35717 invoked from network); 11 Oct 2005 11:36:32 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 11 Oct 2005 11:36:32 -0000
+Received: (qmail 25240 invoked by alias); 11 Oct 2005 11:36:29 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 21862
+Received: (qmail 25231 invoked from network); 11 Oct 2005 11:36:29 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 11 Oct 2005 11:36:29 -0000
+Received: (qmail 35416 invoked from network); 11 Oct 2005 11:36:28 -0000
+Received: from cluster-d.mailcontrol.com (HELO rly15d.srv.mailcontrol.com) (217.69.20.190)
+  by a.mx.sunsite.dk with SMTP; 11 Oct 2005 11:36:28 -0000
+Received: from exchange03.csr.com (mailhost1.csr.com [81.105.217.43])
+	by rly15d.srv.mailcontrol.com (MailControl) with ESMTP id j9BBaQCL012788
+	for <zsh-workers@sunsite.dk>; Tue, 11 Oct 2005 12:36:26 +0100
+Received: from news01 ([10.103.143.38]) by exchange03.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Tue, 11 Oct 2005 12:38:29 +0100
+Date: Tue, 11 Oct 2005 12:36:24 +0100
+From: Peter Stephenson <pws@csr.com>
+To: zsh-workers@sunsite.dk
+Subject: Re: [bug] backslash stripped in sh/ksh emulation
+Message-Id: <20051011123624.70fc9626.pws@csr.com>
+In-Reply-To: <20051011083842.GA5380@sc>
+References: <20051011083842.GA5380@sc>
+Organization: Cambridge Silicon Radio
+X-Mailer: Sylpheed version 0.9.12 (GTK+ 1.2.10; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 11 Oct 2005 11:38:29.0658 (UTC) FILETIME=[4D240FA0:01C5CE58]
+X-Scanned-By: MailControl A-05-40-00 (www.mailcontrol.com) on 10.68.0.125
+X-Spam-Checker-Version: SpamAssassin 3.0.4 (2005-06-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham 
+	version=3.0.4
+
+Stephane Chazelas <Stephane_Chazelas@yahoo.fr> wrote:
+> $ ARGV0=ksh zsh -xc 'a="\\*"; case $a in *\\*) echo a;; esac'
+> + a='\*'
+> + case * (*\*)
+> 
+> Can anyone explain it? It's OK if $a is quoted as in <case "$a">
+> 
+> After investigation, it appears it is triggered by globsubst.
+
+You're basically pointing out that in:
+
+a='\\*'
+print -r ${~a}
+
+the output is
+
+\*
+
+with only a single backslash (I'm assuming nonomatch is set and the pattern
+doesn't match a file --- everything is OK if it does).  Yes, this does seem
+to be a bug: the string shouldn't be altered if it doesn't match a pattern,
+and the use is inconsistent with other shells, which is bad here since
+glob_subst is partly designed to provide compatibility.
+
+Fixing it isn't that trivial, given the constraints:
+
+- Nothing else should change, i.e. the myriad other points at which
+  quoting takes place shouldn't be affected.
+- Also, the quoting effect of the first backslash should be retained
+  in pattern matching (in other words, ${~a} in the example should match a
+  single backslash).
+- zsh removes the so-called "null" arguments, essentially the ghosts
+  of quoting characters that are only needed to recreate a printed
+  representation of the input string, before pattern matching takes
+  place, so restoring it after isn't natural in the current code.
+
+The last one is the really tricky one.  Possible a complete rewrite of the
+way quoting is handled would make this all work, but I'm not going down
+that road.
+
+So I've introduced a variant of Bnull, the ghost of a backslash, called
+Bnullkeep.  This is only inserted in the code used for globsubst, isn't
+removed by remnulargs(), and is explicitly ignored by pattern matching.  If
+the pattern match failed then untokenize() will restore the backslash to
+output the original string.
+
+It's possible there are inconsistencies in that there are places that Bnull
+and Bnullkeep are treated the same when they should be different, or vice
+versa.  It's also possible that there's a point in the code that expects a
+tokenized string but hasn't been taught properly about Bnullkeep, since the
+pattern matching is the only part I've modified.  However, none of the
+existing tests fail, and the new test I've added succeeds.
+
+Nonetheless, this doesn't give me a warm, fuzzy feeling.  If anyone can
+think of places where this might have the wrong effect...
+
+I will not be applying this to 4.2.
+
+(It's just possible we could get away with only using Bnullkeep by suitable
+changes, simplifying the code a bit.)
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+This message has been scanned for viruses by BlackSpider MailControl - www.blackspider.com
+

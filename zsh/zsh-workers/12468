@@ -1,0 +1,875 @@
+From zsh-workers-return-12468-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Aug 01 16:36:26 2000
+Return-Path: <zsh-workers-return-12468-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5137 invoked from network); 1 Aug 2000 16:32:30 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 1 Aug 2000 16:32:30 -0000
+Received: (qmail 457 invoked by alias); 1 Aug 2000 16:32:06 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12468
+Received: (qmail 440 invoked from network); 1 Aug 2000 16:31:57 -0000
+Date: Tue, 1 Aug 2000 17:31:52 +0100
+From: Adam Spiers <adam@spiers.net>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: completion caching layer
+Message-ID: <20000801173152.A9212@thelonious.new.ox.ac.uk>
+Reply-To: Adam Spiers <adam@spiers.net>
+Mail-Followup-To: zsh-workers@sunsite.auc.dk
+References: <200007270800.KAA15656@beta.informatik.hu-berlin.de>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+X-Mailer: Mutt 1.0.1i
+In-Reply-To: <200007270800.KAA15656@beta.informatik.hu-berlin.de>; from wischnow@informatik.hu-berlin.de on Thu, Jul 27, 2000 at 10:00:48AM +0200
+X-Home-Page: http://www.new.ox.ac.uk/~adam/
+X-OS: RedHat Linux
+
+Sven Wischnowsky (wischnow@informatik.hu-berlin.de) wrote:
+> Adam Spiers wrote:
+> > This sounds very nice, but I'm not sure what sort of policies you have
+> > in mind, and how they should be implement.  Could you give a few
+> > examples?
+> 
+> Of course, that's the problem. One that may be useful quite often
+> would compare the mtime of a file and re-build the cache when it has
+> changed.
+> 
+> In some cases (when using data that gets updated after regular time
+> intervals) wall-clock time comparison may be good (with that it would
+> probably be possible to sensibly cache YP data if we would need that).
+> 
+> However, I don't think there can ever be a complete list. Maybe we
+> should just give _retrieve_cache an optional argument which is
+> evaluated or a function name or something that gets called to test if
+> the cache should be re-build. We probably just need more experience...
+
+OK, I've implemented this via the 'cache-policy' style, which should
+contain the name of a function which returns zero iff the cache needs
+rebuilding.  _cache_invalid is a helper function which makes it easy
+to perform this calculation.
+
+Here's the patch (with documentation too, woohoo!)  It's quite big,
+mainly because of reindentation.  I'd be very grateful if one or two
+people could give it a quick thrashing to see whether I've
+missed/broken anything (it seems fine for me but ...)  I'll commit it
+if it works for someone else or if I get bored of waiting for people
+to try :-)
+
+Index: Completion/Base/.distfiles
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Base/.distfiles,v
+retrieving revision 1.4
+diff -u -r1.4 .distfiles
+--- Completion/Base/.distfiles	2000/05/30 09:30:08	1.4
++++ Completion/Base/.distfiles	2000/08/01 16:11:29
+@@ -1,7 +1,7 @@
+ DISTFILES_SRC='
+     .distfiles 
+-    _arg_compile _arguments _brace_parameter _combination
++    _arg_compile _arguments _brace_parameter _cache_invalid _combination
+     _command_names _condition _default _describe _equal _first _in_vared
+-    _jobs _math _parameter _precommand _redirect _regex_arguments _subscript
+-    _tilde _value _values
++    _jobs _math _parameter _precommand _redirect _regex_arguments
++    _retrieve_cache _store_cache _subscript _tilde _value _values
+ '
+Index: Doc/Zsh/compsys.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compsys.yo,v
+retrieving revision 1.88
+diff -u -r1.88 compsys.yo
+--- Doc/Zsh/compsys.yo	2000/08/01 07:19:16	1.88
++++ Doc/Zsh/compsys.yo	2000/08/01 16:28:28
+@@ -3186,6 +3186,22 @@
+ be completed. The last description says that all other arguments are
+ `var(page numbers)' but does not give possible completions.
+ )
++findex(_cache_invalid)
++item(tt(_cache_invalid) var(cache_identifier))(
++This function returns 0 if the completions cache corresponding to the
++given cache identifier needs rebuilding.  It determines this by
++looking up the tt(cache-policy) style for the current context, and
++if it exists, runs the function of the same name, supplying the full
++path to the relevant cache file as the only argument.
++
++Example:
++
++example(_example_caching_policy () {
++    # rebuild if cache is more than a week old
++    oldp=( "$1"(Nmw+1) )
++    (( $#oldp ))
++})
++)
+ findex(_call)
+ item(tt(_call) var(tag) var(string) ...)(
+ This function is used in places where a command is called, making it
+@@ -3592,6 +3608,18 @@
+   (( ret )) || break
+ done)
+ )
++findex(_retrieve_cache)
++item(tt(_retrieve_cache) var(cache_identifier))(
++This function retrieves completion information from the file given by
++var(cache_identifier), stored in a directory specified by the
++tt(cache-path) style (defaults to tt(~/.zsh/cache)).  The return value
++is zero if retrieval was successful.  It will only attempt retrieval
++if the tt(use-cache) style is set, so you can call this function
++without worrying about whether the user wanted to use the caching
++layer.
++
++See tt(_store_cache) below for more details.
++)
+ findex(_sep_parts)
+ item(tt(_sep_parts))(
+ This function is passed alternating arrays and separators as arguments.
+@@ -3714,6 +3742,37 @@
+ separate set. With the tt(-m) option, the arguments are treated in the 
+ same way as the the values for the tt(tag-order) style (except for the 
+ `tt(!...)', `tt(-)' and `tt(foo())' forms).
++)
++findex(_store_cache)
++item(tt(_store_cache) var(cache_identifier) var(vars) ...)(
++This function, when combined with tt(_retrieve_cache) and
++tt(_cache_invalid), makes it easy to implement a caching layer for
++your completion functions.  If a completion function needs to perform
++a costly operation in order to generate data which is used to
++calculate completions, you can store that data in variables, and use
++this function to dump the values of those variables to a file.  Then,
++if they are needed in subsequent shell invocations, they can be
++retrieved quickly from that file via tt(_retrieve_cache), avoiding the
++needly for repeating the costly operation.
++
++The var(cache_identifier) specifies the file which the data should be
++dumped to, and is stored in a directory specified by the
++tt(cache-path) style (defaults to tt(~/.zsh/cache)).  The remaining
++var(vars) arguments are the variables to dump to the file.  Currently
++only arrays are supported.
++
++The return value is zero if storage was successful.  The function will
++only attempt storage if the tt(use-cache) style is set, so you can
++call this function without worrying about whether the user wanted to
++use the caching layer.
++
++If your completion function avoids calling _retrieve_cache when it
++already has the completion data in the environment, it should probably
++at least call tt(_cache_invalid) to check whether this data and the
++data cached on disk is still valid.
++
++See the _perl_modules completion function for a simple example of
++usage of this caching layer.
+ )
+ findex(_tags)
+ item(tt(_tags) [ tt(-C) var(name) [ var(tags) ... ] ])(
+Index: Completion/Base/_cache_invalid
+===================================================================
+RCS file: _cache_invalid
+diff -N _cache_invalid
+--- /dev/null	Tue May  5 13:32:27 1998
++++ _cache_invalid	Tue Aug  1 09:11:29 2000
+@@ -0,0 +1,27 @@
++#autoload
++#
++# Function to decide whether a completions cache needs rebuilding
++
++_cache_invalid () {
++  local _cache_ident _cache_dir _cache_path _cache_policy
++  _cache_ident="$1"
++
++  # If the cache is disabled, we never want to rebuild it, so pretend
++  # it's valid.
++  zstyle -t ":completion:${curcontext}:" use-cache || return 1
++
++  zstyle -s ":completion:${curcontext}:" cache-path _cache_dir
++  : ${_cache_dir:=~/.zsh/cache}
++  _cache_path="$_cache_dir/$_cache_ident"
++
++  # See whether the caching policy says that the cache needs rebuilding
++  # (the policy will return 0 if it does).
++  zstyle -s ":completion:${curcontext}:" cache-policy _cache_policy
++  if [[ -n "$_cache_policy" ]] && "$_cache_policy" "$_cache_path"; then
++    return 0
++  fi
++
++  return 1
++}
++
++_cache_invalid "$@"
+Index: Completion/Base/_retrieve_cache
+===================================================================
+RCS file: _retrieve_cache
+diff -N _retrieve_cache
+--- /dev/null	Tue May  5 13:32:27 1998
++++ _retrieve_cache	Tue Aug  1 09:11:29 2000
+@@ -0,0 +1,38 @@
++#autoload
++#
++# Retrieval component of completions caching layer
++
++_retrieve_cache () {
++  local _cache_ident _cache_dir _cache_path _cache_policy
++  _cache_ident="$1"
++  
++  if zstyle -t ":completion:${curcontext}:" use-cache; then
++    # Decide which directory to retrieve cache from, and ensure it exists
++    zstyle -s ":completion:${curcontext}:" cache-path _cache_dir
++    : ${_cache_dir:=~/.zsh/cache}
++    if [[ ! -d "$_cache_dir" ]]; then
++      if [[ -e "$_cache_dir" ]]; then
++        _message "cache-dir ($_cache_dir) isn't a directory\!"
++        return 1
++      else
++        return 1
++      fi
++    fi
++  
++    _cache_path="$_cache_dir/$_cache_ident"
++  
++    if [[ -e "$_cache_path" ]]; then
++      if _cache_invalid "$_cache_ident"; then
++        return 1
++      fi
++
++      . "$_cache_path"
++      return 0
++    else
++      return 1
++    fi
++  else
++    return 1
++  fi
++}
++
+Index: Completion/Linux/_rpm
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Linux/_rpm,v
+retrieving revision 1.15
+diff -u -r1.15 _rpm
+--- Completion/Linux/_rpm	2000/07/12 09:01:41	1.15
++++ Completion/Linux/_rpm	2000/08/01 16:11:29
+@@ -41,213 +41,238 @@
+ 
+ # Used by `_arguments', made local here.
+ 
+-local curcontext="$curcontext" state lstate line nm="$compstate[nmatches]"
+-typeset -A opt_args
+-
+-state=''
+-
+-local ret=1
+-local -a tmp expl commonopts packageopts
+-commonopts=(
+-  '*-v[verbose mode]'
+-  '--rcfile:resource file:_files'
+-  '--ftpproxy:FTP proxy server:_hosts'
+-  '--ftpport:FTP port number:'
+-  '--httpproxy:HTTP proxy server:_hosts'
+-  '--httpport:HTTP port number:'
+-)
+-packageopts=(
+-  '-a[query all packages]'
+-  '-p+[query uninstalled package file]:*:RPM package file:->package_file'
+-  '-f[specify file to query owner of]:file:_files'
+-  '--triggeredby:RPM package:->package'
+-  '--whatprovides:RPM capability:->capability'
+-  '--whatrequires:RPM capability:->capability'
+-)
+-pathopts=(
+-  '--root:RPM root directory:_files -/'
+-  '--dbpath:RPM database path:_files -/'
+-)
+-
+-# Do simple completions or get the first state.
+-
+-_arguments -C -s \
+-  '--help[print help message]' \
+-  '--version[print version number]' \
+-  "${commonopts[@]}" \
+-  '-q+[query mode]:*:query:->query' \
+-  --{querytags,initdb,showrc} \
+-  '--pipe:pipe command:_command_names -e' \
+-  -{V,y}'[verify mode]:*:verify:->verify' \
+-  '--verify[verify mode]:*:verify:->verify' \
+-  '--setperms[set file permissions]:*:package:->setattrs' \
+-  '--setugids[set file owner/group]:*:package:->setattrs' \
+-  '(--install)-i+[install mode]:*:install:->install' \
+-  '(-i)--install:*:install:->install' \
+-  '(--upgrade)-U+[upgrade mode]:*:upgrade:->upgrade' \
+-  '(-U)--upgrade:*:upgrade:->upgrade' \
+-  '(--freshen)-F+[freshen mode]:*:upgrade:->upgrade' \
+-  '(-F)--freshen:*:upgrade:->upgrade' \
+-  '(--erase)-e+[uninstall mode]:*:uninstall:->uninstall' \
+-  '(-e)--erase:*:uninstall:->uninstall' \
+-  '-b+[build mode (spec file)]:build stage:((p\:execute\ \%prep\ stage l\:do\ a\ list\ check c\:execute\ build\ stage i\:execute\ install\ stage b\:build\ a\ binary\ package a\:build\ binary\ and\ source\ packages)):*:build:->build_b' \
+-  '(-b)-t+[build mode (tar file)]:build stage:((p\:execute\ \%prep\ stage l\:do\ a\ list\ check c\:execute\ build\ stage i\:execute\ install\ stage b\:build\ a\ binary\ package a\:build\ binary\ and\ source\ packages)):*:build:->build_t' \
+-  --{resign,addsign}':*:RPM package:->package_file' \
+-  '--rmsource:*:spec file:->spec_file' \
+-  --{rebuild,recompile}':*:Src RPM files:->package_src' \
+-  '(--checksig)-K+[signature check mode]:*:sigcheck:->sigcheck' \
+-  '(-K)--checksig:*:sigcheck:->sigcheck' \
+-  '--rebuilddb:*:rebuild:->rebuild' && ret=0
+-
+-# As long as we have a state name...
+-
+-while [[ -n "$state" ]]; do
+-
+-  # First try to call a user-defined function.
+-
+-  _funcall ret _rpm_$state && return ret
+-
+-  # Copy the state and reset `state', to simplify the test above.
+-
+-  lstate="$state"
++_rpm () {
++  local curcontext="$curcontext" state lstate line nm="$compstate[nmatches]"
++  typeset -A opt_args
++  
+   state=''
+-  tmp=()
+-
+-  # Dispatch...
+-
+-  case "$lstate" in
+-  query)
+-    # --dump requires on of -{l,c,d}
+-    # --triggers requires --script
+-    _arguments -s \
+-      -q "${commonopts[@]}" "${packageopts[@]}" "${pathopts[@]}" \
+-      '--queryformat:RPM query format:->tags' \
+-      '-i[display package information]' \
+-      '--changelog[display change log]' \
+-      '-l[display package file list]' \
+-      '-s[show file states]' \
+-      '-d[documentation files only]' \
+-      '-c[configuration files only]' \
+-      '--dump[show all information]' \
+-      --provides \
+-      -{R,-requires}'[list dependencies]' \
+-      '--scripts[show (un)install scripts]' \
+-      '--triggers[show trigger scripts]' \
+-      '*:RPM package:->package_or_file' && ret=0
+-    ;;
+-  setattrs)
+-    _arguments -s --set{perm,ugids} "${packageopts[@]}" && ret = 0
+-    ;;
+-  verify)
+-    _arguments -s \
+-      '(-y --verify)-V' '(-V --verify)-y' '(-y -V)--verify' \
+-      "${commonopts[@]}" "${pathopts[@]}" \
+-      --no{deps,md5,files} \
+-      '*:RPM package:->package' && ret=0
+-    ;;
+-  upgrade)
+-    tmp=( '(--upgrade)-U' '(-U)--upgrade' '(--force)--oldpackage' )
+-    ;&
+-  install)
+-    (( $#tmp )) || tmp=( '(--install)-i' '(-i)--install' )
+-    _arguments -s "$tmp[@]" \
+-      "${commonopts[@]}" "${pathopts[@]}" \
+-      '--excludepath:exclude files in following path:_files -/' \
+-      '--relocate:relocate:->relocate' \
+-      '--prefix:package prefix directory:_files -/' \
+-      '(-h)--hash' '(--hash)-h' \
+-      '(--replacepkgs --replacefiles --oldpackage)--force' \
+-      '(--force)--'{replacefiles,replacepkgs} \
+-      --{badreloc,excludedocs,allfiles,ignorearch,ignoreos,includedocs,justdb,nodeps,noorder,noscripts,notriggers,percent,test} \
+-      '*:pkg file:->package_file' && ret=0
+-    ;;
+-  uninstall)
+-    _arguments -s \
+-      '(-e)--erase' '(--erase)-e' \
+-      "${commonopts[@]}" "${pathopts[@]}" \
+-      --{allmatches,justdb,nodeps,noorder,noscripts,notriggers} \
+-      '*:RPM package:->package' && ret=0
+-    ;;
+-  build_b)
+-    tmp=( '*:spec file:_files -g \*.spec' )
+-    ;&
+-  build_t)
+-    (( $#tmp )) || tmp=( '*:tar file:_files -g \*.\(\#i\)tar\(.\*\|\)' )
+-
+-    _arguments -s \
+-      "${commonopts[@]}" "${pathopts[@]}" \
+-      --{short-circuit,clean,rmsource,sign,test} \
+-      '--target:specify a build target:->target'\
+-      '--buildroot:build root directory:_files -/' \
+-      '--buildarch:architecture for which to build:->target' \
+-      '--buildos:ositecture for which to build:' \
+-      '--timecheck:time check (seconds):' "$tmp[1]" && ret=0
+-    ;;
+-  sigcheck)
+-    _arguments -s \
+-      '(-K)--checksig' '(--checksig)-K' \
+-      "${commonopts[@]}" \
+-      --no{pgp,md5} \
+-      '*:RPM package file:->package_file' && ret=0
+-    ;;
+-  rebuild)
+-    _arguments -s \
+-      "${commonopts[@]}" "${pathopts[@]}" \
+-      '*:RPM source package file:->package_file' && ret=0
+-    ;;
+-  target)
+-    _wanted target expl 'Target platforms' \
+-        compadd $(_call target rpm --showrc 2> /dev/null |grep 'compatible archs'|sed 's/.*: //') && ret=0
+-    ;;
+-  package_or_file)
+-    state=package_file
+-    ;&
+-  package)
+-    _wanted packages expl 'RPM package' \
+-        compadd -M 'r:|-=* r:|=*' - $(_call packages rpm -qa 2> /dev/null) && ret=0
+-    ;;
+-  spec_file)
+-    _wanted specfiles expl 'spec file' \
+-        _files -g \*.spec && ret=0
+-    ;;
+-  package_file)
+-    _wanted files expl 'RPM package file' \
+-        _files -g '*.(#i)rpm' && ret=0
+-    if [[ -prefix 1 (f|ht)tp:// ]]; then
+-      _wanted urls expl 'URL of RPM package file' \
+-          _urls -f -g '*.(#i)rpm' "${expl[@]}" && ret=0
+-    else
+-      _wanted urls expl 'URL of RPM package file' \
+-          compadd -S '' "${expl[@]}" ftp:// http:// && ret=0
+-    fi
+-    ;;
+-  package_src)
+-    _files -g \*.src\(\#i\).rpm
+-   ;&
+-  tags)
+-    if compset -P '*%*\{'; then
+-      _wanted tags expl 'RPM tag' \
+-          compadd -M 'm:{a-z}={A-Z}' -S '\}' - \
+-                  "${(@)${(@f)$(_call tags rpm --querytags 2> /dev/null)}#RPMTAG_}" && ret=0
+-    else
+-      _message 'RPM format'
+-    fi
+-    ;;
+-  capability)
+-    _message 'RPM capability'
+-    ;;
+-  relocate)
+-    if compset -P '*='; then
+-      _description directories expl 'new path'
+-    else
+-      _description directories expl 'old path'
+-    fi
+-
+-    _files "$expl[@]" -/ && ret=0
+-    ;;
+-  esac
++  
++  local ret=1
++  local -a tmp expl commonopts packageopts
++  commonopts=(
++    '*-v[verbose mode]'
++    '--rcfile:resource file:_files'
++    '--ftpproxy:FTP proxy server:_hosts'
++    '--ftpport:FTP port number:'
++    '--httpproxy:HTTP proxy server:_hosts'
++    '--httpport:HTTP port number:'
++  )
++  packageopts=(
++    '-a[query all packages]'
++    '-p+[query uninstalled package file]:*:RPM package file:->package_file'
++    '-f[specify file to query owner of]:file:_files'
++    '--triggeredby:RPM package:->package'
++    '--whatprovides:RPM capability:->capability'
++    '--whatrequires:RPM capability:->capability'
++  )
++  pathopts=(
++    '--root:RPM root directory:_files -/'
++    '--dbpath:RPM database path:_files -/'
++  )
++  
++  # Do simple completions or get the first state.
++  
++  _arguments -C -s \
++    '--help[print help message]' \
++    '--version[print version number]' \
++    "${commonopts[@]}" \
++    '-q+[query mode]:*:query:->query' \
++    --{querytags,initdb,showrc} \
++    '--pipe:pipe command:_command_names -e' \
++    -{V,y}'[verify mode]:*:verify:->verify' \
++    '--verify[verify mode]:*:verify:->verify' \
++    '--setperms[set file permissions]:*:package:->setattrs' \
++    '--setugids[set file owner/group]:*:package:->setattrs' \
++    '(--install)-i+[install mode]:*:install:->install' \
++    '(-i)--install:*:install:->install' \
++    '(--upgrade)-U+[upgrade mode]:*:upgrade:->upgrade' \
++    '(-U)--upgrade:*:upgrade:->upgrade' \
++    '(--freshen)-F+[freshen mode]:*:upgrade:->upgrade' \
++    '(-F)--freshen:*:upgrade:->upgrade' \
++    '(--erase)-e+[uninstall mode]:*:uninstall:->uninstall' \
++    '(-e)--erase:*:uninstall:->uninstall' \
++    '-b+[build mode (spec file)]:build stage:((p\:execute\ \%prep\ stage l\:do\ a\ list\ check c\:execute\ build\ stage i\:execute\ install\ stage b\:build\ a\ binary\ package a\:build\ binary\ and\ source\ packages)):*:build:->build_b' \
++    '(-b)-t+[build mode (tar file)]:build stage:((p\:execute\ \%prep\ stage l\:do\ a\ list\ check c\:execute\ build\ stage i\:execute\ install\ stage b\:build\ a\ binary\ package a\:build\ binary\ and\ source\ packages)):*:build:->build_t' \
++    --{resign,addsign}':*:RPM package:->package_file' \
++    '--rmsource:*:spec file:->spec_file' \
++    --{rebuild,recompile}':*:Src RPM files:->package_src' \
++    '(--checksig)-K+[signature check mode]:*:sigcheck:->sigcheck' \
++    '(-K)--checksig:*:sigcheck:->sigcheck' \
++    '--rebuilddb:*:rebuild:->rebuild' && ret=0
++  
++  # As long as we have a state name...
++  
++  while [[ -n "$state" ]]; do
++  
++    # First try to call a user-defined function.
++  
++    _funcall ret _rpm_$state && return ret
++  
++    # Copy the state and reset `state', to simplify the test above.
++  
++    lstate="$state"
++    state=''
++    tmp=()
++  
++    # Dispatch...
++  
++    case "$lstate" in
++    query)
++      # --dump requires on of -{l,c,d}
++      # --triggers requires --script
++      _arguments -s \
++        -q "${commonopts[@]}" "${packageopts[@]}" "${pathopts[@]}" \
++        '--queryformat:RPM query format:->tags' \
++        '-i[display package information]' \
++        '--changelog[display change log]' \
++        '-l[display package file list]' \
++        '-s[show file states]' \
++        '-d[documentation files only]' \
++        '-c[configuration files only]' \
++        '--dump[show all information]' \
++        --provides \
++        -{R,-requires}'[list dependencies]' \
++        '--scripts[show (un)install scripts]' \
++        '--triggers[show trigger scripts]' \
++        '*:RPM package:->package_or_file' && ret=0
++      ;;
++    setattrs)
++      _arguments -s --set{perm,ugids} "${packageopts[@]}" && ret = 0
++      ;;
++    verify)
++      _arguments -s \
++        '(-y --verify)-V' '(-V --verify)-y' '(-y -V)--verify' \
++        "${commonopts[@]}" "${pathopts[@]}" \
++        --no{deps,md5,files} \
++        '*:RPM package:->package' && ret=0
++      ;;
++    upgrade)
++      tmp=( '(--upgrade)-U' '(-U)--upgrade' '(--force)--oldpackage' )
++      ;&
++    install)
++      (( $#tmp )) || tmp=( '(--install)-i' '(-i)--install' )
++      _arguments -s "$tmp[@]" \
++        "${commonopts[@]}" "${pathopts[@]}" \
++        '--excludepath:exclude files in following path:_files -/' \
++        '--relocate:relocate:->relocate' \
++        '--prefix:package prefix directory:_files -/' \
++        '(-h)--hash' '(--hash)-h' \
++        '(--replacepkgs --replacefiles --oldpackage)--force' \
++        '(--force)--'{replacefiles,replacepkgs} \
++        --{badreloc,excludedocs,allfiles,ignorearch,ignoreos,includedocs,justdb,nodeps,noorder,noscripts,notriggers,percent,test} \
++        '*:pkg file:->package_file' && ret=0
++      ;;
++    uninstall)
++      _arguments -s \
++        '(-e)--erase' '(--erase)-e' \
++        "${commonopts[@]}" "${pathopts[@]}" \
++        --{allmatches,justdb,nodeps,noorder,noscripts,notriggers} \
++        '*:RPM package:->package' && ret=0
++      ;;
++    build_b)
++      tmp=( '*:spec file:_files -g \*.spec' )
++      ;&
++    build_t)
++      (( $#tmp )) || tmp=( '*:tar file:_files -g \*.\(\#i\)tar\(.\*\|\)' )
++  
++      _arguments -s \
++        "${commonopts[@]}" "${pathopts[@]}" \
++        --{short-circuit,clean,rmsource,sign,test} \
++        '--target:specify a build target:->target'\
++        '--buildroot:build root directory:_files -/' \
++        '--buildarch:architecture for which to build:->target' \
++        '--buildos:ositecture for which to build:' \
++        '--timecheck:time check (seconds):' "$tmp[1]" && ret=0
++      ;;
++    sigcheck)
++      _arguments -s \
++        '(-K)--checksig' '(--checksig)-K' \
++        "${commonopts[@]}" \
++        --no{pgp,md5} \
++        '*:RPM package file:->package_file' && ret=0
++      ;;
++    rebuild)
++      _arguments -s \
++        "${commonopts[@]}" "${pathopts[@]}" \
++        '*:RPM source package file:->package_file' && ret=0
++      ;;
++    target)
++      _wanted target expl 'Target platforms' \
++          compadd $(_call target rpm --showrc 2> /dev/null |grep 'compatible archs'|sed 's/.*: //') && ret=0
++      ;;
++    package_or_file)
++      state=package_file
++      ;&
++    package)
++      if ( [[ ${+_rpms} -eq 0 ]] || _cache_invalid RPMs ) &&
++         ! _retrieve_cache RPMs;
++      then
++        _rpms=( $(_call packages rpm -qa 2>/dev/null) )
++        _store_cache RPMs _rpms
++      fi
++      _wanted packages expl 'RPM package' \
++          compadd -M 'r:|-=* r:|=*' - "$_rpms[@]" && ret=0
++      ;;
++    spec_file)
++      _wanted specfiles expl 'spec file' \
++          _files -g \*.spec && ret=0
++      ;;
++    package_file)
++      _wanted files expl 'RPM package file' \
++          _files -g '*.(#i)rpm' && ret=0
++      if [[ -prefix 1 (f|ht)tp:// ]]; then
++        _wanted urls expl 'URL of RPM package file' \
++            _urls -f -g '*.(#i)rpm' "${expl[@]}" && ret=0
++      else
++        _wanted urls expl 'URL of RPM package file' \
++            compadd -S '' "${expl[@]}" ftp:// http:// && ret=0
++      fi
++      ;;
++    package_src)
++      _files -g \*.src\(\#i\).rpm
++     ;&
++    tags)
++      if compset -P '*%*\{'; then
++        _wanted tags expl 'RPM tag' \
++            compadd -M 'm:{a-z}={A-Z}' -S '\}' - \
++                    "${(@)${(@f)$(_call tags rpm --querytags 2> /dev/null)}#RPMTAG_}" && ret=0
++      else
++        _message 'RPM format'
++      fi
++      ;;
++    capability)
++      _message 'RPM capability'
++      ;;
++    relocate)
++      if compset -P '*='; then
++        _description directories expl 'new path'
++      else
++        _description directories expl 'old path'
++      fi
++  
++      _files "$expl[@]" -/ && ret=0
++      ;;
++    esac
++  
++    [[ ret -eq 0 || $nm -ne $compstate[nmatches] ]] && return 0
++  done
++  
++  return ret
++}
++
++# set a sensible default caching policy
++local update_policy
++zstyle -s ":completion:*:*:rpm:*" cache-policy update_policy
++if [[ -z "$update_policy" ]]; then
++  zstyle ":completion:*:*:rpm:*" cache-policy _rpms_caching_policy
++fi
++
++_rpms_caching_policy () {
++  # rebuild if cache is more than a week old
++  oldp=( "$1"(Nmw+1) )
++  (( $#oldp )) && return 0
+ 
+-  [[ ret -eq 0 || $nm -ne $compstate[nmatches] ]] && return 0
+-done
++  [[ /var/lib/rpm/packages.rpm -nt "$1" ]]
++}
+ 
+-return ret
++_rpm "$@"
+cvs server: Diffing Completion/User
+Index: Completion/User/_perl_modules
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/User/_perl_modules,v
+retrieving revision 1.6
+diff -u -r1.6 _perl_modules
+--- Completion/User/_perl_modules	2000/05/31 09:38:26	1.6
++++ Completion/User/_perl_modules	2000/08/01 16:11:29
+@@ -17,49 +17,85 @@
+ #   algorithm (the zsh code does almost the same, but only misses
+ #   modules which don't begin with an uppercase letter).
+ 
+-local opts
+-zparseopts -D -a opts S: q
+-
+-if [[ ${+_perl_modules} -eq 0 ]]; then
+-  if zstyle -t ":completion:${curcontext}:modules" try-to-use-pminst \
+-     && (( ${+commands[pminst]} )); then
+-    _perl_modules=( $(pminst) )
+-  else
+-    local inc libdir new_pms
+-    if (( ${+commands[perl]} )); then
+-      inc=( $( perl -e 'print "@INC"' ) )
++_perl_modules () {
++  local opts
++  zparseopts -D -a opts S: q
++  
++  # Set a sensible default caching policy.  This has to be done inside
++  # this function otherwise we wouldn't know the context for the style.
++  local update_policy
++  zstyle -s ":completion:${curcontext}:" cache-policy update_policy
++  if [[ -z "$update_policy" ]]; then
++    zstyle ":completion:${curcontext}:" cache-policy \
++      _perl_modules_caching_policy
++  fi
++  
++  if ( [[ ${+_perl_modules} -eq 0 ]] || _cache_invalid perl_modules ) &&
++     ! _retrieve_cache perl_modules;
++  then
++    if zstyle -t ":completion:${curcontext}:modules" try-to-use-pminst &&
++       (( ${+commands[pminst]} ));
++    then
++      _perl_modules=( $(pminst) )
+     else
+-      # If perl isn't there, one wonders why the user's trying to
+-      # complete Perl modules.  Maybe her $path is wrong?
+-      _message "Didn't find perl on \$PATH; guessing @INC ..."
+-
+-      setopt localoptions extendedglob
+-      inc=( /usr/lib/perl5{,/{site_perl/,}<5->.([0-9]##)}(N) 
+-            ${(s.:.)PERL5LIB} )
+-    fi
+-
+-    typeset -agU _perl_modules  # _perl_modules is global, no duplicates
+-    _perl_modules=( )
+-
+-    for libdir in $inc; do
+-      # Ignore cwd - could be too expensive e.g. if we're near /
+-      if [[ $libdir == '.' ]]; then break; fi
+-
+-      # Find all modules
+-      if [[ -d $libdir && -x $libdir ]]; then
+-      cd $libdir
+-      new_pms=( {[A-Z]*/***/,}*.pm~*blib*(N) )
+-      cd $OLDPWD
++      local inc libdir new_pms
++      if (( ${+commands[perl]} )); then
++        inc=( $( perl -e 'print "@INC"' ) )
++      else
++        # If perl isn't there, one wonders why the user's trying to
++        # complete Perl modules.  Maybe her $path is wrong?
++        _message "Didn't find perl on \$PATH; guessing @INC ..."
++  
++        setopt localoptions extendedglob
++        inc=( /usr/lib/perl5{,/{site_perl/,}<5->.([0-9]##)}(N) 
++              ${(s.:.)PERL5LIB} )
+       fi
+-
+-      # Convert to Perl nomenclature
+-      new_pms=( ${new_pms:r:fs#/#::#} )
+-
+-      _perl_modules=( $new_pms $_perl_modules )
++  
++      typeset -agU _perl_modules  # _perl_modules is global, no duplicates
++      _perl_modules=( )
++  
++      for libdir in $inc; do
++        # Ignore cwd - could be too expensive e.g. if we're near /
++        if [[ $libdir == '.' ]]; then break; fi
++  
++        # Find all modules
++        if [[ -d $libdir && -x $libdir ]]; then
++        cd $libdir
++        new_pms=( {[A-Z]*/***/,}*.pm~*blib*(N) )
++        cd $OLDPWD
++        fi
++  
++        # Convert to Perl nomenclature
++        new_pms=( ${new_pms:r:fs#/#::#} )
++  
++        _perl_modules=( $new_pms $_perl_modules )
++      done
++    fi
++  
++    _store_cache perl_modules _perl_modules
++  fi
++  
++  local expl
++  
++  _wanted modules expl 'Perl modules' compadd "$opts[@]" -a _perl_modules
++}
++
++_perl_modules_caching_policy () {
++  local _perllocals
++
++  # rebuild if cache is more than a week old
++  oldp=( "$1"(Nmw+1) )
++  (( $#oldp )) && return 0
++
++  _perllocals=( /usr/lib/perl5/**/perllocal.pod(N) )
++
++  if (( $#_perllocals )); then
++    for pod in $_perllocals; do
++      [[ "$pod" -nt "$1" ]] && return 0
+     done
+   fi
+-fi
+ 
+-local expl
++  return 1
++}
+ 
+-_wanted modules expl 'Perl modules' compadd "$opts[@]" -a _perl_modules
++_perl_modules "$@"
+Index: Completion/Base/_store_cache
+===================================================================
+RCS file: _store_cache
+diff -N _store_cache
+--- /dev/null	Tue May  5 13:32:27 1998
++++ _store_cache	Tue Aug  1 09:13:53 2000
+@@ -0,0 +1,37 @@
++#autoload
++#
++# Storage component of completions caching layer
++
++local _cache_ident
++_cache_ident="$1"
++
++if zstyle -t ":completion:${curcontext}:" use-cache; then
++  # Decide which directory to cache to, and ensure it exists
++  zstyle -s ":completion:${curcontext}:" cache-path _cache_dir
++  : ${_cache_dir:=~/.zsh/cache}
++  if [[ ! -d "$_cache_dir" ]]; then
++    if [[ -e "$_cache_dir" ]]; then
++      _message "cache-dir style points to a non-directory\!"
++    else
++      mkdir -p "$_cache_dir"
++      if [[ ! -d "$_cache_dir" ]]; then
++        _message "Couldn't create cache-dir $_cache_dir"
++        return 1
++      fi
++    fi
++  fi
++
++  # grr, doesn't work, so we have to roll our own
++#  typeset "$@[2,-1]" > "$_cache_dir/$_cache_ident"
++
++  # only deals with arrays so far
++  for var in "$@[2,-1]"; do
++    print -n "$var=("
++    print -nr - "${(o@P)${var}}"
++    print ")\n"
++  done >! "$_cache_dir/$_cache_ident"
++else
++  return 1
++fi
++
++return 0
+

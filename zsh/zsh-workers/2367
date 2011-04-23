@@ -1,0 +1,235 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Mon Nov 11 12:12:35 1996
+Return-Path: zsh-workers-request@euclid.skiles.gatech.edu
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id MAA06905 for <mason@primenet.com.au>; Mon, 11 Nov 1996 12:12:30 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id UAA02293; Sun, 10 Nov 1996 20:06:11 -0500 (EST)
+Resent-Date: Sun, 10 Nov 1996 20:06:11 -0500 (EST)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199611102355.AAA01982@hzoli.ppp.cs.elte.hu>
+Subject: Re: Handling for ZLE modules
+To: zefram@dcs.warwick.ac.uk (Zefram)
+Date: Mon, 11 Nov 1996 00:55:39 +0100 (MET)
+Cc: pws@ifh.de, zsh-workers@math.gatech.edu
+In-Reply-To: <28077.199611081716@stone.dcs.warwick.ac.uk> from Zefram at "Nov 8, 96 05:16:46 pm"
+X-Mailer: ELM [version 2.4ME+ PL17 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"kDuzk.0.lZ.2mdXo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2367
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+> >deleting at the end.  I have arranged it so that the function is
+> >marked as deleted with name "<deleted>" (which should only be used for
+> >output), but the table entry is kept.
+> 
+> I don't like this.  Do we retain the binding or not?  If not, we have
+
+I do not like it either.  A clueless user can have hard time to track down
+what changed his keybindings so unexpectedly.
+
+> On a related note, we really need to make addbuiltin() and so on handle
+> failure cases gracefully.  Try loading mod_example.so twice ("modload
+> ./mod_example.so; modload ~+/mod_example.so"): when I tried it it
+> segmentated.  Modules are going to have to cope with the possibility
+> that they can't add the builtins, key bindings or whatever that they
+> want.
+
+The coredump is caused by the attempt to free the previously defined
+builtin in addhashnode().  I think the best is to refuse adding the builtin
+if it already exists.  A well behaved module should be prepared to handle
+situations when it is loaded multiple times.  The patch below does a
+dlclose() and does not add the module to the module list if the boot
+function returns nonzero.  Patch to mod_example.c is not included since I'm
+writing this from home and the current version is not here with me.
+
+> And if anyone's counting, I, too, favour the name `zmodload'.
+
+That's fine for me.
+
+> (Own up, how many of us are planning how to implement autoloaded modules?)
+
+I am.  We can add a flag to zmodload to define auloaded builtins.  It adds
+a builtin with NULL as a handlerfunc.  When such a builtin is executed
+execbuiltin() looks up the module with the same name in the MODULE_PATH.
+We also have to add some hacks to specify the module which should be loaded
+since a package will opten want to define a bunch of builtins which sould
+be autoloaded if either one is refered.  The patch below modifies
+addbuiltin() so that it allows adding an already defined builtin if its
+handler function is NULL.  In that case addbuiltin simply overwrites the
+existing structure.  That can be used in the future for autoloading.
+
+Unfortunately it seems to be impossible to handle BINF_MAGICEQUALS and
+BINF_PSPECIAL this way (unless we add other options to zmodload for that).
+
+Instead of zmodload it may be better to use the autoload with an option
+(e.g. autoload -b).
+
+Zoltan
+
+*** Src/module.c	1996/10/31 01:38:10	3.1.0.1
+--- Src/module.c	1996/11/10 23:43:44
+***************
+*** 159,166 ****
+  		    cleanup_module(m);
+  		    dlclose(m->handle);
+  		    if (! --(m->count)) {
+- 			zsfree(m->nam);
+  			remnode(modules, node);
+  		    }
+  		}
+  		break;
+--- 159,167 ----
+  		    cleanup_module(m);
+  		    dlclose(m->handle);
+  		    if (! --(m->count)) {
+  			remnode(modules, node);
++ 			zsfree(m->nam);
++ 			zfree(m, sizeof(*m));
+  		    }
+  		}
+  		break;
+***************
+*** 175,186 ****
+  	    if (! ops['f']) {
+  		zwarnnam(nam, "module %s already loaded.", *args, 0);
+  		ret++;
+! 	    } else if (load_module(*args) != m->handle) {
+  		zwarnnam(nam, "reloaded module %s have new handle?", *args, 0);
+  		ret++;
+  	    } else {
+  		m->count++;
+- 		ret = init_module(m);
+  	    }
+  	} else if (! (handle = load_module(*args))) {
+  	    zwarnnam(nam, "failed to load module: %s", *args, 0);
+--- 176,191 ----
+  	    if (! ops['f']) {
+  		zwarnnam(nam, "module %s already loaded.", *args, 0);
+  		ret++;
+! 	    } else if ((handle = load_module(*args)) != m->handle) {
+  		zwarnnam(nam, "reloaded module %s have new handle?", *args, 0);
++ 		if (handle)
++ 		    dlclose(handle);
++ 		ret++;
++ 	    } else if (init_module(m)) {
++ 		dlclose(handle);
+  		ret++;
+  	    } else {
+  		m->count++;
+  	    }
+  	} else if (! (handle = load_module(*args))) {
+  	    zwarnnam(nam, "failed to load module: %s", *args, 0);
+***************
+*** 190,228 ****
+  	    m->nam = ztrdup(*args);
+  	    m->handle = handle;
+  	    m->count = 1;
+! 	    PERMALLOC {
+! 		addlinknode(modules, m);
+! 	    } LASTALLOC;
+! 	    ret = init_module(m);
+  	}
+      }
+      return ret;
+  }
+  
+  /**/
+! void
+  addbuiltin(char *nam, int flags, HandlerFunc hfunc, int minargs, int maxargs, char *optstr)
+  {
+      Builtin bn;
+  
+!     bn = zcalloc(sizeof(*bn));
+!     bn->nam = nam;
+      bn->flags = flags;
+      bn->handlerfunc = hfunc;
+      bn->minargs = minargs;
+      bn->maxargs = maxargs;
+      bn->optstr = optstr;
+!     PERMALLOC {
+! 	builtintab->addnode(builtintab, bn->nam, bn);
+!     } LASTALLOC;
+  }
+  
+  /**/
+! void
+  deletebuiltin(char *nam)
+  {
+      Builtin bn;
+  
+      bn = (Builtin) builtintab->removenode(builtintab, nam);
+      zfree(bn, sizeof(struct builtin));
+  }
+--- 195,262 ----
+  	    m->nam = ztrdup(*args);
+  	    m->handle = handle;
+  	    m->count = 1;
+! 	    if (init_module(m)) {
+! 		dlclose(handle);
+! 		ret++;
+! 		zsfree(m->nam);
+! 		zfree(m, sizeof(*m));
+! 	    } else {
+! 		PERMALLOC {
+! 		    addlinknode(modules, m);
+! 		} LASTALLOC;
+! 	    }
+  	}
+      }
+      return ret;
+  }
+  
++ /* addbuiltin() can be used to add a new builtin.  It has six arguments: *
++  *  - the name of the new builtin                                        *
++  *  - BINF_* flags (see zsh.h).  Normally it is 0.                       *
++  *  - the handler function of the builtin                                *
++  *  - minimum number of arguments                                        *
++  *  - maximum number of argument (-1 means unlimited)                    *
++  *  - possible option leters                                             *
++  * It returns zero on succes 1 on failure                                */
++ 
+  /**/
+! int
+  addbuiltin(char *nam, int flags, HandlerFunc hfunc, int minargs, int maxargs, char *optstr)
+  {
+      Builtin bn;
+  
+!     bn = (Builtin) builtintab->getnode2(builtintab, nam);
+!     if (bn && bn->handlerfunc)
+! 	return 1;
+!     if (!bn) {
+! 	bn = zcalloc(sizeof(*bn));
+! 	bn->nam = nam;
+! 	PERMALLOC {
+! 	    builtintab->addnode(builtintab, bn->nam, bn);
+! 	} LASTALLOC;
+!     }
+      bn->flags = flags;
+      bn->handlerfunc = hfunc;
+      bn->minargs = minargs;
+      bn->maxargs = maxargs;
+      bn->optstr = optstr;
+!     return 0;
+  }
+  
++ /* Remove the builtin added previously by addbuiltin().  Returns *
++  * zero on succes and 1 if there is no builtin with that name.   *
++  * Attempt to delete a builtin which is not defined by           *
++  * addbuiltin() will fail badly with unpredictable results.      */
++ 
+  /**/
+! int
+  deletebuiltin(char *nam)
+  {
+      Builtin bn;
+  
+      bn = (Builtin) builtintab->removenode(builtintab, nam);
++     if (!bn)
++ 	return 1;
+      zfree(bn, sizeof(struct builtin));
++     return 0;
+  }
+

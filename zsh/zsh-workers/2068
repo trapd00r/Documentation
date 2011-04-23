@@ -1,0 +1,173 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Mon Aug 26 00:31:31 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id AAA04824 for <mason@primenet.com.au>; Mon, 26 Aug 1996 00:31:27 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id KAA11220; Sun, 25 Aug 1996 10:27:24 -0400 (EDT)
+Resent-Date: Sun, 25 Aug 1996 10:27:24 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199608251425.QAA25213@hzoli.ppp.cs.elte.hu>
+Subject: Re: The speed of zsh
+To: schaefer@nbn.com
+Date: Sun, 25 Aug 1996 16:25:00 +0200 (MET DST)
+Cc: zsh-workers@math.gatech.edu
+In-Reply-To: <960824141541.ZM453@candle.brasslantern.com> from Bart Schaefer at "Aug 24, 96 02:15:41 pm"
+X-Mailer: ELM [version 2.4ME+ PL17 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"3w1zP1.0.Bl2.BB68o"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2068
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+> } Somehow ksh spawns external commands twice as fast as zsh.
+> 
+> I suspect it has something to do with zsh's use of pipes for synchronizing
+> parent and child processes; the zsh parent doesn't do anything until the
+> child finishes its entersubsh() and closes the pipe.  Ksh probably doesn't
+> create the pipe in the first place.
+
+It the script I tried there was only a process substitution which does not
+use synch pipes.  Anyway I did remove synch calls and it did make zsh a bit
+faster even when it executed scripts which never before used synch perhaps
+because of the better use of CPU cache.  And I now discovered the real
+reason why that particular script was so slow.  Zsh executes process
+substitutions after forking.  This means that the commands used in process
+substitutions never get hashed in the main process so the path is searched
+each time.  After adding hash expr to the script zsh become almost as fast
+as ksh.  But builtin-only scripts are still much slower than in ksh :-).
+
+Attached is the patch to remove pipe synchronization code.
+
+Zoltan
+
+*** Src/exec.c	1996/08/25 10:32:58	2.85
+--- Src/exec.c	1996/08/25 12:05:46
+***************
+*** 718,731 ****
+  		if ((list_pipe || last1) && !list_pipe_child &&
+  		    jn->stat & STAT_STOPPED) {
+  		    pid_t pid;
+- 		    int synch[2];
+- 
+- 		    pipe(synch);
+  
+  		    if ((pid = fork()) == -1) {
+  			trashzle();
+- 			close(synch[0]);
+- 			close(synch[1]);
+  			putc('\n', stderr);
+  			fprintf(stderr, "zsh: job can't be suspended\n");
+  			fflush(stderr);
+--- 718,726 ----
+***************
+*** 734,747 ****
+  			thisjob = newjob;
+  		    }
+  		    else if (pid) {
+- 			char dummy;
+- 
+  			list_pipe_pid = pid;
+  			nowait = errflag = 1;
+  			breaks = loops;
+- 			close(synch[1]);
+- 			read(synch[0], &dummy, 1);
+- 			close(synch[0]);
+  			jobtab[list_pipe_job].other = newjob;
+  			jobtab[list_pipe_job].stat |= STAT_SUPERJOB;
+  			jn->stat |= STAT_SUBJOB | STAT_NOPRINT;
+--- 729,737 ----
+***************
+*** 750,759 ****
+  			break;
+  		    }
+  		    else {
+- 			close(synch[0]);
+  			entersubsh(Z_ASYNC, 0, 0);
+  			setpgrp(0L, mypgrp = jobtab[list_pipe_job].gleader);
+- 			close(synch[1]);
+  			kill(getpid(), SIGSTOP);
+  			list_pipe = 0;
+  			list_pipe_child = 1;
+--- 740,747 ----
+***************
+*** 818,843 ****
+  	 * shell command, do foo in a subshell and do the     *
+  	 * rest of the pipeline in the current shell.         */
+  	if (pline->left->type >= CURSH && (how & Z_SYNC)) {
+- 	    int synch[2];
+- 
+- 	    pipe(synch);
+  	    if ((pid = fork()) == -1) {
+- 		close(synch[0]);
+- 		close(synch[1]);
+  		zerr("fork failed: %e", NULL, errno);
+  	    } else if (pid) {
+! 		char dummy, *text;
+  
+  		text = getjobtext((void *) pline->left);
+  		addproc(pid, text);
+- 		close(synch[1]);
+- 		read(synch[0], &dummy, 1);
+- 		close(synch[0]);
+  	    } else {
+  		zclose(pipes[0]);
+- 		close(synch[0]);
+  		entersubsh(how, 2, 0);
+- 		close(synch[1]);
+  		execcmd(pline->left, input, pipes[1], how, 0);
+  		_exit(lastval);
+  	    }
+--- 806,821 ----
+  	 * shell command, do foo in a subshell and do the     *
+  	 * rest of the pipeline in the current shell.         */
+  	if (pline->left->type >= CURSH && (how & Z_SYNC)) {
+  	    if ((pid = fork()) == -1) {
+  		zerr("fork failed: %e", NULL, errno);
+  	    } else if (pid) {
+! 		char *text;
+  
+  		text = getjobtext((void *) pline->left);
+  		addproc(pid, text);
+  	    } else {
+  		zclose(pipes[0]);
+  		entersubsh(how, 2, 0);
+  		execcmd(pline->left, input, pipes[1], how, 0);
+  		_exit(lastval);
+  	    }
+***************
+*** 1411,1430 ****
+          sigtrapped[SIGEXIT] || havefiles()))))) {
+  
+  	pid_t pid;
+- 	int synch[2];
+- 	char dummy;
+  
+  	child_block();
+- 	pipe(synch);
+  
+  	if ((pid = zfork()) == -1) {
+- 	    close(synch[0]);
+- 	    close(synch[1]);
+  	    return;
+  	} if (pid) {
+- 	    close(synch[1]);
+- 	    read(synch[0], &dummy, 1);
+- 	    close(synch[0]);
+  #ifdef HAVE_DEV_FD
+  	    closem(2);
+  #endif
+--- 1389,1400 ----
+***************
+*** 1442,1450 ****
+  	    return;
+  	}
+  	/* pid == 0 */
+- 	close(synch[0]);
+  	entersubsh(how, type != SUBSH && !(how & Z_ASYNC) ? 2 : 1, 0);
+- 	close(synch[1]);
+  	forked = 1;
+  	if (sigtrapped[SIGINT] & ZSIG_IGNORED)
+  	    holdintr();
+--- 1412,1418 ----
+

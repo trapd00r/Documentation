@@ -1,0 +1,391 @@
+From zsh-workers-return-21722-mason-zsh=primenet.com.au@sunsite.dk Fri Sep 09 20:23:45 2005
+Return-Path: <zsh-workers-return-21722-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1639 invoked from network); 9 Sep 2005 20:23:40 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 9 Sep 2005 20:23:40 -0000
+Received: (qmail 71812 invoked from network); 9 Sep 2005 20:23:33 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 9 Sep 2005 20:23:33 -0000
+Received: (qmail 27150 invoked by alias); 9 Sep 2005 20:23:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 21722
+Received: (qmail 27140 invoked from network); 9 Sep 2005 20:23:27 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 9 Sep 2005 20:23:27 -0000
+Received: (qmail 71081 invoked from network); 9 Sep 2005 20:23:27 -0000
+Received: from cmailg4.svr.pol.co.uk (195.92.195.174)
+  by a.mx.sunsite.dk with SMTP; 9 Sep 2005 20:23:20 -0000
+Received: from modem-739.putangitangi.dialup.pol.co.uk ([81.78.194.227] helo=pwstephenson.fsnet.co.uk)
+	by cmailg4.svr.pol.co.uk with esmtp (Exim 4.41)
+	id 1EDpP3-0003Qd-EB
+	for zsh-workers@sunsite.dk; Fri, 09 Sep 2005 21:23:19 +0100
+Received: by pwstephenson.fsnet.co.uk (Postfix, from userid 501)
+	id 2BE8E8664; Fri,  9 Sep 2005 16:32:59 -0400 (EDT)
+Received: from pwstephenson.fsnet.co.uk (localhost [127.0.0.1])
+	by pwstephenson.fsnet.co.uk (Postfix) with ESMTP id E7CBB8662
+	for <zsh-workers@sunsite.dk>; Fri,  9 Sep 2005 21:32:59 +0100 (BST)
+To: zsh-workers <zsh-workers@sunsite.dk>
+Subject: Re: various weirdnesses with unicode support 
+In-reply-to: <237967ef05090713304637c1f1@mail.gmail.com> 
+References: <237967ef05090713304637c1f1@mail.gmail.com>
+Date: Fri, 09 Sep 2005 21:32:58 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20050909203259.2BE8E8664@pwstephenson.fsnet.co.uk>
+X-Spam-Checker-Version: SpamAssassin 3.0.4 (2005-06-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham 
+	version=3.0.4
+
+Mikael Magnusson wrote:
+> * Pressing alt-t for transpose word doesn't work, and inserts lots of
+> NULLs in the command line, shown as ^@.
+
+There were two issues here.  The first was that the code for
+transpose-words still only handled the line as single-byte strings,
+which was just plain wrong.
+
+The second was that our iword() macro doesn't handle wide characters.
+The partial fix here should break the back of the problem by allowing
+the existing iword() to work on ASCII characters and assuming for now
+that testing for alphanumerics is good enough for the remainder.
+I don't think the extra execution time from using a function instead of
+a macro is all that significant for the uses we have.
+
+A full fix will be to scan $WORDCHARS for multibyte characters and
+squirrel those or the corresponding wide characters away somewhere,
+either in a hash table (probably easiest since we have the
+infrastructure, although I don't know if the hashing algorithm will be
+good enough to cope) or something like the multibyte keymaps, i.e. a set
+of sparse tables.
+
+As I've noted, extending iident() along the same lines should be
+easy---it's the same fix, but here we simply return 0 if the character
+isn't ASCII.  This would be a nice straigtforward exercise for someone
+eager to get on in the zsh world.  (No, I haven't either.)
+
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.88
+diff -u -r1.88 utils.c
+--- Src/utils.c	17 Aug 2005 19:17:40 -0000	1.88
++++ Src/utils.c	9 Sep 2005 20:14:27 -0000
+@@ -2469,6 +2469,42 @@
+ 	typtab[bangchar] |= ISPECIAL;
+ }
+ 
++
++#ifdef ZLE_UNICODE_SUPPORT
++/*
++ * iword() macro extended to support wide characters.
++ */
++
++/**/
++mod_export int
++wcsiword(wchar_t c)
++{
++    int len;
++    VARARR(char, outstr, MB_CUR_MAX);
++    /*
++     * Strategy:  the shell requires that the multibyte representation
++     * be an extension of ASCII.  So see if converting the character
++     * produces an ASCII character.  If it does, use iword on that.
++     * If it doesn't, use iswalnum on the original character.  This
++     * is pretty good most of the time.
++     *
++     * TODO: extend WORDCHARS to handle multibyte chars by some kind
++     * of hierarchical list or hash table.
++     */
++    len = wctomb(outstr, c);
++
++    if (len == 0) {
++	/* NULL is special */
++	return iword(0);
++    } else if (len == 1 && isascii(*outstr)) {
++	return iword(*outstr);
++    } else {
++	return iswalnum(c);
++    }
++}
++#endif
++
++
+ /**/
+ mod_export char **
+ arrdup(char **s)
+Index: Src/Zle/zle.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle.h,v
+retrieving revision 1.17
+diff -u -r1.17 zle.h
+--- Src/Zle/zle.h	15 Aug 2005 17:20:29 -0000	1.17
++++ Src/Zle/zle.h	9 Sep 2005 20:14:31 -0000
+@@ -69,11 +69,13 @@
+ /*
+  * TODO: doesn't work on arguments with side effects.
+  * Also YUK.  Not even sure this is guaranteed to work.
++ * Should be easy to do along the lines of wcsiword.
+  */
+ #define ZC_iident(x)	(x < 256 && iident((int)x))
+ 
+ #define ZC_tolower towlower
+ #define ZC_toupper towupper
++#define ZC_iword  wcsiword
+ 
+ #define LASTFULLCHAR	lastchar_wide
+ 
+@@ -122,6 +124,7 @@
+ 
+ #define ZC_tolower tulower
+ #define ZC_toupper tuupper
++#define ZC_iword   iword
+ 
+ #define LASTFULLCHAR	lastchar
+ 
+Index: Src/Zle/zle_misc.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_misc.c,v
+retrieving revision 1.28
+diff -u -r1.28 zle_misc.c
+--- Src/Zle/zle_misc.c	9 Sep 2005 13:49:00 -0000	1.28
++++ Src/Zle/zle_misc.c	9 Sep 2005 20:14:42 -0000
+@@ -623,10 +623,10 @@
+     int len, t0;
+ 
+     for (t0 = zlecs - 1; t0 >= 0; t0--)
+-	if (iword(zleline[t0]))
++	if (ZC_iword(zleline[t0]))
+ 	    break;
+     for (; t0 >= 0; t0--)
+-	if (!iword(zleline[t0]))
++	if (!ZC_iword(zleline[t0]))
+ 	    break;
+     if (t0)
+ 	t0++;
+Index: Src/Zle/zle_word.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_word.c,v
+retrieving revision 1.5
+diff -u -r1.5 zle_word.c
+--- Src/Zle/zle_word.c	26 Feb 2005 07:40:57 -0000	1.5
++++ Src/Zle/zle_word.c	9 Sep 2005 20:14:44 -0000
+@@ -30,11 +30,6 @@
+ #include "zle.mdh"
+ #include "zle_word.pro"
+ 
+-/*
+- * TODO: use of iword needs completely rethinking for Unicode
+- * since we can't base it on a table lookup.
+- */
+-
+ /**/
+ int
+ forwardword(char **args)
+@@ -49,11 +44,11 @@
+ 	return ret;
+     }
+     while (n--) {
+-	while (zlecs != zlell && iword(zleline[zlecs]))
++	while (zlecs != zlell && ZC_iword(zleline[zlecs]))
+ 	    zlecs++;
+ 	if (wordflag && !n)
+ 	    return 0;
+-	while (zlecs != zlell && !iword(zleline[zlecs]))
++	while (zlecs != zlell && !ZC_iword(zleline[zlecs]))
+ 	    zlecs++;
+     }
+     return 0;
+@@ -125,11 +120,11 @@
+ 	return ret;
+     }
+     while (n--) {
+-	while (zlecs != zlell && !iword(zleline[zlecs]))
++	while (zlecs != zlell && !ZC_iword(zleline[zlecs]))
+ 	    zlecs++;
+ 	if (wordflag && !n)
+ 	    return 0;
+-	while (zlecs != zlell && iword(zleline[zlecs]))
++	while (zlecs != zlell && ZC_iword(zleline[zlecs]))
+ 	    zlecs++;
+     }
+     return 0;
+@@ -197,9 +192,9 @@
+ 	return ret;
+     }
+     while (n--) {
+-	while (zlecs && !iword(zleline[zlecs - 1]))
++	while (zlecs && !ZC_iword(zleline[zlecs - 1]))
+ 	    zlecs--;
+-	while (zlecs && iword(zleline[zlecs - 1]))
++	while (zlecs && ZC_iword(zleline[zlecs - 1]))
+ 	    zlecs--;
+     }
+     return 0;
+@@ -267,9 +262,9 @@
+ 	return ret;
+     }
+     while (n--) {
+-	while (zlecs && !iword(zleline[zlecs - 1]))
++	while (zlecs && !ZC_iword(zleline[zlecs - 1]))
+ 	    zlecs--;
+-	while (zlecs && iword(zleline[zlecs - 1]))
++	while (zlecs && ZC_iword(zleline[zlecs - 1]))
+ 	    zlecs--;
+     }
+     return 0;
+@@ -289,9 +284,9 @@
+ 	return ret;
+     }
+     while (n--) {
+-	while (x && !iword(zleline[x - 1]))
++	while (x && !ZC_iword(zleline[x - 1]))
+ 	    x--;
+-	while (x && iword(zleline[x - 1]))
++	while (x && ZC_iword(zleline[x - 1]))
+ 	    x--;
+     }
+     backdel(zlecs - x);
+@@ -337,9 +332,9 @@
+ 	return ret;
+     }
+     while (n--) {
+-	while (x && !iword(zleline[x - 1]))
++	while (x && !ZC_iword(zleline[x - 1]))
+ 	    x--;
+-	while (x && iword(zleline[x - 1]))
++	while (x && ZC_iword(zleline[x - 1]))
+ 	    x--;
+     }
+     backkill(zlecs - x, 1);
+@@ -356,9 +351,9 @@
+     if (neg)
+ 	n = -n;
+     while (n--) {
+-	while (zlecs != zlell && !iword(zleline[zlecs]))
++	while (zlecs != zlell && !ZC_iword(zleline[zlecs]))
+ 	    zlecs++;
+-	while (zlecs != zlell && iword(zleline[zlecs])) {
++	while (zlecs != zlell && ZC_iword(zleline[zlecs])) {
+ 	    zleline[zlecs] = ZC_toupper(zleline[zlecs]);
+ 	    zlecs++;
+ 	}
+@@ -378,9 +373,9 @@
+     if (neg)
+ 	n = -n;
+     while (n--) {
+-	while (zlecs != zlell && !iword(zleline[zlecs]))
++	while (zlecs != zlell && !ZC_iword(zleline[zlecs]))
+ 	    zlecs++;
+-	while (zlecs != zlell && iword(zleline[zlecs])) {
++	while (zlecs != zlell && ZC_iword(zleline[zlecs])) {
+ 	    zleline[zlecs] = ZC_tolower(zleline[zlecs]);
+ 	    zlecs++;
+ 	}
+@@ -401,11 +396,11 @@
+ 	n = -n;
+     while (n--) {
+ 	first = 1;
+-	while (zlecs != zlell && !iword(zleline[zlecs]))
++	while (zlecs != zlell && !ZC_iword(zleline[zlecs]))
+ 	    zlecs++;
+-	while (zlecs != zlell && iword(zleline[zlecs]) && !isalpha(zleline[zlecs]))
++	while (zlecs != zlell && ZC_iword(zleline[zlecs]) && !isalpha(zleline[zlecs]))
+ 	    zlecs++;
+-	while (zlecs != zlell && iword(zleline[zlecs])) {
++	while (zlecs != zlell && ZC_iword(zleline[zlecs])) {
+ 	    zleline[zlecs] = (first) ? ZC_toupper(zleline[zlecs]) :
+ 		ZC_tolower(zleline[zlecs]);
+ 	    first = 0;
+@@ -432,9 +427,9 @@
+ 	return ret;
+     }
+     while (n--) {
+-	while (x != zlell && !iword(zleline[x]))
++	while (x != zlell && !ZC_iword(zleline[x]))
+ 	    x++;
+-	while (x != zlell && iword(zleline[x]))
++	while (x != zlell && ZC_iword(zleline[x]))
+ 	    x++;
+     }
+     foredel(x - zlecs);
+@@ -456,9 +451,9 @@
+ 	return ret;
+     }
+     while (n--) {
+-	while (x != zlell && !iword(zleline[x]))
++	while (x != zlell && !ZC_iword(zleline[x]))
+ 	    x++;
+-	while (x != zlell && iword(zleline[x]))
++	while (x != zlell && ZC_iword(zleline[x]))
+ 	    x++;
+     }
+     forekill(x - zlecs, 0);
+@@ -469,36 +464,43 @@
+ int
+ transposewords(UNUSED(char **args))
+ {
+-    int p1, p2, p3, p4, x = zlecs;
+-    char *temp, *pp;
++    int p1, p2, p3, p4, len, x = zlecs;
++    ZLE_STRING_T temp, pp;
+     int n = zmult;
+     int neg = n < 0, ocs = zlecs;
+ 
+     if (neg)
+ 	n = -n;
+     while (n--) {
+-	while (x != zlell && zleline[x] != '\n' && !iword(zleline[x]))
++	while (x != zlell && zleline[x] != ZWC('\n') && !ZC_iword(zleline[x]))
+ 	    x++;
+-	if (x == zlell || zleline[x] == '\n') {
++	if (x == zlell || zleline[x] == ZWC('\n')) {
+ 	    x = zlecs;
+-	    while (x && zleline[x - 1] != '\n' && !iword(zleline[x]))
++	    while (x && zleline[x - 1] != ZWC('\n') && !ZC_iword(zleline[x]))
+ 		x--;
+-	    if (!x || zleline[x - 1] == '\n')
++	    if (!x || zleline[x - 1] == ZWC('\n'))
+ 		return 1;
+ 	}
+-	for (p4 = x; p4 != zlell && iword(zleline[p4]); p4++);
+-	for (p3 = p4; p3 && iword(zleline[p3 - 1]); p3--);
++	for (p4 = x; p4 != zlell && ZC_iword(zleline[p4]); p4++);
++	for (p3 = p4; p3 && ZC_iword(zleline[p3 - 1]); p3--);
+ 	if (!p3)
+ 	    return 1;
+-	for (p2 = p3; p2 && !iword(zleline[p2 - 1]); p2--);
++	for (p2 = p3; p2 && !ZC_iword(zleline[p2 - 1]); p2--);
+ 	if (!p2)
+ 	    return 1;
+-	for (p1 = p2; p1 && iword(zleline[p1 - 1]); p1--);
+-	pp = temp = (char *)zhalloc(p4 - p1 + 1);
+-	struncpy(&pp, (char *) zleline + p3, p4 - p3);
+-	struncpy(&pp, (char *) zleline + p2, p3 - p2);
+-	struncpy(&pp, (char *) zleline + p1, p2 - p1);
+-	strncpy((char *)zleline + p1, temp, p4 - p1);
++	for (p1 = p2; p1 && ZC_iword(zleline[p1 - 1]); p1--);
++
++	pp = temp = (ZLE_STRING_T)zhalloc((p4 - p1)*ZLE_CHAR_SIZE);
++	len = p4 - p3;
++	ZS_memcpy(pp, zleline + p3, len);
++	pp += len;
++	len = p3 - p2;
++	ZS_memcpy(pp, zleline + p2, len);
++	pp += len;
++	ZS_memcpy(pp, zleline + p1, p2 - p1);
++
++	ZS_memcpy(zleline + p1, temp, p4 - p1);
++
+ 	zlecs = p4;
+     }
+     if (neg)
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

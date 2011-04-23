@@ -1,0 +1,167 @@
+From zsh-workers-return-13452-mason-zsh=primenet.com.au@sunsite.dk Sat Feb 10 20:24:44 2001
+Return-Path: <zsh-workers-return-13452-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25860 invoked from network); 10 Feb 2001 20:24:42 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 10 Feb 2001 20:24:42 -0000
+Received: (qmail 23017 invoked by alias); 10 Feb 2001 20:24:31 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13452
+Received: (qmail 22999 invoked from network); 10 Feb 2001 20:24:29 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010210202412.ZM20301@candle.brasslantern.com>
+Date: Sat, 10 Feb 2001 20:24:11 +0000
+In-Reply-To: <000d01c0926a$ce26c590$21c9ca95@mow.siemens.ru>
+Comments: In reply to "Andrej Borsenkow" <Andrej.Borsenkow@mow.siemens.ru>
+        "RE: Word splitting in zsh" (Feb  9, 10:34am)
+References: <000d01c0926a$ce26c590$21c9ca95@mow.siemens.ru> 
+	<1010209181818.ZM16052@candle.brasslantern.com>
+In-Reply-To: <1010209181818.ZM16052@candle.brasslantern.com>
+Comments: In reply to "Bart Schaefer" <schaefer@candle.brasslantern.com>
+        "Re: Word splitting in zsh" (Feb  9,  6:18pm)
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: "Deborah Ariel Pickett" <debbiep@mail.csse.monash.edu.au>,
+        zsh-workers@sunsite.dk
+Subject: PATCH: 3.1.9-dev-8: Re: Word splitting in zsh
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Feb 9, 10:34am, Andrej Borsenkow wrote:
+}
+} > zagzig% echo $ZSH_VERSION
+} > 3.0.8
+} > zagzig% setopt shwordsplit
+} > zagzig% print -l ${1+"$@"}
+} > a1
+} > a2
+} > a3
+} > b
+} > c
+} > zagzig%
+} >
+} 
+} > Well, that's not quite right,
+} 
+} It is simply wrong.
+} 
+}                                             but 3.1.9-dev-8 is even worse:
+} >
+} > zagzig% echo $ZSH_VERSION
+} > 3.1.9-dev-8
+} > zagzig% set "a1 a2 a3" b c
+} > zagzig% print -l ${1+"$@"}
+} > a1 a2 a3 b c						<-- Yipes!
+} 
+} Well, this is "correct" *zsh* behaviour. The part after `+' is a word -
+} not array. And is taken as single word and is never splitted.
+
+On Feb 9,  6:18pm, Bart Schaefer wrote:
+}
+} Yes, your analysis is correct; the bug is that there should not be a scalar
+} context there.  The effect of ${NAME:+WORD} and ${NAME:-WORD} should be to
+} replace the context of NAME with the context of WORD in the event that NAME
+} is (or not) set.  Put another way, the type of NAME should only determine
+} the type of the whole ${...} when NAME really is being substituted.
+
+This turned out to be remarkably easy; patch and explanation below.
+
+On Feb 9, 10:34am, Andrej Borsenkow wrote:
+} 
+} That is just because of above. The structure of WORD in ${name+WORD} is not
+} remebered. But note the same bug again:
+} 
+} bor@itsrm2% set 'a b c' 1 2
+} bor@itsrm2% IFS=: print -l ${1+"$@"}
+} a b c 1 2
+} bor@itsrm2% setopt shwordsplit
+} bor@itsrm2% IFS=: print -l ${1+"$@"}
+} a
+} b
+} c
+} 1
+} 2
+} 
+} IFS value is silently ignored.
+
+This is actually something entirely different, and is not really a bug at
+all.  The problem with Andrej's example is that ${1+"$@"} is expanded
+before the assignment to IFS takes place.  If you replace the `print's
+above with
+
+    args() { print -l $* ++ ${1+"$@"} }
+    IFS=: args "$@"
+
+then you'll see that IFS is handled correctly (modulo the other bug).
+
+OK, here's the patch; I won't commit this until I get some feedback on it.  
+
+The solution is simply (1) pass &aval into multsub() so that it returns
+an array when the word being expanded would expand to an array; (2) pass
+the current value of `spbreak' through multsub() in case of ${=...}; (3)
+turn off word splitting after multsub() returns, because multsub() will
+have already performed quoting and splitting as appropriate.
+
+This applies only to ${...+...} and ${...-...}, with or without the `:'.
+As I mentioned, there would be some benefit to also doing this for the
+${...=...} forms, because then things like ${(A)foo="$bar[@]"} would work
+independently of the setting of shwordplit.
+
+There's some question in my mind of whether ${~...} and ${^...} should be
+treated this way, too; e.g. (this is what does NOT happen):
+
+zsh% print -l ${^1+"x$@x"}
+xa1:a2 a3x
+xbx
+xcx
+
+That `^' and `~' are not propagated now could even be an argument for not
+propagating `=' either, but that would cause a larger change in behavior
+in the instances where the right-hand-side of the `+'/`-' is not quoted
+(and the shwordsplit option is not set).
+
+I've also left unchanged the behavior of ${(s( ))...}, ${(z)...}, etc.,
+because those constructs aren't possible in Bourne shell and in general
+the expansion flags take precedence over everything else -- and because
+there's a lot more potential for breakage when messing with those.
+
+Index: Src/subst.c
+===================================================================
+--- Src/subst.c	2001/01/16 17:18:12	1.72
++++ Src/subst.c	2001/02/10 18:31:20
+@@ -749,7 +749,9 @@
+     int chkset = 0;
+     int vunset = 0;
+     int wantt = 0;
+-    int spbreak = isset(SHWORDSPLIT) && !ssub && !qt;
++    static int mult_spbreak, mult_shwsplit;
++    int spbreak = (!ssub && !qt &&
++		   (mult_spbreak? mult_shwsplit : isset(SHWORDSPLIT)));
+     char *val = NULL, **aval = NULL;
+     unsigned int fwidth = 0;
+     struct value vbuf;
+@@ -1378,8 +1380,14 @@
+ 	/* Fall Through! */
+ 	case '-':
+ 	    if (vunset) {
++		int shws = mult_shwsplit, spbr = mult_spbreak;
++		mult_shwsplit = spbreak;
++		mult_spbreak = 1;
+ 		val = dupstring(s);
+-		multsub(&val, NULL, &isarr, NULL);
++		multsub(&val, (aspar ? NULL : &aval), &isarr, NULL);
++		mult_shwsplit = shws;
++		mult_spbreak = spbr;
++		spbreak = 0;
+ 		copied = 1;
+ 	    }
+ 	    break;
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,354 @@
+From zsh-workers-return-28168-mason-zsh=primenet.com.au@zsh.org Sun Aug 15 06:20:34 2010
+Return-Path: <zsh-workers-return-28168-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11403 invoked by alias); 15 Aug 2010 06:20:34 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28168
+Received: (qmail 10470 invoked from network); 15 Aug 2010 06:20:32 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00 autolearn=ham
+	version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at morini.apam.columbia.edu does not designate permitted sender hosts)
+Date: Sun, 15 Aug 2010 01:53:23 -0400
+From: Pavol Juhas <pj2192@columbia.edu>
+To: zsh workers <zsh-workers@zsh.org>
+Subject: scd - smart change directory
+Message-ID: <20100815055323.GA6875@columbia.edu>
+Mail-Followup-To: zsh workers <zsh-workers@zsh.org>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="LZvS9be/3tNcYl/X"
+Content-Disposition: inline
+User-Agent: Mutt/1.5.20 (2009-06-14)
+
+--LZvS9be/3tNcYl/X
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+Hello,
+
+I have another iteration of the "scd" function for a quick
+change to any directory.  The function keeps a history of
+the visited directories, which serves as an index of the existing
+paths.  The match is more likely for recently visited directories,
+a selection menu is used in case of several matches. The scd
+supports quick creation and removal of permanent directory aliases
+(stored in ~/.scdalias.zsh).
+
+I would welcome comments regarding this script.
+Cheers,
+
+Pavol
+
+------------------------------------------------------------------------
+Installation for zsh: copy the scd script to some directory in $fpath
+and add the following lines to the .zshrc file:
+
+    # Activate scd
+    autoload scd
+
+    # Add chpwd hook to record all visited directories.
+    # The hook is executed only when scd function exists.
+    scd_chpwd_hook()  { [[ ${+functions[scd]} == 0 ]] || scd --add . }
+    autoload add-zsh-hook
+    add-zsh-hook chpwd scd_chpwd_hook
+
+    # Optional - load directory aliases created by scd.
+    # [[ -f ~/.scdalias.zsh ]] && source ~/.scdalias.zsh
+
+Bourne-style shells: copy the scd script to ${HOME}/bin/
+and make it executable.  Add the following lines to .bashrc
+or an equivalent file:
+
+    export SCD_SCRIPT=${HOME}/bin/.scd.go
+    scd() {
+        command scd "$@" && . $SCD_SCRIPT
+    }
+
+C Shell (csh): Same as above, but use the following lines in .cshrc:
+
+    setenv SCD_SCRIPT ${HOME}/bin/.scd.go
+    alias scd "scd \!* && source $SCD_SCRIPT"
+
+------------------------------------------------------------------------
+Examples:
+
+    # Index recursively some paths for a very first run.
+    # The index gets otherwise built with every cd command.
+    scd -ar /tmp/
+
+    # Change to a directory path matching "doc"
+    scd doc
+
+    # Change to a path matching all of "a", "b" and "c"
+    scd a b c
+
+    # Change to a directory path ending in "in"
+    scd "in(#e)"
+
+    # Show selection menu and ranking of 25 most likely directories
+    scd -v
+
+    # Brief usage info:
+    scd --help
+
+--LZvS9be/3tNcYl/X
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename=scd
+
+#!/bin/zsh -if
+# $Id: scd 170 2010-08-15 05:19:17Z juhas $
+
+emulate -L zsh
+if [[ $(whence -w $0) == *:' 'command ]]; then
+    emulate -R zsh
+    alias return=exit
+    local RUNNING_AS_COMMAND=1
+fi
+
+local DOC='scd -- smart change to a recently used directory
+usage: scd [options] [pattern1 pattern2 ...]
+Go to a directory path that contains all fixed string patterns.  Prefer
+recently visited directories and directories with patterns in their tail
+component.  Display a selection menu in case of multiple matches.
+
+Options:
+  -a, --add         add specified directories to the directory index
+  -r, --recursive   add directoriese recursively for option --add
+  --alias=ALIAS     create alias for the current or specified directory and
+                    store it in ~/.scdalias.zsh
+  --unalias         remove ALIAS definition for the current or specified
+                    directory from ~/.scdalias.zsh
+  -v, --verbose     display directory rank in the selection menu
+  -h, --help        display this message and exit
+'
+
+local SCD_HISTFILE=~/.scdhistory
+local SCD_HISTSIZE=${SCD_HISTSIZE:-5000}
+local SCD_MENUSIZE=${SCD_MENUSIZE:-25}
+local SCD_MEANLIFE=${SCD_MEANLIFE:-86400}
+local SCD_THRESHOLD=${SCD_THRESHOLD:-0.005}
+local SCD_SCRIPT=${SCD_SCRIPT:-}
+local SCD_ALIAS=~/.scdalias.zsh
+
+local ICASE a d m p i tdir maxrank threshold
+local opt_help opt_add opt_recursive opt_verbose opt_alias opt_unalias
+local -A drank dalias
+local dmatching
+
+setopt incappendhistory extendedhistory extendedglob noautonamedirs
+[[ ${+options[histsavebycopy]} == 1 ]] && setopt nohistsavebycopy
+
+# make sure that any old commands are removed from SCD_SCRIPT
+[[ -n "$SCD_SCRIPT" && -s $SCD_SCRIPT ]] && : >| $SCD_SCRIPT
+
+# process command line options
+zmodload -i zsh/zutil
+zmodload -i zsh/datetime
+zparseopts -D -- h=opt_help -help=opt_help \
+    a=opt_add -add=opt_add \
+    r=opt_recursive -recursive=opt_recursive \
+    v=opt_verbose -verbose=opt_verbose \
+    -alias:=opt_alias -unalias=opt_unalias \
+    || return $?
+
+if [[ -n $opt_help ]]; then
+    print $DOC
+    return
+fi
+
+# load directory aliases if they exist
+[[ -r $SCD_ALIAS ]] && source $SCD_ALIAS
+
+# define directory alias
+if [[ -n $opt_alias ]]; then
+    if [[ -n $1 && ! -d $1 ]]; then
+	print -u2 "'$1' is not a directory"
+	return 1
+    fi
+    a=${opt_alias[-1]#=}
+    d=$(unfunction -m "*"; cd ${1:-.}; pwd)
+    # alias in the current shell, update alias file if successful
+    hash -d -- $a=$d &&
+    (   
+        umask 077
+        hash -dr
+        [[ -r $SCD_ALIAS ]] && source $SCD_ALIAS
+        hash -d -- $a=$d
+        hash -dL >| $SCD_ALIAS
+    )
+    return $?
+fi
+
+# undefine directory alias
+if [[ -n $opt_unalias ]]; then
+    if [[ -n $1 && ! -d $1 ]]; then
+	print -u2 "'$1' is not a directory"
+	return 1
+    fi
+    a=$(unfunction -m "*"; cd ${1:-.}; print -rP "%~")
+    if [[ $a != [~][^/]## ]]; then
+        return 0
+    fi
+    a=${a#[~]}
+    # unalias in the current shell, update alias file if successful
+    if unhash -d -- $a 2>/dev/null && [[ -r $SCD_ALIAS ]]; then
+        (
+            umask 077
+            hash -dr
+            source $SCD_ALIAS
+            unhash -d -- $a 2>/dev/null &&
+            hash -dL >| $SCD_ALIAS
+        )
+    fi
+    return $?
+fi
+
+# define custom history file
+fc -a -p $SCD_HISTFILE $SCD_HISTSIZE
+
+if [[ -n $opt_add ]]; then
+    for a in ${*:-.}; do
+        if [[ ! -d $a ]]; then
+            print -u 2 "Directory $a does not exist"
+            return 2
+        fi
+        d=$(unfunction -m "*"; cd $a; pwd)
+        print -rs -- $d
+        if [[ -n $opt_recursive ]]; then
+            print -n "scanning ${d} ... "
+            for i in ${d}/**/*(-/N); do
+                print -rs -- $i
+            done
+            print "[done]"
+        fi
+    done
+    return
+fi
+
+# self destructive action command
+scd_action() {
+    if [[ $# == 1 ]]; then
+        if [[ -z $SCD_SCRIPT && -n $RUNNING_AS_COMMAND ]]; then
+            print -u2 "Warning: running as command with SCD_SCRIPT undefined."
+        fi
+        [[ -n $SCD_SCRIPT ]] && (umask 077;
+            print -r "cd ${(q)1}" >| $SCD_SCRIPT)
+	[[ -N $SCD_HISTFILE ]] && touch -a $SCD_HISTFILE
+        cd $1
+	# update SCD_HISTFILE unless already done in chpwd hook
+	[[ -N $SCD_HISTFILE ]] || print -rs $PWD
+    fi
+}
+trap 'unfunction scd_action' EXIT
+
+# take care of existing directories
+if  [[ $# == 1 && -d $1 ]]; then
+    scd_action $1
+    return $?
+# take care of exact aliases
+elif  [[ $# == 1 ]] && d=${$(hash -d -m "(#s)$1")#${1}=} && [[ -d $d ]]; then
+    scd_action $d
+    return $?
+fi
+
+[[ "$*" == *[[:upper:]]* ]] || ICASE='(#i)'
+
+# calculate rank for all directories in the history
+drank=( ${(f)"$(
+    tail -${SCD_HISTSIZE} $SCD_HISTFILE |
+    awk -v epochseconds=$EPOCHSECONDS -v meanlife=$SCD_MEANLIFE '
+        BEGIN { FS = "[:;]"; }
+	length($0) < 4096 {
+	    pi = 0.01 + exp(1.0 * ($2 - epochseconds) / meanlife);
+            sub(/^[^;]*;/, "");
+            p[$0] += pi;
+        }
+        END { for (di in p)  { print di; print p[di]; } }'
+    )"}
+)
+
+for a; do
+    p=${ICASE}"*${a}*"
+    drank=( ${(kv)drank[(I)${~p}]} )
+done
+
+# build matching directories sorted by rank
+dmatching=( ${(f)"$( for d p in ${(kv)drank}; do print -r -- "$p $d"; done |
+    sort -grk1 | cut -d ' ' -f 2- )"} )
+
+# reduce to exact matches
+# patterns follow each other
+p=${ICASE}"*${(j:*:)argv}*"
+m=( ${(M)dmatching:#${~p}} )
+[[ -d ${m[1]} ]] && dmatching=( $m )
+# last pattern is in the path tail
+p=${ICASE}"*${(j:*:)argv}[^/]#"
+m=( ${(M)dmatching:#${~p}} )
+[[ -d ${m[1]} ]] && dmatching=( $m )
+# all patterns are present in the path tail
+m=( $dmatching )
+for a; do
+    p=${ICASE}"*/[^/]#${a}[^/]#"
+    m=( ${(M)m:#${~p}} )
+done
+[[ -d ${m[1]} ]] && dmatching=( $m )
+# all patterns are in the path tail following each other
+p=${ICASE}"/*${(j:[^/]#:)argv}[^/]#"
+m=( ${(M)dmatching:#${~p}} )
+[[ -d ${m[1]} ]] && dmatching=( $m )
+
+# do not match $HOME or $PWD when run without arguments
+if [[ $# == 0 ]]; then
+    dmatching=( ${dmatching:#(${HOME}|${PWD})} )
+fi
+
+# cut dmatching to $SCD_MENUSIZE existing directories
+m=( )
+for d in $dmatching; do
+    [[ ${#m} == $SCD_MENUSIZE ]] && break
+    [[ -d $d ]] && m+=$d
+done
+dmatching=( $m )
+
+# find out maximum rank
+maxrank=0.0
+for d in $dmatching; do
+    [[ ${drank[$d]} -lt maxrank ]] || maxrank=${drank[$d]}
+done
+
+# cut out directories below rank threshold
+threshold=$(( maxrank * SCD_THRESHOLD ))
+dmatching=( ${^dmatching}(Ne:'(( ${drank[$REPLY]} >= threshold ))':) )
+
+case ${#dmatching} in
+(0)
+    print -u2 "no matching directory"
+    return 1
+    ;;
+(1)
+    scd_action $dmatching
+    return $?
+    ;;
+(*)
+    m=( ${(f)"$(unfunction -m "*";
+            for d in ${dmatching}; do
+                cd $d
+                [[ -n $opt_verbose ]] && printf "%.3g " ${drank[$d]}
+                print -P "%~"
+            done)"} )
+    for i in {1..${#m}}; dalias[${m[i]}]=$dmatching[i]
+    select d in ${m}; do
+        scd_action ${dalias[$d]}
+        return $?
+    done
+esac
+
+--LZvS9be/3tNcYl/X--
+

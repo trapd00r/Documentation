@@ -1,0 +1,176 @@
+From zsh-workers-request@math.gatech.edu  Fri Aug 18 11:00:29 1995
+Received: from gatech.edu (gatech.edu [130.207.244.244]) by werple.mira.net.au (8.6.12/8.6.9) with SMTP id LAA02860 for <mason@werple.mira.net.au>; Fri, 18 Aug 1995 11:00:23 +1000
+Received: from math (math.skiles.gatech.edu) by gatech.edu with SMTP id AA28779
+  (5.65c/Gatech-10.0-IDA for <mason@werple.mira.net.au>); Thu, 17 Aug 1995 21:01:12 -0400
+Received: by math (5.x/SMI-SVR4)
+	id AA03195; Thu, 17 Aug 1995 20:56:25 -0400
+Resent-Date: Fri, 18 Aug 1995 01:58:09 +0100 (BST)
+Old-Return-Path: <zefram@dcs.warwick.ac.uk>
+From: Zefram <A.Main@dcs.warwick.ac.uk>
+Message-Id: <20799.199508180058@stone.dcs.warwick.ac.uk>
+Subject: Re: Redirection Bug II -- It's Back
+To: zsh-workers@math.gatech.edu (Z Shell workers mailing list)
+Date: Fri, 18 Aug 1995 01:58:09 +0100 (BST)
+In-Reply-To: <1992.199508172108@tamarind.dcs.warwick.ac.uk> from "Zefram" at Aug 17, 95 10:08:22 pm
+X-Loop: zefram@dcs.warwick.ac.uk
+X-Stardate: [-31]6150.20
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-Id: <"jtn4O1.0.rn.uK-Cm"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/331
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+Here's the fix for the new redirection bug.  The problem was that
+dup'ing redirections (x>&y, x<&y) and closing redirections (x>&-, x<&-)
+stomped all over any existing redirection, including the record of
+which fd to use to restore the status quo after the redirected
+command.  I fixed this in a different way for each case: after the
+patch, dup'ing redirections cooperate with multios, and closing
+redirections fully close multios but don't overwrite the saved fd.  I
+also, necessarily, make addfd(), which sets up multios, make sure it
+doesn't overwrite a record of a saved fd, so that additional
+redirections after a closing redirection will work.
+
+Another problem with dup'ing redirections and multios is that, in a
+naive implementation,
+
+% echo a 3>x >&3 3>y 3>z
+
+would echo into x but not y or z, but
+
+% echo b 3>x 3>y >&3 3>z
+
+would echo into all three files.  That happens because in the first
+case fd 3 is a simple fd with no multio at the time of the dup, but in
+the second case it's already a multio that gets added to after the
+dup.  There's some code in the patch below that `finalises' a multio
+when it gets dup'ed, and then sets up the same multio as a multio again
+so that it can continue to be added to.
+
+After this patch, multios get beautifully, and intuitively, flexible:
+
+% echo c >&1 >x
+
+does a tee, and
+
+% echo d >x >&1
+
+sends *two copies* of the output into the file.
+
+% echo e >&1 >&1 >&1
+
+sends *four* copies of the output to stdout.
+
+% { echo f; echo g >&3 } 3>x >&3 3>y
+
+puts "f" into x, and "g" into x and y.  You get the idea.
+
+The patch to utils.c below fixes a little problem with movefd(), that
+it would always move its argument, even if it was already >=10.  The
+first hunk of the patch to exec.c depends on my previous patch that
+added the NO_MULTIOS option.  If you haven't applied that patch, you'll
+have to apply this hunk by hand.
+
+ -zefram
+
+      *** Src/exec.c.1.8	1995/07/24 11:52:50
+      --- Src/exec.c	1995/08/18 00:39:18
+      ***************
+      *** 938,944 ****
+            if (!mfds[fd1] || isset(NOMULTIOS)) {
+        	if(!mfds[fd1]) {		/* starting a new multio */
+        	    mfds[fd1] = (struct multio *) alloc(sizeof(struct multio));
+      ! 	    if (!forked && fd1 != fd2 && fd1 < 10)
+        		save[fd1] = movefd(fd1);
+        	}
+        	redup(fd2, fd1);
+      --- 938,944 ----
+            if (!mfds[fd1] || isset(NOMULTIOS)) {
+        	if(!mfds[fd1]) {		/* starting a new multio */
+        	    mfds[fd1] = (struct multio *) alloc(sizeof(struct multio));
+      ! 	    if (!forked && fd1 != fd2 && fd1 < 10 && save[fd1] == -1)
+        		save[fd1] = movefd(fd1);
+        	}
+        	redup(fd2, fd1);
+      ***************
+      *** 1323,1336 ****
+        		if (nullexec && fn->fd1 == 0 && isset(SHINSTDIN) && interact)
+        		    init_io();
+        	    } else if (fn->type == CLOSE) {
+      ! 		if (!forked && fn->fd1 < 10)
+        		    save[fn->fd1] = movefd(fn->fd1);
+        		closemn(mfds, fn->fd1);
+        		close(fn->fd1);
+        	    } else if (fn->type == MERGE || fn->type == MERGEOUT) {
+        		if (fn->fd2 == FD_COPROC)
+        		    fn->fd2 = (fn->type == MERGEOUT) ? coprocout : coprocin;
+      ! 		closemn(mfds, fn->fd1);
+        		fil = dup(fn->fd2);
+        		if (fil == -1) {
+        		    char fdstr[4];
+      --- 1323,1342 ----
+        		if (nullexec && fn->fd1 == 0 && isset(SHINSTDIN) && interact)
+        		    init_io();
+        	    } else if (fn->type == CLOSE) {
+      ! 		if (!forked && fn->fd1 < 10 && save[fn->fd1] == -1)
+        		    save[fn->fd1] = movefd(fn->fd1);
+        		closemn(mfds, fn->fd1);
+        		close(fn->fd1);
+        	    } else if (fn->type == MERGE || fn->type == MERGEOUT) {
+        		if (fn->fd2 == FD_COPROC)
+        		    fn->fd2 = (fn->type == MERGEOUT) ? coprocout : coprocin;
+      ! 		else if(mfds[fn->fd2] && mfds[fn->fd2]->ct > 1) {
+      ! 		    /* This code `knows' about the internals of multios. */
+      ! 		    int rf = mfds[fn->fd2]->rflag;
+      ! 
+      ! 		    closemn(mfds, fn->fd2);
+      ! 		    addfd(forked, save, mfds, fn->fd2, fn->fd2, rf);
+      ! 		}
+        		fil = dup(fn->fd2);
+        		if (fil == -1) {
+        		    char fdstr[4];
+      *** Src/utils.c.1.7	1995/08/09 04:02:26
+      --- Src/utils.c	1995/08/17 23:42:28
+      ***************
+      *** 874,886 ****
+        {
+            int fe;
+        
+      !     if (fd == -1)
+        	return fd;
+        #ifdef F_DUPFD
+            fe = fcntl(fd, F_DUPFD, 10);
+        #else
+      !     if ((fe = dup(fd)) < 10)
+      ! 	fe = movefd(fe);
+        #endif
+            close(fd);
+            return fe;
+      --- 874,885 ----
+        {
+            int fe;
+        
+      !     if (fd == -1 || fd >= 10)
+        	return fd;
+        #ifdef F_DUPFD
+            fe = fcntl(fd, F_DUPFD, 10);
+        #else
+      !     fe = movefd(dup(fd));
+        #endif
+            close(fd);
+            return fe;
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.i
+
+iQBVAgUBMDPk8GWJ8JfKi+e9AQEVcgH8DyOFwRZ+0xOzkRtYIK8vLiFwFHSuT+3l
+zO4mJvKAXFrCjW0D8Ar6lTNoICtmRK6Nw/FLO0MEtrfr6e2d6ssAvQ==
+=IwS7
+-----END PGP SIGNATURE-----
+

@@ -1,0 +1,384 @@
+From zsh-workers-return-23919-mason-zsh=primenet.com.au@sunsite.dk Mon Oct 08 14:06:21 2007
+Return-Path: <zsh-workers-return-23919-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3240 invoked from network); 8 Oct 2007 14:06:13 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.3 (2007-08-08) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.3
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 8 Oct 2007 14:06:13 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 55823 invoked from network); 8 Oct 2007 14:06:06 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 8 Oct 2007 14:06:06 -0000
+Received: (qmail 3260 invoked by alias); 8 Oct 2007 14:06:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23919
+Received: (qmail 3231 invoked from network); 8 Oct 2007 14:06:01 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 8 Oct 2007 14:06:01 -0000
+Received: (qmail 55420 invoked from network); 8 Oct 2007 14:06:01 -0000
+Received: from acolyte.scowler.net (216.254.112.45)
+  by a.mx.sunsite.dk with SMTP; 8 Oct 2007 14:05:55 -0000
+Received: by acolyte.scowler.net (Postfix, from userid 1000)
+	id 342915C3B3; Mon,  8 Oct 2007 10:05:53 -0400 (EDT)
+Date: Mon, 8 Oct 2007 10:05:54 -0400
+From: Clint Adams <clint@zsh.org>
+To: zsh-workers@sunsite.dk
+Subject: PATCH: zcurses builtin
+Message-ID: <20071008140554.GA24853@scowler.net>
+Mail-Followup-To: zsh-workers@sunsite.dk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.16 (2007-06-11)
+
+This adds the zcurses builtin, replacing _newwin, _delwin, _wrefresh,
+and _wmove with -a, -d, -r, and -m switches respectively.
+
+I haven't done the rest yet mostly due to indecision about option
+letters.
+
+The following test script works, though I'm certain there's quite a bit
+of error-checking lacking now.
+--8<--
+zmodload curses
+
+zcurses -a 10 10 10 10 5
+zcurses_wborder 5
+zcurses -m 5 1 1
+zcurses_wadd_wch 5 B
+zcurses_wadd_wch 5 l
+zcurses_wadd_wch 5 a
+zcurses_wadd_wch 5 h
+zcurses -r 5
+sleep 5
+--8<--
+
+Index: Src/Modules/curses.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/curses.c,v
+retrieving revision 1.1
+diff -u -r1.1 curses.c
+--- Src/Modules/curses.c	8 Oct 2007 02:04:02 -0000	1.1
++++ Src/Modules/curses.c	8 Oct 2007 13:57:48 -0000
+@@ -37,116 +37,137 @@
+ #include "curses.mdh"
+ #include "curses.pro"
+ 
+-static char *nam="curses";
+-
+ #define ZCURSES_MAX_WINDOWS 9
+ 
+ static WINDOW *zcurses_WIN[ZCURSES_MAX_WINDOWS + 1];
+ 
+-/**/
+-static int
+-bin_zcurses_newwin(char *nam, char **args, Options ops, UNUSED(int func))
+-{
+-    int nlines, ncols, begin_y, begin_x;
+-    unsigned winnum;
+-
+-    nlines = atoi(args[0]);
+-    ncols = atoi(args[1]);
+-    begin_y = atoi(args[2]);
+-    begin_x = atoi(args[3]);
+-    winnum = atoi(args[4]);
+-
+-    if(winnum > ZCURSES_MAX_WINDOWS) {
+-        zerrnam(nam, "bad window number: %s", args[4], 0);
+-        return 1;
+-    }
++#define ZCURSES_ERANGE 1
++#define ZCURSES_EDEFINED 2
++#define ZCURSES_EUNDEFINED 3
+ 
+-    if(zcurses_WIN[winnum]!=NULL) {
+-        zwarnnam(nam, "window number %s already defined", args[4], 0);
+-        return 1;
+-    }
++#define ZCURSES_UNUSED 1
++#define ZCURSES_USED 2
+ 
+-    zcurses_WIN[winnum]=newwin(nlines, ncols, begin_y, begin_x);
++static int zc_errno;
+ 
+-    if(zcurses_WIN[winnum]==NULL)
+-	return 1;
++/**/
++static const char *
++zcurses_strerror(int err)
++{
++    static const char *errs[] = {
++	NULL,
++	"window number out of range",
++	"window already defined",
++	NULL };
+ 
+-    return 0;
++    return errs[err];
+ }
+ 
+ /**/
+-static int
+-bin_zcurses_delwin(char *nam, char **args, Options ops, UNUSED(int func))
++static unsigned
++zcurses_validate_window(char *win, int criteria)
+ {
+-    unsigned winnum;
++    unsigned target;
+ 
+-    winnum = atoi(args[0]);
++    if (win==NULL) {
++	zc_errno = ZCURSES_ERANGE;
++	return -1;
++    }
+ 
+-    if(winnum > ZCURSES_MAX_WINDOWS) {
+-        zerrnam(nam, "bad window number: %s", args[0], 0);
+-        return 1;
++    target = (unsigned)atoi(win);
++
++    if (target > ZCURSES_MAX_WINDOWS) {
++	zc_errno = ZCURSES_ERANGE;
++	return -1;
+     }
+ 
+-    if(zcurses_WIN[winnum]==NULL) {
+-        zwarnnam(nam, "window number %s does not exist", args[0], 0);
+-        return 1;
++    if(zcurses_WIN[target]!=NULL && (criteria & ZCURSES_UNUSED)) {
++	zc_errno = ZCURSES_EDEFINED;
++	return -1;
+     }
+ 
+-    if(delwin(zcurses_WIN[winnum])!=OK)
+-	return 1;
++    if(zcurses_WIN[target]==NULL && (criteria & ZCURSES_USED)) {
++	zc_errno = ZCURSES_EUNDEFINED;
++	return -1;
++    }
+ 
+-    zcurses_WIN[winnum]=NULL;
+-    return 0;
++    return target;
+ }
+ 
+ /**/
+ static int
+-bin_zcurses_wrefresh(char *nam, char **args, Options ops, UNUSED(int func))
++bin_zcurses(char *nam, char **args, Options ops, UNUSED(int func))
+ {
+-    unsigned winnum;
++    int targetwin;
+ 
+-    winnum = atoi(args[0]);
++    if (OPT_ISSET(ops,'a')) {
++	int nlines, ncols, begin_y, begin_x;
++	unsigned winnum;
+ 
+-    if(winnum > ZCURSES_MAX_WINDOWS) {
+-        zerrnam(nam, "bad window number: %s", args[0], 0);
+-        return 1;
+-    }
++	nlines = atoi(args[0]);
++	ncols = atoi(args[1]);
++	begin_y = atoi(args[2]);
++	begin_x = atoi(args[3]);
++	winnum = zcurses_validate_window(args[4], ZCURSES_UNUSED);
+ 
+-    if(zcurses_WIN[winnum]==NULL) {
+-        zwarnnam(nam, "window number %s does not exist", args[0], 0);
+-        return 1;
+-    }
++	if (winnum == -1) {
++	    zerrnam(nam, "%s: %s", zcurses_strerror(zc_errno), args[4], 0);
++	    return 1;
++	}
+ 
+-    if(wrefresh(zcurses_WIN[winnum])!=OK)
+-	return 1;
++	zcurses_WIN[winnum]=newwin(nlines, ncols, begin_y, begin_x);
+ 
+-    return 0;
+-}
++	if(zcurses_WIN[winnum]==NULL)
++	    return 1;
+ 
+-/**/
+-static int
+-bin_zcurses_wmove(char *nam, char **args, Options ops, UNUSED(int func))
+-{
+-    int y, x;
+-    unsigned winnum;
++	return 0;
++    }
++    if (OPT_ISSET(ops,'d')) {
++	targetwin = zcurses_validate_window(OPT_ARG(ops,'d'), ZCURSES_USED);
++	if (targetwin == -1) {
++	    zwarnnam(nam, "%s: %s", zcurses_strerror(zc_errno), OPT_ARG(ops,'d'), 0);
++	    return 1;
++	}
+ 
+-    winnum = atoi(args[0]);
+-    y = atoi(args[1]);
+-    x = atoi(args[2]);
++	if(delwin(zcurses_WIN[targetwin])!=OK)
++		return 1;
+ 
+-    if(winnum > ZCURSES_MAX_WINDOWS) {
+-        zerrnam(nam, "bad window number: %s", args[0], 0);
+-        return 1;
++	zcurses_WIN[targetwin]=NULL;
++	return 0;
+     }
+ 
+-    if(zcurses_WIN[winnum]==NULL) {
+-        zwarnnam(nam, "window number %s is not defined", args[0], 0);
+-        return 1;
++    if (OPT_ISSET(ops,'r')) {
++	targetwin = zcurses_validate_window(OPT_ARG(ops,'r'), ZCURSES_USED);
++	if (targetwin == -1) {
++	    zwarnnam(nam, "%s: %s", zcurses_strerror(zc_errno), OPT_ARG(ops,'r'), 0);
++	    return 1;
++	}
++
++	return (wrefresh(zcurses_WIN[targetwin])!=OK) ? 1 : 0;
+     }
++    if (OPT_ISSET(ops,'m')) {
++	int y, x;
++	unsigned winnum;
+ 
+-    if(wmove(zcurses_WIN[winnum], y, x)!=OK)
+-	return 1;
++	winnum = atoi(args[0]);
++	y = atoi(args[1]);
++	x = atoi(args[2]);
++
++	if(winnum > ZCURSES_MAX_WINDOWS) {
++	    zerrnam(nam, "bad window number: %s", args[0], 0);
++	    return 1;
++	}
++
++	if(zcurses_WIN[winnum]==NULL) {
++	    zwarnnam(nam, "window number %s is not defined", args[0], 0);
++	    return 1;
++	}
++
++	if(wmove(zcurses_WIN[winnum], y, x)!=OK)
++	    return 1;
+ 
++	return 0;
++    }
+     return 0;
+ }
+ 
+@@ -167,13 +188,13 @@
+ 	return 1;
+ 
+     if(winnum > ZCURSES_MAX_WINDOWS) {
+-        zerrnam(nam, "bad window number: %s", args[0], 0);
+-        return 1;
++	zerrnam(nam, "bad window number: %s", args[0], 0);
++	return 1;
+     }
+ 
+     if(zcurses_WIN[winnum]==NULL) {
+-        zwarnnam(nam, "window number %s is not defined", args[0], 0);
+-        return 1;
++	zwarnnam(nam, "window number %s is not defined", args[0], 0);
++	return 1;
+     }
+ 
+     if(wadd_wch(zcurses_WIN[winnum], &cc)!=OK)
+@@ -194,19 +215,19 @@
+     winnum = atoi(args[0]);
+ 
+     if(winnum > ZCURSES_MAX_WINDOWS) {
+-        zerrnam(nam, "bad window number: %s", args[0], 0);
+-        return 1;
++	zerrnam(nam, "bad window number: %s", args[0], 0);
++	return 1;
+     }
+ 
+     if(zcurses_WIN[winnum]==NULL) {
+-        zwarnnam(nam, "window number %s is not defined", args[0], 0);
+-        return 1;
++	zwarnnam(nam, "window number %s is not defined", args[0], 0);
++	return 1;
+     }
+ 
+     sl = strlen(args[1]);
+ 
+     if(sl == 0) {
+-        return 0;
++	return 0;
+     }
+ 
+     ws = malloc(sl * sizeof(wchar_t));
+@@ -225,7 +246,7 @@
+     free(ws);
+ 
+     if(wadd_wchstr(zcurses_WIN[winnum], wcc)!=OK) {
+-        free(wcc);
++	free(wcc);
+ 	return 1;
+     }
+ 
+@@ -242,13 +263,13 @@
+     winnum = atoi(args[0]);
+ 
+     if(winnum > ZCURSES_MAX_WINDOWS) {
+-        zerrnam(nam, "bad window number: %s", args[0], 0);
+-        return 1;
++	zerrnam(nam, "bad window number: %s", args[0], 0);
++	return 1;
+     }
+ 
+     if(zcurses_WIN[winnum]==NULL) {
+-        zwarnnam(nam, "window number %s does not exist", args[0], 0);
+-        return 1;
++	zwarnnam(nam, "window number %s does not exist", args[0], 0);
++	return 1;
+     }
+ 
+     if(wborder(zcurses_WIN[winnum], 0, 0, 0, 0, 0, 0, 0, 0)!=OK)
+@@ -257,17 +278,12 @@
+     return 0;
+ }
+ 
+-
+-
+ /*
+  * boot_ is executed when the module is loaded.
+  */
+ 
+ static struct builtin bintab[] = {
+-    BUILTIN("zcurses_newwin", 0, bin_zcurses_newwin, 5, 5, 0, NULL, NULL),
+-    BUILTIN("zcurses_delwin", 0, bin_zcurses_delwin, 1, 1, 0, NULL, NULL),
+-    BUILTIN("zcurses_wrefresh", 0, bin_zcurses_wrefresh, 1, 1, 0, NULL, NULL),
+-    BUILTIN("zcurses_wmove", 0, bin_zcurses_wmove, 3, 3, 0, NULL, NULL),
++    BUILTIN("zcurses", 0, bin_zcurses, 0, 5, 0, "ad:mr:", NULL),
+     BUILTIN("zcurses_wadd_wch", 0, bin_zcurses_wadd_wch, 2, 2, 0, NULL, NULL),
+     BUILTIN("zcurses_wadd_wchstr", 0, bin_zcurses_wadd_wchstr, 2, 2, 0, NULL, NULL),
+     BUILTIN("zcurses_wborder", 0, bin_zcurses_wborder, 1, 1, 0, NULL, NULL),
+Index: Src/Modules/curses.mdd
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/curses.mdd,v
+retrieving revision 1.1
+diff -u -r1.1 curses.mdd
+--- Src/Modules/curses.mdd	8 Oct 2007 02:04:02 -0000	1.1
++++ Src/Modules/curses.mdd	8 Oct 2007 13:57:48 -0000
+@@ -2,6 +2,6 @@
+ link='if test "x$ac_cv_func_initscr" = xyes -a "x$ac_cv_header_curses_h" = xyes -a "x$ac_cv_func_setcchar" = xyes; then echo dynamic; else echo no; fi'
+ load=no
+ 
+-autobins="zcurses_newwin"
++autobins="zcurses"
+ 
+ objects="curses.o"
+

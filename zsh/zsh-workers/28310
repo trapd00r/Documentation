@@ -1,0 +1,248 @@
+From zsh-workers-return-28310-mason-zsh=primenet.com.au@zsh.org Sat Oct 02 19:43:37 2010
+Return-Path: <zsh-workers-return-28310-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26236 invoked by alias); 2 Oct 2010 19:43:37 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28310
+Received: (qmail 24233 invoked from network); 2 Oct 2010 19:43:34 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00 autolearn=ham
+	version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.58 as permitted sender)
+Date: Sat, 2 Oct 2010 19:58:55 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@zsh.org
+Subject: Re: (bug report) Starting zsh takes ~5 seconds with the latest
+ commits after 20th of September with big history file
+Message-ID: <20101002195855.24c882fa@pws-pc>
+In-Reply-To: <100926131528.ZM407@torch.brasslantern.com>
+References: <20100926181231.GA4616@arch>
+	<100926131528.ZM407@torch.brasslantern.com>
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.20.1; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Cloudmark-Analysis: v=1.1 cv=DhNl2YeytwJssBBGe49HJX82LNDFEEVkpVB34RXKaPo= c=1 sm=0 a=hceiX467PfsA:10 a=4YI7mmuYAqcA:10 a=kj9zAlcOel0A:10 a=q2GGsy2AAAAA:8 a=NLZqzBF-AAAA:8 a=o59iD6JsbI0Xwn2J_9QA:9 a=ZJUAyfs1QtrJcML3oZgA:7 a=mxf1SjNFdwXKjcbfQolJO5172VkA:4 a=CjuIK1q_8ugA:10 a=I6wTmPyJxzYA:10 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+On Sun, 26 Sep 2010 13:15:27 -0700
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> (1) have an option for the new behavior (HIST_LEX_WORDS ?);
+
+This adds that.
+
+> (2) implicitly turn that option off on the way through shell exit, so
+>     history rewrites/comparisons use faster processing.
+
+Sounds like the shell is already doing too much work here.
+
+Index: Doc/Zsh/options.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/options.yo,v
+retrieving revision 1.95
+diff -p -u -r1.95 options.yo
+--- Doc/Zsh/options.yo	12 Sep 2010 18:56:40 -0000	1.95
++++ Doc/Zsh/options.yo	2 Oct 2010 18:56:16 -0000
+@@ -836,6 +836,21 @@ command is entered before it vanishes, a
+ or edit the line.  If you want to make it vanish right away without
+ entering another command, type a space and press return.
+ )
++pindex(HIST_LEX_WORDS)
++pindex(NO_HIST_LEX_WORDS)
++pindex(HISTLEXWORDS)
++pindex(NOHISTLEXWORDS)
++item(tt(HIST_LEX_WORDS))(
++By default, shell history that is read in from files is split into
++words on all white space.  This means that arguments with quoted
++whitespace are not correctly handled, with the consequence that
++references to words in history lines that have been read from a file
++may be inaccurate.  When this option is set, words read in from a
++history file are divided up in a similar fashion to normal shell
++command line handling.  Although this produces more accurately delimited
++words, if the size of the history file is large this can be slow.  Trial
++and error is necessary to decide.
++)
+ pindex(HIST_NO_FUNCTIONS)
+ pindex(NO_HIST_NO_FUNCTIONS)
+ pindex(HISTNOFUNCTIONS)
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.100
+diff -p -u -r1.100 hist.c
+--- Src/hist.c	25 Sep 2010 18:49:37 -0000	1.100
++++ Src/hist.c	2 Oct 2010 18:56:17 -0000
+@@ -2232,7 +2232,6 @@ readhistfile(char *fn, int err, int read
+     struct stat sb;
+     int nwordpos, nwords, bufsiz;
+     int searching, newflags, l, ret;
+-    LinkList wordlist;
+    
+     if (!fn && !(fn = getsparam("HISTFILE")))
+ 	return;
+@@ -2336,60 +2335,81 @@ readhistfile(char *fn, int err, int read
+ 		he->ftim = ftim;
+ 
+ 	    /*
+-	     * Divide up the words.  Attempt to do this using the lexer.
++	     * Divide up the words.
+ 	     */
+ 	    nwordpos = 0;
+ 	    start = pt;
+-	    wordlist = bufferwords(NULL, pt, NULL);
+-	    he->nwords = countlinknodes(wordlist);
+-	    if (2*he->nwords > nwords) {
+-		nwords = 2*he->nwords;
+-		words = (short *)realloc(words, nwords*sizeof(short));
+-	    }
+-	    while (firstnode(wordlist)) {
+-		char *word = uremnode(wordlist, firstnode(wordlist));
++	    if (isset(HISTLEXWORDS)) {
++		/*
++		 * Attempt to do this using the lexer.
++		 */
++		LinkList wordlist = bufferwords(NULL, pt, NULL);
++		he->nwords = countlinknodes(wordlist);
++		if (2*he->nwords > nwords) {
++		    nwords = 2*he->nwords;
++		    words = (short *)realloc(words, nwords*sizeof(short));
++		}
++		while (firstnode(wordlist)) {
++		    char *word = uremnode(wordlist, firstnode(wordlist));
+ 		
+-		while (inblank(*pt))
+-		    pt++;
+-		if (!strpfx(word, pt)) {
+-		    int bad = 0;
+-		    /*
+-		     * Oddity 1: newlines turn into semicolons.
+-		     */
+-		    if (!strcmp(word, ";"))
+-			continue;
+-		    /*
+-		     * Oddity 2: !'s turn into |'s.
+-		     */
+-		    while (*pt) {
+-			if (!*word) {
+-			    bad = 1;
+-			    break;
++		    while (inblank(*pt))
++			pt++;
++		    if (!strpfx(word, pt)) {
++			int bad = 0;
++			/*
++			 * Oddity 1: newlines turn into semicolons.
++			 */
++			if (!strcmp(word, ";"))
++			    continue;
++			/*
++			 * Oddity 2: !'s turn into |'s.
++			 */
++			while (*pt) {
++			    if (!*word) {
++				bad = 1;
++				break;
++			    }
++			    if (*pt == *word ||
++				(*pt == '!' && *word == '|')) {
++				pt++;
++				word++;
++			    } else {
++				bad = 1;
++				break;
++			    }
+ 			}
+-			if (*pt == *word ||
+-			    (*pt == '!' && *word == '|')) {
+-			    pt++;
+-			    word++;
+-			} else {
+-			    bad = 1;
++			if (bad) {
++#ifdef DEBUG
++			    dputs(ERRMSG("bad wordsplit reading history: "
++					 "%s\nat: %s\nword: %s"),
++				  start, pt, word);
++#endif
++			    words[nwordpos++] = pt - start;
++			    pt += strlen(pt);
++			    words[nwordpos++] = pt - start;
+ 			    break;
+ 			}
+ 		    }
+-		    if (bad) {
+-#ifdef DEBUG
+-			dputs(ERRMSG("bad wordsplit reading history: %s\nat: %s"
+-				     "\nword: %s"),
+-			      start, pt, word);
+-#endif
++		    words[nwordpos++] = pt - start;
++		    pt += strlen(word);
++		    words[nwordpos++] = pt - start;
++		}
++	    } else {
++		do {
++		    while (inblank(*pt))
++			pt++;
++		    if (*pt) {
++			if (nwordpos >= nwords)
++			    words = (short *)
++				realloc(words, (nwords += 64)*sizeof(short));
+ 			words[nwordpos++] = pt - start;
+-			pt += strlen(pt);
++			while (*pt && !inblank(*pt))
++			    pt++;
+ 			words[nwordpos++] = pt - start;
+-			break;
+ 		    }
+-		}
+-		words[nwordpos++] = pt - start;
+-		pt += strlen(word);
+-		words[nwordpos++] = pt - start;
++		} while (*pt);
++
++		he->nwords = nwordpos/2;
+ 	    }
+ 
+ 	    if (he->nwords) {
+Index: Src/options.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/options.c,v
+retrieving revision 1.55
+diff -p -u -r1.55 options.c
+--- Src/options.c	12 Sep 2010 18:56:41 -0000	1.55
++++ Src/options.c	2 Oct 2010 18:56:17 -0000
+@@ -149,6 +149,7 @@ static struct optname optns[] = {
+ {{NULL, "histignorealldups",  0},			 HISTIGNOREALLDUPS},
+ {{NULL, "histignoredups",     0},			 HISTIGNOREDUPS},
+ {{NULL, "histignorespace",    0},			 HISTIGNORESPACE},
++{{NULL, "histlexwords",	      0},			 HISTLEXWORDS},
+ {{NULL, "histnofunctions",    0},			 HISTNOFUNCTIONS},
+ {{NULL, "histnostore",	      0},			 HISTNOSTORE},
+ {{NULL, "histsubstpattern",   OPT_EMULATE},              HISTSUBSTPATTERN},
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.168
+diff -p -u -r1.168 zsh.h
+--- Src/zsh.h	14 Sep 2010 14:46:26 -0000	1.168
++++ Src/zsh.h	2 Oct 2010 18:56:18 -0000
+@@ -1942,6 +1942,7 @@ enum {
+     HISTIGNOREALLDUPS,
+     HISTIGNOREDUPS,
+     HISTIGNORESPACE,
++    HISTLEXWORDS,
+     HISTNOFUNCTIONS,
+     HISTNOSTORE,
+     HISTREDUCEBLANKS,
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

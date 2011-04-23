@@ -1,0 +1,340 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Thu Jul 03 11:00:01 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 1337 invoked from network); 3 Jul 1997 08:54:39 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 3 Jul 1997 08:54:39 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id EAA22618; Thu, 3 Jul 1997 04:24:56 -0400 (EDT)
+Resent-Date: Thu, 3 Jul 1997 04:24:56 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@frontiernet.net>
+Message-Id: <199707030828.EAA06611@hzoli.home>
+Subject: non-blocking reads
+To: zsh-workers@math.gatech.edu (Zsh hacking and development)
+Date: Thu, 3 Jul 1997 04:28:51 -0400 (EDT)
+X-Mailer: ELM [version 2.4ME+ PL31 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"M-Hj1.0.HX5.N7skp"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3344
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+The included patch inplements the POSIX.2 required stdin blocking:
+
+    [...]
+    The standard input will be used only if one of the following is true: 
+
+      o The -s option is specified. 
+
+      o The -c option is not specified and no operands are specified. 
+
+      o The script executes one or more commands that require input from
+        standard input (such as a read command that does not redirect its
+        input). 
+
+    [...]
+
+    If the standard input to sh is a FIFO or terminal device and is set to
+    non-blocking reads, then sh will enable blocking reads on standard
+    input. This will remain in effect when the command completes.  (This
+    concerns an instance of sh that has been invoked, probably by a
+    C-language program, with standard input that has been opened using the
+    O_NONBLOCK flag; see open() in the XSH specification. If the shell did
+    not reset this flag, it would immediately terminate because no input
+    data would be available yet and that would be considered the same as
+    end-of-file.)
+
+The implementation really checks for non-regular file on stdin instead of
+a FIFO or terminal since, for example in case of rsh, stdin can be a
+socket and the blocking is still desirable.  It also modifies read so
+that without the -r option backslash removes the special meaning of the
+next character, as described in POSIX and in ksh(1).
+
+The patch should be applied to both of zsh-3.0.4 and zsh-3.1.2.
+
+Zoltan
+
+
+*** Src/builtin.c	1997/06/16 05:11:38	3.1.3.1
+--- Src/builtin.c	1997/07/03 08:04:33
+***************
+*** 2718,2724 ****
+  bin_read(char *name, char **args, char *ops, int func)
+  {
+      char *reply, *readpmpt;
+!     int bsiz, c = 0, gotnl = 0, al = 0, first, nchars = 1;
+      int haso = 0;	/* true if /dev/tty has been opened specially */
+      int isem = !strcmp(term, "emacs");
+      char *buf, *bptr, *firstarg, *zbuforig;
+--- 2718,2724 ----
+  bin_read(char *name, char **args, char *ops, int func)
+  {
+      char *reply, *readpmpt;
+!     int bsiz, c = 0, gotnl = 0, al = 0, first, nchars = 1, bslash;
+      int haso = 0;	/* true if /dev/tty has been opened specially */
+      int isem = !strcmp(term, "emacs");
+      char *buf, *bptr, *firstarg, *zbuforig;
+***************
+*** 2767,2793 ****
+      } else if (ops['u'] && !ops['p']) {
+  	/* -u means take input from the specified file descriptor. *
+  	 * -up means take input from the coprocess.                */
+! 	for (readfd = 0; readfd < 10; ++readfd)
+! 	    if (ops[readfd + '0'])
+! 		break;
+! 	if (readfd == 10)
+! 	    readfd = 0;
+      } else if (ops['p'])
+  	readfd = coprocin;
+!     else {
+! 	/* last resort: take input from plain old stdin */
+! 	attachtty((jobtab[thisjob].gleader) ? jobtab[thisjob].gleader : mypgrp);
+  	readfd = 0;
+! #if 0
+! 	  else if (isset(SHINSTDIN) && unset(INTERACTIVE)) {
+! 	    /* use stdout or stderr, if either is a tty */
+! 	    if (isatty(1))
+! 		readfd = 1;
+! 	    else if (isatty(2))
+! 		readfd = 2;
+! 	}
+! #endif
+!     }
+      /* handle prompt */
+      if (firstarg) {
+  	for (readpmpt = firstarg;
+--- 2767,2778 ----
+      } else if (ops['u'] && !ops['p']) {
+  	/* -u means take input from the specified file descriptor. *
+  	 * -up means take input from the coprocess.                */
+! 	for (readfd = 9; readfd && !ops[readfd + '0']; --readfd);
+      } else if (ops['p'])
+  	readfd = coprocin;
+!     else
+  	readfd = 0;
+! 
+      /* handle prompt */
+      if (firstarg) {
+  	for (readpmpt = firstarg;
+***************
+*** 2874,2895 ****
+      zbuforig = zbuf = (!ops['z']) ? NULL :
+  	(nonempty(bufstack)) ? (char *) getlinknode(bufstack) : ztrdup("");
+      first = 1;
+      while (*args || (ops['A'] && !gotnl)) {
+  	buf = bptr = (char *)zalloc(bsiz = 64);
+  	/* get input, a character at a time */
+! 	for (;;) {
+! 	    if (gotnl)
+! 		break;
+  	    c = zread();
+  	    /* \ at the end of a line indicates a continuation *
+  	     * line, except in raw mode (-r option)            */
+! 	    if (!ops['r'] && c == '\n' && bptr != buf && bptr[-1] == '\\') {
+! 		bptr--;
+  		continue;
+  	    }
+  	    if (c == EOF || c == '\n')
+  		break;
+! 	    if (isep(c)) {
+  		if (bptr != buf || (!iwsep(c) && first)) {
+  		    first |= !iwsep(c);
+  		    break;
+--- 2859,2879 ----
+      zbuforig = zbuf = (!ops['z']) ? NULL :
+  	(nonempty(bufstack)) ? (char *) getlinknode(bufstack) : ztrdup("");
+      first = 1;
++     bslash = 0;
+      while (*args || (ops['A'] && !gotnl)) {
+  	buf = bptr = (char *)zalloc(bsiz = 64);
+  	/* get input, a character at a time */
+! 	while (!gotnl) {
+  	    c = zread();
+  	    /* \ at the end of a line indicates a continuation *
+  	     * line, except in raw mode (-r option)            */
+! 	    if (bslash && c == '\n') {
+! 		bslash = 0;
+  		continue;
+  	    }
+  	    if (c == EOF || c == '\n')
+  		break;
+! 	    if (!bslash && isep(c)) {
+  		if (bptr != buf || (!iwsep(c) && first)) {
+  		    first |= !iwsep(c);
+  		    break;
+***************
+*** 2897,2902 ****
+--- 2881,2889 ----
+  		first |= !iwsep(c);
+  		continue;
+  	    }
++ 	    bslash = c == '\\' && !bslash && !ops['r'];
++ 	    if (bslash)
++ 		continue;
+  	    first = 0;
+  	    if (imeta(c)) {
+  		*bptr++ = Meta;
+***************
+*** 2964,2987 ****
+      }
+      buf = bptr = (char *)zalloc(bsiz = 64);
+      /* any remaining part of the line goes into one parameter */
+      if (!gotnl)
+  	for (;;) {
+  	    c = zread();
+  	    /* \ at the end of a line introduces a continuation line, except in
+  	    raw mode (-r option) */
+! 	    if (!ops['r'] && c == '\n' && bptr != buf && bptr[-1] == '\\') {
+! 		bptr--;
+  		continue;
+  	    }
+  	    if (c == EOF || (c == '\n' && !zbuf))
+  		break;
+! 	    if (isep(c) && bptr == buf)
+  		if (iwsep(c))
+  		    continue;
+  		else if (!first) {
+  		    first = 1;
+  		    continue;
+  		}
+  	    if (imeta(c)) {
+  		*bptr++ = Meta;
+  		*bptr++ = c ^ 32;
+--- 2951,2978 ----
+      }
+      buf = bptr = (char *)zalloc(bsiz = 64);
+      /* any remaining part of the line goes into one parameter */
++     bslash = 0;
+      if (!gotnl)
+  	for (;;) {
+  	    c = zread();
+  	    /* \ at the end of a line introduces a continuation line, except in
+  	    raw mode (-r option) */
+! 	    if (bslash && c == '\n') {
+! 		bslash = 0;
+  		continue;
+  	    }
+  	    if (c == EOF || (c == '\n' && !zbuf))
+  		break;
+! 	    if (!bslash && isep(c) && bptr == buf)
+  		if (iwsep(c))
+  		    continue;
+  		else if (!first) {
+  		    first = 1;
+  		    continue;
+  		}
++ 	    bslash = c == '\\' && !bslash && !ops['r'];
++ 	    if (bslash)
++ 		continue;
+  	    if (imeta(c)) {
+  		*bptr++ = Meta;
+  		*bptr++ = c ^ 32;
+***************
+*** 3028,3034 ****
+  static int
+  zread(void)
+  {
+!     char cc;
+  
+      /* use zbuf if possible */
+      if (zbuf)
+--- 3019,3025 ----
+  static int
+  zread(void)
+  {
+!     char cc, i;
+  
+      /* use zbuf if possible */
+      if (zbuf)
+***************
+*** 3039,3050 ****
+  	    return zbuf++, STOUC(*zbuf++ ^ 32);
+  	else
+  	    return (*zbuf) ? STOUC(*zbuf++) : EOF;
+!     /* read a character from readfd */
+!     if (read(readfd, &cc, 1) != 1)
+! 	/* on EOF, return EOF */
+! 	return EOF;
+!     /* return the character read */
+!     return STOUC(cc);
+  }
+  
+  /* holds lexer for par_cond():  normally yylex(), testlex() for bin_test() */
+--- 3030,3049 ----
+  	    return zbuf++, STOUC(*zbuf++ ^ 32);
+  	else
+  	    return (*zbuf) ? STOUC(*zbuf++) : EOF;
+!     for (i = 2; i--;) {
+! 	/* read a character from readfd */
+! 	switch (read(readfd, &cc, 1)) {
+! 	case 1:
+! 	    /* return the character read */
+! 	    return STOUC(cc);
+! 	case -1:
+! 	    if (errno == EWOULDBLOCK && readfd == 0 && setblock_stdin())
+! 		continue;
+! 	    break;
+! 	}
+! 	break;
+!     }
+!     return EOF;
+  }
+  
+  /* holds lexer for par_cond():  normally yylex(), testlex() for bin_test() */
+*** Src/init.c	1997/06/05 04:44:57	3.1.3.0
+--- Src/init.c	1997/07/03 08:05:10
+***************
+*** 53,60 ****
+      for (;;) {
+  	freeheap();
+  	errflag = 0;
+! 	if (interact && isset(SHINSTDIN))
+! 	    preprompt();
+  	hbegin();		/* init history mech        */
+  	intr();			/* interrupts on            */
+  	lexinit();              /* initialize lexical state */
+--- 53,63 ----
+      for (;;) {
+  	freeheap();
+  	errflag = 0;
+! 	if (isset(SHINSTDIN)) {
+! 	    setblock_stdin();
+! 	    if (interact)
+! 		preprompt();
+! 	}
+  	hbegin();		/* init history mech        */
+  	intr();			/* interrupts on            */
+  	lexinit();              /* initialize lexical state */
+*** Src/utils.c	1997/06/06 06:13:24	3.1.3.1
+--- Src/utils.c	1997/07/03 08:04:43
+***************
+*** 1050,1055 ****
+--- 1050,1073 ----
+  
+  /**/
+  int
++ setblock_stdin(void)
++ {
++ #ifdef O_NONBLOCK
++     struct stat st;
++     long mode;
++ 
++     if (!fstat(0, &st) && !S_ISREG(st.st_mode)) {
++ 	mode = fcntl(0, F_GETFL);
++ 	if (mode != -1 && (mode & O_NONBLOCK) &&
++ 	    !fcntl(0, F_SETFL, mode & ~O_NONBLOCK))
++ 	    return 1;
++     }
++ #endif
++     return 0;
++ }
++ 
++ /**/
++ int
+  getquery(char *valid_chars)
+  {
+      char c, d;
+

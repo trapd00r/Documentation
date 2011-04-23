@@ -1,0 +1,291 @@
+From zsh-workers-return-17135-mason-zsh=primenet.com.au@sunsite.dk Mon May 13 09:31:02 2002
+Return-Path: <zsh-workers-return-17135-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8949 invoked from network); 13 May 2002 09:31:02 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 13 May 2002 09:31:02 -0000
+Received: (qmail 23999 invoked by alias); 13 May 2002 09:30:56 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17135
+Received: (qmail 23988 invoked from network); 13 May 2002 09:30:56 -0000
+From: Sven Wischnowsky <wischnow@berkom.de>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+Message-ID: <15583.34740.981994.404489@wischnow.berkom.de>
+Date: Mon, 13 May 2002 11:30:28 +0200
+To: zsh-workers@sunsite.dk
+Subject: Re: completion in quotes - " vs ' - no suffix added
+In-Reply-To: <1020508153855.ZM7837@candle.brasslantern.com>
+References: <15576.54689.459113.686818@wischnow.berkom.de>
+	<6134254DE87BD411908B00A0C99B044F02E89A73@mowd019a.mow.siemens.ru>
+	<15577.7296.682622.411849@wischnow.berkom.de>
+	<1020508153855.ZM7837@candle.brasslantern.com>
+X-Mailer: VM 6.95 under 21.5 (patch 3) "asparagus" XEmacs Lucid
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> Sven, what you're missing is that although the result is correct after
+> you execute the command, the completion is not correct while the command
+> line is being built.  That is, if the completion system is going to turn
+> the file name `a\ b' into the string `"a\\ b"' when it inserts it on the
+> line, then `compset -q' should also UNDO the backslash-doubling again
+> when the quote character is a double-quote, so that it's possible to
+> correctly complete the file path on the second and subsequent calls to
+> the completion system.
+
+(Sorry for the delay, I was away on Thursday and Friday.)
+
+(Also sorry for being so bone-headed. Ahem.)
+
+Whew, this was pretty complicated, we have to special-case this stuff.
+Because a quoting a single quote inserts more single quotes. This
+wasn't even handled correctly (in the case that there was one quoted
+single quote in the string) by get_comp_string().
+
+The patch below should fix it. At least it does for the pretty
+complicated cases I tried.
+
+Bye
+  Sven
+
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.56
+diff -u -r1.56 compcore.c
+--- Src/Zle/compcore.c	1 Mar 2002 10:42:02 -0000	1.56
++++ Src/Zle/compcore.c	13 May 2002 09:27:02 -0000
+@@ -1175,6 +1175,30 @@
+     return t;
+ }
+ 
++/* Remove one of every pair of single quotes, without copying. Return
++ * the number of removed quotes. */
++
++/**/
++mod_export int
++remsquote(char *s)
++{
++    int ret = 0, qa = (isset(RCQUOTES) ? 1 : 3);
++    char *t = s;
++
++    while (*s)
++	if (qa == 1 ?
++            (s[0] == '\'' && s[1] == '\'') :
++            (s[0] == '\'' && s[1] == '\\' && s[2] == '\'' && s[3] == '\'')) {
++            ret += qa;
++            *t++ = '\'';
++            s += qa + 1;
++	} else
++	    *t++ = *s++;
++    *t = '\0';
++
++    return ret;
++}
++
+ /* This should probably be moved into tokenize(). */
+ 
+ /**/
+@@ -1244,7 +1268,8 @@
+     LinkList foo = newlinklist();
+     LinkNode n;
+     int owe = we, owb = wb, ocs = cs, swb, swe, scs, soffs, ne = noerrs;
+-    int tl, got = 0, i = 0, cur = -1, oll = ll, sl, remq;
++    int tl, got = 0, i = 0, j, cur = -1, oll = ll, sl;
++    int remq = 0, dq = 0, odq, sq = 0, osq, issq = 0, sqq = 0, lsq = 0, qa = 0;
+     int ois = instring, oib = inbackt, noffs = lp, ona = noaliases;
+     char *tmp, *p, *ns, *ol = (char *) line, sav, *qp, *qs, *ts, qc = '\0';
+ 
+@@ -1266,8 +1291,33 @@
+     memcpy(tmp + 1, s, noffs);
+     tmp[(scs = cs = 1 + noffs)] = 'x';
+     strcpy(tmp + 2 + noffs, s + noffs);
+-    if ((remq = (*compqstack == '\\')))
++
++    switch (*compqstack) {
++    case '\\':
++        remq = 1;
+ 	tmp = rembslash(tmp);
++        break;
++    case '\'':
++        issq = 1;
++        if (isset(RCQUOTES))
++            qa = 1;
++        else
++            qa = 3;
++
++        sq = remsquote(tmp);
++
++        break;
++    case '"':
++        for (j = 0, p = tmp; *p; p++, j++)
++            if (*p == '\\' && p[1] == '\\') {
++                dq++;
++                chuck(p);
++                if (!*p)
++                    break;
++            }
++    }
++    odq = dq;
++    osq = sq;
+     inpush(dupstrspace(tmp), 0, NULL);
+     line = (unsigned char *) tmp;
+     ll = tl - 1;
+@@ -1280,9 +1330,10 @@
+ 
+ 	    if (!tokstr)
+ 		break;
+-	    for (j = 0, p = tokstr; *p; p++)
++	    for (j = 0, p = tokstr; *p; p++) {
+ 		if (*p == Snull || *p == Dnull)
+ 		    j++;
++            }
+ 	    if (j & 1) {
+ 		tok = STRING;
+ 		if (p > tokstr && p[-1] == ' ')
+@@ -1291,16 +1342,33 @@
+ 	}
+ 	if (tok == ENDINPUT || tok == LEXERR)
+ 	    break;
+-	if (tokstr && *tokstr)
++	if (tokstr && *tokstr) {
++            for (p = tokstr; dq && *p; p++)
++                if (*p == Bnull)
++                    dq--;
++            if (issq) {
++                for (p = tokstr, lsq = 0; *p; p++) {
++                    if (sq && *p == Snull)
++                        sq -= qa;
++                    if (*p == '\'') {
++                        sq -= qa;
++                        lsq += qa;
++                    }
++                }
++            }
++            else
++                lsq = 0;
+ 	    addlinknode(foo, (p = ztrdup(tokstr)));
++        }
+ 	else
+ 	    p = NULL;
+ 	if (!got && !zleparse) {
+ 	    DPUTS(!p, "no current word in substr");
+ 	    got = 1;
+ 	    cur = i;
+-	    swb = wb - 1;
+-	    swe = we - 1;
++	    swb = wb - 1 - dq - sq;
++	    swe = we - 1 - dq - sq;
++            sqq = lsq;
+ 	    soffs = cs - swb;
+ 	    chuck(p + soffs);
+ 	    ns = dupstring(p);
+@@ -1352,8 +1420,12 @@
+     for (p = ns, i = swb; *p; p++, i++) {
+ 	if (INULL(*p)) {
+ 	    if (i < scs) {
+-		if (remq && *p == Bnull && p[1])
+-		    swb -= 2;
++		if (*p == Bnull && p[1]) {
++                    if (remq)
++                        swb -= 2;
++                    if (odq)
++                        swb--;
++                }
+ 	    }
+ 	    if (p[1] || *p != Bnull) {
+ 		if (*p == Bnull) {
+@@ -1378,9 +1450,9 @@
+ 	if (ql > rl)
+ 	    swb -= ql - rl;
+     }
+-    sav = s[(i = swb - 1)];
++    sav = s[(i = swb - 1 - sqq)];
+     s[i] = '\0';
+-    qp = rembslash(s);
++    qp = (issq ? dupstring(s) : rembslash(s));
+     s[i] = sav;
+     if (swe < swb)
+ 	swe = swb;
+@@ -1391,11 +1463,14 @@
+ 	if (strlen(ns) > swe - swb + 1)
+ 	    ns[swe - swb + 1] = '\0';
+     }
+-    qs = rembslash(s + swe);
++    qs = (issq ? dupstring(s + swe) : rembslash(s + swe));
+     sl = strlen(ns);
+     if (soffs > sl)
+ 	soffs = sl;
+-
++    if (issq) {
++        remsquote(qp);
++        remsquote(qs);
++    }
+     {
+ 	int set = CP_QUOTE | CP_QUOTING, unset = 0;
+ 
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_tricky.c,v
+retrieving revision 1.36
+diff -u -r1.36 zle_tricky.c
+--- Src/Zle/zle_tricky.c	16 Apr 2002 07:53:13 -0000	1.36
++++ Src/Zle/zle_tricky.c	13 May 2002 09:27:02 -0000
+@@ -985,7 +985,7 @@
+ get_comp_string(void)
+ {
+     int t0, tt0, i, j, k, cp, rd, sl, ocs, ins, oins, ia, parct, varq = 0;
+-    int ona = noaliases;
++    int ona = noaliases, qsub;
+     char *s = NULL, *linptr, *tmp, *p, *tt = NULL, rdop[20];
+ 
+     freebrinfo(brbeg);
+@@ -1051,6 +1051,8 @@
+     * and whatnot. */
+ 
+     do {
++        qsub = 0;
++
+ 	lincmd = ((incmdpos && !ins && !incond) || (oins == 2 && i == 2) ||
+ 		  (ins == 3 && i == 1));
+ 	linredir = (inredir && !ins);
+@@ -1126,9 +1128,16 @@
+ 	if (!zleparse && !tt0) {
+ 	    /* This is done when the lexer reached the word the cursor is on. */
+ 	    tt = tokstr ? dupstring(tokstr) : NULL;
++
++            if (isset(RCQUOTES) && *tt == Snull) {
++                char *p, *e = tt + cs - wb;
++                for (p = tt; *p && p < e; p++)
++                    if (*p == '\'')
++                        qsub++;
++            }
+ 	    /* If we added a `x', remove it. */
+ 	    if (addedx && tt)
+-		chuck(tt + cs - wb);
++		chuck(tt + cs - wb - qsub);
+ 	    tt0 = tok;
+ 	    /* Store the number of this word. */
+ 	    clwpos = i;
+@@ -1176,8 +1185,8 @@
+ 	/* If this is the word the cursor is in and we added a `x', *
+ 	 * remove it.                                               */
+ 	if (clwpos == i++ && addedx)
+-	    chuck(&clwords[i - 1][((cs - wb) >= sl) ?
+-				 (sl - 1) : (cs - wb)]);
++	    chuck(&clwords[i - 1][((cs - wb - qsub) >= sl) ?
++				 (sl - 1) : (cs - wb - qsub)]);
+     } while (tok != LEXERR && tok != ENDINPUT &&
+ 	     (tok != SEPER || (zleparse && !tt0)));
+     /* Calculate the number of words stored in the clwords array. */
+
+-- 
+Sven Wischnowsky                          wischnow@berkom.de
+

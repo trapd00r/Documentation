@@ -1,0 +1,188 @@
+From zsh-workers-return-8184-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Oct 10 08:28:05 1999
+Return-Path: <zsh-workers-return-8184-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3071 invoked from network); 10 Oct 1999 08:28:04 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 10 Oct 1999 08:28:04 -0000
+Received: (qmail 17606 invoked by alias); 10 Oct 1999 08:27:54 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8184
+Received: (qmail 17599 invoked from network); 10 Oct 1999 08:27:52 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <991010082734.ZM31398@candle.brasslantern.com>
+Date: Sun, 10 Oct 1999 08:27:34 +0000
+In-Reply-To: <991005094557.ZM4191@candle.brasslantern.com>
+Comments: In reply to "Bart Schaefer" <schaefer@candle.brasslantern.com>
+        "All sorts of file-descriptor strangeness" (Oct  5,  9:45am)
+References: <991005094557.ZM4191@candle.brasslantern.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: 3.0.6/3.1.6: Re: All sorts of file-descriptor strangeness
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Oct 5,  9:45am, Bart Schaefer wrote:
+} Subject: All sorts of file-descriptor strangeness
+}
+} For one thing, did you know that back in January of 1996, Zoltan added
+} the "&>" operator to zsh?  It is both undocumented and exceptionally
+} inconsistent in its behavior, and I'm still not precisely sure what it
+} is supposed to do.
+
+It's supposed to mean exactly the same thing as ">&" when no descriptor
+numbers are provided; that is, both ">& foo" and "&> foo" are shorthand
+for "> foo 2>&1", with the single difference that the right-hand-side of
+"&>" is always treated as a file name, never as a descriptor number.  A
+doc patch for this is below.
+
+">& foo" is a csh-ism that zsh has always supported; I don't know where
+"&>" came from (ksh?), but it appears that it has always been broken.
+
+} If it's the first redirection after starting "zsh -f":
+} 
+} 	zagzig% echo 1&>3
+} 	1
+} 
+} This has now created an empty file named "3" and echoed "1\n" to stdout.
+} 
+} 	zagzig% echo 22>&1
+} 	22
+} 	zagzig% echo 1&>3
+} 	zagzig% 
+} 
+} Now suddenly the file "3" contains "1\n" -- completely ignoring noclobber,
+} I may add.  I don't know what's magic about the >&1, but from then on the
+} &> operator acts just like >|.
+
+First, let me say that I was confused about noclobber.  It wasn't ignored,
+it simply wasn't set in the first place.
+
+Wiping the egg out of my eyes, I compared strace output before and after
+"echo >&1" and discovered that the first "echo 1 &>3" was behaving as if
+it were "echo 1 0>&3", while the second acted like "echo 1 1>&3".  Come
+tiptoe through the lexer with me:  At the top of gettok(), on redirects
+beginning with '>' or '<', the local `peekfd' is set to the number that
+precedes the redirection as a single digit --
+
+} Let's talk about that 22>&1 for a moment.  The number on the left side of
+} an >& or <& must be a single digit, or zsh treats it as a separate word
+} and not as part of the redirection.
+
+-- and then later when the redirect operator has been lexed, the global
+`tokfd' is set to `peekfd', which is -1 if there was no digit.  Over in
+the parser, upon getting a redirection token, par_redir() is called to
+copy `tokfd' into the `struct redir' that goes in the argument list.
+
+None of this, however, happens for "&>", so `tokfd' has whatever value
+was left over the last time a redirection operator was parsed!  Thus the
+"real" meaning of &> is (was) to redirect both stderr _and_ whatever FD
+had most recently been redirected (initally stdin!) to the file named on
+the RHS.  As I'm relatively sure this is a bug, a patch is appended (the
+lex.c hunk).
+
+Returning to other redirections:
+
+} The number on the right, on the other
+} hand, can be as many digits long as you like, and can even have whitespace
+} in front of it, and still zsh happily converts it to an integer and tries
+} to dup() it.
+
+The doc patch also changes "digit" to "number" in strategic spots to imply
+this without calling much attention to it.
+
+} This usually simply prints "bad file number" -- but if you
+} happen to hit one of the descriptors that movefd() has allocated, you can
+} produce some strange effects, usually ending with a sudden exit.
+
+This turns out to be overstated.  You can produce strange effects, but they
+don't inherently cause the shell any problems, because the dup-ing always
+goes from the RHS to the LHS -- so although you can grab a copy of a one
+of the internal file descriptors, the worst thing you can do with it is
+clobber one or more of stdin/out/err with it.  So no fix is needed here.
+
+} Finally, I'm pretty sure that it's something like this >&1 mystery that
+} causes the "coproc" descriptor leakage that I described in a previous
+} message to zsh-users.  [...]
+} 
+} I'm pretty sure all this has something to do with addfd(), based on this
+} comment from exec.c (carats my emphasis):
+} 
+}  * fd1 == fd2 is possible, and indicates that fd1 was really closed.  *
+}    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This was a red herring.  The coproc input descriptor is _always_ leaked;
+I'm puzzled as to why this doesn't always cause the coproc to fail to see
+end-of-file; it's probably just that zsh sometimes stomps on the leaked
+descriptor itself, because it doesn't know that it's still "in use."  It
+is, however, a good idea to avoid descriptor leakage, so a patch for this
+is also included (the exec.c hunk).
+
+I can't find any reason why opipe[0] should not be closed at that point,
+as zsh otherwise completely forgets that it exists.  Maybe some obscure
+system has a bug that causes the coproc to get EOF premturely in that case?
+If you know or find this to be true, please try to send us an appropriate
+#ifdef and comment for this spot.
+
+Off we go ... for 3.0.6, simply ignore the redirect.yo hunk.
+
+Index: Doc/Zsh/redirect.yo
+===================================================================
+@@ -77,10 +77,10 @@
+ Perform shell expansion on var(word) and pass the result
+ to standard input.  This is known as a em(here-string).
+ )
+-xitem(tt(<&) var(digit))
+-item(tt(>&) var(digit))(
++xitem(tt(<&) var(number))
++item(tt(>&) var(number))(
+ The standard input/output is duplicated from file descriptor
+-var(digit) (see manref(dup)(2)).
++var(number) (see manref(dup2)(2)).
+ )
+ xitem(tt(<& -))
+ item(tt(>& -))(
+@@ -90,8 +90,10 @@
+ item(tt(>& p))(
+ The input/output from/to the coprocess is moved to the standard input/output.
+ )
+-item(tt(>&) var(word))(
+-Same as `tt(>) var(word) tt(2>&1)'.
++xitem(tt(>&) var(word))
++item(tt(&>) var(word))(
++Same as `tt(>) var(word) tt(2>&1)'.  Note that with tt(&>), var(word) is
++never interpreted as a file descriptor, even if it is a number.
+ )
+ item(tt(>>&) var(word))(
+ Same as `tt(>>) var(word) tt(2>&1)'.
+Index: Src/exec.c
+===================================================================
+@@ -877,8 +877,10 @@
+     if (how & Z_ASYNC) {
+ 	lastwj = newjob;
+ 	jobtab[thisjob].stat |= STAT_NOSTTY;
+-	if (l->flags & PFLAG_COPROC)
++	if (l->flags & PFLAG_COPROC) {
+ 	    zclose(ipipe[1]);
++	    zclose(opipe[0]);
++	}
+ 	if (how & Z_DISOWN) {
+ 	    deletejob(jobtab + thisjob);
+ 	    thisjob = -1;
+Index: Src/lex.c
+===================================================================
+@@ -642,6 +642,7 @@
+ 	    }
+ 	    hungetc(d);
+ 	    lexstop = 0;
++	    tokfd = -1;
+ 	    return AMPOUTANG;
+ 	}
+ 	hungetc(d);
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

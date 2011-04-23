@@ -1,0 +1,182 @@
+From zsh-workers-return-22270-mason-zsh=primenet.com.au@sunsite.dk Wed Feb 15 11:36:10 2006
+Return-Path: <zsh-workers-return-22270-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15230 invoked from network); 15 Feb 2006 11:36:08 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.0 (2005-09-13) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 15 Feb 2006 11:36:08 -0000
+Received: (qmail 71215 invoked from network); 15 Feb 2006 11:36:00 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 15 Feb 2006 11:36:00 -0000
+Received: (qmail 17150 invoked by alias); 15 Feb 2006 11:35:52 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22270
+Received: (qmail 17140 invoked from network); 15 Feb 2006 11:35:51 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 15 Feb 2006 11:35:51 -0000
+Received: (qmail 70584 invoked from network); 15 Feb 2006 11:35:51 -0000
+Received: from dsl3-63-249-88-2.cruzio.com (HELO dot.blorf.net) (63.249.88.2)
+  by a.mx.sunsite.dk with SMTP; 15 Feb 2006 11:35:50 -0000
+Received: by dot.blorf.net (Postfix, from userid 1000)
+	id 48F7146F4; Wed, 15 Feb 2006 03:35:49 -0800 (PST)
+Date: Wed, 15 Feb 2006 03:35:49 -0800
+From: Wayne Davison <wayned@users.sourceforge.net>
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: PATCH: fixing ${1+"$@"} when word-splitting
+Message-ID: <20060215113549.GB4882@dot.blorf.net>
+References: <20060211181440.GA30984@dot.blorf.net> <200602122026.k1CKQHGH003629@pwslaptop.csr.com> <20060213105349.GD31780@dot.blorf.net> <20060214071441.GA9931@dot.blorf.net>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="J/dobhs11T7y2rNN"
+Content-Disposition: inline
+In-Reply-To: <20060214071441.GA9931@dot.blorf.net>
+User-Agent: Mutt/1.5.11
+
+
+--J/dobhs11T7y2rNN
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+I noticed another long-standing bug (I think the final result is wrong):
+
+ % foo=(1 2)
+ % bar=3
+ % print -l ${foo+$bar$foo}
+ 31
+ 2
+ % print -l ${foo+$foo$bar}
+ 1 23
+
+This is a case of the arrayness of the result being lost because the
+non-array, $bar, came after the array, $foo.
+
+Attached is a patch that fixes this by having multsub() only honor
+mult_isarr as a flag that indicates that a single-item result was
+really an array, not that a multi-item result should not be an array.
+
+..wayne..
+
+--J/dobhs11T7y2rNN
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="arrayness.patch"
+
+Index: Src/subst.c
+--- Src/subst.c	15 Feb 2006 10:13:41 -0000	1.45
++++ Src/subst.c	15 Feb 2006 11:24:32 -0000
+@@ -300,16 +300,15 @@ singsub(char **s)
+  * first word-split using IFS, but only for non-quoted "whitespace" (as
+  * indicated by Dnull, Snull, Tick, Bnull, Inpar, and Outpar).
+  *
+- * If arg "a" was non-NULL _and_ the parsing set mult_isarr, the resulting
+- * strings are stored in *a (even for a 1-element array) and *isarr is set
+- * to 1.  Otherwise, *isarr is set to 0, and the result is stored in *s,
++ * If arg "a" was non-NULL and we got an array as a result of the parsing,
++ * the strings are stored in *a (even for a 1-element array) and *isarr is
++ * set to 1.  Otherwise, *isarr is set to 0, and the result is put into *s,
+  * with any necessary joining of multiple elements using sep (which can be
+  * NULL to use IFS).  The return value is true iff the expansion resulted
+  * in an empty list.
+  *
+- * The mult_isarr variable is used by paramsubst() to tell us if the
+- * substitutions yielded an array, but we will also set it if we split *s
+- * into multiple items (since that also yields an array). */
++ * The mult_isarr variable is used by paramsubst() to tell us if a single-
++ * item result was an array.  We always restore its value on exit. */
+ 
+ /**/
+ static int mult_isarr;
+@@ -337,7 +336,6 @@ multsub(char **s, int split, char ***a, 
+     if (split) {
+ 	LinkNode n = firstnode(&foo);
+ 	int inq = 0, inp = 0;
+-	split = 0; /* use this to flag if we really split anything */
+ 	for ( ; *x; x += l+1) {
+ 	    char c = (l = *x == Meta) ? x[1] ^ 32 : *x;
+ 	    if (!inq && !inp && isep(c)) {
+@@ -350,7 +348,6 @@ multsub(char **s, int split, char ***a, 
+ 		if (!*x)
+ 		    break;
+ 		insertlinknode(&foo, n, (void *)x), incnode(n);
+-		split = 1;
+ 	    }
+ 	    switch (c) {
+ 	    case Dnull:  /* " */
+@@ -382,24 +379,19 @@ multsub(char **s, int split, char ***a, 
+ 	mult_isarr = omi;
+ 	return 0;
+     }
+-    if (split)
+-	mult_isarr = 1;
+ 
+     if ((l = countlinknodes(&foo)) > 1 || (a && mult_isarr)) {
+ 	p = r = hcalloc((l + 1) * sizeof(char*));
+ 	while (nonempty(&foo))
+ 	    *p++ = (char *)ugetnode(&foo);
+ 	*p = NULL;
+-	/*
+-	 * This is the most obscure way of deciding whether a value is
+-	 * an array it would be possible to imagine.  It seems to result
+-	 * partly because we don't pass down the qt and ssub flags from
+-	 * paramsubst() through prefork() properly, partly because we
+-	 * don't tidy up to get back the return type from multsub we
+-	 * need properly.  The crux of neatening this up is to get rid
+-	 * of the following test.
+-	 */
+-	if (a && mult_isarr) {
++	/* We need a way to figure out if a one-item result was a scalar
++	 * or a single-item array.  The parser will have set mult_isarr
++	 * in the latter case, allowing us to return it as an array to
++	 * our caller (if they provided for that result).  It would be
++	 * better if this information were encoded in the list itself
++	 * (e.g. by adding a flag to the LinkList structure). */
++	if (a && (l > 1 || mult_isarr)) {
+ 	    *a = r;
+ 	    *isarr = SCANPM_MATCHMANY;
+ 	    mult_isarr = omi;
+@@ -2397,12 +2389,6 @@ paramsubst(LinkList l, LinkNode n, char 
+     }
+     /* ssub is true when we are called from singsub (via prefork).
+      * It means that we must join arrays and should not split words. */
+-    /*
+-     * TODO: this is what is screwing up the use of SH_WORD_SPLIT
+-     * after `:-' etc.  If we fix multsub(), we might get away
+-     * with simply unsetting the appropriate flags when they
+-     * get handled.
+-     */
+     if (ssub || spbreak || spsep || sep) {
+ 	if (isarr)
+ 	    val = sepjoin(aval, sep, 1), isarr = 0;
+Index: Test/D04parameter.ztst
+--- Test/D04parameter.ztst	15 Feb 2006 10:13:43 -0000	1.14
++++ Test/D04parameter.ztst	15 Feb 2006 11:24:32 -0000
+@@ -550,10 +550,12 @@
+ >again
+ 
+   local sure_that='sure that' varieties_of='varieties of' one=1 two=2
++  extra=(5 4 3)
+   set Make $sure_that "this test keeps" on 'preserving all' "$varieties_of" quoted whitespace
+   print -l ${=1+"$@"}
+   print -l ${=1+Make $sure_that "this test keeps" on 'preserving all' "$varieties_of" quoted whitespace}
+   print -l ${=1+$one $two}
++  print -l ${1+$extra$two$one}
+ 0:Regression test of ${=1+"$@"} bug and some related expansions
+ >Make
+ >sure that
+@@ -574,6 +576,9 @@
+ >whitespace
+ >1
+ >2
++>5
++>4
++>321
+ 
+   splitfn() {
+     emulate -L sh
+
+--J/dobhs11T7y2rNN--
+

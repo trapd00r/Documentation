@@ -1,0 +1,167 @@
+From zsh-workers-return-15266-mason-zsh=primenet.com.au@sunsite.dk Thu Jul 05 23:46:32 2001
+Return-Path: <zsh-workers-return-15266-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22711 invoked from network); 5 Jul 2001 23:46:26 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Jul 2001 23:46:26 -0000
+Received: (qmail 16332 invoked by alias); 5 Jul 2001 23:45:22 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15266
+Received: (qmail 16319 invoked from network); 5 Jul 2001 23:45:21 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: fix for ${(S)...%%...}
+Date: Fri, 06 Jul 2001 01:48:24 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20010706004829.E359F14286@pwstephenson.fsnet.co.uk>
+
+I don't know if you care, but this was wrong.  Consider:
+
+% foo='where I was standing lizards crawled here and there around'
+% print ${(S)foo%%h*ere} 
+where I was standing lizards crawled here and t around
+
+This is simply the first match found, whereas you want the longest.  You
+can only get the longest match by scanning backwards from that point till
+it fails.  To do the whole thing quicker, scan forwards from the start,
+remember the furthest point matched, and use the longest match which
+reached there.  The new version gives:
+
+w around
+
+which I consider to be correct.  The I'th matches for I = 2 and 3 (e.g.
+${(SI:2:)foo%%h*ere}) are:
+
+w and there around
+w I was standing lizards crawled here and there around
+
+which are correct because you want the longest match which doesn't finish
+in the same place as the previous attempt (implying it finishes earlier in
+the string).  I tried to make the doc better about what happens when you
+scan backwards using %% and (S), but it's already obscure as the darker
+reaches of hell.  Any suggestions gratefully received.
+
+Index: Src/glob.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/glob.c,v
+retrieving revision 1.17
+diff -u -r1.17 glob.c
+--- Src/glob.c	2001/05/09 09:00:19	1.17
++++ Src/glob.c	2001/07/05 23:36:13
+@@ -2068,7 +2068,7 @@
+ static int
+ igetmatch(char **sp, Patprog p, int fl, int n, char *replstr)
+ {
+-    char *s = *sp, *t, sav;
++    char *s = *sp, *t, sav, *furthestend, *longeststart, *lastend;
+     int i, l = strlen(*sp), ml = ztrlen(*sp), matched = 1;
+ 
+     repllist = NULL;
+@@ -2243,19 +2243,17 @@
+ 		*sp = get_match_ret(*sp, l, l, fl, replstr);
+ 		patoffset = 0;
+ 		return 1;
+-	    } /* fall through */
+-	case (SUB_END|SUB_LONG|SUB_SUBSTR):
+-	    /* Longest/shortest at end, matching substrings.       */
++	    }
+ 	    patoffset--;
+ 	    for (t = s + l - 1; t >= s; t--, patoffset--) {
+ 		if (t > s && t[-1] == Meta)
+ 		    t--;
+ 		set_pat_start(p, t-s);
+ 		if (pattry(p, t) && patinput > t && !--n) {
+-		    /* Found the longest match */
+-		    char *mpos = patinput;
+-		    if (!(fl & SUB_LONG) && !(p->flags & PAT_PURES)) {
+-			char *ptr;
++		    /* Found a match from this point */
++		    char *mpos = patinput, *ptr;
++		    if (!(p->flags & PAT_PURES)) {
++			/* See if there's a shorter to anywhere */
+ 			for (ptr = t; ptr < mpos; METAINC(ptr)) {
+ 			    sav = *ptr;
+ 			    set_pat_end(p, sav);
+@@ -2277,6 +2275,57 @@
+ 	    set_pat_start(p, l);
+ 	    if ((fl & SUB_LONG) && pattry(p, s + l) && !--n) {
+ 		*sp = get_match_ret(*sp, l, l, fl, replstr);
++		patoffset = 0;
++		return 1;
++	    }
++	    patoffset = 0;
++	    break;
++
++	case (SUB_END|SUB_LONG|SUB_SUBSTR):
++	    /*
++	     * Longest at end, matching substrings.  Scan up from
++	     * start, remembering the furthest we got.  The
++	     * longest string to reach that point wins.
++	     */
++	    furthestend = longeststart = lastend = NULL;
++	    sav = '\0';
++	    while (n) {
++		int l2 = strlen(s);
++		for (i = 0, t = s; i <= l2; i++, t++, patoffset++) {
++		    set_pat_start(p, t-s);
++		    if (pattry(p, t)) {
++			if (!furthestend || 
++			    patinput - t > furthestend - longeststart) {
++			    furthestend = patinput;
++			    longeststart = t;
++			}
++		    }
++		    if (*t == Meta)
++			t++, i++;
++		}
++		if (furthestend) {
++		    if (lastend) {
++			*lastend = sav;
++			lastend = NULL;
++		    }
++		    if (--n && furthestend > s) {
++			lastend = (furthestend > s+1 && furthestend[-2]
++				   == Meta) ? furthestend-2 : furthestend-1;
++			sav = *lastend;
++			set_pat_end(p, sav);
++			*lastend = '\0';
++			furthestend = NULL;
++			patoffset = 0;
++			continue;
++		    }
++		}
++		break;
++	    }
++	    if (lastend)
++		*lastend = sav;
++	    if (!n) {
++		*sp = get_match_ret(*sp, longeststart-s, furthestend-s, fl,
++				    replstr);
+ 		patoffset = 0;
+ 		return 1;
+ 	    }
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.29
+diff -u -r1.29 expn.yo
+--- Doc/Zsh/expn.yo	2001/05/29 17:54:39	1.29
++++ Doc/Zsh/expn.yo	2001/07/05 23:43:29
+@@ -793,7 +793,8 @@
+ substituted) or tt(${)...tt(//)...tt(}) (all matches from the
+ var(expr)th on are substituted).  The var(expr)th match is counted
+ such that there is either one or zero matches from each starting
+-position in the string, although for global substitution matches
++position in the string when scanning forwards, or to each finishing
++position when scanning backwards, although for global substitution matches
+ overlapping previous replacements are ignored.
+ )
+ item(tt(M))(
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

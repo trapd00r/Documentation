@@ -1,0 +1,122 @@
+From zsh-workers-return-22983-mason-zsh=primenet.com.au@sunsite.dk Wed Nov 08 17:34:05 2006
+Return-Path: <zsh-workers-return-22983-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4668 invoked from network); 8 Nov 2006 17:33:57 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.7 (2006-10-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.7
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 8 Nov 2006 17:33:57 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 90745 invoked from network); 8 Nov 2006 17:33:52 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 8 Nov 2006 17:33:52 -0000
+Received: (qmail 7020 invoked by alias); 8 Nov 2006 17:33:49 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22983
+Received: (qmail 7011 invoked from network); 8 Nov 2006 17:33:49 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 8 Nov 2006 17:33:49 -0000
+Received: (qmail 90476 invoked from network); 8 Nov 2006 17:33:49 -0000
+Received: from cluster-c.mailcontrol.com (168.143.177.190)
+  by a.mx.sunsite.dk with SMTP; 8 Nov 2006 17:33:45 -0000
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly09c.srv.mailcontrol.com (MailControl) with ESMTP id kA8HX9ub001761
+	for <zsh-workers@sunsite.dk>; Wed, 8 Nov 2006 17:33:21 GMT
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.1830);
+	 Wed, 8 Nov 2006 17:33:16 +0000
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.13.7/8.13.4) with ESMTP id kA8HXGv1006759
+	for <zsh-workers@sunsite.dk>; Wed, 8 Nov 2006 17:33:16 GMT
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.13.7/8.13.7/Submit) with ESMTP id kA8HXFs7006756
+	for <zsh-workers@sunsite.dk>; Wed, 8 Nov 2006 17:33:16 GMT
+Message-Id: <200611081733.kA8HXFs7006756@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: fixes for exit
+Date: Wed, 08 Nov 2006 17:33:15 +0000
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 08 Nov 2006 17:33:16.0714 (UTC) FILETIME=[F98EC8A0:01C7035B]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A-07-06-75 (www.mailcontrol.com) on 10.67.0.119
+
+You might have thought that exiting the shell was simple enough that
+there were know serious bugs.
+
+1. Exiting from a zle function caused an infinite loop.
+
+2. Code run at exit that called "exit" caused infinite regression.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.166
+diff -u -r1.166 builtin.c
+--- Src/builtin.c	8 Nov 2006 10:38:06 -0000	1.166
++++ Src/builtin.c	8 Nov 2006 17:30:48 -0000
+@@ -4391,6 +4391,10 @@
+ {
+     static int in_exit;
+ 
++    /* Don't do anything recursively:  see below */
++    if (in_exit == -1)
++	return;
++
+     if (isset(MONITOR) && !stopmsg && from_where != 1) {
+ 	scanjobs();    /* check if jobs need printing           */
+ 	if (isset(CHECKJOBS))
+@@ -4400,9 +4404,16 @@
+ 	    return;
+ 	}
+     }
++    /* Positive in_exit means we have been here before */
+     if (from_where == 2 || (in_exit++ && from_where))
+ 	return;
+ 
++    /*
++     * We're now committed to exiting.  Set in_exit to -1 to
++     * indicate we shouldn't do any recursive processing.
++     */
++    in_exit = -1;
++
+     if (isset(MONITOR)) {
+ 	/* send SIGHUP to any jobs left running  */
+ 	killrunjobs(from_where == 1);
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.71
+diff -u -r1.71 init.c
+--- Src/init.c	8 Nov 2006 10:38:06 -0000	1.71
++++ Src/init.c	8 Nov 2006 17:30:48 -0000
+@@ -131,6 +131,15 @@
+ 		(tok == LEXERR && (!isset(SHINSTDIN) || !toplevel)) ||
+ 		justonce)
+ 		break;
++	    if (exit_pending) {
++		/*
++		 * Something down there (a ZLE function?) decided
++		 * to exit when there was stuff to clear up.
++		 * Handle that now.
++		 */
++		stopmsg = 1;
++		zexit(exit_pending >> 1, 0);
++	    }
+ 	    if (tok == LEXERR && !lastval)
+ 		lastval = 1;
+ 	    continue;
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+To access the latest news from CSR copy this link into a web browser:  http://www.csr.com/email_sig.php
+

@@ -1,0 +1,385 @@
+From zsh-workers-return-6955-mason-zsh=primenet.com.au@sunsite.auc.dk Sat Jul 03 11:48:48 1999
+Return-Path: <zsh-workers-return-6955-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15623 invoked from network); 3 Jul 1999 11:48:45 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Jul 1999 11:48:45 -0000
+Received: (qmail 3432 invoked by alias); 3 Jul 1999 11:48:12 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6955
+Received: (qmail 3425 invoked from network); 3 Jul 1999 11:48:11 -0000
+Message-Id: <9907031119.AA37171@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: pws-24: compinstall and compinit
+Date: Sat, 03 Jul 1999 13:19:30 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+This does a few things with completion initialization:
+
+- compinstall now recognizes completion subdirectories and compinstall
+  is cleverer about adding them to fpath.
+- compinit -d is now the default; -D surpresses dumping.  You can still
+  use -d to give an alternative dumpfile.  This is to provide the most
+  natural defaults for people adding compinit to .zshrc by hand.
+- The documentation now better reflects the fact that functions are
+  probably installed already.  The description of the subdirectories
+  is relegated to the end.
+- There was a bug that compinstall didn't put back the backslashes at
+  the end of continuation lines of compconf arguments.
+- Some more code which is unnecessary now compinit can only find out
+  its own directory from fpath was removed.
+
+It is still possible to add other advanced choices compinstall.  Ideally it
+probably needs a menu system and subfunctions to be able to configure
+everything easily.  Maybe someone has ideas for this.
+
+Now everything is a function so that there is a uniform interface, I don't
+particularly like the idea of going back to using sourced scripts, even
+with some mechanism for finding them.  The natural way of finding shell
+bits and pieces is fpath, and this is now used throughout the completion
+system.  It's possible to make compinit sourceable, too, but I don't think
+the added complexity gains much.  I think there's enough basic shell code
+so it's not too difficult to make local arrangements for initialization
+some other way.
+
+--- Completion/Core/compinit.ci	Fri Jun 25 17:43:27 1999
++++ Completion/Core/compinit	Sat Jul  3 13:04:47 1999
+@@ -41,12 +41,13 @@
+ # See the file `compdump' for how to speed up initialisation.
+ 
+ # If we got the `-d'-flag, we will automatically dump the new state (at
+-# the end).  This takes the dumpfile as an argument.
++# the end).  This takes the dumpfile as an argument.  -d (with the
++# default dumpfile) is now the default; to turn off dumping use -D.
+ 
+ emulate -L zsh
+ 
+-typeset _i_dumpfile _i_files _i_line _i_done _i_dir _i_autodump=0
+-typeset _i_tag _i_file
++typeset _i_dumpfile _i_files _i_line _i_done _i_dir _i_autodump=1
++typeset _i_tag _i_file _i_addfiles
+ 
+ while [[ $# -gt 0 && $1 = -[df] ]]; do
+   if [[ "$1" = -d ]]; then
+@@ -56,6 +57,8 @@
+       _i_dumpfile="$1"
+       shift
+     fi
++  elif [[ "$1" = -D ]]; then
++    _i_autodump=0
+   elif [[ "$1" = -f ]]; then
+     # Not used any more; use _compdir
+     shift
+@@ -291,17 +294,24 @@
+ 
+ typeset -U _i_files
+ _i_files=( ${^~fpath:/.}/_(|*[^~])(N:t) )
+-if [[ $#_i_files -lt 20 ]]; then
+-  # Too few files:  we need some more directories
+-  # Assume that we need to add the compinit directory to fpath.
++if [[ $#_i_files -lt 20 || $_compdir = */Core || -d $_compdir/Core ]]; then
++  # Too few files:  we need some more directories,
++  # or we need to check that all directories (not just Core) are present.
+   if [[ -n $_compdir ]]; then
++    _i_addfiles=()
+     if [[ $_compdir = */Core ]]; then
+       # Add all the Completion subdirectories
+-      fpath=(${_compdir:h}/*(/) $fpath)
++      _i_addfiles=(${_compdir:h}/*(/))
+     elif [[ -d $_compdir/Core ]]; then
+       # Likewise
+-      fpath=(${_compdir}/*(/) $fpath)
++      _i_addfiles=(${_compdir}/*(/))
+     fi
++    for _i_line in {1..$#i_addfiles}; do
++      _i_file=${_i_addfiles[$_i_line]}
++      [[ -d $_i_file && -z ${fpath[(r)$_i_$file]} ]] ||
++        _i_addfiles[$_i_line]=
++    done
++    fpath=($_i_addfiles $fpath)
+     _i_files=( ${^~fpath:/.}/_(|*[^~])(N:t) )
+   fi
+ fi
+--- Completion/Core/compinstall.ci	Fri Jun 25 16:39:05 1999
++++ Completion/Core/compinstall	Sat Jul  3 13:04:47 1999
+@@ -1,11 +1,12 @@
+ # This script is to be run by a user to set up the new function based
+ # completion system.  The functions themselves are assumed to be already
+ # available in some directory; they should have been installed with the
+-# the shell (except we haven't written that yet).
++# the shell.  If they have been, the commands `autoload -U compinit; compinit'
++# in the shell startup file should be enough, although you can run
++# compinstall for more configuration choices.
+ #
+-# Run this script as a function and answer the questions.
+-#
+-# Normally, this will alter ~/.zshrc (or wherever ZDOTDIR puts it), but you
++# Simply run this script as a function and answer the questions.
++# Normally it will alter ~/.zshrc (or wherever ZDOTDIR puts it), but you
+ # can make that unwritable and it will leave the lines in a temporary file
+ # instead.  It doesn't matter if .zshrc didn't exist before.  If your
+ # .zshrc usually exits before the end, then you should take the code added
+@@ -29,7 +30,7 @@
+ typeset _ci_options _ci_f _ci_fdir _ci_files _ci_dumpfile _ci_lines
+ typeset _ci_type _ci_completer _ci_accept _ci_cprompt _ci_startline
+ typeset _ci_endline _ci_ifile _ci_tmpf _ci_compconf _ci_warn
+-typeset _ci_dtype _ci_existing _ci_line
++typeset _ci_dtype _ci_existing _ci_line _ci_end
+ 
+ # Look for the defaults.
+ _ci_startline='# The following lines were added by compinstall'
+@@ -49,13 +50,14 @@
+   while read -rA _ci_line; do
+     if (( $_ci_compconf )); then
+       # parse a compconf component as first argument
+-      if [[ $_ci_line[-1] == \\ ]]; then
+-	_ci_line=(${_ci_line[1,-2]})
+-      else
++      if [[ $_ci_line[-1] != \\ ]]; then
++	_ci_end=-1
+ 	_ci_compconf=0
++      else
++	_ci_end=-2
+       fi
+       if [[ $_ci_line[1] = *=* ]]; then
+-	_ci_f="${${_ci_line[*]}#*=}"
++	_ci_f="${${_ci_line[1,$_ci_end]}#*=}"
+ 	if [[ $_ci_f = \'*\' ]]; then
+ 	  # strip quotes
+ 	  _ci_f=${_ci_f[2,-2]//\'\\\'\'/\'}
+@@ -92,38 +94,42 @@
+ 
+ # Find out where the completion functions are kept.
+ 
+-if [[ -z $_ci_fdir || ! -f $_ci_f/compinit || ! -f $_ci_f/compdump ]]; then
++if [[ -z $_ci_fdir || ! -f ${~_ci_fdir}/compinit ||
++  ! -f ${~_ci_fdir}/compdump ]]; then
+   for _ci_f in $fpath; do
+     if [[ $_ci_f != . && -f $_ci_f/compinit && -f $_ci_f/compdump ]]; then
+       _ci_fdir=$_ci_f
+       break
++    elif [[ $_ci_f != . && -f $_ci_f/Core/compinit &&
++      -f $_ci_f/Core/compdump ]]
++    then
++      _ci_fdir=$_ci_f/Core
++      break
+     fi
+   done
+ fi
+ 
+ if [[ -z $_ci_fdir || ! -d ${~_ci_fdir} ]]; then
+-  print "Trying to find where the completion functions are..."
+-  if [[ $0 = */* && -o functionargzero &&
+-        -f $0:h/compinit && -f $0:h/compdump ]]; then
+-    _ci_fdir=$0:h
+-    print "Using my directory, $_ci_fdir"
+-  else
+-    # more guesses?
+-    print \
++  print \
+ "Please edit the name of the directory where the completion functions are
+ installed.  If they are not installed, you will need to find them in the
+ Completion/* directories of the zsh distribution and install them yourself,
+ or insult your system manager for incompetence."
+-    vared -c _ci_fdir
+-    while [[ ! -d ${~_ci_fdir} || ! -f ${~_ci_fdir}/compinit || 
+-      ! -f ${~_ci_fdir}/compdump ]]; do
+-      print "I can't find them in that directory.  Try again or abort."
+-      vared _ci_fdir
+-    done
++  vared -c _ci_fdir
++  while [[ ! -d ${~_ci_fdir} || 
++    ((! -f ${~_ci_fdir}/compinit || ! -f ${~_ci_fdir}/compdump) &&
++    (! -f ${~_ci_fdir}/Core/compinit || ! -f ${~_ci_fdir}/Core/compdump)) ]]
++  do
++    print "I can't find them in that directory.  Try again or abort."
++    vared _ci_fdir
++  done
++  if [[ -f ${~_ci_fdir}/Core/compinit && ! -f ${~_ci_fdir}/compinit ]]; then
++    _ci_fdir=$_ci_fdir/Core
+   fi
+ else
+   print "Keeping existing completion directiory $_ci_fdir"
+ fi
++
+ if [[ ${~_ci_fdir} != /* ]]; then
+   _ci_fdir=$(cd $_ci_fdir;builtin pwd)
+ fi
+@@ -131,6 +137,7 @@
+ # Check if this is in fpath already, else put it there (with ~'s expanded).
+ _ci_f=${~_ci_fdir}
+ [[ -z ${fpath[(r)$_ci_f]} ]] && fpath=($_ci_f $fpath)
++
+ # Contract $HOME to ~ in the parameter to be used for writing.
+ _ci_fdir=${_ci_fdir/#$HOME/\~}
+ 
+@@ -178,7 +185,7 @@
+ _ci_lines="${_ci_lines}_compdir=$_ci_fdir
+ [[ -z \$fpath[(r)\$_compdir] ]] && fpath=(\$_compdir \$fpath)
+ autoload -U compinit
+-compinit -d"
++compinit"
+ [[ $_ci_dtype != standard ]] && _ci_lines="${_ci_lines} $_ci_dumpfile"
+ _ci_lines="${_ci_lines}
+ "
+--- Doc/Zsh/compsys.yo.ci	Sat Jun 26 15:00:58 1999
++++ Doc/Zsh/compsys.yo	Sat Jul  3 13:12:32 1999
+@@ -6,51 +6,29 @@
+ sect(Description)
+ 
+ This describes the shell code for the new completion system.  It consists
+-of two scripts and a few other files that define shell functions.
+-The shell functions which implement completion behaviour and which may
+-be bound to keystrokes, are referred to as `widgets'.  All are contained
+-in the following subdirectories of the tt(Completion) directory of the main
+-distribution directory.
+-
+-startitem()
+-item(tt(Core))(
+-The core scripts and functions.  You will certainly need these, though will
+-probably not need to alter them.  The contents of this directory is
+-described in more detail below.
+-)
+-item(tt(Base))(
+-Other functions you will almost certainly want if you are going to use
+-any of the standard completion functions.  You may want to edit some of
+-these files.
+-)
+-item(tt(Builtins))(
+-Functions for completing arguments of shell builtin commands.
+-)
+-item(tt(User))(
+-Functions for completing arguments of external commands and suites of
+-commands.  They may need modifying for your system.
+-)
+-item(tt(Commands))(
+-Functions which implement special types of completion to be bound to
+-keystrokes rather than called by context.
+-)
+-enditem()
+-
+-You should decide which files you will be using and copy them to a
+-directory (or multiple directories) of your own which should appear in your
+-tt($fpath) variable so that the functions can be autoloaded.
++of varsious shell functions; those beginning tt(comp) are to be called
++directly by the user, while those beginning tt(_) are called by the
++completion code.  The shell functions of the second set which implement
++completion behaviour and which may be bound to keystrokes, are referred to
++as `widgets'.
+ 
+ startmenu()
+ menu(Initialization)
+ menu(Control Functions)
+ menu(Completion Functions)
++menu(Completion Directories)
+ endmenu()
+ 
+ texinode(Initialization)(Control Functions)()(Completion System)
+ sect(Initialization)
+ 
+ The function tt(compinstall) can be run by a user to set up the completion
+-system for use.  It will usually insert code into tt(.zshrc), although if
++system for use, which also provides options for more advanced usage.
++However, if the system was installed completely, it should be enough to
++call the shell function tt(compinit) from your initialization file; see the
++next section.
++
++Usually, tt(compinstall) will insert code into tt(.zshrc), although if
+ that is not writable it will save it in another file and tell you that
+ file's locations.  Note that it is up to you to make sure that the lines
+ added to tt(.zshrc) are actually run; you may, for example, need to move
+@@ -94,16 +72,13 @@
+ new system.
+ 
+ To speed up the running of tt(compinit), it can be made to produce a dumped
+-configuration which will be read in on future invocations.  The easiest way
+-to do this is by adding the option tt(-d) whenever tt(compinit) is run.
+-In this case the dumped file is tt(.zcompdump) in the same directory as the
+-startup files (i.e. tt($ZDOTDIR) or tt($HOME)); alternatively, an explicit
+-file name can be given following the tt(-d).  On the next call to
+-tt(compinit -d), the dumped file will be read instead.
+-
+-If the parameter tt(_compdir) is set, tt(compinit) uses it has a directory
+-where completion functions can be found; this is only necessary if they are
+-not already in the function search path.
++configuration which will be read in on future invocations; this is the
++default, although it can be turned off by calling tt(compinit) with the
++option tt(-D).  The dumped file is tt(.zcompdump) in the same
++directory as the startup files (i.e. tt($ZDOTDIR) or tt($HOME));
++alternatively, an explicit file name can be given following the option
++tt(-d).  On the next call to tt(compinit -d), the dumped file will be read
++instead.
+ 
+ If the number of completion files changes, tt(compinit) will recognise this
+ and produce a new dump file.  However, if the name of a function or the
+@@ -116,6 +91,10 @@
+ (e.g. using tt(compdef)) and then want to dump the new one.  The name of
+ the old dumped file will be remembered for this purpose.
+ 
++If the parameter tt(_compdir) is set, tt(compinit) uses it has a directory
++where completion functions can be found; this is only necessary if they are
++not already in the function search path.
++
+ subsect(Autoloaded files)
+ 
+ The convention for autoloaded functions used in completion is that they
+@@ -249,8 +228,8 @@
+ texinode(Control Functions)(Completion Functions)(Initialization)(Completion System)
+ sect(Control Functions)
+ 
+-The initialization script tt(compinit) re-binds all the keys which perform
+-completion to newly created widgets that all call the supplied widget
++The initialization script tt(compinit) redefines all the widgets
++which perform completion to call the supplied widget
+ function tt(_main_complete). This function acts as a wrapper calling
+ the so-called `completer' functions that generate matches. If
+ tt(_main_complete) is
+@@ -787,5 +766,39 @@
+ options which are passed unchanged to `tt(compadd)'. Finally, it
+ accepts the option `tt(-t)'; if this is given, completion is only done
+ on words starting with two hyphens.
++)
++enditem()
++
++texinode(Completion Directories)()(Completion Functions)(Completion System)
++sect(Completion Directories)
++
++In the source distribution, the files are contained in various
++subdirectories of the tt(Completion) directory.  They may have been
++installed in the same structure, or into one single function directory.
++The following is a description of the files found in the original directory
++structure.  If you wish to alter an installed file, you will need to copy
++it to some directory which appears earlier in your tt(fpath) than the
++standard directory where it appears.
++
++startitem()
++item(tt(Core))(
++The core scripts and functions.  You will certainly need these, though will
++probably not need to alter them.  Many of these are docmented above.
++)
++item(tt(Base))(
++Other functions you will almost certainly want if you are going to use
++any of the standard completion functions.  You may want to edit some of
++these files.
++)
++item(tt(Builtins))(
++Functions for completing arguments of shell builtin commands.
++)
++item(tt(User))(
++Functions for completing arguments of external commands and suites of
++commands.  They may need modifying for your system.
++)
++item(tt(Commands))(
++Functions which implement special types of completion to be bound to
++keystrokes rather than called by context.
+ )
+ enditem()
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

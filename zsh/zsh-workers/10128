@@ -1,0 +1,155 @@
+From zsh-workers-return-10128-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Mar 14 09:55:45 2000
+Return-Path: <zsh-workers-return-10128-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2777 invoked from network); 14 Mar 2000 09:55:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Mar 2000 09:55:44 -0000
+Received: (qmail 19530 invoked by alias); 14 Mar 2000 09:55:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10128
+Received: (qmail 19499 invoked from network); 14 Mar 2000 09:55:36 -0000
+Date: Tue, 14 Mar 2000 10:54:59 +0100 (MET)
+Message-Id: <200003140954.KAA07267@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Mon, 13 Mar 2000 16:07:25 +0100
+	(MET)
+Subject: Re: PATCH: Re: The `zle' command and traps
+
+
+I wrote:
+
+> ...
+>
+> > If we can restrict widgets to those that do "safe" things, then we can
+> > allow "zle widgetname" and there's no need for the special parameters to
+> > be visible directly to the trap function.  If instead we must prohibit
+> > widget-calling entirely, then perhaps the parameters should be available
+> > to the trap function.
+> 
+> No patch for that yet, either. The problem is that traps are called
+> from the core (of course) and the zle module might not be there. Maybe 
+> calling a hook in dotrapargs() so that zle can install its own hook
+> function when it is loaded to make the parameters available read-only
+> when zle is active. Or does this sound too complicated to anyone?
+
+Well, it didn't look too complicated to me... this also documents in
+zle.yo that the zle parameters are available in completion widgets and 
+traps called when zle is active.
+
+
+Bye
+ Sven
+
+diff -ru ../z.old/Doc/Zsh/zle.yo Doc/Zsh/zle.yo
+--- ../z.old/Doc/Zsh/zle.yo	Tue Mar 14 10:39:02 2000
++++ Doc/Zsh/zle.yo	Tue Mar 14 10:42:35 2000
+@@ -115,6 +115,9 @@
+ when the widget function exits.  These special parameters in fact have
+ local scope, like parameters created in a function using tt(local).
+ 
++Inside completion widgets and traps called while ZLE is active, these
++parameters are available read-only.
++
+ startitem()
+ vindex(BUFFER)
+ item(tt(BUFFER) (scalar))(
+diff -ru ../z.old/Src/Zle/zle_main.c Src/Zle/zle_main.c
+--- ../z.old/Src/Zle/zle_main.c	Tue Mar 14 10:38:53 2000
++++ Src/Zle/zle_main.c	Tue Mar 14 10:41:09 2000
+@@ -992,6 +992,28 @@
+ 	kungetct = 0;
+ }
+ 
++/* Hook functions. Used to allow access to zle parameters if zle is
++ * active. */
++
++static int
++zlebeforetrap(Hookdef dummy, void *dat)
++{
++    if (zleactive) {
++	startparamscope();
++	makezleparams(1);
++    }
++    return 0;
++}
++
++static int
++zleaftertrap(Hookdef dummy, void *dat)
++{
++    if (zleactive)
++	endparamscope();
++
++    return 0;
++}
++
+ static struct builtin bintab[] = {
+     BUILTIN("bindkey", 0, bin_bindkey, 0, -1, 0, "evaMldDANmrsLR", NULL),
+     BUILTIN("vared",   0, bin_vared,   1,  7, 0, NULL,             NULL),
+@@ -1049,6 +1071,8 @@
+ int
+ boot_(Module m)
+ {
++    addhookfunc("before_trap", (Hookfn) zlebeforetrap);
++    addhookfunc("after_trap", (Hookfn) zleaftertrap);
+     addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
+     addhookdefs(m->nam, zlehooks, sizeof(zlehooks)/sizeof(*zlehooks));
+     return 0;
+@@ -1063,6 +1087,8 @@
+ 	    NULL, 0);
+ 	return 1;
+     }
++    deletehookfunc("before_trap", (Hookfn) zlebeforetrap);
++    deletehookfunc("after_trap", (Hookfn) zleaftertrap);
+     deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
+     deletehookdefs(m->nam, zlehooks, sizeof(zlehooks)/sizeof(*zlehooks));
+     return 0;
+diff -ru ../z.old/Src/init.c Src/init.c
+--- ../z.old/Src/init.c	Tue Mar 14 10:38:47 2000
++++ Src/init.c	Tue Mar 14 10:41:09 2000
+@@ -90,6 +90,8 @@
+ /**/
+ mod_export struct hookdef zshhooks[] = {
+     HOOKDEF("exit", NULL, HOOKF_ALL),
++    HOOKDEF("before_trap", NULL, HOOKF_ALL),
++    HOOKDEF("after_trap", NULL, HOOKF_ALL),
+ };
+ 
+ /* keep executing lists until EOF found */
+diff -ru ../z.old/Src/signals.c Src/signals.c
+--- ../z.old/Src/signals.c	Tue Mar 14 10:38:49 2000
++++ Src/signals.c	Tue Mar 14 10:41:09 2000
+@@ -894,6 +894,7 @@
+     lexsave();
+     execsave();
+     breaks = 0;
++    runhookdef(BEFORETRAPHOOK, NULL);
+     if (*sigtr & ZSIG_FUNC) {
+ 	int osc = sfcontext;
+ 
+@@ -912,6 +913,7 @@
+ 	zsfree(name);
+     } else
+ 	execode(sigfn, 1, 0);
++    runhookdef(AFTERTRAPHOOK, NULL);
+ 
+     if (trapreturn > 0)
+ 	trapret = trapreturn;
+diff -ru ../z.old/Src/zsh.h Src/zsh.h
+--- ../z.old/Src/zsh.h	Tue Mar 14 10:38:50 2000
++++ Src/zsh.h	Tue Mar 14 10:41:10 2000
+@@ -1675,4 +1675,6 @@
+ /* Hooks in core.                      */
+ /***************************************/
+ 
+-#define EXITHOOK (zshhooks + 0)
++#define EXITHOOK       (zshhooks + 0)
++#define BEFORETRAPHOOK (zshhooks + 1)
++#define AFTERTRAPHOOK  (zshhooks + 2)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

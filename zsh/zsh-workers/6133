@@ -1,0 +1,713 @@
+From zsh-workers-return-6133-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Apr 28 09:51:31 1999
+Return-Path: <zsh-workers-return-6133-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25430 invoked from network); 28 Apr 1999 09:51:28 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 Apr 1999 09:51:28 -0000
+Received: (qmail 13175 invoked by alias); 28 Apr 1999 09:51:14 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6133
+Received: (qmail 13168 invoked from network); 28 Apr 1999 09:51:13 -0000
+Date: Wed, 28 Apr 1999 11:51:11 +0200 (MET DST)
+Message-Id: <199904280951.LAA17706@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: autoloaded parameters
+
+
+Here is my attempt at allowing modules to define autoloaded
+parameters.
+
+I tried to keep it simple by mostly using the paramtab for it.
+Autoloaded parameters are stored in it like normal parameters, but
+with a new flag (PM_AUTOLOAD). Then I changed the getnode-functions of 
+paramtab to use a new function getparamnode() which calls
+gethashnode2() and then checks if the Param returned has the
+PM_AUTOLOAD flag set. If it has, the module is loaded. The name of the 
+module is stored in pm->u.str and the PM_AUTOLOAD params also have the 
+PM_SCALAR flag, so the old code should do most of the work for us
+automatically.
+
+There are some problems, though:
+
+  - To avoid having a `local' with the name of a parameter that will
+    be autoloaded trigger the loading of the module, I had to change
+    calls like `paramtab->getnode()' to `gethashnode2(paramtab,...)'
+    in some places. This is ugly. Maybe we should keep a second
+    pointer to the real paramtab and do this only if
+    `paramtab == realparamtab'. Any comments?
+  - There might be problems when defining autoloaded parameters in
+    functions, but I hope I have sorted that out. Autoloaded
+    parameters are always defined in the global scope, they can be
+    hidden by local parameters, and so on.
+  - For now, I made `typeset' without arguments not print the
+    autoloaded parameters because we have virtually no information
+    about them as long as the module is not loaded. But since `which'
+    reports builtins even when their module isn't loaded yet, we might
+    want to change this. (What exactly should it print then?)
+
+I've also modified the example module to define three parameters
+(exint, exstr, and exarr -- an integer, a scalar, and an array), so
+you can test all this with `zmodload -p ex{ample,int,str,arr}'. There
+is also a bit of desription in the `zsh-development-guide' file.
+
+
+Bye
+ Sven
+
+diff -u os/builtin.c Src/builtin.c
+--- os/builtin.c	Mon Apr 26 10:24:10 1999
++++ Src/builtin.c	Tue Apr 27 17:30:50 1999
+@@ -120,7 +120,7 @@
+     BUILTIN("which", 0, bin_whence, 0, -1, 0, "ampsw", "c"),
+ 
+ #ifdef DYNAMIC
+-    BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "LaudicI", NULL),
++    BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "LaudicIp", NULL),
+ #endif
+ };
+ 
+@@ -1485,7 +1485,7 @@
+     int usepm, tc, keeplocal = 0;
+ 
+     /* use the existing pm? */
+-    usepm = pm && !(pm->flags & PM_UNSET);
++    usepm = pm && !(pm->flags & (PM_UNSET | PM_AUTOLOAD));
+ 
+     /* Always use an existing pm if special at current locallevel */
+     if (pm && (pm->flags & PM_SPECIAL) && pm->level == locallevel)
+@@ -1793,7 +1793,7 @@
+ 	    continue;
+ 	}
+ 	if (!typeset_single(name, asg->name,
+-			    (Param)paramtab->getnode(paramtab, asg->name),
++			    (Param)gethashnode2(paramtab, asg->name),
+ 			    func, on, off, roff, asg->value, NULL))
+ 	    returnval = 1;
+     }
+@@ -1945,7 +1945,7 @@
+ 			next = (Param) pm->next;
+ 			if ((!(pm->flags & PM_RESTRICTED) ||
+ 			    unset(RESTRICTED)) && domatch(pm->nam, com, 0)) {
+-			    unsetparam(pm->nam);
++			    unsetparam_pm(pm, 0, 1);
+ 			    match++;
+ 			}
+ 		    }
+@@ -1974,7 +1974,7 @@
+ 	    }
+ 	    *ss = 0;
+ 	}
+-	pm = (Param) paramtab->getnode(paramtab, s);
++	pm = (Param) gethashnode2(paramtab, s);
+ 	if (!pm)
+ 	    returnval = 1;
+ 	else if ((pm->flags & PM_RESTRICTED) && isset(RESTRICTED)) {
+diff -u os/mkbltnmlst.sh Src/mkbltnmlst.sh
+--- os/mkbltnmlst.sh	Wed Apr 28 10:45:00 1999
++++ Src/mkbltnmlst.sh	Wed Apr 28 10:45:11 1999
+@@ -24,7 +24,7 @@
+ 	*" $x_mod "*) ;;
+ 	*)  echo "/* non-linked-in known module \`$x_mod' */"
+ 	    eval "loc=\$loc_$x_mod"
+-	    unset moddeps autobins autoinfixconds autoprefixconds
++	    unset moddeps autobins autoinfixconds autoprefixconds autoparams
+ 	    . $srcdir/../$loc/${x_mod}.mdd
+ 	    for bin in $autobins; do
+ 		echo "    add_autobin(\"$bin\", \"$x_mod\");"
+@@ -34,6 +34,9 @@
+ 	    done
+ 	    for cond in $autoprefixconds; do
+ 		echo "    add_autocond(\"$cond\", 0, \"$x_mod\");"
++	    done
++	    for param in $autoparams; do
++		echo "    add_autoparam(\"$param\", \"$x_mod\");"
+ 	    done
+ 	    for dep in $moddeps; do
+ 		case $bin_mods in
+diff -u os/mkmakemod.sh Src/mkmakemod.sh
+--- os/mkmakemod.sh	Wed Apr 28 10:45:00 1999
++++ Src/mkmakemod.sh	Wed Apr 28 10:45:51 1999
+@@ -24,6 +24,7 @@
+ #   autoinfixconds  infix condition codes defined by the module, for
+ #                   autoloading (without the leading `-')
+ #   autoprefixconds like autoinfixconds, but for prefix condition codes
++#   autoparams      parameters defined by the module, for autoloading
+ #   objects         .o files making up this module (*must* be defined)
+ #   proto           .pro files for this module (default generated from $objects)
+ #   headers         extra headers for this module (default none)
+@@ -170,7 +171,7 @@
+     for module in $here_modules; do
+ 
+ 	unset moddeps nozshdep alwayslink hasexport
+-	unset autobins autoinfixconds autoprefixconds
++	unset autobins autoinfixconds autoprefixconds autoparams
+ 	unset objects proto headers hdrdeps otherincs
+ 	. $top_srcdir/$the_subdir/${module}.mdd
+ 	test -n "${moddeps+set}" || moddeps=
+diff -u os/module.c Src/module.c
+--- os/module.c	Mon Apr 26 10:24:11 1999
++++ Src/module.c	Tue Apr 27 16:27:26 1999
+@@ -539,18 +539,24 @@
+ 	m = zcalloc(sizeof(*m));
+ 	m->nam = ztrdup(name);
+ 	m->handle = handle;
++	m->flags |= MOD_SETUP;
++	PERMALLOC {
++	    node = addlinknode(modules, m);
++	} LASTALLOC;
+ 	if (setup_module(m) || init_module(m)) {
+ 	    finish_module(m);
++	    remnode(modules, node);
+ 	    zsfree(m->nam);
+ 	    zfree(m, sizeof(*m));
++	    m->flags &= ~MOD_SETUP;
+ 	    return NULL;
+ 	}
+-	PERMALLOC {
+-	    addlinknode(modules, m);
+-	} LASTALLOC;
++	m->flags &= ~MOD_SETUP;
+ 	return m;
+     } 
+     m = (Module) getdata(node);
++    if (m->flags & MOD_SETUP)
++	return m;
+     if (m->flags & MOD_UNLOAD)
+ 	m->flags &= ~MOD_UNLOAD;
+     else if (m->handle)
+@@ -570,17 +576,22 @@
+     if (!m->handle) {
+ 	if (!(m->handle = do_load_module(name)))
+ 	    return NULL;
++	m->flags |= MOD_SETUP;
+ 	if (setup_module(m)) {
+ 	    finish_module(m->handle);
+ 	    m->handle = NULL;
++	    m->flags &= ~MOD_SETUP;
+ 	    return NULL;
+ 	}
+     }
++    m->flags |= MOD_SETUP;
+     if (init_module(m)) {
+ 	finish_module(m->handle);
+ 	m->handle = NULL;
++	m->flags &= ~MOD_SETUP;
+ 	return NULL;
+     }
++    m->flags &= ~MOD_SETUP;
+     return m;
+ }
+ 
+@@ -690,6 +701,8 @@
+ 	return bin_zmodload_auto(nam, args, ops);
+     else if (ops['c'] || ops['C'])
+ 	return bin_zmodload_cond(nam, args, ops);
++    else if (ops['p'])
++	return bin_zmodload_param(nam, args, ops);
+     else
+ 	return bin_zmodload_load(nam, args, ops);
+ }
+@@ -888,6 +901,66 @@
+     }
+ }
+ 
++static void
++printautoparams(HashNode hn, int lon)
++{
++    Param pm = (Param) hn;
++
++    if (pm->flags & PM_AUTOLOAD) {
++	if (lon)
++	    printf("zmodload -p %s %s\n", pm->u.str, pm->nam);
++	else
++	    printf("%s (%s)\n", pm->nam, pm->u.str);
++    }
++}
++
++/**/
++static int
++bin_zmodload_param(char *nam, char **args, char *ops)
++{
++    int ret = 0;
++
++    if (ops['u']) {
++	/* remove autoloaded parameters */
++	for (; *args; args++) {
++	    Param pm = (Param) gethashnode2(paramtab, *args);
++
++	    if (!pm) {
++		if (!ops['i']) {
++		    zwarnnam(nam, "%s: no such parameter", *args, 0);
++		    ret = 1;
++		}
++	    } else if (!(pm->flags & PM_AUTOLOAD)) {
++		zwarnnam(nam, "%s: parameter is already defined", *args, 0);
++		ret = 1;
++	    } else
++		unsetparam_pm(pm, 0, 1);
++	}
++	return ret;
++    } else if (!*args) {
++	scanhashtable(paramtab, 1, 0, 0, printautoparams, ops['L']);
++	return 0;
++    } else {
++	/* add autoloaded parameters */
++	char *modnam;
++
++	modnam = *args++;
++	if(isset(RESTRICTED) && strchr(modnam, '/')) {
++	    zwarnnam(nam, "%s: restricted", modnam, 0);
++	    return 1;
++	}
++	do {
++	    char *pnam = *args ? *args++ : modnam;
++	    if (strchr(pnam, '/')) {
++		zwarnnam(nam, "%s: `/' is illegal in a parameter", pnam, 0);
++		ret = 1;
++	    } else
++		add_autoparam(pnam, modnam);
++	} while(*args);
++	return ret;
++    }
++}
++
+ /**/
+ int
+ unload_module(Module m, LinkNode node)
+@@ -1114,6 +1187,71 @@
+     return hadf ? hads : 1;
+ }
+ 
++/* This adds the given parameter definition. The return value is zero on *
++ * success and 1 on failure. */
++
++/**/
++int
++addparamdef(Paramdef d)
++{
++    Param pm;
++
++    if ((pm = (Param) gethashnode2(paramtab, d->name)))
++	unsetparam_pm(pm, 0, 1);
++
++    if (!(pm = createparam(d->name, d->flags)) &&
++	!(pm = (Param) paramtab->getnode(paramtab, d->name)))
++	return 1;
++
++    pm->level = 0;
++    pm->u.data = d->var;
++    pm->sets.ifn = (void (*)(Param, long)) d->set;
++    pm->gets.ifn = (long (*)(Param)) d->get;
++    pm->unsetfn = (void (*)(Param, int)) d->unset;
++
++    return 0;
++}
++
++/* This adds multiple parameter definitions. This is like addbuiltins(). */
++
++/**/
++int
++addparamdefs(char const *nam, Paramdef d, int size)
++{
++    int hads = 0, hadf = 0;
++
++    while (size--) {
++	if (addparamdef(d)) {
++	    zwarnnam(nam, "error when adding parameter `%s'", d->name, 0);
++	    hadf = 1;
++	} else
++	    hads = 2;
++	d++;
++    }
++    return hadf ? hads : 1;
++}
++
++/* Delete parameters defined. No error checking yet. */
++
++/**/
++int
++deleteparamdef(Paramdef d)
++{
++    unsetparam(d->name);
++    return 0;
++}
++
++/**/
++int
++deleteparamdefs(char const *nam, Paramdef d, int size)
++{
++    while (size--) {
++	deleteparamdef(d);
++	d++;
++    }
++    return 1;
++}
++
+ #ifdef DYNAMIC
+ 
+ /* This adds a definition for autoloading a module for a condition. */
+@@ -1186,6 +1324,22 @@
+ 	c++;
+     }
+     return hadf ? hads : 1;
++}
++
++/* This adds a definition for autoloading a module for a parameter. */
++
++/**/
++void
++add_autoparam(char *nam, char *module)
++{
++    Param pm;
++
++    if ((pm = (Param) gethashnode2(paramtab, nam)))
++	unsetparam_pm(pm, 0, 1);
++
++    pm = setsparam(ztrdup(nam), ztrdup(module));
++
++    pm->flags |= PM_AUTOLOAD;
+ }
+ 
+ #endif
+diff -u os/params.c Src/params.c
+--- os/params.c	Mon Apr 26 10:24:11 1999
++++ Src/params.c	Tue Apr 27 17:23:49 1999
+@@ -267,8 +267,8 @@
+     ht->emptytable  = emptyhashtable;
+     ht->filltable   = NULL;
+     ht->addnode     = addhashnode;
+-    ht->getnode     = gethashnode2;
+-    ht->getnode2    = gethashnode2;
++    ht->getnode     = getparamnode;
++    ht->getnode2    = getparamnode;
+     ht->removenode  = removehashnode;
+     ht->disablenode = NULL;
+     ht->enablenode  = NULL;
+@@ -278,6 +278,23 @@
+     return ht;
+ }
+ 
++/**/
++static HashNode
++getparamnode(HashTable ht, char *nam)
++{
++    HashNode hn = gethashnode2(ht, nam);
++    Param pm = (Param) hn;
++
++    if (pm && pm->u.str && (pm->flags & PM_AUTOLOAD)) {
++	char *mn = dupstring(pm->u.str);
++
++	if (!load_module(mn))
++	    return NULL;
++	hn = gethashnode2(ht, nam);
++    }
++    return hn;
++}
++
+ /* Copy a parameter hash table */
+ 
+ static HashTable outtable;
+@@ -542,7 +559,7 @@
+     Param pm, oldpm;
+ 
+     if (name != nulstring) {
+-	oldpm = (Param) paramtab->getnode(paramtab, name);
++	oldpm = (Param) gethashnode2(paramtab, name);
+ 
+ 	if (oldpm && oldpm->level == locallevel) {
+ 	    if (!(oldpm->flags & PM_UNSET) || (oldpm->flags & PM_SPECIAL)) {
+@@ -2698,7 +2715,7 @@
+     Param p = (Param) hn;
+     char *t, **u;
+ 
+-    if (p->flags & PM_UNSET)
++    if (p->flags & (PM_UNSET | PM_AUTOLOAD))
+ 	return;
+ 
+     /* Print the attributes of the parameter */
+diff -u os/zsh.h Src/zsh.h
+--- os/zsh.h	Mon Apr 26 10:24:12 1999
++++ Src/zsh.h	Tue Apr 27 15:55:40 1999
+@@ -231,6 +231,7 @@
+ typedef struct reswd     *Reswd;
+ typedef struct alias     *Alias;
+ typedef struct param     *Param;
++typedef struct paramdef  *Paramdef;
+ typedef struct cmdnam    *Cmdnam;
+ typedef struct shfunc    *Shfunc;
+ typedef struct funcwrap  *FuncWrap;
+@@ -850,6 +851,7 @@
+ 
+ #define MOD_BUSY    (1<<0)
+ #define MOD_UNLOAD  (1<<1)
++#define MOD_SETUP   (1<<2)
+ 
+ /* node used in parameter hash table (paramtab) */
+ 
+@@ -923,6 +925,7 @@
+ #define PM_RESTRICTED	(1<<15) /* cannot be changed in restricted mode       */
+ #define PM_UNSET	(1<<16)	/* has null value                             */
+ #define PM_REMOVABLE	(1<<17)	/* special can be removed from paramtab */
++#define PM_AUTOLOAD     (1<<18) /* autoloaded from module */
+ 
+ /* Flags for extracting elements of arrays and associative arrays */
+ #define SCANPM_WANTVALS   (1<<0)
+@@ -954,6 +957,27 @@
+ #define PF_TYPESET	0x01	/* argument handled like typeset foo=bar */
+ #define PF_ASSIGN	0x02	/* argument handled like the RHS of foo=bar */
+ #define PF_SINGLE	0x04	/* single word substitution */
++
++struct paramdef {
++    char *name;
++    int flags;
++    void *var;
++    void *set;
++    void *get;
++    void *unset;
++};
++
++#define PARAMDEF(name, flags, var, set, get, unset) \
++    { name, flags, (void *) var, (void *) set, (void *) get, (void *) unset }
++#define INTPARAMDEF(name, var) \
++    { name, PM_INTEGER, (void *) var, (void *) intvarsetfn, \
++      (void *) intvargetfn, (void *) stdunsetfn }
++#define STRPARAMDEF(name, var) \
++    { name, PM_SCALAR, (void *) var, (void *) strvarsetfn, \
++      (void *) strvargetfn, (void *) stdunsetfn }
++#define ARRPARAMDEF(name, var) \
++    { name, PM_ARRAY, (void *) var, (void *) arrvarsetfn, \
++      (void *) arrvargetfn, (void *) stdunsetfn }
+ 
+ /* node for named directory hash table (nameddirtab) */
+ 
+diff -u os/Modules/example.c Src/Modules/example.c
+--- os/Modules/example.c	Wed Apr 28 11:18:20 1999
++++ Src/Modules/example.c	Tue Apr 27 17:19:25 1999
+@@ -30,22 +30,45 @@
+ #include "example.mdh"
+ #include "example.pro"
+ 
++/* parameters */
++
++static long intparam;
++static char *strparam;
++static char **arrparam;
++
++
+ /**/
+ static int
+ bin_example(char *nam, char **args, char *ops, int func)
+ {
+     unsigned char c;
++    char **oargs = args, **p = arrparam;
++    long i = 0;
+ 
+     printf("Options: ");
+     for (c = 32; ++c < 128;)
+ 	if (ops[c])
+ 	    putchar(c);
+     printf("\nArguments:");
+-    for (; *args; args++) {
++    for (; *args; i++, args++) {
+ 	putchar(' ');
+ 	fputs(*args, stdout);
+     }
+     printf("\nName: %s\n", nam);
++    printf("\nInteger Parameter: %ld\n", intparam);
++    printf("String Parameter: %s\n", strparam ? strparam : "");
++    printf("Array Parameter:");
++    if (p)
++	while (*p) printf(" %s", *p++);
++    printf("\n");
++
++    intparam = i;
++    zsfree(strparam);
++    strparam = ztrdup(*oargs ? *oargs : "");
++    freearray(arrparam);
++    PERMALLOC {
++	arrparam = arrdup(oargs);
++    } LASTALLOC;
+     return 0;
+ }
+ 
+@@ -103,6 +126,12 @@
+     CONDDEF("ex", CONDF_INFIX, cond_i_ex, 0, 0, 0),
+ };
+ 
++static struct paramdef patab[] = {
++    INTPARAMDEF("exint", &intparam),
++    STRPARAMDEF("exstr", &strparam),
++    ARRPARAMDEF("exarr", &arrparam),
++};
++
+ static struct funcwrap wrapper[] = {
+     WRAPDEF(ex_wrapper),
+ };
+@@ -120,8 +149,15 @@
+ int
+ boot_example(Module m)
+ {
++    intparam = 42;
++    strparam = ztrdup("example");
++    arrparam = (char **) zalloc(3 * sizeof(char *));
++    arrparam[0] = ztrdup("example");
++    arrparam[1] = ztrdup("array");
++    arrparam[2] = NULL;
+     return !(addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab)) |
+ 	     addconddefs(m->nam, cotab, sizeof(cotab)/sizeof(*cotab)) |
++	     addparamdefs(m->nam, patab, sizeof(patab)/sizeof(*patab)) |
+ 	     !addwrapper(m, wrapper));
+ }
+ 
+@@ -133,6 +169,7 @@
+ {
+     deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
+     deleteconddefs(m->nam, cotab, sizeof(cotab)/sizeof(*cotab));
++    deleteparamdefs(m->nam, patab, sizeof(patab)/sizeof(*patab));
+     deletewrapper(m, wrapper);
+     return 0;
+ }
+diff -u os/Modules/example.mdd Src/Modules/example.mdd
+--- os/Modules/example.mdd	Wed Apr 28 11:18:22 1999
++++ Src/Modules/example.mdd	Wed Apr 28 11:18:42 1999
+@@ -2,5 +2,6 @@
+ 
+ autoinfixconds="ex"
+ autoprefixconds="len"
++autoparams="exint exstr exarr"
+ 
+ objects="example.o"
+diff -u od/Zsh/builtins.yo Doc/Zsh/builtins.yo
+--- od/Zsh/builtins.yo	Mon Apr 26 15:41:37 1999
++++ Doc/Zsh/builtins.yo	Wed Apr 28 11:16:26 1999
+@@ -1175,9 +1175,12 @@
+ xitem(tt(zmodload) tt(-du) var(name) [ var(dep) ... ])
+ xitem(tt(zmodload) tt(-a) [ tt(-iL) ] [ var(name) [ var(builtin) ... ] ])
+ xitem(tt(zmodload) tt(-au) [ tt(-i) ] var(builtin) ...)
+-xitem(tt(zmodload) tt(-c) [ tt(-iI) ] [ var(name) [ var(cond) ... ] ])
++xitem(tt(zmodload) tt(-c) [ tt(-iI) ] var(name) [ var(cond) ... ])
+ xitem(tt(zmodload) tt(-cu) [ tt(-iI) ] var(cond) ...)
+-item(tt(zmodload) tt(-c) [ tt(-IL) ])(
++xitem(tt(zmodload) tt(-c) [ tt(-IL) ])
++xitem(tt(zmodload) tt(-p) [ tt(-i) ] var(name) [ var(parameter) ... ])
++xitem(tt(zmodload) tt(-pu) [ tt(-i) ] var(parameter) ... ])
++item(tt(zmodload) tt(-p) [ tt(-L) ])(
+ tt(zmodload) performs operations relating to zsh's loadable modules.
+ This feature is not available on all operating systems,
+ or on all installations on a particular operating system.
+@@ -1253,5 +1256,8 @@
+ Together with the tt(-u) option definitions for autoloaded conditions
+ are removed. If given no condition names all defined names are listed
+ (as a series of tt(zmodload) commands if the tt(-L) option is given).
++
++The tt(-p) option is like the tt(-c) option, but makes tt(zmodload)
++work on autoloaded parameters instead of condition codes.
+ )
+ enditem()
+diff -u ou/zsh-development-guide Util/zsh-development-guide
+--- ou/zsh-development-guide	Wed Apr 28 10:46:33 1999
++++ Util/zsh-development-guide	Wed Apr 28 11:10:44 1999
+@@ -127,6 +127,7 @@
+   - autoinfixconds  infix condition codes defined by the module, for
+                     autoloading (without the leading `-')
+   - autoprefixconds like autoinfixconds, but for prefix condition codes
++  - autoparams      parameters defined by the module, for autoloading
+   - objects         .o files making up this module (*must* be defined)
+   - proto           .pro files for this module (default generated from $objects)
+   - headers         extra headers for this module (default none)
+@@ -137,7 +138,7 @@
+ look at the `mkmakemod.sh' script in the Src directory of the
+ distribution.
+ 
+-Modules have to define four functions which will automatically called
++Modules have to define four functions which will be called automatically
+ by the zsh core. The first one, named `setup_foo' for a module named
+ `foo', should set up any data needed in the module, at least any data
+ other modules may be interested in. The second one, named `boot_foo',
+@@ -322,6 +323,78 @@
+ 
+ Arguments and return values are the same as for the functions for
+ builtins.
++
++For defining parameters, a module can call `createparam()' directly or 
++use a table to describe them, e.g.:
++
++  static struct paramdef patab[] = {
++    PARAMDEF("foo", PM_INTEGER, NULL, get_foo, set_foo, unset_foo),
++    INTPARAMDEF("exint", &intparam),
++    STRPARAMDEF("exstr", &strparam),
++    ARRPARAMDEF("exarr", &arrparam),
++  };
++
++There are four macros used:
++
++  - PARAMDEF() gets as arguments:
++    - the name of the parameter
++    - the parameter flags to set for it (from the PM_* flags defined
++      in zsh.h)
++    - optionally a pointer to a variable holding the value of the
++      parameter
++    - three functions that will be used to get the value of the
++      parameter, store a value in the parameter, and unset the
++      parameter
++  - the other macros provide simple ways to define the most common
++    types of parameters; they get the name of the parameter and a
++    pointer to a variable holding the value as arguments; they are
++    used to define integer-, scalar-, and array-parameters, so the
++    variables whose addresses are given should be of type `long',
++    `char *', and `char **', respectively
++
++For a description of how to write functions for getting or setting the 
++value of parameters, or how to write a function to unset a parameter,
++see the description of the following functions in the `params.c' file:
++
++  - `intvargetfn()' and `intvarsetfn()' for integer parameters
++  - `strvargetfn()' and `strvarsetfn()' for scalar parameters
++  - `arrvargetfn()' and `arrvarsetfn()' for array parameters
++  - `stdunsetfn()' for unsetting parameters
++
++Note that if one defines parameters using the last two macros (for
++scalars and arrays), the variable holding the value should be
++initialized to either `NULL' or to a a piece of memory created with
++`zalloc()'. But this memory should *not* be freed in the
++finish-function of the module because that will be taken care of by
++the `deleteparamdefs()' function described below.
++
++To register the parameters in the zsh core, the function
++`addparamdefs()' is called as in:
++
++  /**/
++  int
++  boot_example(Module m)
++  {
++    int ret;
++
++    ret = addparamdefs(m->nam, patab, sizeof(patab)/sizeof(*patab))
++    ...
++  }
++
++The arguments and the return value are as for the functions used to
++add builtins and condition codes and like these, it should be called
++in the boot-function of the module. To remove the parameters defined,
++the function `deleteparamdefs()' should be called, again with the same 
++arguments and the same return value as for the functions to remove
++builtins and condition codes:
++
++  /**/
++  int
++  cleanup_example(Module m)
++  {
++    deleteparamdefs(m->nam, patab, sizeof(patab)/sizeof(*patab));
++    ...
++  }
+ 
+ Finally, modules can define wrapper functions. These functions are
+ called whenever a shell function is to be executed.
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

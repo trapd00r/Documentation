@@ -1,0 +1,200 @@
+From zsh-workers-return-11696-mason-zsh=primenet.com.au@sunsite.auc.dk Wed May 31 21:45:58 2000
+Return-Path: <zsh-workers-return-11696-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29648 invoked from network); 31 May 2000 21:45:56 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 May 2000 21:45:56 -0000
+Received: (qmail 16627 invoked by alias); 31 May 2000 21:45:50 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11696
+Received: (qmail 16620 invoked from network); 31 May 2000 21:45:47 -0000
+To: zsh-workers@sunsite.auc.dk
+Subject: Re: Read-only special variables and "local +h" 
+In-reply-to: ""Bart Schaefer""'s message of "Fri, 28 Apr 2000 06:14:51 -0000."
+             <1000428061451.ZM23738@candle.brasslantern.com> 
+Date: Wed, 31 May 2000 22:44:30 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E12xGHu-0007f3-00.2000-05-31-22-44-30@cmailg3.svr.pol.co.uk>
+
+Bart reminded me about this.  (Just in case you thought I was looking at it
+voluntarily...)
+
+"Bart Schaefer" wrote:
+> Try running the following function.
+> 
+> blam() {
+>     setopt localoptions extendedglob
+>     zmodload -i zsh/parameter
+>     set $(typeset +r)
+>     while (( $# )); do
+>         [[ $1 = [[:alnum:]]# ]] && {
+> 	    print -n "assigning to local $1\: "
+>             eval \( local +h $1 \; ${(qf)$(set | grep \^$1=)} \)
+> 	    case $? in
+> 	    0) print no error detected;;
+> 	    136) print floating point exception;;
+> 	    139) print segmentation fault;;
+> 	    *) print other failure;;
+>             esac
+>         }
+>         shift
+>     done
+> }
+
+I've fixed these, but the really good news is that mostly this wasn't my
+fault.
+
+The segmentation violations from the integer functions were occurring
+because there was only one nullsetfn for dealing with assignments which
+shouldn't happen, which assumed the parameter was scalar and tries to free
+it.  It wasn't and it couldn't.
+
+The floating point exceptions from the special hashes in the parameter
+module were Linux's sui generis interpretation of having an integer
+expression modulo zero, because the special hash had a size of 0 which was
+being copied faithfully to the hash where the values were being saved
+during the function call.  In most cases it would be pretty pointless to
+save this particular hash at all --- but that's why it usually has the -h
+bit set, because it assumes if you're making it local you want to do
+something entirely different with it; it's entirely logical to save it when
+you explicitly make it localisable as a special.  So I've just fixed the
+size problem.
+
+I think I'm daring enough to assume the problems are, er, local enough to
+be able to commit this patch without the world blowing up in our faces.
+
+By the way, we definitely need a way (similar to the -h flag) of telling
+set, typeset and friends that they are not to display the values of certain
+parameters, even if the `+' flag wasn't given.  Currently using `set' and
+`typeset' on their own is virtually useless with the parameters module
+loaded.  Even non-interactively there are problems --- GNU grep is
+sensitive to eight-bit characters and refuses to grep the `set' output
+unless you give it the -a flag, so Bart's blam function was actually
+printing out lots of `binary output matches' messages.
+
+I can't resist giving the output I get after the patch.
+
+assigning to local ARGC: no error detected
+assigning to local ERRNO: no error detected
+assigning to local LINENO: no error detected
+assigning to local PPID: no error detected
+assigning to local TTYIDLE: no error detected
+assigning to local builtins: no error detected
+assigning to local funcstack: no error detected
+assigning to local history: no error detected
+assigning to local historywords: no error detected
+assigning to local jobdirs: no error detected
+assigning to local jobstates: no error detected
+assigning to local jobtexts: no error detected
+assigning to local modules: no error detected
+assigning to local parameters: no error detected
+assigning to local reswords: no error detected
+assigning to local status: no error detected
+assigning to local userdirs: no error detected
+
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.12
+diff -u -r1.12 params.c
+--- Src/params.c	2000/05/31 08:56:24	1.12
++++ Src/params.c	2000/05/31 21:39:13
+@@ -134,8 +134,8 @@
+ #define SFN(X) BR(((void (*)_((Param, char *)))(X)))
+ #define GFN(X) BR(((char *(*)_((Param)))(X)))
+ #define IPDEF1(A,B,C,D) {NULL,A,PM_INTEGER|PM_SPECIAL|D,BR(NULL),SFN(C),GFN(B),stdunsetfn,10,NULL,NULL,NULL,0}
+-IPDEF1("#", poundgetfn, nullsetfn, PM_READONLY),
+-IPDEF1("ERRNO", errnogetfn, nullsetfn, PM_READONLY),
++IPDEF1("#", poundgetfn, nullintsetfn, PM_READONLY),
++IPDEF1("ERRNO", errnogetfn, nullintsetfn, PM_READONLY),
+ IPDEF1("GID", gidgetfn, gidsetfn, PM_DONTIMPORT | PM_RESTRICTED),
+ IPDEF1("EGID", egidgetfn, egidsetfn, PM_DONTIMPORT | PM_RESTRICTED),
+ IPDEF1("HISTSIZE", histsizegetfn, histsizesetfn, PM_RESTRICTED),
+@@ -143,17 +143,17 @@
+ IPDEF1("SECONDS", secondsgetfn, secondssetfn, 0),
+ IPDEF1("UID", uidgetfn, uidsetfn, PM_DONTIMPORT | PM_RESTRICTED),
+ IPDEF1("EUID", euidgetfn, euidsetfn, PM_DONTIMPORT | PM_RESTRICTED),
+-IPDEF1("TTYIDLE", ttyidlegetfn, nullsetfn, PM_READONLY),
++IPDEF1("TTYIDLE", ttyidlegetfn, nullintsetfn, PM_READONLY),
+ 
+ #define IPDEF2(A,B,C,D) {NULL,A,PM_SCALAR|PM_SPECIAL|D,BR(NULL),SFN(C),GFN(B),stdunsetfn,0,NULL,NULL,NULL,0}
+ IPDEF2("USERNAME", usernamegetfn, usernamesetfn, PM_DONTIMPORT|PM_RESTRICTED),
+-IPDEF2("-", dashgetfn, nullsetfn, PM_READONLY),
++IPDEF2("-", dashgetfn, nullstrsetfn, PM_READONLY),
+ IPDEF2("histchars", histcharsgetfn, histcharssetfn, PM_DONTIMPORT),
+ IPDEF2("HOME", homegetfn, homesetfn, 0),
+ IPDEF2("TERM", termgetfn, termsetfn, 0),
+ IPDEF2("WORDCHARS", wordcharsgetfn, wordcharssetfn, 0),
+ IPDEF2("IFS", ifsgetfn, ifssetfn, PM_DONTIMPORT),
+-IPDEF2("_", underscoregetfn, nullsetfn, PM_READONLY),
++IPDEF2("_", underscoregetfn, nullstrsetfn, PM_READONLY),
+ 
+ #ifdef USE_LOCALE
+ # define LCIPDEF(name) IPDEF2(name, strgetfn, lcsetfn, PM_UNSET)
+@@ -176,7 +176,7 @@
+ # endif
+ #endif /* USE_LOCALE */
+ 
+-#define IPDEF4(A,B) {NULL,A,PM_INTEGER|PM_READONLY|PM_SPECIAL,BR((void *)B),SFN(nullsetfn),GFN(intvargetfn),stdunsetfn,10,NULL,NULL,NULL,0}
++#define IPDEF4(A,B) {NULL,A,PM_INTEGER|PM_READONLY|PM_SPECIAL,BR((void *)B),SFN(nullintsetfn),GFN(intvargetfn),stdunsetfn,10,NULL,NULL,NULL,0}
+ IPDEF4("!", &lastpid),
+ IPDEF4("$", &mypid),
+ IPDEF4("?", &lastval),
+@@ -224,7 +224,7 @@
+ 
+ /* The following parameters are not avaible in sh/ksh compatibility *
+  * mode. All of these has sh compatible equivalents.                */
+-IPDEF1("ARGC", poundgetfn, nullsetfn, PM_READONLY),
++IPDEF1("ARGC", poundgetfn, nullintsetfn, PM_READONLY),
+ IPDEF2("HISTCHARS", histcharsgetfn, histcharssetfn, PM_DONTIMPORT),
+ IPDEF4("status", &lastval),
+ IPDEF7("prompt", &prompt),
+@@ -266,7 +266,10 @@
+ mod_export HashTable
+ newparamtable(int size, char const *name)
+ {
+-    HashTable ht = newhashtable(size, name, NULL);
++    HashTable ht;
++    if (!size)
++	size = 17;
++    ht = newhashtable(size, name, NULL);
+ 
+     ht->hash        = hasher;
+     ht->emptytable  = emptyhashtable;
+@@ -2189,15 +2192,24 @@
+     free(val);		/* not freearray() */
+ }
+ 
+-/* This function is used as the set function for      *
+- * special parameters that cannot be set by the user. */
++/*
++ * These functions are used as the set function for special parameters that
++ * cannot be set by the user.  The set is incomplete as the only such
++ * parameters are scalar and integer.
++ */
+ 
+ /**/
+ void
+-nullsetfn(Param pm, char *x)
++nullstrsetfn(Param pm, char *x)
+ {
+     zsfree(x);
+ }
++
++/**/
++void
++nullintsetfn(Param pm, zlong x)
++{}
++
+ 
+ /* Function to get value of generic special integer *
+  * parameter.  data is pointer to global variable   *
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@CambridgeSiliconRadio.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

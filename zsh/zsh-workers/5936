@@ -1,0 +1,996 @@
+From zsh-workers-return-5936-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Mar 25 14:28:51 1999
+Return-Path: <zsh-workers-return-5936-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9554 invoked from network); 25 Mar 1999 14:28:46 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Mar 1999 14:28:46 -0000
+Received: (qmail 2580 invoked by alias); 25 Mar 1999 14:28:09 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5936
+Received: (qmail 2573 invoked from network); 25 Mar 1999 14:28:07 -0000
+Date: Thu, 25 Mar 1999 15:28:02 +0100 (MET)
+Message-Id: <199903251428.PAA24324@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: compset (testing and modification)
+
+
+Curious if you like this one better...
+
+This removes the condition codes as we know them and adds:
+
+- the builtin compset:
+  - currently it supports six options that con *not* be combined (due
+    to the optional arguments -- we could make them mandatory and then 
+    allow multiple tests and modifications in one go):
+
+    - compset -p <num>
+      moves num chars from `PREFIX' to `IPREFIX' if there are at least
+      <num> chars in `PREFIX'
+    - compset -P [ <num> ] <pat>
+      sees if <pat> matches the beginning of `PREFIX', and if so, moves
+      the matched portion into `IPREFIX'; if the <num> is given, the
+      <num>'th (or -<num>'th longest, if <num> is negative) match is
+      used; the default is to use the longest match
+      note that this is also the replacement for `-string' and
+      `-class', but here you have to use a `*' at the beginning to
+      make it match
+    - compset -s <num>
+      like -p, but for `SUFFIX/ISUFFIX'
+    - compset -S [ <num> ] <pat>
+      like -P, but for `SUFFIX/ISUFFIX'
+    - compset -n <beg> [ <end> ]
+      if `CURRENT' is >= <beg>, then remove anything up to the <beg>'th
+      word from `words' and adjust `CURRENT'; if <end> is given,
+      `CURRENT' must be <= <end>, and the words from it onwards are
+      removed, too
+    - compset -N <bpat> [ <epat> ]
+      the replacement for `-mbetween'
+
+  - since all of these do some kind of test before doing the
+    modification, I made the return value reflect the outcome of this
+    test, so that you can do `if comptest -P '*\='; then ...'
+- four new condition codes:
+  - they are:
+    `-prefix [ <num> ] <pat>'
+    `-suffix [ <num> ] <pat>'
+    `-after <bpat>'
+    `-between <bpat> <epat>'
+  - ...and have the same meaning as the options `-P', `-S', `-N <pat>',
+    and `-N <pat> <pat>' of `compset', but they will not modify the
+    parameters
+  - this is to simplify the rare cases where one needs to save/restore 
+    modified parameters (or only need the test or a slightly different 
+    test)
+
+Of course, we could remove the condition codes (why?), or replace them 
+with an extra option (say `-q') to `compset' which makes it only do
+the tests and set the return value (no modification).
+
+Anyway, this at least is cleaner than what we had before. Comments?
+
+Bye
+ Sven
+
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Thu Mar 25 09:35:53 1999
++++ Src/Zle/compctl.c	Thu Mar 25 15:09:20 1999
+@@ -1832,6 +1832,279 @@
+     return a;
+ }
+ 
++#define CVT_RANGENUM 0
++#define CVT_RANGEPAT 1
++#define CVT_PRENUM   2
++#define CVT_PREPAT   3
++#define CVT_SUFNUM   4
++#define CVT_SUFPAT   5
++
++static void
++ignore_prefix(int l)
++{
++    char *tmp, sav = compprefix[l];
++
++    compprefix[l] = '\0';
++    tmp = tricat(compiprefix, compprefix, "");
++    zsfree(compiprefix);
++    compiprefix = tmp;
++    compprefix[l] = sav;
++    tmp = ztrdup(compprefix + l);
++    zsfree(compprefix);
++    compprefix = tmp;
++}
++
++static void
++ignore_suffix(int l)
++{
++    char *tmp, sav;
++
++    l = strlen(compsuffix) - l;
++    tmp = tricat(compsuffix + l, compisuffix, "");
++    zsfree(compisuffix);
++    compisuffix = tmp;
++    sav = compsuffix[l];
++    compsuffix[l] = '\0';
++    tmp = ztrdup(compsuffix);
++    compsuffix[l] = sav;
++    zsfree(compsuffix);
++    compsuffix = tmp;
++}
++
++/**/
++static void
++restrict_range(int b, int e)
++{
++    int i = e - b + 1;
++    char **p = (char **) zcalloc((i + 1) * sizeof(char *)), **q, **pp;
++
++    for (q = p, pp = compwords + b; i; i--, q++, pp++)
++	*q = ztrdup(*pp);
++    freearray(compwords);
++    compwords = p;
++    compcurrent -= b;
++}
++
++static int
++do_comp_vars(int test, int na, char *sa, int nb, char *sb, int mod)
++{
++    switch (test) {
++    case CVT_RANGENUM:
++	{
++	    int l = arrlen(compwords);
++
++	    if (na < 0)
++		na += l;
++	    else
++		na--;
++	    if (nb < 0)
++		nb += l;
++	    else
++		nb--;
++
++	    if (compcurrent - 1 < na || compcurrent - 1 > nb)
++		return 0;
++
++	    restrict_range(na, nb);
++	    return 1;
++	}
++    case CVT_RANGEPAT:
++	{
++	    char **p;
++	    int i, l = arrlen(compwords), t = 0, b = 0, e = l - 1;
++	    Comp c;
++
++	    i = compcurrent - 1;
++	    if (i < 0 || i >= l)
++		return 0;
++
++	    singsub(&sa);
++	    c = parsereg(sa);
++
++	    for (i--, p = compwords + i; i >= 0; p--, i--) {
++		if (domatch(*p, c, 0)) {
++		    b = i + 1;
++		    t = 1;
++		    break;
++		}
++	    }
++	    if (t && sb) {
++		int tt = 0;
++
++		singsub(&sb);
++		c = parsereg(sb);
++
++		for (i++, p = compwords + i; i < l; p++, i++) {
++		    if (domatch(*p, c, 0)) {
++			e = i - 1;
++			tt = 1;
++			break;
++		    }
++		}
++		if (tt && i < compcurrent)
++		    t = 0;
++	    }
++	    if (e < b)
++		t = 0;
++	    if (t)
++		restrict_range(b, e);
++	    return t;
++	}
++    case CVT_PRENUM:
++    case CVT_SUFNUM:
++	if (!na)
++	    return 1;
++	if (na > 0 &&
++	    strlen(test == CVT_PRENUM ? compprefix : compsuffix) >= na) {
++	    if (mod) {
++		if (test == CVT_PRENUM)
++		    ignore_prefix(na);
++		else
++		    ignore_suffix(na);
++		return 1;
++	    }
++	    return 0;
++	}
++    case CVT_PREPAT:
++    case CVT_SUFPAT:
++	{
++	    Comp c;
++
++	    if (!na)
++		return 0;
++
++	    if (!(c = parsereg(sa)))
++		return 0;
++
++	    if (test == CVT_PREPAT) {
++		int l, add;
++		char *p, sav;
++
++		if (!(l = strlen(compprefix)))
++		    return 0;
++		if (na < 0) {
++		    p = compprefix + l;
++		    na = -na;
++		    add = -1;
++		} else {
++		    p = compprefix + 1;
++		    add = 1;
++		}
++		for (; l; l--, p += add) {
++		    sav = *p;
++		    *p = '\0';
++		    test = domatch(compprefix, c, 0);
++		    *p = sav;
++		    if (test && !--na)
++			break;
++		}
++		if (!l)
++		    return 0;
++
++		ignore_prefix(p - compprefix);
++	    } else {
++		int l, ol, add;
++		char *p;
++
++		if (!(ol = l = strlen(compsuffix)))
++		    return 0;
++		if (na < 0) {
++		    p = compsuffix;
++		    na = -na;
++		    add = 1;
++		} else {
++		    p = compsuffix + l - 1;
++		    add = -1;
++		}
++		for (; l; l--, p += add)
++		    if (domatch(p, c, 0) && !--na)
++			break;
++
++		if (!l)
++		    return 0;
++
++		ignore_suffix(ol - (p - compsuffix));
++	    }
++	    return 1;
++	}
++    }
++    return 0;
++}
++
++/**/
++static int
++bin_compset(char *name, char **argv, char *ops, int func)
++{
++    int test = 0, na = 0, nb = 0;
++    char *sa = NULL, *sb = NULL;
++
++    if (incompfunc != 1) {
++	zerrnam(name, "can only be called from completion function", NULL, 0);
++	return 1;
++    }
++    if (argv[0][0] != '-') {
++	zerrnam(name, "missing option", NULL, 0);
++	return 1;
++    }
++    switch (argv[0][1]) {
++    case 'n': test = CVT_RANGENUM; break;
++    case 'N': test = CVT_RANGEPAT; break;
++    case 'p': test = CVT_PRENUM; break;
++    case 'P': test = CVT_PREPAT; break;
++    case 's': test = CVT_SUFNUM; break;
++    case 'S': test = CVT_SUFPAT; break;
++    default:
++	zerrnam(name, "bad option -%c", NULL, argv[0][1]);
++	return 1;
++    }
++    if (argv[0][2]) {
++	sa = argv[0] + 2;
++	sb = argv[1];
++	na = 2;
++    } else {
++	if (!(sa = argv[1])) {
++	    zerrnam(name, "missing string for option -%c", NULL, argv[0][1]);
++	    return 1;
++	}
++	sb = argv[2];
++	na = 3;
++    }
++    if (((test == CVT_PRENUM || test == CVT_SUFNUM) ? !!sb :
++	 (sb && argv[na]))) {
++	zerrnam(name, "too many arguments", NULL, 0);
++	return 1;
++    }
++    switch (test) {
++    case CVT_RANGENUM:
++	na = atoi(sa);
++	nb = (sb ? atoi(sb) : -1);
++	break;
++    case CVT_RANGEPAT:
++	tokenize(sa);
++	sa = rembslash(sa);
++	if (sb) {
++	    tokenize(sb);
++	    sb = rembslash(sb);
++	}
++	break;
++    case CVT_PRENUM:
++    case CVT_SUFNUM:
++	na = atoi(sa);
++	break;
++    case CVT_PREPAT:
++    case CVT_SUFPAT:
++	if (sb) {
++	    na = atoi(sa);
++	    sa = sb;
++	} else
++	    na = -1;
++	tokenize(sa);
++	sa = rembslash(sa);
++	break;
++    }
++    return !do_comp_vars(test, na, sa, nb, sb, 1);
++}
++
+ /**/
+ static int
+ bin_compcall(char *name, char **argv, char *ops, int func)
+@@ -2101,22 +2374,6 @@
+ }
+ 
+ /**/
+-static void
+-ignore_prefix(int l)
+-{
+-    char *o, sav = compprefix[l];
+-
+-    compprefix[l] = '\0';
+-    o = compiprefix;
+-    compiprefix = tricat(o, compprefix, "");
+-    zsfree(o);
+-    compprefix[l] = sav;
+-    o = compprefix;
+-    compprefix = ztrdup(o + l);
+-    zsfree(o);
+-}
+-
+-/**/
+ static int
+ comp_check(void)
+ {
+@@ -2128,132 +2385,15 @@
+ }
+ 
+ /**/
+-static void
+-restrict_range(int b, int e)
+-{
+-    int i = e - b + 1;
+-    char **p = (char **) zcalloc((i + 1) * sizeof(char *)), **q, **pp;
+-
+-    for (q = p, pp = compwords + b; i; i--, q++, pp++)
+-	*q = ztrdup(*pp);
+-    freearray(compwords);
+-    compwords = p;
+-    compcurrent -= b;
+-}
+-
+-/**/
+-static int
+-cond_prefix(char **a, int id)
+-{
+-    if (comp_check())
+-	return strpfx(cond_str(a, 0), compprefix);
+-    return 0;
+-}
+-
+-/**/
+-static int
+-cond_iprefix(char **a, int id)
+-{
+-    if (comp_check()) {
+-	char *s = cond_str(a, 0);
+-
+-	if (strpfx(s, compprefix)) {
+-	    ignore_prefix(strlen(s));
+-	    return 1;
+-	}
+-    }
+-    return 0;
+-}
+-
+-/**/
+-static int
+-cond_position(char **a, int id)
+-{
+-    if (comp_check()) {
+-	int b = cond_val(a, 0), e = (a[1] ? cond_val(a, 1) : b);
+-	int l = arrlen(compwords), t, i = compcurrent - 1;
+-
+-	if (b > 0)
+-	    b--;
+-	if (e > 0)
+-	    e--;
+-	if (b < 0)
+-	    b += l;
+-	if (e < 0)
+-	    e += l;
+-	t = (b >= 0 && e >= 0 && i >= b && i <= e && b <= e);
+-
+-	if (t && a[1]) {
+-	    if (b > l)
+-		b = l;
+-	    if (e > l)
+-		e = l;
+-	    restrict_range(b, e);
+-	}
+-	return t;
+-    }
+-    return 0;
+-}
+-
+-/**/
+ static int
+-cond_word(char **a, int id)
++cond_psfix(char **a, int id)
+ {
+     if (comp_check()) {
+-	int o = ((id & 2) ? compcurrent : 0) + cond_val(a, 0);
+-	int l = arrlen(compwords);
+-	char *s;
+-
+-	if (o < 0)
+-	    o += l;
+-
+-	o--;
+-	if (o < 0 || o >= l)
+-	    return 0;
+-
+-	s = compwords[o];
+-	return ((id & 1) ? cond_match(a, 1, s) : !strcmp(s, cond_str(a, 1)));
+-    }
+-    return 0;
+-}
+-
+-/**/
+-static int
+-cond_strcl(char **a, int id)
+-{
+-    if (comp_check()) {
+-	char *s;
+-	int i, ipl;
+-
+-	if (a[1]) {
+-	    s = cond_str(a, 1);
+-	    i = cond_val(a, 0);
+-	} else {
+-	    s = cond_str(a, 0);
+-	    i = -1;
+-	}
+-	if (!getcpatptr) {
+-	    zerr("zle not loaded, zle condition not available", NULL, 0);
+-	    return 1;
+-	}
+-	i = getcpatptr(comp_strptr(&ipl, NULL, 1), i, s, id);
+-	if (i != -1 && i >= ipl) {
+-	    ignore_prefix(i - ipl);
+-	    return 1;
+-	}
+-    }
+-    return 0;
+-}
+-
+-/**/
+-static int
+-cond_words(char **a, int id)
+-{
+-    if (comp_check()) {
+-	int b = cond_val(a, 0), e = (a[1] ? cond_val(a, 1) : -1);
+-	int l = arrlen(compwords);
+-
+-	return (l >= b && l <= e);
++	if (a[1])
++	    return do_comp_vars(id, cond_val(a, 0), cond_str(a, 1),
++				0, NULL, 0);
++	else
++	    return do_comp_vars(id, -1, cond_str(a, 0), 0, NULL, 0);
+     }
+     return 0;
+ }
+@@ -2262,100 +2402,23 @@
+ static int
+ cond_range(char **a, int id)
+ {
+-    if (comp_check()) {
+-	char *s, **p;
+-	int i, l = arrlen(compwords), t = 0, b = 0, e = l - 1;
+-	Comp c = NULL;
+-
+-	i = compcurrent - 1;
+-	if (i < 0 || i >= l)
+-	    return 0;
+-
+-	if (id & 1) {
+-	    s = a[0];
+-	    singsub(&s);
+-	    c = parsereg(s);
+-	} else
+-	    s = cond_str(a, 0);
+-
+-	for (i--, p = compwords + i; i >= 0; p--, i--) {
+-	    if (((id & 1) ? domatch(*p, c, 0) : !strcmp(*p, s))) {
+-		b = i + 1;
+-		t = 1;
+-		break;
+-	    }
+-	}
+-	if (t && (id & 2)) {
+-	    int tt = 0;
+-
+-	    if (id & 1) {
+-		s = a[1];
+-		singsub(&s);
+-		c = parsereg(s);
+-	    } else
+-		s = cond_str(a, 1);
+-
+-	    for (i++, p = compwords + i; i < l; p++, i++) {
+-		if (((id & 1) ? domatch(*p, c, 0) : !strcmp(*p, s))) {
+-		    e = i - 1;
+-		    tt = 1;
+-		    break;
+-		}
+-	    }
+-	    if (tt && i < compcurrent)
+-		t = 0;
+-	}
+-	if (e < b)
+-	    t = 0;
+-	if (t)
+-	    restrict_range(b, e);
+-	return t;
+-    }
+-    return 0;
+-}
+-
+-/**/
+-static int
+-cond_nmatches(char **a, int id)
+-{
+-    if (comp_check())
+-	return compnmatches == cond_val(a, 0);
+-    return 0;
+-}
+-
+-/**/
+-static int
+-cond_matcher(char **a, int id)
+-{
+-    if (comp_check())
+-	return compmatcher == cond_val(a, 0);
+-    return 0;
++    return do_comp_vars(CVT_RANGEPAT, 0, cond_str(a, 0), 0,
++			(id ? cond_str(a, 1) : NULL), 0);
+ }
+ 
+ static struct builtin bintab[] = {
+     BUILTIN("compctl", 0, bin_compctl, 0, -1, 0, NULL, NULL),
+     BUILTIN("compgen", 0, bin_compgen, 1, -1, 0, NULL, NULL),
+     BUILTIN("compadd", 0, bin_compadd, 0, -1, 0, NULL, NULL),
++    BUILTIN("compset", 0, bin_compset, 1, 3, 0, NULL, NULL),
+     BUILTIN("compcall", 0, bin_compcall, 0, 0, 0, "TD", NULL),
+ };
+ 
+ static struct conddef cotab[] = {
+-    CONDDEF("prefix", 0, cond_prefix, 1, 1, 0),
+-    CONDDEF("iprefix", 0, cond_iprefix, 1, 1, 0),
+-    CONDDEF("position", 0, cond_position, 1, 2, 0),
+-    CONDDEF("word", 0, cond_word, 2, 2, 0),
+-    CONDDEF("mword", 0, cond_word, 2, 2, 1),
+-    CONDDEF("current", 0, cond_word, 2, 2, 2),
+-    CONDDEF("mcurrent", 0, cond_word, 2, 2, 3),
+-    CONDDEF("string", 0, cond_strcl, 1, 2, 0),
+-    CONDDEF("class", 0, cond_strcl, 1, 2, 1),
+-    CONDDEF("words", 0, cond_words, 1, 2, 0),
+-    CONDDEF("between", 0, cond_range, 2, 2, 2),
+-    CONDDEF("mbetween", 0, cond_range, 2, 2, 3),
++    CONDDEF("prefix", 0, cond_psfix, 1, 2, CVT_PREPAT),
++    CONDDEF("suffix", 0, cond_psfix, 1, 2, CVT_SUFPAT),
++    CONDDEF("between", 0, cond_range, 2, 2, 1),
+     CONDDEF("after", 0, cond_range, 1, 1, 0),
+-    CONDDEF("mafter", 0, cond_range, 1, 1, 1),
+-    CONDDEF("nmatches", 0, cond_nmatches, 1, 1, 0),
+-    CONDDEF("matcher", 0, cond_matcher, 1, 1, 0),
+ };
+ 
+ static struct funcwrap wrapper[] = {
+diff -u od/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- od/Zsh/compwid.yo	Wed Mar 24 13:42:06 1999
++++ Doc/Zsh/compwid.yo	Thu Mar 25 14:56:48 1999
+@@ -444,6 +444,87 @@
+ )
+ enditem()
+ )
++xitem(tt(compset -p) var(number))
++xitem(tt(compset -P) [ var(number) ] var(pattern))
++xitem(tt(compset -s) var(number))
++xitem(tt(compset -S) [ var(number) ] var(pattern))
++xitem(tt(compset -n) var(begin) [ var(end) ])
++item(tt(compset -p) var(beg-pat) [ var(end-pat) ])(
++This builtin allows to easily modify the special parameters and at
++the same time, to do tests on their values.
++
++The options are:
++
++startitem()
++item(tt(-p) var(number))(
++If the contents of the tt(PREFIX) parameter is longer than var(number)
++characters, the first var(number) characters are removed from it and
++appended to the contents of the tt(IPREFIX) parameter.
++)
++item(tt(-P) [ var(number) ] var(pattern))(
++If the value of the tt(PREFIX) parameter begins with anything that
++matches the var(pattern), the matched portion is removed from
++tt(PREFIX) and appended to tt(IPREFIX).
++
++Without the optional var(number), the longest match is taken, but
++if var(number) is given, anything up to the var(number)'th match is
++moved. If the var(number) is negative, the var(number)'th longest
++match is moved. For example, if tt(PREFIX) contains the string
++`tt(a=b=c)' doing tt(compset -P '*\=') will move the string `tt(a=b=)' 
++into the tt(IPREFIX) parameter, but tt(compset -P 1 '*\=') moves only
++the string `tt(a=)'.
++)
++item(tt(-s) var(number))(
++Like tt(-p), but prepend the last var(number) characters from the
++parameter tt(SUFFIX) to the contents of the parameter tt(ISUFFIX).
++)
++item(tt(-S) [ var(number) ] var(pattern))(
++Like tt(-P), but matching from the end of tt(SUFFIX) and moving the
++matched portion into the parameter tt(ISUFFIX).
++)
++item(tt(-n) var(begin) [ var(end) ])(
++If the current word position as specified by the parameter tt(CURRENT) 
++is greater than or equal to var(begin), anything up to the
++var(begin)'th word is removed from the tt(words) array and the value
++of the parameter tt(CURRENT) is decremented by var(begin).
++
++If the optional var(end) is given, the modification is done only if
++the current word position is also less than or equal to var(end). In
++this case, the words from position var(end) onwards are removed from
++the tt(words) array, too.
++
++Both of these numbers may be negative to make them count backwards
++from the last element of the tt(words) array.
++)
++item(tt(-N) var(beg-pat) [ var(end-pat) ])(
++If one of the elements of the tt(words) array up to the one at the
++index given by the value of the parameter tt(CURRENT) matches the
++pattern var(beg-pat), all elements up to the matching one are removed
++from the tt(words) array and the value of tt(CURRENT) is changed to
++point to the same word in the changed array.
++
++If the optional pattern var(end-pat) is also given and there is an
++element in the tt(words) array matching this pattern, the parameters
++are modified only if the index of this word is higher than the one
++given by the tt(CURRENT) parameter (meaning that the matching word has 
++to be after the cursor). In this case, the words from the word
++matching tt(end-pat) onwards are also removed from the tt(words)
++array. If tt(words) contains no word matching var(end-pat), the
++testing and modification is done as if it were not given.
++)
++enditem()
++
++In all of these cases the return value is zero if the test succeded
++and the parameters were modified, and non-zero otherwise. This allows
++one to use this builtin in tests as in:
++
++indent(
++tt(if compset -P '*\='; then ...)
++)
++
++Which makes anything up to and including the last equal sign be
++ignored by the completion code.
++)
+ item(tt(compcall) [ tt(-TD) ])(
+ 
+ This allows one to use completion definitions given with the
+@@ -469,84 +550,26 @@
+ above can be used, but also some additional condition codes. These
+ work on the special parameters and can be used to easily build
+ completion functions that generate different matches depending on the
+-strings on the line.
++strings on the line. All of these condition codes perform tests also
++done by the tt(compset) builtin, but they don't modify the contents of 
++the special parameters.
+ 
+ The following condition codes are made available inside completion
+ widgets:
+ 
+ startitem()
+-item(tt(-prefix) var(string))(
+-true if the content of tt(PREFIX) starts with var(string)
+-)
+-item(tt(-iprefix) var(string))(
+-like tt(-prefix), but the var(string) is removed from tt(PREFIX) and
+-added to tt(IPREFIX)
+-)
+-item(tt(-position) var(beg) [ var(end) ])(
+-true if tt(CURRENT) is equal to var(beg) or, if var(end) is given,
+-equal to or greater than var(beg) and equal to or less than var(end);
+-both of var(beg) and var(end) may be arithmetic expressions, if they
+-are less than zero the number of words in tt(words) are added to them
+-before comparing them to tt(CURRENT); thus, tt(-1) is the last word,
+-tt(-2) is the word before that and so on; note that positions are
+-taken as indexes into the tt(words) array and thus are counted as if
+-the tt(ksharray) is not set
+-)
+-item(tt(-word) var(index) var(string))(
+-true if the word number var(index) in tt(words) is equal to
+-var(string); again, var(index) may be negative, counting backwards
+-)
+-item(tt(-mword) var(index) var(pattern))(
+-like tt(-word) but using pattern matching
+-)
+-item(tt(-current) var(offset) var(string))(
+-like tt(-word) but var(offset) is relative to the value of
+-tt(CURRENT)
+-)
+-item(tt(-mcurrent) var(offset) var(pattern))(
+-like tt(-current) but using pattern matching
+-)
+-item(tt(-string) [ var(number) ] var(string))(
+-true if the current word contains var(string); anything up to the last 
+-occurrence of this string will be ingnored by removing it from
+-tt(PREFIX) and adding it to tt(IPREFIX); if var(number) is given,
+-anything up to the var(number)'th occurrence of the var(string) will
+-be ignored; again, var(number) may be any arithmetic expression and
+-negative values count backward
+-)
+-item(tt(-class) [ var(number) ] var(class))(
+-like tt(-string) but the var(class) is used as a character class so
+-that anything up to and including the last or the var(number)'th
+-occurrence of any character from the string var(class) is ignored
+-)
+-item(tt(-words) var(min) [ var(max) ])(
+-true if the number of words is equal to var(min); if var(max) is
+-given, it is true if the number of words is equal to or greater than
+-var(min) and equal to or less than var(max)
+-)
+-item(tt(-after) var(string))(
+-true if the cursor is after a word that is equal to var(string); this
+-removes all words up to and including the matched word from the
+-tt(words) array
+-)
+-item(tt(-mafter) var(pattern))(
+-like tt(-after) but using pattern matching
+-)
+-item(tt(-between) var(string1) var(string2))(
+-true if the cursor is after a word that is equal to var(string1), if
+-there is also a word that is equal to var(string2), this is true only
+-if the cursor is before it; as a side effect, all words before
+-var(string1) and after var(string2) (both inclusive) are removed from
+-the tt(words) array
++item(tt(-prefix) [ var(number) ] var(pattern))(
++true if the test for the tt(-P) option of tt(compset) would succeed
+ )
+-item(tt(-mbetween) var(pattern1) var(pattern2))(
+-like tt(-between) but using pattern matching
++item(tt(-suffix) [ var(number) ] var(pattern))(
++true if the test for the tt(-S) option of tt(compset) would succeed
+ )
+-item(tt(-nmatches) var(number))(
+-true if the the value of tt(compstate[nmatches]) is equal to var(number)
++item(tt(-after) var(beg-pat))(
++true if the test of the tt(-N) option with only the var(beg-pat) given 
++would succeed
+ )
+-item(tt(-matcher) var(number))(
+-true if the value of tt(compstate[matcher]) is equal to var(number)
++item(tt(-between) var(beg-pat end-pat))(
++true if the test for the tt(-N) option with both patterns would succeed
+ )
+ enditem()
+ 
+diff -u -r oc/Builtins/_cd Completion/Builtins/_cd
+--- oc/Builtins/_cd	Thu Mar 25 09:36:15 1999
++++ Completion/Builtins/_cd	Thu Mar 25 13:34:21 1999
+@@ -17,7 +17,7 @@
+ emulate -LR zsh
+ setopt extendedglob
+ 
+-if [[ -position 3 ]]; then
++if [[ CURRENT -eq 3 ]]; then
+   # cd old new: look for old in $PWD and see what can replace it
+   local rep
+   # Get possible completions using word in position 2
+diff -u -r oc/Builtins/_command Completion/Builtins/_command
+--- oc/Builtins/_command	Thu Mar 25 09:36:15 1999
++++ Completion/Builtins/_command	Thu Mar 25 13:35:30 1999
+@@ -1,6 +1,7 @@
+ #defcomp command
+ 
+-if [[ -position 3 -1 ]]; then
++if [[ CURRENT -ge 3 ]]; then
++  compset -n 2
+   _normal
+ else
+   compgen -em
+diff -u -r oc/Builtins/_hash Completion/Builtins/_hash
+--- oc/Builtins/_hash	Thu Mar 25 09:36:16 1999
++++ Completion/Builtins/_hash	Thu Mar 25 14:15:52 1999
+@@ -1,12 +1,12 @@
+ #defcomp hash
+ 
+ if [[ "$words[2]" = -*d* ]]; then
+-  if [[ -string 1 '=' ]]; then
++  if compset -P 1 '*\='; then
+     _path_files -g '*(-/)'
+   else
+     compgen -n -q -S '='
+   fi
+-elif [[ -string 1 '=' ]]; then
++elif compset -P 1 '*\='; then
+   _files -/g '*(*)'
+ else
+   compgen -m -q -S '='
+diff -u -r oc/Builtins/_kill Completion/Builtins/_kill
+--- oc/Builtins/_kill	Thu Mar 25 09:36:17 1999
++++ Completion/Builtins/_kill	Thu Mar 25 13:37:20 1999
+@@ -2,7 +2,7 @@
+ 
+ local list
+ 
+-if [[ -iprefix '-' ]]; then
++if compset -P 1 -; then
+   compgen -k "($signals[1,-3])"
+ else
+   local ret=1
+diff -u -r oc/Builtins/_sched Completion/Builtins/_sched
+--- oc/Builtins/_sched	Thu Mar 25 09:36:17 1999
++++ Completion/Builtins/_sched	Thu Mar 25 13:37:50 1999
+@@ -1,3 +1,3 @@
+ #defcomp sched
+ 
+-[[ -position 3 -1 ]] && _normal
++compset -n 3 && _normal
+diff -u -r oc/Builtins/_source Completion/Builtins/_source
+--- oc/Builtins/_source	Thu Mar 25 09:36:17 1999
++++ Completion/Builtins/_source	Thu Mar 25 13:38:36 1999
+@@ -1,6 +1,7 @@
+ #defcomp source
+ 
+-if [[ -position 3 -1 ]]; then
++if [[ CURRENT -ge 3 ]]; then
++  compset -n 2
+   _normal
+ else
+   _files
+diff -u -r oc/Builtins/_zmodload Completion/Builtins/_zmodload
+--- oc/Builtins/_zmodload	Thu Mar 25 09:36:17 1999
++++ Completion/Builtins/_zmodload	Thu Mar 25 13:39:01 1999
+@@ -2,7 +2,7 @@
+ 
+ local fl="$words[2]"
+ 
+-if [[ "$fl" = -*(a*u|u*a)* || "$fl" = -*a* && -position 4 -1 ]]; then
++if [[ "$fl" = -*(a*u|u*a)* || "$fl" = -*a* && CURRENT -ge 4 ]]; then
+   compgen -B
+ elif [[ "$fl" = -*u* ]]; then
+   compgen -s '$(zmodload)'
+diff -u -r oc/Core/_main_complete Completion/Core/_main_complete
+--- oc/Core/_main_complete	Thu Mar 25 09:36:18 1999
++++ Completion/Core/_main_complete	Thu Mar 25 14:07:26 1999
+@@ -40,9 +40,10 @@
+ 
+ # Special completion contexts after `~' and `='.
+ 
+-if [[ -iprefix '=' ]]; then
++if compset -P 1 '\='; then
+   compstate[context]=equal
+-elif [[ "$PREFIX" != */* && -iprefix '~' ]]; then
++elif [[ "$PREFIX" != */* && "$PREFIX[1]" = '~' ]]; then
++  compset -p 1
+   compstate[context]=tilde
+ fi
+ 
+diff -u -r oc/User/_dd Completion/User/_dd
+--- oc/User/_dd	Thu Mar 25 09:36:19 1999
++++ Completion/User/_dd	Thu Mar 25 13:43:36 1999
+@@ -1,12 +1,12 @@
+ #defcomp dd
+ 
+-if [[ -iprefix conv= ]]; then
++if compset -P 1 'conv\='; then
+   # If there's a comma present, ignore up to the last one.  The
+   # test alone will have that effect.
+-  [[ -string , ]]
++  compset -p '*,'
+   compgen -S, -q \
+       -k '(ascii ebcdic ibm block unblock lcase ucase swab noerror sync)'
+-elif [[ -iprefix 'if=' || -iprefix 'of=' ]]; then
++elif compset -P 1 '[io]f\='; then
+   _files
+ else
+   compgen -S '=' -k '(if of ibs obs bs cbs skip files seek count conv)'
+diff -u -r oc/User/_find Completion/User/_find
+--- oc/User/_find	Thu Mar 25 09:36:19 1999
++++ Completion/User/_find	Thu Mar 25 13:44:40 1999
+@@ -2,14 +2,14 @@
+ 
+ local prev="$words[CURRENT-1]"
+ 
+-if [[ -mbetween -(ok|exec) \\\; ]]; then
++if compset -N '-(ok|exec)' '\;' then
+   _normal
+-elif [[ -iprefix - ]]; then
++elif compset -P 1 -; then
+   compgen -s 'daystart {max,min,}depth follow noleaf version xdev \
+     {a,c,}newer {a,c,m}{min,time} empty false {fs,x,}type gid inum links \
+     {i,}{l,}name {no,}{user,group} path perm regex size true uid used \
+     exec {f,}print{f,0,} ok prune ls'
+-elif [[ -position 2 ]]; then
++elif [[ CURRENT -eq 2 ]]; then
+   local ret=1
+ 
+   compgen -g '. ..' && ret=0
+diff -u -r oc/User/_mh Completion/User/_mh
+--- oc/User/_mh	Thu Mar 25 09:36:19 1999
++++ Completion/User/_mh	Thu Mar 25 13:46:24 1999
+@@ -13,7 +13,7 @@
+ # To be on the safe side, check this exists and if not, get it anyway.
+ [[ -d $mymhdir ]] || mymhdir=$(mhpath +)
+ 
+-if [[ -iprefix - ]]; then
++if compset -P 1 -; then
+   # get list of options, which MH commands can generate themselves
+   # awk is just too icky to use for this, sorry.  send me one if
+   # you come up with it.
+@@ -23,7 +23,7 @@
+     print $n =~ s/^\[([a-z]+)\]// ? "$n\n$1$n\n" : "$n\n";
+   }')
+   return
+-elif [[ -iprefix '+' || -iprefix '@' || "$prev" = -draftfolder ]]; then
++elif compset -P 1 '[+@] || [ "$prev" = -draftfolder ]]; then
+   # Complete folder names.
+   local mhpath
+ 
+diff -u -r oc/User/_stty Completion/User/_stty
+--- oc/User/_stty	Thu Mar 25 09:36:20 1999
++++ Completion/User/_stty	Thu Mar 25 13:47:03 1999
+@@ -5,7 +5,7 @@
+ then
+      compadd -Q '^-' '^h' '^?' '^c' '^u'
+ else
+-  [[ -string '-' || -string '+' ]]
++  compset -P '[-+]'
+   compadd rows columns intr quit erase kill eof eol \
+     eol2 start stop susp dsusp reprint discard werase lnext \
+     parenb parodd cs8 cstopb hupcl cread clocal parext \
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

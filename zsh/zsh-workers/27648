@@ -1,0 +1,216 @@
+From zsh-workers-return-27648-mason-zsh=primenet.com.au@zsh.org Tue Feb 02 15:07:00 2010
+Return-Path: <zsh-workers-return-27648-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28580 invoked by alias); 2 Feb 2010 15:07:00 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27648
+Received: (qmail 963 invoked from network); 2 Feb 2010 15:06:57 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.7 required=5.0 tests=AWL,BAYES_00,
+	RCVD_IN_DNSWL_LOW,SPF_HELO_PASS,URI_NOVOWEL autolearn=ham version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Tue, 2 Feb 2010 15:06:39 +0000
+From: Peter Stephenson <pws@csr.com>
+To: "Zsh Hackers' List" <zsh-workers@zsh.org>
+Subject: Re: Want to replace bash w zsh as system shell on Ubuntu
+Message-ID: <20100202150639.4ee8d46c@news01>
+In-Reply-To: <87vdefkeuf.fsf@ft.bewatermyfriend.org>
+References: <20100202081546.GA5930@panix.com>
+	<87vdefkeuf.fsf@ft.bewatermyfriend.org>
+Organization: CSR
+X-Mailer: Claws Mail 3.5.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 02 Feb 2010 15:06:39.0889 (UTC) FILETIME=[52825010:01CAA419]
+X-Scanned-By: MailControl A-09-22-10 (www.mailcontrol.com) on 10.71.0.121
+
+On Tue, 02 Feb 2010 13:21:44 +0100
+Frank Terbeck <ft@bewatermyfriend.org> wrote:
+> One of the problems (which was worked around after four years in debian)
+> was a script defining a function called `repeat'. That's also a shell
+> reserved word in zsh, leading to a parsing error. If zsh would disable
+> `repeat' in sh mode, which would also be correct, that problem would be
+> gone.
+> 
+> The other problem mentioned in grml's FAQ is #329288[1], where the
+> problem is a script using `ulimit'. In sh mode, zsh does not make
+> `ulimit' available as a builtin command. The guy responding to the bug
+> report closed the bug, stating that zsh in sh mode is not a POSIX
+> compatible shell and therefore not supported. I guess strictly speaking,
+> you cannot dispute that - although sh mode is trying as hard as possible
+> to be compatible. Demanding POSIX here is kind of a two sided sword,
+> though. If you look at the actual standard for ulimit[2] you'll find
+> that `ulimit' is only an extension to the standard.
+
+I'm perfectly happy to change things like this if it's more convenient.
+Emulations aren't there to keep normal zsh users happy, so *backwards*
+compatibility is not the issue for once.  (If ulimit is allowed as an
+extension, then making it available is presumably not making any
+compatibility problems worse.)
+
+This makes it possible to have loadable features available in emulation
+mode, makes the "ulimit" builtin one such, and disables "repeat" in emulation
+mode.  I'm not sure how sophisticated this would need to be; having things
+other than parameters different in different (non-native) emulation modes
+is a complexity it would be good to avoid.
+
+Would need some documentation.
+
+Index: Etc/zsh-development-guide
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Etc/zsh-development-guide,v
+retrieving revision 1.22
+diff -u -r1.22 zsh-development-guide
+--- Etc/zsh-development-guide	11 May 2009 09:03:28 -0000	1.22
++++ Etc/zsh-development-guide	2 Feb 2010 14:57:45 -0000
+@@ -198,12 +198,16 @@
+   - nozshdep        non-empty indicates no dependence on the `zsh/main'
+                     pseudo-module
+   - alwayslink      if non-empty, always link the module into the executable
+-  - autobins        builtins defined by the module, for autoloading
+-  - autoinfixconds  infix condition codes defined by the module, for
+-                    autoloading (without the leading `-')
+-  - autoprefixconds like autoinfixconds, but for prefix condition codes
+-  - autoparams      parameters defined by the module, for autoloading
+-  - automathfuncs   math functions defined by the module, for autoloading
++  - autofeatures    features defined by the module for autoloading,
++                    a space-separated list.  The syntax for features is as
++                    for zmodload -F, e.g. b:mybin refers to the builtin
++                    mybin.  This replaces the previous mechanism with
++                    separate variables for builtins, conditions, math
++                    functions and parameters.  Note the features are only
++		    available in zsh's native mode, not in emulation modes.
++  - autofeatures_emu As autofeatures, but the features so presented are
++                    available in modes that are *not* zsh's native mode.
++		    The variable autofeatures must also be present.
+   - objects         .o files making up this module (*must* be defined)
+   - proto           .syms files for this module (default generated from $objects)
+   - headers         extra headers for this module (default none)
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.237
+diff -u -r1.237 builtin.c
+--- Src/builtin.c	29 Jan 2010 21:44:59 -0000	1.237
++++ Src/builtin.c	2 Feb 2010 14:57:45 -0000
+@@ -206,6 +206,17 @@
+     }
+ }
+ 
++/**/
++void
++init_builtins(void)
++{
++    if (!EMULATION(EMULATE_ZSH)) {
++	HashNode hn = reswdtab->getnode2(reswdtab, "repeat");
++	if (hn)
++	    reswdtab->disablenode(hn, 0);
++    }
++}
++
+ /* Make sure we have space for a new option and increment. */
+ 
+ #define OPT_ALLOC_CHUNK 16
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.109
+diff -u -r1.109 init.c
+--- Src/init.c	27 Jan 2010 19:25:34 -0000	1.109
++++ Src/init.c	2 Feb 2010 14:57:45 -0000
+@@ -1443,6 +1443,7 @@
+     setupvals();
+     init_signals();
+     init_bltinmods();
++    init_builtins();
+     run_init_scripts();
+     init_misc();
+ 
+Index: Src/mkbltnmlst.sh
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/mkbltnmlst.sh,v
+retrieving revision 1.10
+diff -u -r1.10 mkbltnmlst.sh
+--- Src/mkbltnmlst.sh	11 Feb 2009 20:42:16 -0000	1.10
++++ Src/mkbltnmlst.sh	2 Feb 2010 14:57:45 -0000
+@@ -37,18 +37,38 @@
+         echo "/* non-linked-in known module \`$x_mod' */"
+ 	linked=no
+     esac
+-    unset moddeps autofeatures
++    unset moddeps autofeatures autofeatures_emu
+     . $srcdir/../$modfile
+     if test "x$autofeatures" != x; then
+-	echo "  if (EMULATION(EMULATE_ZSH)) {"
+-	echo "    char *features[] = { "
+-	for feature in $autofeatures; do
+-	    echo "      \"$feature\","
+-	done
+-	echo "      NULL"
+-	echo "    }; "
+-	echo "    autofeatures(\"zsh\", \"$x_mod\", features, 0, 1);"
+-	echo "  }"
++        if test "x$autofeatures_emu" != x; then
++            echo "  {"
++	    echo "    char *zsh_features[] = { "
++	    for feature in $autofeatures; do
++		echo "      \"$feature\","
++	    done
++	    echo "      NULL"
++	    echo "    }; "
++	    echo "    char *emu_features[] = { "
++	    for feature in $autofeatures_emu; do
++		echo "      \"$feature\","
++	    done
++	    echo "      NULL"
++	    echo "    }; "
++	    echo "    autofeatures(\"zsh\", \"$x_mod\","
++	    echo "       EMULATION(EMULATE_ZSH) ? zsh_features : emu_features,"
++	    echo "       0, 1);"
++	    echo "  }"
++        else
++	    echo "  if (EMULATION(EMULATE_ZSH)) {"
++	    echo "    char *features[] = { "
++	    for feature in $autofeatures; do
++		echo "      \"$feature\","
++	    done
++	    echo "      NULL"
++	    echo "    }; "
++	    echo "    autofeatures(\"zsh\", \"$x_mod\", features, 0, 1);"
++	    echo "  }"
++	fi
+     fi
+     for dep in $moddeps; do
+ 	echo "  add_dep(\"$x_mod\", \"$dep\");"
+Index: Src/Builtins/rlimits.mdd
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Builtins/rlimits.mdd,v
+retrieving revision 1.4
+diff -u -r1.4 rlimits.mdd
+--- Src/Builtins/rlimits.mdd	20 Jun 2007 20:59:17 -0000	1.4
++++ Src/Builtins/rlimits.mdd	2 Feb 2010 14:57:46 -0000
+@@ -3,6 +3,7 @@
+ load=yes
+ 
+ autofeatures="b:limit b:ulimit b:unlimit"
++autofeatures_emu="b:ulimit"
+ 
+ objects="rlimits.o"
+ 
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

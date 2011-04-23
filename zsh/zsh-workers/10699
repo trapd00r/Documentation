@@ -1,0 +1,195 @@
+From zsh-workers-return-10699-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Apr 12 13:04:57 2000
+Return-Path: <zsh-workers-return-10699-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19709 invoked from network); 12 Apr 2000 13:04:55 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Apr 2000 13:04:55 -0000
+Received: (qmail 11089 invoked by alias); 12 Apr 2000 13:04:39 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10699
+Received: (qmail 11076 invoked from network); 12 Apr 2000 13:04:39 -0000
+Date: Wed, 12 Apr 2000 15:04:23 +0200 (MET DST)
+Message-Id: <200004121304.PAA11291@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Mon, 10 Apr 2000 11:05:38 +0200
+	(MET DST)
+Subject: PATCH: Re: Compinstall, zcompile, and my .zshrc
+
+
+I wrote:
+
+> Bart Schaefer wrote:
+> 
+> > On Apr 10, 10:37am, Sven Wischnowsky wrote:
+> > } 
+> > } Bart Schaefer wrote:
+> > } 
+> > } > Second, it'd be nice if I could do something like
+> > } > 
+> > } > 	zcompile .zshrc.zwc .zshrc .zsh/*
+> > } 
+> > } As for loading functions from a zwc files it checks if the (basename
+> > } of the) name of the sourced file is in the zwc file. And the loads it.
+> > } In other words, you can use symbolic links:
+> > } 
+> > }   zcompile .zshrc.zwc .zshrc .zsh/*
+> > }   for i in .zsh/*; do ln -s .zshrc.zwc ${i}.zwc; done
+> > 
+> > But how clever is that?  I mean, the file's still going to be read and/or
+> > mapped multiple times; is it really any better than compiling them all as
+> > separate .zwc files?
+> 
+> No, currently not. Hm, we could make the functions that looks if a zwc 
+> file is already mapped check if the file is the same as one of the
+> files already mapped usin stat, not only comparing filenames.
+
+The patch does that. I see no reason how using the pathnames could
+have any advantage.
+
+The patch looks bigger than it is.
+
+Bye
+ Sven
+
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.5
+diff -u -r1.5 parse.c
+--- Src/parse.c	2000/04/10 14:16:25	1.5
++++ Src/parse.c	2000/04/12 13:01:32
+@@ -2741,7 +2741,7 @@
+ /* Load a dump file (i.e. map it). */
+ 
+ static void
+-load_dump_file(char *dump, int other, int len)
++load_dump_file(char *dump, struct stat *sbuf, int other, int len)
+ {
+     FuncDump d;
+     Wordcode addr;
+@@ -2781,7 +2781,8 @@
+     d = (FuncDump) zalloc(sizeof(*d));
+     d->next = dumps;
+     dumps = d;
+-    d->name = ztrdup(dump);
++    d->dev = sbuf->st_dev;
++    d->ino = sbuf->st_ino;
+     d->fd = fd;
+     d->map = addr + (other ? (len - off) / sizeof(wordcode) : 0);
+     d->addr = addr;
+@@ -2806,7 +2807,7 @@
+     char *dig, *wc;
+ 
+     if (strsfx(FD_EXT, path))
+-	return check_dump_file(path, name, ksh);
++	return check_dump_file(path, NULL, name, ksh);
+ 
+     dig = dyncat(path, FD_EXT);
+     wc = dyncat(file, FD_EXT);
+@@ -2822,13 +2823,13 @@
+     if (!rd &&
+ 	(rc || std.st_mtime > stc.st_mtime) &&
+ 	(rn || std.st_mtime > stn.st_mtime) &&
+-	(prog = check_dump_file(dig, name, ksh)))
++	(prog = check_dump_file(dig, &std, name, ksh)))
+ 	return prog;
+ 
+     /* No digest file. Now look for the per-function compiled file. */
+     if (!rc &&
+ 	(rn || stc.st_mtime > stn.st_mtime) &&
+-	(prog = check_dump_file(wc, name, ksh)))
++	(prog = check_dump_file(wc, &stc, name, ksh)))
+ 	return prog;
+ 
+     /* No compiled file for the function. The caller (getfpfunc() will
+@@ -2853,7 +2854,7 @@
+ 	tail = file;
+ 
+     if (strsfx(FD_EXT, file))
+-	return check_dump_file(file, tail, NULL);
++	return check_dump_file(file, NULL, tail, NULL);
+ 
+     wc = dyncat(file, FD_EXT);
+ 
+@@ -2861,7 +2862,7 @@
+     rn = stat(file, &stn);
+ 
+     if (!rc && (rn || stc.st_mtime > stn.st_mtime) &&
+-	(prog = check_dump_file(wc, tail, NULL)))
++	(prog = check_dump_file(wc, &stc, tail, NULL)))
+ 	return prog;
+ 
+     return NULL;
+@@ -2872,13 +2873,20 @@
+ 
+ /**/
+ static Eprog
+-check_dump_file(char *file, char *name, int *ksh)
++check_dump_file(char *file, struct stat *sbuf, char *name, int *ksh)
+ {
+     int isrec = 0;
+     Wordcode d;
+     FDHead h;
+     FuncDump f;
++    struct stat lsbuf;
+ 
++    if (!sbuf) {
++	if (stat(file, &lsbuf))
++	    return NULL;
++	sbuf = &lsbuf;
++    }
++
+ #ifdef USE_MMAP
+ 
+  rec:
+@@ -2890,7 +2898,7 @@
+ #ifdef USE_MMAP
+ 
+     for (f = dumps; f; f = f->next)
+-	if (!strcmp(file, f->name)) {
++	if (f->dev == sbuf->st_dev && f->ino == sbuf->st_ino) {
+ 	    d = f->map;
+ 	    break;
+ 	}
+@@ -2935,7 +2943,7 @@
+ 
+ 	    return prog;
+ 	} else if (fdflags(d) & FDF_MAP) {
+-	    load_dump_file(file, (fdflags(d) & FDF_OTHER), fdother(d));
++	    load_dump_file(file, sbuf, (fdflags(d) & FDF_OTHER), fdother(d));
+ 	    isrec = 1;
+ 	    goto rec;
+ 	} else
+@@ -3017,7 +3025,6 @@
+ 		dumps = p->next;
+ 	    munmap((void *) f->addr, f->len);
+ 	    zclose(f->fd);
+-	    zsfree(f->name);
+ 	    zfree(f, sizeof(*f));
+ 	}
+     }
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.3
+diff -u -r1.3 zsh.h
+--- Src/zsh.h	2000/04/04 12:02:04	1.3
++++ Src/zsh.h	2000/04/12 13:01:33
+@@ -487,7 +487,8 @@
+ 
+ struct funcdump {
+     FuncDump next;		/* next in list */
+-    char *name;			/* path name */
++    dev_t dev;			/* device */
++    ino_t ino;			/* indoe number */
+     int fd;			/* file descriptor */
+     Wordcode map;		/* pointer to header */
+     Wordcode addr;		/* mapped region */
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,413 @@
+From zsh-workers-request@math.gatech.edu Mon Dec 14 10:16:10 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18026 invoked from network); 14 Dec 1998 10:16:05 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 14 Dec 1998 10:16:05 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id FAA00177;
+	Mon, 14 Dec 1998 05:13:18 -0500 (EST)
+Resent-Date: Mon, 14 Dec 1998 05:13:18 -0500 (EST)
+Date: Mon, 14 Dec 1998 11:11:34 +0100 (MET)
+Message-Id: <199812141011.LAA06380@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@math.gatech.edu
+In-reply-to: "Bart Schaefer"'s message of Fri, 11 Dec 1998 09:40:53 -0800
+Subject: Re: wrapper functions in modules
+Resent-Message-ID: <"1ysgD2.0.h2.-IETs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4769
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+
+Bart Schaefer wrote:
+
+> 
+> On Dec 11,  3:16pm, Sven Wischnowsky wrote:
+> } Subject: Re: wrapper functions in modules
+> }
+> } [...] my first idea was to let modules register only one function
+> } which would have to call back the execution code [...]
+> } This would solve the call stack problems you mentioned. Also, writing
+> } wrappers would be easier in modules since you can use local variables, 
+> } static local variables for number-of-calls and so on...
+> 
+> This would indeed be an improvement.  An interesting side-effect is that
+> it would permit a module to decide not to run the shell function at all;
+> it could instead branch off into any code it liked.
+> 
+
+The patch below implements this suggestion with a slight modification: 
+the wrapper function now returns an integer value. Returning zero
+means that the shell function was executed (by calling
+runshfunc()). Returning non-zero means that the execution code has to
+execute the function itself. This way a module can easily define
+wrapper function that are to be used only under certain conditions or
+that don't need cleanup code.
+
+> That in turn probably makes modules even more dangerous than before, from
+> a run-time perspective.  An innoccuous module placed in root's module path
+> could suddenly have someone else driving the shell.  It might even be a
+> good idea to have zsh refuse to dynamically load modules when EUID==0, or
+> at least refuse to auto-load them.
+
+The fact that module can choose not to execute shell functions was one 
+of the reasons why I first implemented to separate functions (the
+other was that unloading-modules-thing, I didn't realise all the
+implications that has).
+
+> } About the problems with unloading: I would vote for completely
+> } disallowing to unload a module if a wrapper is active for it.
+> } This is relatively easy to keep track of and seems to be the savest
+> 
+> (Safest.)  This still isn't quite good enough -- you can't unload
+> modules upon which other modules depend, so if X has a wrapper and
+> depends on Y, you can't unload Y even though Y has no wrapper.
+> 
+> This probably means you end up refusing to unload any modules at all
+> whenever there are any wrappers at all, which may be problematic.
+
+But this interferes only with wrappers that are currently being
+executed.
+The patch doesn't change the unloading stuff, though we will have to
+find a solution for it.
+
+> 
+> } the question is: how often does one want to unload modules in shell
+> } functions?
+> 
+> I could envision someone wanting to write a pair of functions, one that
+> installs several related modules and another that uninstalls them again.
+
+Hm, right. Which brings us back to the separation of user-interface
+and internals you mentioned.
+We could keep the current function interface and offer a more basic
+one for separately defining and deleting the user-visible and internal 
+things so that only modules with wrapper functions that call
+runshfunc() would be affected.
+
+> 
+> } Finally about the order in which installed wrappers are to be called:
+> } looking at load_module() it should be enough to build the wrappers
+> } list by appending new definitions to the end.
+> 
+> Yes, as I said, if the only constraint is module dependencies this will
+> work fine.
+
+The patch does this.
+
+Another things this patch doesn't do is: add documentation. I agree
+that we should have documentation for all this, but the file
+Util/zsh-development-guide you mentioned doesn't contain anything
+about modules...
+
+Maybe I find some time to add it in the next days (although others are 
+certainly more qualified to describe the basic module loading
+mechanisms).
+
+
+Bye
+ Sven
+
+*** os/zsh.h	Mon Dec 14 10:53:29 1998
+--- Src/zsh.h	Mon Dec 14 10:24:28 1998
+***************
+*** 774,795 ****
+  
+  /* node in list of function call wrappers */
+  
+! typedef void (*WrapBefore) _((FuncWrap, char *));
+! typedef void (*WrapAfter) _((FuncWrap, char *, int));
+  
+  struct funcwrap {
+      FuncWrap next;
+      int flags;
+!     WrapBefore before;
+!     WrapAfter after;
+      Module module;
+      int count;
+  };
+  
+  #define WRAPF_ADDED 1
+  
+! #define WRAPDEF(before, after) \
+!     { NULL, 0, before, after, NULL, 0 }
+  
+  /* node in builtin command hash table (builtintab) */
+  
+--- 774,793 ----
+  
+  /* node in list of function call wrappers */
+  
+! typedef int (*WrapFunc) _((List, FuncWrap, char *));
+  
+  struct funcwrap {
+      FuncWrap next;
+      int flags;
+!     WrapFunc handler;
+      Module module;
+      int count;
+  };
+  
+  #define WRAPF_ADDED 1
+  
+! #define WRAPDEF(func) \
+!     { NULL, 0, func, NULL, 0 }
+  
+  /* node in builtin command hash table (builtintab) */
+  
+*** os/exec.c	Mon Dec 14 10:53:28 1998
+--- Src/exec.c	Mon Dec 14 10:36:29 1998
+***************
+*** 2657,2667 ****
+  {
+      char **tab, **x, *oargv0 = NULL;
+      int xexittr, newexittr, oldzoptind, oldlastval;
+-     char *ou;
+      void *xexitfn, *newexitfn;
+      char saveopts[OPT_SIZE];
+      int obreaks = breaks;
+-     FuncWrap wrap, nwrap;
+  
+      HEAPALLOC {
+  	pushheap();
+--- 2657,2665 ----
+***************
+*** 2706,2740 ****
+  		argzero = ztrdup(argzero);
+  	    }
+  	}
+! 	for (wrap = wrappers; wrap; wrap = wrap->next) {
+! 	    if (wrap->before)
+! 		wrap->before(wrap, name);
+! 	    if (wrap->after) {
+! 		wrap->module->flags |= MOD_WRAPPER;
+! 		wrap->count++;
+! 	    }
+! 	}
+! 	startparamscope();
+! 	ou = underscore;
+! 	underscore = ztrdup(underscore);
+! 	execlist(dupstruct(list), 1, 0);
+! 	zsfree(underscore);
+! 	underscore = ou;
+! 	endparamscope();
+! 	for (wrap = wrappers; wrap; wrap = nwrap) {
+! 	    nwrap = wrap->next;
+! 	    if (wrap->after) {
+! 		wrap->after(wrap, name, lastval);
+! 		wrap->count--;
+! 		if (!wrap->count) {
+! 		    wrap->module->flags &= ~MOD_WRAPPER;
+! 		    if (wrap->module->flags & MOD_UNLOAD) {
+! 			wrap->module->flags &= ~MOD_UNLOAD;
+! 			unload_module(wrap->module, NULL);
+! 		    }
+! 		}
+! 	    }
+! 	}
+  	if (retflag) {
+  	    retflag = 0;
+  	    breaks = obreaks;
+--- 2704,2710 ----
+  		argzero = ztrdup(argzero);
+  	    }
+  	}
+! 	runshfunc(list, wrappers, name);
+  	if (retflag) {
+  	    retflag = 0;
+  	    breaks = obreaks;
+***************
+*** 2787,2792 ****
+--- 2757,2798 ----
+  	    lastval = oldlastval;
+  	popheap();
+      } LASTALLOC;
++ }
++ 
++ /* This finally executes a shell function and any function wrappers     *
++  * defined by modules. This works by calling the wrapper function which *
++  * in turn has to call back this function with the arguments it gets.   */
++ 
++ /**/
++ void
++ runshfunc(List list, FuncWrap wrap, char *name)
++ {
++     int cont;
++     char *ou;
++ 
++     while (wrap) {
++ 	wrap->module->flags |= MOD_WRAPPER;
++ 	wrap->count++;
++ 	cont = wrap->handler(list, wrap->next, name);
++ 	wrap->count--;
++ 	if (!wrap->count) {
++ 	    wrap->module->flags &= ~MOD_WRAPPER;
++ 	    if (wrap->module->flags & MOD_UNLOAD) {
++ 		wrap->module->flags &= ~MOD_UNLOAD;
++ 		unload_module(wrap->module, NULL);
++ 	    }
++ 	}
++ 	if (!cont)
++ 	    return;
++ 	wrap = wrap->next;
++     }
++     startparamscope();
++     ou = underscore;
++     underscore = ztrdup(underscore);
++     execlist(dupstruct(list), 1, 0);
++     zsfree(underscore);
++     underscore = ou;
++     endparamscope();
+  }
+  
+  /* Search fpath for an undefined function.  Finds the file, and returns the *
+*** os/module.c	Mon Dec 14 10:53:29 1998
+--- Src/module.c	Mon Dec 14 10:26:21 1998
+***************
+*** 328,337 ****
+  int
+  addwrapper(Module m, FuncWrap w)
+  {
+      if (w->flags & WRAPF_ADDED)
+  	return 1;
+!     w->next = wrappers;
+!     wrappers = w;
+      w->flags |= WRAPF_ADDED;
+      w->module = m;
+      w->count = 0;
+--- 328,343 ----
+  int
+  addwrapper(Module m, FuncWrap w)
+  {
++     FuncWrap p, q;
++ 
+      if (w->flags & WRAPF_ADDED)
+  	return 1;
+!     for (p = wrappers, q = NULL; p; q = p, p = p->next);
+!     if (q)
+! 	q->next = w;
+!     else
+! 	wrappers = w;
+!     w->next = NULL;
+      w->flags |= WRAPF_ADDED;
+      w->module = m;
+      w->count = 0;
+*** os/Modules/example.c	Wed Dec  9 15:45:33 1998
+--- Src/Modules/example.c	Mon Dec 14 10:45:05 1998
+***************
+*** 79,112 ****
+      return !strcmp("example", dyncat(s1, s2));
+  }
+  
+- struct ogd {
+-     struct ogd *next;
+-     int val;
+- };
+- 
+- static struct ogd *ogds;
+- 
+  /**/
+! static void
+! wrap_before(FuncWrap w, char *name)
+  {
+!     if (!strncmp(name, "example", 7)) {
+! 	struct ogd *n = (struct ogd *) halloc(sizeof(*n));
+  
+- 	n->next = ogds;
+- 	ogds = n;
+- 	n->val = opts[GLOBDOTS];
+  	opts[GLOBDOTS] = 1;
+!     }
+! }
+  
+! /**/
+! static void
+! wrap_after(FuncWrap w, char *name, int ret)
+! {
+!     if (!strncmp(name, "example", 7)) {
+! 	opts[GLOBDOTS] = ogds->val;
+! 	ogds = ogds->next;
+      }
+  }
+  
+--- 79,98 ----
+      return !strcmp("example", dyncat(s1, s2));
+  }
+  
+  /**/
+! static int
+! ex_wrapper(List list, FuncWrap w, char *name)
+  {
+!     if (strncmp(name, "example", 7))
+! 	return 1;
+!     else {
+! 	int ogd = opts[GLOBDOTS];
+  
+  	opts[GLOBDOTS] = 1;
+! 	runshfunc(list, w, name);
+! 	opts[GLOBDOTS] = ogd;
+  
+! 	return 0;
+      }
+  }
+  
+***************
+*** 124,140 ****
+  };
+  
+  static struct funcwrap wrapper[] = {
+!     WRAPDEF(wrap_before, wrap_after),
+  };
+  
+  /**/
+  int
+  boot_example(Module m)
+  {
+-     ogds = NULL;
+      return !(addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab)) |
+  	     addconddefs(m->nam, cotab, sizeof(cotab)/sizeof(*cotab)) |
+! 	     !addwrapper(wrapper));
+  }
+  
+  #ifdef MODULE
+--- 110,125 ----
+  };
+  
+  static struct funcwrap wrapper[] = {
+!     WRAPDEF(ex_wrapper),
+  };
+  
+  /**/
+  int
+  boot_example(Module m)
+  {
+      return !(addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab)) |
+  	     addconddefs(m->nam, cotab, sizeof(cotab)/sizeof(*cotab)) |
+! 	     !addwrapper(m, wrapper));
+  }
+  
+  #ifdef MODULE
+***************
+*** 145,151 ****
+  {
+      deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
+      deleteconddefs(m->nam, cotab, sizeof(cotab)/sizeof(*cotab));
+!     deletewrapper(wrapper);
+      return 0;
+  }
+  #endif
+--- 130,136 ----
+  {
+      deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
+      deleteconddefs(m->nam, cotab, sizeof(cotab)/sizeof(*cotab));
+!     deletewrapper(m, wrapper);
+      return 0;
+  }
+  #endif
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

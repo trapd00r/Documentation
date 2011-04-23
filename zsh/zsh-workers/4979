@@ -1,0 +1,511 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Date: Mon, 25 Jan 1999 12:06:56 +0100 (MET)
+Message-Id: <199901251106.MAA12163@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: suggestion for new glob modifiers
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 4979
+
+
+This implements something I missed a long time...
+
+1) A new glob modifier that allows to make the resulting list sorted
+   not only by name. The syntax is `Oc' where `c' is a character
+   saying how the list should be sorted:
+
+   `n'           - by name
+   `L'           - by size (length)
+   `l'           - by number of links
+   `a', `m', ac' - by access, modification, or inode change time
+
+   The modifiers `^' and `-' are respected, so `*(^OL^On)' gives you a 
+   list sorted largest file first, with files with the same size being 
+   sorted by name in ascending order.
+
+2) The second change is that you can give subscripts in modifier lists 
+   which say which matches you want to get. The subscripts are as for
+   arrays *without* the flags. If you use flags, the globbing code
+   will take the modifier list as a pattern and return something you
+   probably won't want. Maybe we should make this return an error.
+   Example: `*(^OL[1,3])' gives you the names of the three biggest
+   files.
+
+This patch should work with all versions that have associative arrays
+(due to the hunks in params.c which are needed to allow the globbing
+code to easily use getindex() with a struct value which contains no
+param-pointer).
+
+Any comments?
+
+Bye
+ Sven
+
+*** os/glob.c	Mon Jan 25 10:22:39 1999
+--- Src/glob.c	Mon Jan 25 11:52:16 1999
+***************
+*** 31,37 ****
+  #include "glob.pro"
+  
+  /* flag for CSHNULLGLOB */
+!  
+  /**/
+  int badcshglob;
+   
+--- 31,72 ----
+  #include "glob.pro"
+  
+  /* flag for CSHNULLGLOB */
+! 
+! typedef struct gmatch *Gmatch; 
+! 
+! struct gmatch {
+!     char *name;
+!     long size;
+!     long atime;
+!     long mtime;
+!     long ctime;
+!     long links;
+!     long _size;
+!     long _atime;
+!     long _mtime;
+!     long _ctime;
+!     long _links;
+! };
+! 
+! #define GS_NAME   1
+! #define GS_SIZE   2
+! #define GS_ATIME  4
+! #define GS_MTIME  8
+! #define GS_CTIME 16
+! #define GS_LINKS 32
+! 
+! #define GS_SHIFT  5
+! #define GS__SIZE  (GS_SIZE << GS_SHIFT)
+! #define GS__ATIME (GS_ATIME << GS_SHIFT)
+! #define GS__MTIME (GS_MTIME << GS_SHIFT)
+! #define GS__CTIME (GS_CTIME << GS_SHIFT)
+! #define GS__LINKS (GS_LINKS << GS_SHIFT)
+! 
+! #define GS_DESC  2048
+! 
+! #define GS_NORMAL (GS_SIZE | GS_ATIME | GS_MTIME | GS_CTIME | GS_LINKS)
+! #define GS_LINKED (GS_NORMAL << GS_SHIFT)
+! 
+  /**/
+  int badcshglob;
+   
+***************
+*** 42,49 ****
+  static char *pathbuf;		/* pathname buffer                      */
+  static int pathbufsz;		/* size of pathbuf			*/
+  static int pathbufcwd;		/* where did we chdir()'ed		*/
+! static char **matchbuf;		/* array of matches                     */
+! static char **matchptr;		/* &matchbuf[matchct]                   */
+  static char *colonmod;		/* colon modifiers in qualifier list    */
+  
+  typedef struct stat *Statptr;	 /* This makes the Ultrix compiler happy.  Go figure. */
+--- 77,84 ----
+  static char *pathbuf;		/* pathname buffer                      */
+  static int pathbufsz;		/* size of pathbuf			*/
+  static int pathbufcwd;		/* where did we chdir()'ed		*/
+! static Gmatch matchbuf;		/* array of matches                     */
+! static Gmatch matchptr;		/* &matchbuf[matchct]                   */
+  static char *colonmod;		/* colon modifiers in qualifier list    */
+  
+  typedef struct stat *Statptr;	 /* This makes the Ultrix compiler happy.  Go figure. */
+***************
+*** 81,86 ****
+--- 116,122 ----
+  static int qualct, qualorct;
+  static int range, amc, units;
+  static int gf_nullglob, gf_markdirs, gf_noglobdots, gf_listtypes, gf_follow;
++ static int gf_sorts, gf_nsorts, gf_sortlist[11];
+  
+  /* Prefix, suffix for doing zle trickery */
+  
+***************
+*** 213,218 ****
+--- 249,255 ----
+  
+  	if (!statted && statfullpath(s, &buf, 1))
+  	    return;
++ 	statted = 1;
+  	qo = quals;
+  	for (qn = qo; qn && qn->func;) {
+  	    range = qn->range;
+***************
+*** 237,255 ****
+  	    }
+  	    qn = qn->next;
+  	}
+!     } else if (!checked && statfullpath(s, NULL, 1))
+! 	return;
+! 
+      news = dyncat(pathbuf, news);
+      if (colonmod) {
+  	/* Handle the remainder of the qualifer:  e.g. (:r:s/foo/bar/). */
+  	s = colonmod;
+  	modify(&news, &s);
+      }
+!     *matchptr++ = news;
+      if (++matchct == matchsz) {
+! 	matchbuf = (char **)realloc((char *)matchbuf,
+! 				    sizeof(char **) * (matchsz *= 2));
+  
+  	matchptr = matchbuf + matchct;
+      }
+--- 274,317 ----
+  	    }
+  	    qn = qn->next;
+  	}
+!     } else if (!checked) {
+! 	if (statfullpath(s, NULL, 1))
+! 	    return;
+! 	statted = 1;
+!     }
+      news = dyncat(pathbuf, news);
+      if (colonmod) {
+  	/* Handle the remainder of the qualifer:  e.g. (:r:s/foo/bar/). */
+  	s = colonmod;
+  	modify(&news, &s);
+      }
+!     if (!statted && (gf_sorts & GS_NORMAL)) {
+! 	statfullpath(s, &buf, 1);
+! 	statted = 1;
+!     }
+!     if (statted != 2 && (gf_sorts & GS_LINKED)) {
+! 	if (statted) {
+! 	    if (!S_ISLNK(buf.st_mode) || statfullpath(s, &buf2, 0))
+! 		memcpy(&buf2, &buf, sizeof(buf));
+! 	} else if (statfullpath(s, &buf2, 0))
+! 	    statfullpath(s, &buf2, 1);
+!     }
+!     matchptr->name = news;
+!     matchptr->size = buf.st_size;
+!     matchptr->atime = buf.st_atime;
+!     matchptr->mtime = buf.st_mtime;
+!     matchptr->ctime = buf.st_ctime;
+!     matchptr->links = buf.st_nlink;
+!     matchptr->_size = buf2.st_size;
+!     matchptr->_atime = buf2.st_atime;
+!     matchptr->_mtime = buf2.st_mtime;
+!     matchptr->_ctime = buf2.st_ctime;
+!     matchptr->_links = buf2.st_nlink;
+!     matchptr++;
+! 
+      if (++matchct == matchsz) {
+! 	matchbuf = (Gmatch )realloc((char *)matchbuf,
+! 				    sizeof(struct gmatch) * (matchsz *= 2));
+  
+  	matchptr = matchbuf + matchct;
+      }
+***************
+*** 961,966 ****
+--- 1023,1076 ----
+      return v;
+  }
+  
++ static int
++ gmatchcmp(Gmatch a, Gmatch b)
++ {
++     int i, *s;
++     long r;
++ 
++     for (i = gf_nsorts, s = gf_sortlist; i; i--, s++) {
++ 	switch (*s & ~GS_DESC) {
++ 	case GS_NAME:
++ 	    r = notstrcmp(&a->name, &b->name);
++ 	    break;
++ 	case GS_SIZE:
++ 	    r = b->size - a->size;
++ 	    break;
++ 	case GS_ATIME:
++ 	    r = b->atime - a->atime;
++ 	    break;
++ 	case GS_MTIME:
++ 	    r = b->mtime - a->mtime;
++ 	    break;
++ 	case GS_CTIME:
++ 	    r = b->ctime - a->ctime;
++ 	    break;
++ 	case GS_LINKS:
++ 	    r = b->links - a->links;
++ 	    break;
++ 	case GS__SIZE:
++ 	    r = b->_size - a->_size;
++ 	    break;
++ 	case GS__ATIME:
++ 	    r = b->_atime - a->_atime;
++ 	    break;
++ 	case GS__MTIME:
++ 	    r = b->_mtime - a->_mtime;
++ 	    break;
++ 	case GS__CTIME:
++ 	    r = b->_ctime - a->_ctime;
++ 	    break;
++ 	case GS__LINKS:
++ 	    r = b->_links - a->_links;
++ 	    break;
++ 	}
++ 	if (r)
++ 	    return (int) ((*s & GS_DESC) ? -r : r);
++     }
++     return 0;
++ }
++ 
+  /* Main entry point to the globbing code for filename globbing. *
+   * np points to a node in the list list which will be expanded  *
+   * into a series of nodes.                                      */
+***************
+*** 976,982 ****
+      Complist q;				/* pattern after parsing         */
+      char *ostr = (char *)getdata(np);	/* the pattern before the parser */
+  					/* chops it up                   */
+! 
+      MUSTUSEHEAP("glob");
+      if (unset(GLOBOPT) || !haswilds(ostr)) {
+  	untokenize(ostr);
+--- 1086,1093 ----
+      Complist q;				/* pattern after parsing         */
+      char *ostr = (char *)getdata(np);	/* the pattern before the parser */
+  					/* chops it up                   */
+!     int first = 0, last = -1;		/* index of first/last match to  */
+! 				        /* return */
+      MUSTUSEHEAP("glob");
+      if (unset(GLOBOPT) || !haswilds(ostr)) {
+  	untokenize(ostr);
+***************
+*** 994,999 ****
+--- 1105,1111 ----
+      gf_markdirs = isset(MARKDIRS);
+      gf_listtypes = gf_follow = 0;
+      gf_noglobdots = unset(GLOBDOTS);
++     gf_sorts = gf_nsorts = 0;
+  
+      /* Check for qualifiers */
+      if (isset(BAREGLOBQUAL) && str[sl - 1] == Outpar) {
+***************
+*** 1315,1320 ****
+--- 1427,1477 ----
+  			data = qgetnum(&s);
+  			break;
+  
++ 		    case 'O':
++ 			{
++ 			    int t;
++ 
++ 			    switch (*s) {
++ 			    case 'n': t = GS_NAME; break;
++ 			    case 'L': t = GS_SIZE; break;
++ 			    case 'l': t = GS_LINKS; break;
++ 			    case 'a': t = GS_ATIME; break;
++ 			    case 'm': t = GS_MTIME; break;
++ 			    case 'c': t = GS_CTIME; break;
++ 			    default:
++ 				zerr("unknown sort specifier", NULL, 0);
++ 				return;
++ 			    }
++ 			    if ((sense & 2) && t != GS_NAME)
++ 				t <<= GS_SHIFT;
++ 			    if (gf_sorts & t) {
++ 				zerr("doubled sort specifier", NULL, 0);
++ 				return;
++ 			    }
++ 			    gf_sorts |= t;
++ 			    gf_sortlist[gf_nsorts++] = t |
++ 				((sense & 1) ? GS_DESC : 0);
++ 			    s++;
++ 			    break;
++ 			}
++ 		    case '[':
++ 		    case Inbrack:
++ 			{
++ 			    char *os = --s;
++ 			    struct value v;
++ 
++ 			    v.isarr = SCANPM_WANTVALS;
++ 			    v.pm = NULL;
++ 			    v.b = -1;
++ 			    v.inv = 0;
++ 			    if (getindex(&s, &v) || s == os) {
++ 				zerr("invalid subscript", NULL, 0);
++ 				return;
++ 			    }
++ 			    first = v.a;
++ 			    last = v.b;
++ 			    break;
++ 			}
+  		    default:
+  			zerr("unknown file attribute", NULL, 0);
+  			return;
+***************
+*** 1353,1362 ****
+  	zerr("bad pattern: %s", ostr, 0);
+  	return;
+      }
+! 
+      /* Initialise receptacle for matched files, *
+       * expanded by insert() where necessary.    */
+!     matchptr = matchbuf = (char **)zalloc((matchsz = 16) * sizeof(char *));
+      matchct = 0;
+  
+      /* The actual processing takes place here: matches go into  *
+--- 1510,1523 ----
+  	zerr("bad pattern: %s", ostr, 0);
+  	return;
+      }
+!     if (!gf_nsorts) {
+! 	gf_sortlist[0] = gf_sorts = GS_NAME;
+! 	gf_nsorts = 1;
+!     }
+      /* Initialise receptacle for matched files, *
+       * expanded by insert() where necessary.    */
+!     matchptr = matchbuf = (Gmatch)zalloc((matchsz = 16) *
+! 					 sizeof(struct gmatch));
+      matchct = 0;
+  
+      /* The actual processing takes place here: matches go into  *
+***************
+*** 1375,1392 ****
+  	    return;
+  	} else {
+  	    /* treat as an ordinary string */
+! 	    untokenize(*matchptr++ = dupstring(ostr));
+  	    matchct = 1;
+  	}
+      }
+      /* Sort arguments in to lexical (and possibly numeric) order. *
+       * This is reversed to facilitate insertion into the list.    */
+!     qsort((void *) & matchbuf[0], matchct, sizeof(char *),
+! 	       (int (*) _((const void *, const void *)))notstrcmp);
+  
+!     matchptr = matchbuf;
+!     while (matchct--)		/* insert matches in the arg list */
+! 	insertlinknode(list, node, *matchptr++);
+      free(matchbuf);
+  }
+  
+--- 1536,1567 ----
+  	    return;
+  	} else {
+  	    /* treat as an ordinary string */
+! 	    untokenize(matchptr->name = dupstring(ostr));
+! 	    matchptr++;
+  	    matchct = 1;
+  	}
+      }
+      /* Sort arguments in to lexical (and possibly numeric) order. *
+       * This is reversed to facilitate insertion into the list.    */
+!     qsort((void *) & matchbuf[0], matchct, sizeof(struct gmatch),
+! 	       (int (*) _((const void *, const void *)))gmatchcmp);
+  
+!     if (first < 0)
+! 	first += matchct;
+!     if (last < 0)
+! 	last += matchct;
+!     if (first < 0)
+! 	first = 0;
+!     if (last >= matchct)
+! 	last = matchct - 1;
+!     if (first <= last) {
+! 	matchptr = matchbuf + matchct - 1 - last;
+! 	last -= first;
+! 	while (last-- >= 0) {		/* insert matches in the arg list */
+! 	    insertlinknode(list, node, matchptr->name);
+! 	    matchptr++;
+! 	}
+!     }
+      free(matchbuf);
+  }
+  
+*** os/params.c	Mon Jan 25 10:22:41 1999
+--- Src/params.c	Mon Jan 25 11:52:16 1999
+***************
+*** 679,685 ****
+      Comp c;
+  
+      /* first parse any subscription flags */
+!     if (*s == '(' || *s == Inpar) {
+  	int escapes = 0;
+  	int waste;
+  	for (s++; *s != ')' && *s != Outpar && s != *str; s++) {
+--- 679,685 ----
+      Comp c;
+  
+      /* first parse any subscription flags */
+!     if (v->pm && *s == '(' || *s == Inpar) {
+  	int escapes = 0;
+  	int waste;
+  	for (s++; *s != ')' && *s != Outpar && s != *str; s++) {
+***************
+*** 765,771 ****
+  	} else if (rev) {
+  	    v->isarr |= SCANPM_WANTVALS;
+  	}
+! 	if (!down && PM_TYPE(v->pm->flags) == PM_HASHED)
+  	    v->isarr &= ~SCANPM_MATCHMANY;
+  	*inv = ind;
+      }
+--- 765,771 ----
+  	} else if (rev) {
+  	    v->isarr |= SCANPM_WANTVALS;
+  	}
+! 	if (!down && v->pm && PM_TYPE(v->pm->flags) == PM_HASHED)
+  	    v->isarr &= ~SCANPM_MATCHMANY;
+  	*inv = ind;
+      }
+***************
+*** 785,791 ****
+      singsub(&s);
+  
+      if (!rev) {
+! 	if (PM_TYPE(v->pm->flags) == PM_HASHED) {
+  	    HashTable ht = v->pm->gets.hfn(v->pm);
+  	    if (!ht) {
+  		ht = newparamtable(17, v->pm->nam);
+--- 785,791 ----
+      singsub(&s);
+  
+      if (!rev) {
+! 	if (v->pm && PM_TYPE(v->pm->flags) == PM_HASHED) {
+  	    HashTable ht = v->pm->gets.hfn(v->pm);
+  	    if (!ht) {
+  		ht = newparamtable(17, v->pm->nam);
+*** od/Zsh/expn.yo	Mon Jan 25 10:22:13 1999
+--- Doc/Zsh/expn.yo	Mon Jan 25 11:52:17 1999
+***************
+*** 1122,1127 ****
+--- 1122,1146 ----
+  sets the tt(GLOB_DOTS) option for the current pattern
+  pindex(GLOB_DOTS, setting in pattern)
+  )
++ item(tt(O)var(c))(
++ specifies how the names of the files should be sorted. If var(c) is
++ tt(n) they are sorted by name (the default), if var(c) is tt(L) they
++ are sorted depending on the size (length) of the files, tt(l) makes
++ them be sorted by the number of links, and tt(a), tt(m), and tt(c)
++ make them be sorted by the time of the last access, modification, and
++ inode change respectively. Note that the modifiers tt(^) and tt(-) are 
++ used, so `tt(*(^-OL))' gives a list of all files sorted by file size in 
++ descending order working not on symbolic links but on the files they
++ point to.
++ )
++ item(tt([)var(beg)[tt(,)var(end)]tt(]))(
++ specifies which of the matched filenames should be included in the
++ returned list. The syntax is the same as for array
++ subscripts. var(beg) and the optional var(end) may be mathematical
++ expressions. As in parameter subscripting they may be negative to make 
++ them count from the last match backward. E.g.: `tt(*(^-OL[1,3]))'
++ gives a list of the names of three biggest files.
++ )
+  enditem()
+  
+  More than one of these lists can be combined, separated by commas. The
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

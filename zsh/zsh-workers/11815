@@ -1,0 +1,270 @@
+From zsh-workers-return-11815-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jun 08 08:37:44 2000
+Return-Path: <zsh-workers-return-11815-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12012 invoked from network); 8 Jun 2000 08:37:43 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 Jun 2000 08:37:43 -0000
+Received: (qmail 12403 invoked by alias); 8 Jun 2000 08:37:32 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11815
+Received: (qmail 12393 invoked from network); 8 Jun 2000 08:37:31 -0000
+Date: Thu, 8 Jun 2000 10:37:25 +0200 (MET DST)
+Message-Id: <200006080837.KAA18263@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Wed, 7 Jun 2000 15:28:08 +0000
+Subject: PATCH: Re: expansion
+
+
+Bart Schaefer wrote:
+
+> On Jun 7,  8:46am, Sven Wischnowsky wrote:
+>
+> ...
+> 
+> } But then I would insist, that we change add-space to:
+> } 
+> }   - true: always add a space (after all, one might want to use it to
+> }            generate names of non-existing files)
+> }   - false: never add a space
+> }   - exisiting: add a space only if the word is the name of an
+> }            exisiting file
+> } 
+> } Ok?
+> 
+> Whether that is "ok" depends more on what the behavior is when it is not
+> set at all than on what the possible settings are.
+
+The patch below makes the default `file' (I used that instead of the
+longish `existing'). But that's easy to change.
+
+
+> } Maybe we should add to this: add a space if the thing comes from a
+> } parameter expansion even if it isn't the name of an existing file.
+> 
+> How about a simplified rule of "add a space whenever completion would."
+> 
+> Of course that's probably a much more complicated *implementation* ...
+
+I'm not sure what you mean. Completion (which, in my book, is
+something completely different than expansion, but...) *always* adds a 
+space, unless it's a directory and it completed filenames or there is
+some other kind of suffix, most of which are only useful with
+completion, I think.
+
+Anyway, the patch also allows `add-space' to contain `subst', combined 
+with either `true' or `file' to say that it shouldn't add the space if 
+some kind of substitution was involved.
+
+
+Peter Stephenson wrote:
+
+> How about something like this?  The style keep-tilde defaults to on and
+> makes _expand restore the ~/ or ~foo/ part of an expression after globbing.
+> It doesn't need to default to on.  It could probably usefully take a third
+> value indicating you would like the ~ expanded if there were no other
+> changes --- that might be a good default.
+
+Wonderful, I wrote something similar yesterday evening -- and called
+it `keep-prefix'. I've now also added that third value you suggest
+(I've called it `change') and made it the default. Again, that's easy
+to change.
+
+> I won't commit this because I'm sure someone will have suggestions for
+> expansions, deletions, changes, or complete rewrites.  For example, you
+> could restore initial parameter expressions such as ${HOME}/ in a similar
+> way if the glob succeeded (or subst-globs-only is true).  But we could do
+> with something or other along these lines.
+
+It's called `keep-prefix' because it tries to do that. But the pattern 
+matching is *very* simple currently, so that it will not catch all
+complicated parameter expansions. That could be improved.
+
+> It's a different question, but maybe we could set nonomatch for the
+> duration of the function to handle failed matches more gracefully.  Or
+> maybe people who don't set nonomatch (i.e. do set no nonomatch) like it the
+> way it is.
+
+Oops. Yes, good idea. Maybe we should also take the code we use
+elsewhere when expanding ~unknown/foo to complain about an unknown
+user/dir.
+
+
+I'll commit this patch, in the hope that it will be easier to get the
+behaviour that finally makes most people happy with it.
+
+Bye
+ Sven
+
+Index: Completion/Core/_expand
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Core/_expand,v
+retrieving revision 1.14
+diff -u -r1.14 _expand
+--- Completion/Core/_expand	2000/06/06 13:04:10	1.14
++++ Completion/Core/_expand	2000/06/08 08:35:44
+@@ -7,11 +7,11 @@
+ # the expansions done produce no result or do not change the original
+ # word from the line.
+ 
+-setopt localoptions nullglob
++setopt localoptions nullglob nonomatch
+ 
+ [[ _matcher_num -gt 1 ]] && return 1
+ 
+-local exp word sort expr expl subd suf=" " force opt
++local exp word sort expr expl subd suf=" " force opt asp tmp opre pre epre
+ 
+ (( $# )) &&
+     while getopts gsco opt; do
+@@ -46,8 +46,8 @@
+    { { zstyle -s ":completion:${curcontext}:" substitute expr ||
+        { [[ "$curcontext" = expand-word:* ]] && expr=1 } } &&
+          [[ "${(e):-\$[$expr]}" -eq 1 ]] }; then
+-  exp=( ${(f)"$(print -lR - ${(e)exp//\\[ 	
+-]/ })"} ) 2>/dev/null
++  exp=( "${(e)exp//\\[ 	
++]/ }" )
+ else
+   exp=( "${exp:s/\\\$/\$}" )
+ fi
+@@ -81,18 +81,42 @@
+       [[ "${(e):-\$[$expr]}" -eq 1 ]] } && 
+         [[ "$subd" = "$exp"(|\(N\)) ]] && return 1
+ 
++zstyle -s ":completion:${curcontext}:" keep-prefix tmp || tmp=changed
++if [[ "$word" = [\~\$]*/* && "$tmp" = (yes|true|on|1|changed) ]]; then
++  epre=( ${(e)~${word%%/*}} )
++  if [[ -n "$epre" && $#epre -eq 1 ]]; then
++    opre="${word%%/*}"
++    pre="$epre[1]"
++    [[ "$tmp" != changed || $#exp -gt 1 ||
++       "${opre}${exp[1]#${pre}}" != "$word" ]] && exp=( ${opre}${^exp#${pre}} )
++  fi
++  [[ $#exp -eq 1 && "$exp[1]" = "$word" ]] && return 1
++fi
++
+ # Now add as matches whatever the user requested.
+ 
+ zstyle -s ":completion:${curcontext}:" sort sort
+ 
+ [[ "$sort" = (yes|true|1|on) ]] && exp=( "${(@o)exp}" )
+ 
++if zstyle -s ":completion:${curcontext}:" add-space tmp; then
++  if [[ "$tmp" != *subst* || "$word" != *\$* || "$exp[1]" = *\$* ]]; then
++    [[ "$tmp" = *file* ]] && asp=file
++    [[ "$tmp" = *(yes|true|1|on|subst)* ]] && asp="yes$asp"
++  fi
++else
++  asp=file
++fi
++
+ # If there is only one expansion, add a suitable suffix
+ 
+ if (( $#exp == 1 )); then
+-  if [[ -d $exp && "$exp[1]" != */ ]]; then
++  if [[ -d ${exp[1]/${opre}/${pre}} && "$exp[1]" != */ ]]; then
+     suf=/
+-  elif ! zstyle -T ":completion:${curcontext}:" add-space; then
++  elif [[ "$asp" = yes* ||
++          ( "$asp" = *file && -f "${exp[1]/${opre}/${pre}}" ) ]]; then
++    suf=' '
++  else
+     suf=
+   fi
+ fi
+@@ -120,30 +144,30 @@
+     compadd "$disp[@]" "$expl[@]" -UQ -qS "$suf" - "$exp"
+   fi
+   if [[ $#exp -gt 1 ]] && _requested expansions; then
+-    local i normal dir
++    local i j normal space dir
+ 
+     if [[ "$sort" = menu ]]; then
+       _description expansions expl expansions "o:$word"
+     else
+       _description -V expansions expl expansions "o:$word"
+     fi
+-    if zstyle -T ":completion:${curcontext}:" add-space; then
+-      suf=' '
+-    else
+-      suf=
+-    fi
+     normal=()
++    space=()
+     dir=()
+ 
+     for i in "$exp[@]"; do
+-      if [[ -d "$i" && "$i" != */ ]]; then
++      j="${i/${opre}/${pre}}"
++      if [[ -d "$j" && "$i" != */ ]]; then
+         dir=( "$dir[@]" "$i" )
++      elif [[ "$asp" = yes* || ( "$asp" = *file && -f "$j" ) ]]; then
++        space=( "$space[@]" "$i" )
+       else
+ 	normal=( "$normal[@]" "$i" )
+       fi
+     done
+     (( $#dir ))    && compadd "$expl[@]" -UQ -qS/ -a dir
+-    (( $#normal )) && compadd "$expl[@]" -UQ -qS "$suf" -a normal
++    (( $#space ))  && compadd "$expl[@]" -UQ -qS " " -a space
++    (( $#normal )) && compadd "$expl[@]" -UQ -qS "" -a normal
+   fi
+ 
+   _requested original expl original && compadd "$expl[@]" -UQ - "$word"
+Index: Doc/Zsh/compsys.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compsys.yo,v
+retrieving revision 1.59
+diff -u -r1.59 compsys.yo
+--- Doc/Zsh/compsys.yo	2000/05/29 14:48:38	1.59
++++ Doc/Zsh/compsys.yo	2000/06/08 08:35:46
+@@ -784,10 +784,15 @@
+ item(tt(add-space))(
+ This style is used by the tt(_expand) completer.  If it is `true' (the
+ default), a space will be inserted after all words resulting from the 
+-expansion (except for directory names which get a slash).
++expansion (except for directory names which get a slash).  The value
++may also be the string `tt(file)' to make the completer add a space
++only to names of existing files.  Finally, the `true' values and
++`tt(file)' may be combined with `tt(subst)' to keep the completer from 
++adding a space when the resulting words were generated by expanding a
++substitution such as `tt($LPAR()...RPAR())' and `tt(${...})'.
+ 
+-It is also used by the tt(_prefix) completer to decide if a space should
+-be inserted before the suffix.
++It is also used by the tt(_prefix) completer as a simple boolean value
++to decide if a space should be inserted before the suffix.
+ )
+ kindex(ambiguous, completion style)
+ item(tt(ambiguous))(
+@@ -1282,6 +1287,22 @@
+ in the context name to one of tt(correct-)var(num) or
+ tt(approximate-)var(num), where var(num) is the number of errors that
+ were accepted.
++)
++kindex(keep-prefix, completion style)
++item(tt(keep-prefix))(
++This style is used by the tt(_expand) completer.  If it is `true', the
++completer will try to keep a prefix containing a tilde or parameter
++expansion.  I.e., the string `tt(~/f*)' would be expanded to
++`tt(~/foo)' instead of `tt(/home/user/foo)'.  If the style is set to
++`tt(changed)' (the default), the prefix will only be left unchanged if
++there were other changes between the expanded words and the original
++word from the command line.  Any other value makes the prefix be
++expanded unconditionally.
++
++Note that with one of the `true' values, the tt(_expand) completer
++returns if there is only one expansion and that is, after restoring
++the original prefix, the same as the original word.  This means that
++other completers will be called immediately after tt(_expand).
+ )
+ kindex(last-prompt, completion style)
+ item(tt(last-prompt))(
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

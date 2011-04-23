@@ -1,0 +1,535 @@
+From zsh-workers-return-22684-mason-zsh=primenet.com.au@sunsite.dk Sun Sep 10 16:49:11 2006
+Return-Path: <zsh-workers-return-22684-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2009 invoked from network); 10 Sep 2006 16:49:06 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.4 (2006-07-25) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.4
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 10 Sep 2006 16:49:06 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 48554 invoked from network); 10 Sep 2006 16:48:57 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 10 Sep 2006 16:48:57 -0000
+Received: (qmail 1218 invoked by alias); 10 Sep 2006 16:48:55 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22684
+Received: (qmail 1208 invoked from network); 10 Sep 2006 16:48:54 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 10 Sep 2006 16:48:54 -0000
+Received: (qmail 48260 invoked from network); 10 Sep 2006 16:48:54 -0000
+Received: from mtaout01-winn.ispmail.ntl.com (81.103.221.47)
+  by a.mx.sunsite.dk with SMTP; 10 Sep 2006 16:48:52 -0000
+Received: from aamtaout04-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout01-winn.ispmail.ntl.com with ESMTP
+          id <20060910164849.FJXY15018.mtaout01-winn.ispmail.ntl.com@aamtaout04-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Sun, 10 Sep 2006 17:48:49 +0100
+Received: from pwslaptop.csr.com ([81.107.41.155])
+          by aamtaout04-winn.ispmail.ntl.com with ESMTP
+          id <20060910164849.WCYN15733.aamtaout04-winn.ispmail.ntl.com@pwslaptop.csr.com>
+          for <zsh-workers@sunsite.dk>; Sun, 10 Sep 2006 17:48:49 +0100
+Received: from pwslaptop.csr.com (pwslaptop.csr.com [127.0.0.1])
+	by pwslaptop.csr.com (8.13.7/8.13.7) with ESMTP id k8AGmiu8015604
+	for <zsh-workers@sunsite.dk>; Sun, 10 Sep 2006 17:48:45 +0100
+Message-Id: <200609101648.k8AGmiu8015604@pwslaptop.csr.com>
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: Bug#386730: zsh: printf doesn't handle single-digit and two-digit octal escapes 
+In-Reply-To: Your message of "Sat, 09 Sep 2006 16:52:34 EDT."
+             <20060909205234.GA5303@scowler.net> 
+Date: Sun, 10 Sep 2006 17:48:44 +0100
+
+Clint Adams wrote:
+> > zsh's builtin printf fails to interpret two-digit octal escape, such
+> > as '\1' or '\33'.
+
+Also three-digit sequences, handled at least by bash's printf and the
+GNU utility.
+
+> Will changing getkeystring() break anything?
+
+If done simply, it would break echo, which doesn't handle '\333'
+etc. either.  This appears to be a deliberate feature.
+
+Rather than hack up getkeystring() with yet another code, I've rewritten
+it properly so the caller selects the actual features it wants (so
+printf can get raw octal handling while echo doesn't).  As always when
+trying to turn zsh's accumulated hacks into proper code, this isn't
+completely trivial, but all the tests still pass.
+
+I was going to finish doing the gardening...
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.160
+diff -u -r1.160 builtin.c
+--- Src/builtin.c	24 Jul 2006 22:00:20 -0000	1.160
++++ Src/builtin.c	10 Sep 2006 16:43:41 -0000
+@@ -3488,7 +3488,8 @@
+     else if (OPT_HASARG(ops,'f'))
+ 	fmt = OPT_ARG(ops,'f');
+     if (fmt)
+-	fmt = getkeystring(fmt, &flen, OPT_ISSET(ops,'b') ? 2 : 0, &fmttrunc);
++	fmt = getkeystring(fmt, &flen, OPT_ISSET(ops,'b') ? GETKEYS_BINDKEY :
++			   GETKEYS_PRINTF, &fmttrunc);
+ 
+     first = args;
+     
+@@ -3525,9 +3526,14 @@
+ 	     (OPT_ISSET(ops,'R') || OPT_ISSET(ops,'r') || OPT_ISSET(ops,'E'))))
+ 	    unmetafy(args[n], &len[n]);
+ 	else {
+-	    args[n] = getkeystring(args[n], &len[n], OPT_ISSET(ops,'b') ? 2 :
+-				   (func != BIN_ECHO && !OPT_ISSET(ops,'e')),
+-				   &nnl);
++	    int escape_how;
++	    if (OPT_ISSET(ops,'b'))
++		escape_how = GETKEYS_BINDKEY;
++	    else if (func != BIN_ECHO && !OPT_ISSET(ops,'e'))
++		escape_how = GETKEYS_PRINT;
++	    else
++		escape_how = GETKEYS_ECHO;
++	    args[n] = getkeystring(args[n], &len[n], escape_how, &nnl);
+ 	    if (nnl) {
+ 		/* If there was a \c escape, make this the last arg. */
+ 		argc = n + 1;
+@@ -3933,7 +3939,8 @@
+ 		    int l;
+ 		    if (*c == 'b') {
+ 			b = getkeystring(metafy(curarg, curlen, META_USEHEAP), &l,
+-					 OPT_ISSET(ops,'b') ? 2 : 0, &nnl);
++					 OPT_ISSET(ops,'b') ? GETKEYS_BINDKEY :
++					 GETKEYS_PRINTF, &nnl);
+ 		    } else {
+ 			b = curarg;
+ 			l = curlen;
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.27
+diff -u -r1.27 math.c
+--- Src/math.c	26 Jul 2006 13:19:27 -0000	1.27
++++ Src/math.c	10 Sep 2006 16:43:42 -0000
+@@ -464,7 +464,7 @@
+ 			zerr("character missing after ##");
+ 			return EOI;
+ 		    }
+-		    ptr = getkeystring(ptr, NULL, 6, &v);
++		    ptr = getkeystring(ptr, NULL, GETKEYS_MATH, &v);
+ 		    yyval.u.l = v;
+ 		    return NUM;
+ 		}
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.118
+diff -u -r1.118 params.c
+--- Src/params.c	2 Aug 2006 17:16:38 -0000	1.118
++++ Src/params.c	10 Sep 2006 16:43:43 -0000
+@@ -1038,8 +1038,8 @@
+ 		    goto flagerr;
+ 		sav = *t;
+ 		*t = '\0';
+-		sep = escapes ? getkeystring(s + 1, &waste, 3, NULL) :
+-				dupstring(s + 1);
++		sep = escapes ? getkeystring(s + 1, &waste, GETKEYS_SEP, NULL)
++		    : dupstring(s + 1);
+ 		*t = sav;
+ 		s = t;
+ 		break;
+Index: Src/subst.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/subst.c,v
+retrieving revision 1.56
+diff -u -r1.56 subst.c
+--- Src/subst.c	10 Sep 2006 15:24:27 -0000	1.56
++++ Src/subst.c	10 Sep 2006 16:43:44 -0000
+@@ -150,7 +150,7 @@
+ 		setdata(node, (void *) str3);
+ 		continue;
+ 	    } else if (c == Snull) {
+-		str = getkeystring(str, NULL, 4, NULL);
++		str = getkeystring(str, NULL, GETKEYS_DOLLARS_QUOTE, NULL);
+ 		continue;
+ 	    } else {
+ 		node = paramsubst(list, node, &str, qt, ssub);
+@@ -272,7 +272,7 @@
+ 
+     while (*s) {
+ 	if (*s == String && s[1] == Snull) {
+-	    s = getkeystring(s, NULL, 4, NULL);
++	    s = getkeystring(s, NULL, GETKEYS_DOLLARS_QUOTE, NULL);
+ 	} else {
+ 	    s++;
+ 	}
+@@ -942,7 +942,7 @@
+ 
+ 	/* inefficient: should separate out \U handling from getkeystring */
+ 	sprintf(buf, "\\U%.8x", (unsigned int)ires);
+-	return getkeystring(buf, &dummy, 2, NULL);
++	return getkeystring(buf, &dummy, GETKEYS_BINDKEY, NULL);
+     } else {
+ 	ptr = zhalloc(2);
+ 	sprintf(ptr, "%c", (int)ires);
+@@ -1232,7 +1232,7 @@
+ #define UNTOK_AND_ESCAPE(X) {\
+ 		untokenize(X = dupstring(s + 1));\
+ 		if (escapes) {\
+-		    X = getkeystring(X, &klen, 3, NULL);\
++		    X = getkeystring(X, &klen, GETKEYS_SEP, NULL);\
+ 		    X = metafy(X, klen, META_HREALLOC);\
+ 		}\
+ 	    }
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.135
+diff -u -r1.135 utils.c
+--- Src/utils.c	10 Sep 2006 15:24:27 -0000	1.135
++++ Src/utils.c	10 Sep 2006 16:43:45 -0000
+@@ -2804,7 +2804,7 @@
+     queue_signals();
+     if ((vb = getsparam("ZBEEP"))) {
+ 	int len;
+-	vb = getkeystring(vb, &len, 2, NULL);
++	vb = getkeystring(vb, &len, GETKEYS_BINDKEY, NULL);
+ 	write(SHTTY, vb, len);
+     } else if (isset(BEEP))
+ 	write(SHTTY, "\07", 1);
+@@ -4540,26 +4540,14 @@
+ /*
+  * Decode a key string, turning it into the literal characters.
+  * The length is (usually) returned in *len.
+- * fromwhere determines how the processing works:
+- *   0:  Don't handle keystring, just print-like escapes.
+- *       If a \c escape is seen, *misc is set to 1.
+- *   1:  Handle Emacs-like \C-X arguments etc., but not ^X.
+- *       If a \c escape is seen, *misc is set to 1.
+- *   2:  Handle ^X as well as emacs-like keys; don't handle \c
+- *       (the misc arg is not used).
+- *   3:  As 1, but don't handle \c (the misc arg is not used).
+- *   4:  Do $'...' quoting.  Overwrites the existing string instead of
+- *       zhalloc'ing. If \uNNNN ever generates multi-byte chars longer
+- *       than 6 bytes, will need to adjust this to re-allocate memory.
+- *   5:  As 2, but \- is special. If \- is seen, *misc is set to 1.
+- *   6:  As 2, but parses only one character: returns a pointer to the
+- *       next character and puts the parsed character into *misc (the
+- *       len arg is not used).
++ * how is a set of bits from the GETKEY_ values defined in zsh.h;
++ * not all combinations of bits are useful.  Callers will typically
++ * use one of the GETKEYS_ values which define sets of bits.
+  */
+ 
+ /**/
+ mod_export char *
+-getkeystring(char *s, int *len, int fromwhere, int *misc)
++getkeystring(char *s, int *len, int how, int *misc)
+ {
+     char *buf, tmp[1];
+     char *t, *u = NULL;
+@@ -4579,9 +4567,9 @@
+ # endif
+ #endif
+ 
+-    if (fromwhere == 6)
++    if (how & GETKEY_SINGLE_CHAR)
+ 	t = buf = tmp;
+-    else if (fromwhere != 4)
++    else if (!(how & GETKEY_DOLLAR_QUOTE))
+ 	t = buf = zhalloc(strlen(s) + 1);
+     else {
+ 	t = buf = s;
+@@ -4616,7 +4604,7 @@
+ 		*t++ = '\r';
+ 		break;
+ 	    case 'E':
+-		if (!fromwhere) {
++		if (!(how & GETKEY_EMACS)) {
+ 		    *t++ = '\\', s--;
+ 		    continue;
+ 		}
+@@ -4625,7 +4613,7 @@
+ 		*t++ = '\033';
+ 		break;
+ 	    case 'M':
+-		if (fromwhere) {
++		if (how & GETKEY_EMACS) {
+ 		    if (s[1] == '-')
+ 			s++;
+ 		    meta = 1 + control;	/* preserve the order of ^ and meta */
+@@ -4633,7 +4621,7 @@
+ 		    *t++ = '\\', s--;
+ 		continue;
+ 	    case 'C':
+-		if (fromwhere) {
++		if (how & GETKEY_EMACS) {
+ 		    if (s[1] == '-')
+ 			s++;
+ 		    control = 1;
+@@ -4644,13 +4632,13 @@
+ 		*t++ = '\\', s--;
+ 		break;
+ 	    case '-':
+-		if (fromwhere == 5) {
++		if (how & GETKEY_BACKSLASH_MINUS) {
+ 		    *misc  = 1;
+ 		    break;
+ 		}
+ 		goto def;
+ 	    case 'c':
+-		if (fromwhere < 2) {
++		if (how & GETKEY_BACKSLASH_C) {
+ 		    *misc = 1;
+ 		    *t = '\0';
+ 		    *len = t - buf;
+@@ -4671,7 +4659,7 @@
+ 		        break;
+ 		    }
+ 		}
+-    	    	if (fromwhere == 6) {
++    	    	if (how & GETKEY_SINGLE_CHAR) {
+ 		    *misc = wval;
+ 		    return s+1;
+ 		}
+@@ -4679,7 +4667,7 @@
+ 		count = wctomb(t, (wchar_t)wval);
+ 		if (count == -1) {
+ 		    zerr("character not in range");
+-		    if (fromwhere == 4) {
++		    if (how & GETKEY_DOLLAR_QUOTE) {
+ 			for (u = t; (*u++ = *++s););
+ 			return t;
+ 		    }
+@@ -4708,7 +4696,7 @@
+     	    	    cd = iconv_open(nl_langinfo(CODESET), "UCS-4BE");
+ 		    if (cd == (iconv_t)-1) {
+ 			zerr("cannot do charset conversion");
+-			if (fromwhere == 4) {
++			if (how & GETKEY_DOLLAR_QUOTE) {
+ 			    for (u = t; (*u++ = *++s););
+ 			    return t;
+ 			}
+@@ -4742,7 +4730,7 @@
+ 	    default:
+ 	    def:
+ 		if ((idigit(*s) && *s < '8') || *s == 'x') {
+-		    if (!fromwhere) {
++		    if (!(how & GETKEY_OCTAL_ESC)) {
+ 			if (*s == '0')
+ 			    s++;
+ 			else if (*s != 'x') {
+@@ -4763,21 +4751,21 @@
+ 		    }
+ 		    s--;
+ 		} else {
+-		    if (!fromwhere && *s != '\\')
++		    if (!(how & GETKEY_EMACS) && *s != '\\')
+ 			*t++ = '\\';
+ 		    *t++ = *s;
+ 		}
+ 		break;
+ 	    }
+-	} else if (fromwhere == 4 && *s == Snull) {
++	} else if ((how & GETKEY_DOLLAR_QUOTE) && *s == Snull) {
+ 	    for (u = t; (*u++ = *s++););
+ 	    return t + 1;
+-	} else if (*s == '^' && !control &&
+-		   (fromwhere == 2 || fromwhere == 5 || fromwhere == 6)) {
++	} else if (*s == '^' && !control && (how & GETKEY_CTRL)) {
+ 	    control = 1;
+ 	    continue;
+ #ifdef MULTIBYTE_SUPPORT
+-	} else if (fromwhere == 6 && isset(MULTIBYTE) && STOUC(*s) > 127) {
++	} else if ((how & GETKEY_SINGLE_CHAR) &&
++		   isset(MULTIBYTE) && STOUC(*s) > 127) {
+ 	    wint_t wc;
+ 	    int len;
+ 	    len = mb_metacharlenconv(s, &wc);
+@@ -4806,19 +4794,19 @@
+ 	    t[-1] |= 0x80;
+ 	    meta = 0;
+ 	}
+-	if (fromwhere == 4 && imeta(t[-1])) {
++	if ((how & GETKEY_DOLLAR_QUOTE) && imeta(t[-1])) {
+ 	    *t = t[-1] ^ 32;
+ 	    t[-1] = Meta;
+ 	    t++;
+ 	}
+-	if (fromwhere == 6 && t != tmp) {
++	if ((how & GETKEY_SINGLE_CHAR) && t != tmp) {
+ 	    *misc = STOUC(tmp[0]);
+ 	    return s + 1;
+ 	}
+     }
+-    DPUTS(fromwhere == 4, "BUG: unterminated $' substitution");
++    DPUTS(how & GETKEY_DOLLAR_QUOTE, "BUG: unterminated $' substitution");
+     *t = '\0';
+-    if (fromwhere == 6)
++    if (how & GETKEY_SINGLE_CHAR)
+       *misc = 0;
+     else
+       *len = t - buf;
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.96
+diff -u -r1.96 zsh.h
+--- Src/zsh.h	10 Sep 2006 15:24:27 -0000	1.96
++++ Src/zsh.h	10 Sep 2006 16:43:46 -0000
+@@ -1900,6 +1900,62 @@
+     CASMOD_CAPS
+ };
+ 
++/*******************************************/
++/* Flags to third argument of getkeystring */
++/*******************************************/
++
++/*
++ * By default handles some subset of \-escapes.  The following bits
++ * turn on extra features.
++ */
++enum {
++    /*
++     * Handle octal where the first digit is non-zero e.g. \3, \33, \333
++     * \0333 etc. is always handled.
++     */
++    GETKEY_OCTAL_ESC = (1 << 0),
++    /*
++     * Handle Emacs-like key sequences \C-x etc.
++     * Also treat \E like \e and use backslashes to escape the
++     * next character if not special, i.e. do all the things we
++     * don't do with the echo builtin.
++     */
++    GETKEY_EMACS = (1 << 1),
++    /* Handle ^X etc. */
++    GETKEY_CTRL = (1 << 2),
++    /* Handle \c (uses misc arg to getkeystring()) */
++    GETKEY_BACKSLASH_C = (1 << 3),
++    /* Do $'...' quoting (len arg to getkeystring() not used) */
++    GETKEY_DOLLAR_QUOTE = (1 << 4),
++    /* Handle \- (uses misc arg to getkeystring()) */
++    GETKEY_BACKSLASH_MINUS = (1 << 5),
++    /* Parse only one character (len arg to getkeystring() not used) */
++    GETKEY_SINGLE_CHAR = (1 << 6)
++};
++
++/*
++ * Standard combinations used within the shell.
++ * Note GETKEYS_... instead of GETKEY_...: this is important in some cases.
++ */
++/* echo builtin */
++#define GETKEYS_ECHO	(GETKEY_BACKSLASH_C)
++/* printf format string */
++#define GETKEYS_PRINTF	(GETKEY_OCTAL_ESC|GETKEY_BACKSLASH_C)
++/* Full print without -e */
++#define GETKEYS_PRINT	(GETKEY_OCTAL_ESC|GETKEY_BACKSLASH_C|GETKEY_EMACS)
++/* bindkey */
++#define GETKEYS_BINDKEY	(GETKEY_OCTAL_ESC|GETKEY_EMACS|GETKEY_CTRL)
++/* $'...' */
++#define GETKEYS_DOLLARS_QUOTE (GETKEY_OCTAL_ESC|GETKEY_EMACS|GETKEY_DOLLAR_QUOTE)
++/* Single character for math processing */
++#define GETKEYS_MATH	\
++	(GETKEY_OCTAL_ESC|GETKEY_EMACS|GETKEY_CTRL|GETKEY_SINGLE_CHAR)
++/* Used to process separators etc. with print-style escapes */
++#define GETKEYS_SEP	(GETKEY_OCTAL_ESC|GETKEY_EMACS)
++/* Used for suffix removal */
++#define GETKEYS_SUFFIX		\
++	(GETKEY_OCTAL_ESC|GETKEY_EMACS|GETKEY_CTRL|GETKEY_BACKSLASH_MINUS)
++
+ /**********************************/
+ /* Flags to third argument of zle */
+ /**********************************/
+Index: Src/Zle/zle_hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_hist.c,v
+retrieving revision 1.35
+diff -u -r1.35 zle_hist.c
+--- Src/Zle/zle_hist.c	7 Mar 2006 21:31:43 -0000	1.35
++++ Src/Zle/zle_hist.c	10 Sep 2006 16:43:47 -0000
+@@ -902,7 +902,7 @@
+ 	int len;
+ 	char *arg;
+ 	savekeys = kungetct;
+-	arg = getkeystring(*args, &len, 2, NULL);
++	arg = getkeystring(*args, &len, GETKEYS_BINDKEY, NULL);
+ 	ungetbytes(arg, len);
+     }
+ 
+Index: Src/Zle/zle_keymap.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_keymap.c,v
+retrieving revision 1.27
+diff -u -r1.27 zle_keymap.c
+--- Src/Zle/zle_keymap.c	30 May 2006 22:35:04 -0000	1.27
++++ Src/Zle/zle_keymap.c	10 Sep 2006 16:43:47 -0000
+@@ -879,7 +879,7 @@
+ 	struct remprefstate rps;
+ 	rps.km = km;
+ 	while ((useq = *argv++)) {
+-	    bseq = getkeystring(useq, &len, 2, NULL);
++	    bseq = getkeystring(useq, &len, GETKEYS_BINDKEY, NULL);
+ 	    rps.prefix = metafy(bseq, len, META_USEHEAP);
+ 	    rps.prefixlen = strlen(rps.prefix);
+ 	    scankeymap(km, 0, scanremoveprefix, &rps);
+@@ -895,14 +895,14 @@
+ 	    fn = refthingy(t_undefinedkey);
+ 	    str = NULL;
+ 	} else if(func == 's') {
+-	    str = getkeystring(*++argv, &len, 2, NULL);
++	    str = getkeystring(*++argv, &len, GETKEYS_BINDKEY, NULL);
+ 	    fn = NULL;
+ 	    str = metafy(str, len, META_HREALLOC);
+ 	} else {
+ 	    fn = rthingy(*++argv);
+ 	    str = NULL;
+ 	}
+-	bseq = getkeystring(useq, &len, 2, NULL);
++	bseq = getkeystring(useq, &len, GETKEYS_BINDKEY, NULL);
+ 	seq = metafy(bseq, len, META_USEHEAP);
+ 	if(OPT_ISSET(ops,'R')) {
+ 	    int first, last;
+@@ -960,7 +960,7 @@
+ 	int len;
+ 	char *seq;
+ 
+-	seq = getkeystring(argv[0], &len, 2, NULL);
++	seq = getkeystring(argv[0], &len, GETKEYS_BINDKEY, NULL);
+ 	seq = metafy(seq, len, META_HREALLOC);
+ 	bs.flags |= BS_ALL;
+ 	bs.firstseq = bs.lastseq = seq;
+@@ -975,7 +975,8 @@
+ 		zwarnnam(name, "option -p requires a prefix string");
+ 		return 1;
+ 	    }
+-	    bs.prefix = getkeystring(argv[0], &bs.prefixlen, 2, NULL);
++	    bs.prefix = getkeystring(argv[0], &bs.prefixlen, GETKEYS_BINDKEY,
++				     NULL);
+ 	    bs.prefix = metafy(bs.prefix, bs.prefixlen, META_HREALLOC);
+ 	    bs.prefixlen = strlen(bs.prefix);
+ 	} else {
+Index: Src/Zle/zle_misc.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_misc.c,v
+retrieving revision 1.40
+diff -u -r1.40 zle_misc.c
+--- Src/Zle/zle_misc.c	9 Feb 2006 22:14:49 -0000	1.40
++++ Src/Zle/zle_misc.c	10 Sep 2006 16:43:47 -0000
+@@ -1162,7 +1162,7 @@
+ 	    s++;
+ 	} else
+ 	    inv = 0;
+-	s = getkeystring(s, &i, 5, &z);
++	s = getkeystring(s, &i, GETKEYS_SUFFIX, &z);
+ 	s = metafy(s, i, META_USEHEAP);
+ 	ws = stringaszleline(s, 0, &i, NULL, NULL);
+ 
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

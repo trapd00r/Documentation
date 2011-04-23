@@ -1,0 +1,196 @@
+From zsh-workers-return-9945-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Mar 01 00:35:09 2000
+Return-Path: <zsh-workers-return-9945-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15802 invoked from network); 1 Mar 2000 00:35:08 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 1 Mar 2000 00:35:08 -0000
+Received: (qmail 14715 invoked by alias); 1 Mar 2000 00:34:59 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9945
+Received: (qmail 14692 invoked from network); 1 Mar 2000 00:34:57 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000301003452.ZM28876@candle.brasslantern.com>
+Date: Wed, 1 Mar 2000 00:34:52 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: %<...< and %{...%}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+Here's the fix (?) for the bug Tanaka reported.  It takes the approach of
+preserving ALL "invisble" substrings, even if that means that the visible
+stuff in between them becomes empty.  It inserts the replacement (that's
+the `...' in $<...<) as far left as is reasonable, even when truncating
+on the right.  E.g., given
+
+PS1=$'[%20>..>%/]%{\e[33m%} %%'
+
+when e.g. PWD=/usr/local/src/zsh/zsh-3.1.6 you should see
+
+[/usr/local/src/zsh..
+                     ^with a yellow cursor here.  Thus the truncation was
+first applied to the visible text and then the remaining invisible part of
+the prompt was inserted; the remaining visible part beyond the invisible
+bit was omitted.  If instead PWD=/usr/local you should see
+
+[/usr/local] %
+            ^with yellow beginning right here.
+
+The messiest bit was getting right-side-truncation working (well, left-
+side started out messier until I gave up on being clever and just shoved
+the whole string over and back, but ...).  I'm still not certain that I
+have nul-terminated everything properly, so someone should check this.
+
+Index: Src/prompt.c
+===================================================================
+@@ -684,7 +684,8 @@
+ 
+ /* Count height etc. of a prompt string returned by promptexpand(). *
+  * This depends on the current terminal width, and tabs and         *
+- * newlines require nontrivial processing.                          */
++ * newlines require nontrivial processing.                          *
++ * Passing `overf' as -1 means to ignore columns (absolute width).  */
+ 
+ /**/
+ mod_export void
+@@ -693,7 +694,7 @@
+     int w = 0, h = 1;
+     int s = 1;
+     for(; *str; str++) {
+-	if(w >= columns) {
++	if(w >= columns && overf >= 0) {
+ 	    w = 0;
+ 	    h++;
+ 	}
+@@ -715,7 +716,7 @@
+ 		w++;
+ 	}
+     }
+-    if(w >= columns) {
++    if(w >= columns && overf >= 0) {
+ 	if (!overf || w > columns) {
+ 	    w = 0;
+ 	    h++;
+@@ -734,6 +735,7 @@
+     if (arg) {
+ 	char ch = *fm, *ptr = bp, *truncstr;
+ 	int truncatleft = ch == '<';
++	int w;
+ 
+ 	/*
+ 	 * If there is already a truncation active, return so that
+@@ -768,7 +770,8 @@
+ 	fm++;
+ 	putpromptchar(doprint, endchar);
+ 	*bp = '\0';
+-	if (bp - ptr > trunclen) {
++	countprompt(ptr, &w, 0, -1);
++	if (w > trunclen) {
+ 	    /*
+ 	     * We need to truncate.  t points to the truncation string -- *
+ 	     * which is inserted literally, without nice representation.  *
+@@ -780,23 +783,82 @@
+ 	    char *t = truncstr;
+ 	    int fullen = bp - ptr;
+ 	    int tlen = ztrlen(t), maxlen;
+-	    if (tlen > fullen) {
+-		addbufspc(tlen - fullen);
+-		bp += tlen - fullen;
+-	    } else
+-		bp -= fullen - trunclen;
+ 	    maxlen = tlen < trunclen ? trunclen - tlen : 0;
+-	    if (truncatleft) {
+-		if (maxlen)
+-		    memmove(ptr + strlen(t), ptr + fullen - maxlen,
+-			    maxlen);
+-		while (*t)
+-		    *ptr++ = *t++;
++	    if (w < fullen) {
++		/* Invisible substrings, lots of shuffling. */
++		int n = strlen(t);
++		addbufspc(n);
++
++		if (truncatleft) {
++		    char *p = ptr + n, *q = p;
++
++		    n = fullen - w;
++
++		    /* Shift the whole string right, then *
++		     * selectively copy to the left.      */
++		    memmove(p, ptr, fullen);
++		    while (w > 0 || n > 0) {
++			if (*p == Inpar)
++			    do {
++				*q++ = *p;
++				--n;
++			    } while (*p++ != Outpar && *p && n);
++			else if (w) {
++			    if (--w < maxlen)
++				*q++ = *p;
++			    ++p;
++			}
++		    }
++		    bp = q;
++		} else {
++		    /* Truncate on the right, selectively */
++		    char *q = ptr + fullen;
++
++		    /* First skip over as much as will "fit". */
++		    while (w > 0 && maxlen > 0) {
++			if (*ptr == Inpar)
++			    while (*ptr++ != Outpar && *ptr) {;}
++			else
++			    ++ptr, --w, --maxlen;
++		    }
++		    if (ptr < q) {
++			/* We didn't reach the end of the string. *
++			 * In case there are more invisible bits, *
++			 * insert the truncstr and keep looking.  */
++			memmove(ptr + n, ptr, q - ptr);
++			q = ptr + n;
++			while (*t)
++			    *ptr++ = *t++;
++			while (*q) {
++			    if (*q == Inpar)
++				do {
++				    *ptr++ = *q;
++				} while (*q++ != Outpar && *q);
++			    else
++				++q;
++			}
++			bp = ptr;
++			*bp = 0;
++		    } else
++			bp = ptr + n;
++		}
+ 	    } else {
+-		ptr += maxlen;
+-		while (*t)
+-		    *ptr++ = *t++;
++		/* No invisible substrings. */
++		if (tlen > fullen) {
++		    addbufspc(tlen - fullen);
++		    bp += tlen - fullen;
++		} else
++		    bp -= fullen - trunclen;
++		if (truncatleft) {
++		    if (maxlen)
++			memmove(ptr + strlen(t), ptr + fullen - maxlen,
++				maxlen);
++		} else
++		    ptr += maxlen;
+ 	    }
++	    /* Finally, copy the truncstr into place. */
++	    while (*t)
++		*ptr++ = *t++;
+ 	}
+ 	zsfree(truncstr);
+ 	trunclen = 0;
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

@@ -1,0 +1,103 @@
+From zsh-workers-return-28172-mason-zsh=primenet.com.au@zsh.org Wed Aug 18 20:10:28 2010
+Return-Path: <zsh-workers-return-28172-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1961 invoked by alias); 18 Aug 2010 20:10:27 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28172
+Received: (qmail 24429 invoked from network); 18 Aug 2010 20:10:18 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at ntlworld.com designates 81.103.221.48 as permitted sender)
+Date: Wed, 18 Aug 2010 21:09:59 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@zsh.org
+Cc: Victor Villa <victormvm+debian@gmail.com>, 593426@bugs.debian.org
+Subject: Re: Bug#593426: zsh: Status of background jobs not updated
+Message-ID: <20100818210959.2a9d4d25@pws-pc>
+In-Reply-To: <20100818182959.GA29785@scru.org>
+References: <20100818025148.13456.14691.reportbug@salamander.skynet.lan>
+	<20100818182959.GA29785@scru.org>
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.18.9; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-Cloudmark-Analysis: v=1.1 cv=4QByPj+6Iq2k/6L54d+eVKTdgQxdscpRskJJReCfdXo= c=1 sm=0 a=Tl0LJv6T4H8A:10 a=DogomfpGjd0A:10 a=kj9zAlcOel0A:10 a=xNf9USuDAAAA:8 a=NLZqzBF-AAAA:8 a=8efxQ--D4Wex0c0nsN4A:9 a=BVL6GDOoTr-2GJy8gJAA:7 a=KyG1KEUGNcnrfEYxtS7bkcqdQoIA:4 a=CjuIK1q_8ugA:10 a=YPTUPuSgPjgA:10 a=_dQi-Dcv4p4A:10 a=HpAAvcLHHh0Zw7uRqdWCyQ==:117
+
+On Wed, 18 Aug 2010 18:29:59 +0000
+Clint Adams <schizo@debian.org> wrote:
+> On Wed, Aug 18, 2010 at 02:51:48PM +1200, Victor Villa wrote:
+> > After running a process in the background (by putting "&" at the end
+> > of the command line) the output of "jobs" correctly shows the
+> > process as "running". If I send the process a STOP signal with "kill
+> > -STOP", the process stops and "jobs" shows the process as "suspended
+> > (signal)".  The problem is that after sending a CONT signal to the
+> > process (with kill -CONT), "jobs" still shows the process as
+> > suspended, even though the process resumes (if it's a media file I
+> > can hear it playing, for example.
+
+Part of the problem is that we don't update the process status properly
+when sending a SIGCONT.  That's fairly easy to fix, and it sounds like
+it addresses the immediate issue.
+
+However, we ought to be cleverer, since we don't get a signal when a
+child gets a SIGCONT from outside the shell, which is perfectly
+possible.  To handle that we'd need to use wait3() or waitpid() with
+WNOHANG to see if the job was still stopped.  That's still fairly
+straightforward, the problem is that if the job has just exited we then
+need to update the job status as if we were in the SIGCHLD handler, and
+that needs more thought to do it properly.  Probably not *that*
+difficult.  I don't suppose anyone has an urge to learn about the signal
+code?
+
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.77
+diff -p -u -r1.77 jobs.c
+--- Src/jobs.c	31 Jul 2010 22:03:41 -0000	1.77
++++ Src/jobs.c	18 Aug 2010 19:58:50 -0000
+@@ -2217,7 +2217,7 @@ bin_kill(char *nam, char **argv, UNUSED(
+ 	    signal. */
+ 	    if (jobtab[p].stat & STAT_STOPPED) {
+ 		if (sig == SIGCONT)
+-		    jobtab[p].stat &= ~STAT_STOPPED;
++		    makerunning(jobtab + p);
+ 		if (sig != SIGKILL && sig != SIGCONT && sig != SIGTSTP
+ 		    && sig != SIGTTOU && sig != SIGTTIN && sig != SIGSTOP)
+ 		    killjb(jobtab + p, SIGCONT);
+@@ -2225,9 +2225,19 @@ bin_kill(char *nam, char **argv, UNUSED(
+ 	} else if (!isanum(*argv)) {
+ 	    zwarnnam("kill", "illegal pid: %s", *argv);
+ 	    returnval++;
+-	} else if (kill(atoi(*argv), sig) == -1) {
+-	    zwarnnam("kill", "kill %s failed: %e", *argv, errno);
+-	    returnval++;
++	} else {
++	    int pid = atoi(*argv);
++	    if (kill(pid, sig) == -1) {
++		zwarnnam("kill", "kill %s failed: %e", *argv, errno);
++		returnval++;
++	    } else if (sig == SIGCONT) {
++		Job jn;
++		Process pn;
++		if (findproc(pid, &jn, &pn, 0)) {
++		    if (WIFSTOPPED(pn->status))
++			pn->status = SP_RUNNING;
++		}
++	    }
+ 	}
+     }
+     unqueue_signals();
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

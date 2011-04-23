@@ -1,0 +1,192 @@
+From zsh-workers-return-11641-mason-zsh=primenet.com.au@sunsite.auc.dk Mon May 29 21:31:12 2000
+Return-Path: <zsh-workers-return-11641-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14300 invoked from network); 29 May 2000 21:31:11 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 29 May 2000 21:31:11 -0000
+Received: (qmail 25340 invoked by alias); 29 May 2000 21:31:03 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11641
+Received: (qmail 25331 invoked from network); 29 May 2000 21:31:02 -0000
+Date: Mon, 29 May 2000 14:30:52 -0700 (PDT)
+From: Wayne Davison <wayne@clari.net>
+To: Bart Schaefer <schaefer@candle.brasslantern.com>
+cc: zsh-workers@sunsite.auc.dk
+Subject: Re: History still coredumping after "print -s" during completion
+In-Reply-To: <1000506173443.ZM6244@candle.brasslantern.com>
+Message-ID: <Pine.GSO.4.21.0005291411310.22792-100000@house.clari.net>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+On Sat, 6 May 2000, Bart Schaefer wrote:
+> This [crash] is with Wayne's 11171.  Is this just part of "the
+> lines are not immediately available yet" or is it a different bug?
+
+It's a different bug, but the two bugs are somewhat related.
+
+Here's what's going on.  First, "print -s" is adding a line to the
+history with zle active, and when zle gets control back, it now has
+the wrong histline set.  This makes it think that the current edit
+buffer is associated with the newly-added history line, and thus
+you can ^N down past the current line (which you shouldn't be able
+to do in this scenario) and you won't see the real newly-added
+history line until the editing is complete.
+
+Combine this with a bug in the code called by Ctrl-N that was failing
+to initialize the "curline" structure in some instances, and we have
+the crash you found.
+
+The appended patch (which is based on the latest cvs source) changes
+a few things:
+
+ + It gets rid of quietgethistent() since the difference between
+   quietgethistent() and the regular gethistent() had nothing to do
+   with silence.
+
+ + It makes both gethistent() and movehistent() ensure that, if we're
+   at the "curline" entry, we have accurate values set (this used to
+   only happen when quietgethistent() was called).
+
+ + It tweaks execzlefunc() so that, when it calls a completion
+   widget, it ensures that if we were at curline, we're still at
+   curline.  This change assumes that completion never causes us to
+   change to a different history line.  If this is not true, we'll
+   need a different fix.  The easiest might be to add an external zle
+   function that allows "print -s" to tweak the value of "histline".
+
+With these changes, your example now works right:
+
+% ls <C-x?><C-n>
+
+This will now fail to move downward (since there's nowhere to go),
+and a <C-p> will show you the newly-added history line.
+
+..wayne..
+
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/hist.c
+@@ -853,6 +853,7 @@
+ 	if (!(he->flags & xflags))
+ 	    n--;
+     }
++    checkcurline(he);
+     return he;
+ }
+ 
+@@ -880,27 +881,26 @@
+ 	return NULL;
+ 
+     if (ev - hist_ring->down->histnum < hist_ring->histnum - ev) {
+-	for (he = hist_ring->down; he->histnum <= ev; he = he->down) {
+-	    if (he->histnum == ev)
+-		return he;
+-	}
+-	if (nearmatch < 0)
+-	    return up_histent(he);
+-	if (nearmatch > 0)
+-	    return he;
++	for (he = hist_ring->down; he->histnum < ev; he = he->down) ;
++	if (nearmatch == 0) {
++	    if (he->histnum != ev)
++		return NULL;
++	}
++	else if (nearmatch < 0 && (he = up_histent(he)) == NULL)
++	    return NULL;
+     }
+     else {
+-	for (he = hist_ring; he->histnum >= ev; he = he->up) {
+-	    if (he->histnum == ev)
+-		return he;
++	for (he = hist_ring; he->histnum > ev; he = he->up) ;
++	if (nearmatch == 0) {
++	    if (he->histnum != ev)
++		return NULL;
+ 	}
+-	if (nearmatch < 0)
+-	    return he;
+-	if (nearmatch > 0)
+-	    return down_histent(he);
++	else if (nearmatch > 0 && (he = down_histent(he)) == NULL)
++	    return NULL;
+     }
+ 
+-    return NULL;
++    checkcurline(he);
++    return he;
+ }
+ 
+ /**/
+@@ -1452,22 +1452,21 @@
+ }
+ 
+ /**/
+-mod_export Histent
+-quietgethistent(int ev, int nearmatch)
++mod_export void
++checkcurline(Histent he)
+ {
+-    if (ev == curhist && (histactive & HA_ACTIVE)) {
++    if (he->histnum == curhist && (histactive & HA_ACTIVE)) {
+ 	curline.text = chline;
+ 	curline.nwords = chwordpos/2;
+ 	curline.words = chwords;
+     }
+-    return gethistent(ev, nearmatch);
+ }
+ 
+ /**/
+ mod_export Histent
+ quietgethist(int ev)
+ {
+-    return quietgethistent(ev, GETHIST_EXACT);
++    return gethistent(ev, GETHIST_EXACT);
+ }
+ 
+ /**/
+Index: Src/Modules/parameter.c
+@@ -1059,7 +1059,7 @@
+ {
+     struct param pm;
+     int i = addhistnum(curhist, -1, HIST_FOREIGN);
+-    Histent he = quietgethistent(i, GETHIST_UPWARD);
++    Histent he = gethistent(i, GETHIST_UPWARD);
+     char buf[40];
+ 
+     pm.flags = PM_SCALAR | PM_READONLY;
+@@ -1096,7 +1096,7 @@
+     LinkList l = newlinklist(), ll;
+     LinkNode n;
+     int i = addhistnum(curhist, -1, HIST_FOREIGN), iw;
+-    Histent he = quietgethistent(i, GETHIST_UPWARD);
++    Histent he = gethistent(i, GETHIST_UPWARD);
+ 
+     ll = bufferwords(NULL, NULL, NULL);
+     for (n = firstnode(ll); n; incnode(n))
+Index: Src/Zle/compctl.c
+@@ -3688,7 +3688,7 @@
+ 	Patprog pprogc = NULL;
+ 	char *e, *h, hpatsav;
+ 	int i = addhistnum(curhist,-1,HIST_FOREIGN), n = cc->hnum;
+-	Histent he = quietgethistent(i, GETHIST_UPWARD);
++	Histent he = gethistent(i, GETHIST_UPWARD);
+ 
+ 	/* Parse the pattern, if it isn't the null string. */
+ 	if (*(cc->hpat)) {
+Index: Src/Zle/zle_main.c
+@@ -641,8 +641,11 @@
+ 	if(!(wflags & ZLE_LASTCOL))
+ 	    lastcol = -1;
+ 	if (wflags & WIDGET_NCOMP) {
++	  int atcurhist = histline == curhist;
+ 	    compwidget = w;
+ 	    ret = completecall(args);
++	    if (atcurhist)
++		histline = curhist;
+ 	} else
+ 	    ret = w->u.fn(args);
+ 	if (!(wflags & ZLE_NOTCOMMAND))
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

@@ -1,0 +1,361 @@
+From zsh-workers-return-25318-mason-zsh=primenet.com.au@sunsite.dk Mon Jul 21 00:17:02 2008
+Return-Path: <zsh-workers-return-25318-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18539 invoked from network); 21 Jul 2008 00:17:00 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 21 Jul 2008 00:17:00 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 37705 invoked from network); 21 Jul 2008 00:16:57 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 21 Jul 2008 00:16:57 -0000
+Received: (qmail 4040 invoked by alias); 21 Jul 2008 00:16:54 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 25318
+Received: (qmail 4031 invoked from network); 21 Jul 2008 00:16:54 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 21 Jul 2008 00:16:54 -0000
+Received: from cork.scru.org (cork.scru.org [209.20.67.2])
+	by bifrost.dotsrc.org (Postfix) with ESMTPS id EC86480561C3
+	for <zsh-workers@sunsite.dk>; Mon, 21 Jul 2008 02:16:37 +0200 (CEST)
+Received: by cork.scru.org (Postfix, from userid 1000)
+	id 8DC5410402D; Mon, 21 Jul 2008 00:16:34 +0000 (UTC)
+Date: Mon, 21 Jul 2008 00:16:34 +0000
+From: Clint Adams <clint@zsh.org>
+To: zsh-workers@sunsite.dk
+Subject: PATCH: gdbm bindings
+Message-ID: <20080721001634.GA20601@scru.org>
+Mail-Followup-To: zsh-workers@sunsite.dk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.18 (2008-05-17)
+X-Virus-Scanned: ClamAV 0.92.1/7764/Sun Jul 20 18:42:45 2008 on bifrost
+X-Virus-Status: Clean
+
+I don't know how many years I've been talking about this and not doing
+anything about it, so I am going to commit this mostly-useless patch
+and talk about it some more instead of fixing it.
+
+At present you can put the right sort of gdbm database file as
+/tmp/db_test, then load the module and run
+
+  ztie -d db/gdbm hokeypokey
+  print ${hokeypokey}
+
+and it will print the contents of the database.  That's about all it
+does.  Printing the keys, writing to the database, all that stuff is
+missing.
+
+Moving on to the stuff which is not immediately relevant to my laziness:
+
+ztie and zuntie should be moved somewhere more general, and each backend
+module should be able to register its availability dynamically.  I
+vaguely recall that there was some concern about referring to "tie" for
+this purpose since there is already a variable-tying meaning.  So,
+better ideas?
+
+Probing for gdbm_open twice seems silly.  If I don't do it the second
+time, HAVE_GDBM_OPEN isn't set.
+
+I forget what else.
+
+diff --git a/Src/Modules/db_gdbm.c b/Src/Modules/db_gdbm.c
+new file mode 100644
+index 0000000..9672123
+--- /dev/null
++++ b/Src/Modules/db_gdbm.c
+@@ -0,0 +1,236 @@
++/*
++ * db_gdbm.c - bindings for gdbm
++ *
++ * This file is part of zsh, the Z shell.
++ *
++ * Copyright (c) 2008 Clint Adams
++ * All rights reserved.
++ *
++ * Permission is hereby granted, without written agreement and without
++ * license or royalty fees, to use, copy, modify, and distribute this
++ * software and to distribute modified versions of this software for any
++ * purpose, provided that the above copyright notice and the following
++ * two paragraphs appear in all copies of this software.
++ *
++ * In no event shall Clint Adams or the Zsh Development
++ * Group be liable to any party for direct, indirect, special, incidental, or
++ * consequential damages arising out of the use of this software and its
++ * documentation, even if Peter Stephenson, Sven Wischnowsky and the Zsh
++ * Development Group have been advised of the possibility of such damage.
++ *
++ * Clint Adams and the Zsh Development Group
++ * specifically disclaim any warranties, including, but not limited to, the
++ * implied warranties of merchantability and fitness for a particular purpose.
++ * The softwareprovided hereunder is on an "as is" basis, and Peter
++ * Stephenson, Sven Wischnowsky and the Zsh Development Group have no
++ * obligation to provide maintenance, support, updates, enhancements, or
++ * modifications.
++ *
++ */
++
++#include "db_gdbm.mdh"
++#include "db_gdbm.pro"
++
++/*
++ * Make sure we have all the bits I'm using for memory mapping, otherwise
++ * I don't know what I'm doing.
++ */
++#if defined(HAVE_GDBM_H) && defined(HAVE_GDBM_OPEN)
++
++#include <gdbm.h>
++
++static const struct gsu_hash gdbm_gsu =
++{ gdbmgetfn, gdbmsetfn, gdbmunsetfn };
++
++static struct builtin bintab[] = {
++    BUILTIN("ztie", 0, bin_ztie, 1, -1, 0, "d:", NULL),
++    BUILTIN("zuntie", 0, bin_zuntie, 1, -1, 0, NULL, NULL),
++};
++
++static char resource_name[] = "/tmp/db_test";
++GDBM_FILE dbf = NULL;
++Param tied_param;
++
++/**/
++static int
++bin_ztie(char *nam, char **args, Options ops, UNUSED(int func))
++{
++    if(!OPT_ISSET(ops,'d')) {
++        zwarnnam(nam, "you must pass `-d db/gdbm' to ztie", NULL);
++	return 1;
++    }
++
++    /* Here should be a lookup of the backend type against
++     * a registry.
++     */
++
++    /* Here should be an assignment of a resource name
++     * for the backend.
++     */
++
++    if(dbf) {
++        zwarnnam(nam, "something is already ztied and this implementation is flawed", NULL);
++	return 1;
++    }
++
++    char *pmname = ztrdup(*args);
++
++    if (!(tied_param = createspecialhash(pmname, &getgdbmnode, &scangdbmkeys, PM_SPECIAL | PM_HASHED))) {
++        zwarnnam(nam, "cannot create the requested parameter name", NULL);
++	return 1;
++    }
++
++    dbf = gdbm_open(resource_name, 0, GDBM_WRCREAT | GDBM_SYNC, 0666, 0);
++    if(!dbf) {
++        zwarnnam(nam, "error opening database file", NULL);
++	return 1;
++    }
++
++    return 0;
++}
++
++/**/
++static int
++bin_zuntie(char *nam, char **args, Options ops, UNUSED(int func))
++{
++    /* should untie the argument */
++
++    paramtab->removenode(paramtab, tied_param->node.nam);
++    gdbm_close(dbf);
++
++    return 0;
++}
++
++
++/**/
++static char *
++gdbmgetfn(Param pm)
++{
++return;
++}
++
++/**/
++static void
++gdbmsetfn(Param pm, char **key)
++{
++return;
++}
++
++/**/
++static void
++gdbmunsetfn(Param pm, int um)
++{
++return;
++}
++
++/**/
++static HashNode
++getgdbmnode(UNUSED(HashTable ht), const char *name)
++{
++    int len, ret;
++    char *nameu;
++    datum content, key;
++    Param pm = NULL;
++
++    nameu = dupstring(name);
++    unmetafy(nameu, &len);
++    key.dptr = nameu;
++
++    pm = (Param) hcalloc(sizeof(struct param));
++    pm->node.nam = nameu;
++    pm->node.flags = PM_SCALAR;
++
++    ret = gdbm_exists(dbf, key);
++    if(!ret) {
++	pm->u.str = dupstring("");
++	pm->node.flags |= PM_UNSET;
++    } else {
++	content = gdbm_fetch(dbf, key);
++
++	pm->u.str = content.dptr;
++	pm->gsu.s = &nullsetscalar_gsu;
++    }
++    return &pm->node;
++}
++
++/**/
++static void
++scangdbmkeys(UNUSED(HashTable ht), ScanFunc func, int flags)
++{
++    Param pm = NULL;
++    datum key, content;
++
++    pm = (Param) hcalloc(sizeof(struct param));
++
++    pm->node.flags = PM_SCALAR;
++    pm->gsu.s = &nullsetscalar_gsu;
++
++    key = gdbm_firstkey(dbf);
++
++    while(key.dptr) {
++	content = gdbm_fetch(dbf, key);
++
++	pm->u.str = content.dptr;
++	pm->gsu.s = &nullsetscalar_gsu;
++
++	func(&pm->node, flags);
++
++        key = gdbm_nextkey(dbf, key);
++    }
++
++}
++
++#else
++# error no gdbm
++#endif /* have gdbm */
++
++static struct features module_features = {
++    bintab, sizeof(bintab)/sizeof(*bintab),
++    NULL, 0,
++    NULL, 0,
++    NULL, 0,
++    0
++};
++
++/**/
++int
++setup_(UNUSED(Module m))
++{
++    return 0;
++}
++
++/**/
++int
++features_(Module m, char ***features)
++{
++    *features = featuresarray(m, &module_features);
++    return 0;
++}
++
++/**/
++int
++enables_(Module m, int **enables)
++{
++    return handlefeatures(m, &module_features, enables);
++}
++
++/**/
++int
++boot_(UNUSED(Module m))
++{
++    return 0;
++}
++
++/**/
++int
++cleanup_(UNUSED(Module m))
++{
++    return setfeatureenables(m, &module_features, NULL);
++}
++
++/**/
++int
++finish_(UNUSED(Module m))
++{
++    return 0;
++}
+diff --git a/Src/Modules/db_gdbm.mdd b/Src/Modules/db_gdbm.mdd
+new file mode 100644
+index 0000000..ce7926b
+--- /dev/null
++++ b/Src/Modules/db_gdbm.mdd
+@@ -0,0 +1,12 @@
++name=zsh/db/gdbm
++link='if test "x$ac_cv_lib_gdbm_gdbm_open" = xyes && test "x$ac_cv_header_gdbm_h" = xyes; then
++  echo dynamic
++else
++  echo no
++fi
++'
++load=no
++
++autofeatures="b:ztie b:zuntie"
++
++objects="db_gdbm.o"
+diff --git a/configure.ac b/configure.ac
+index c4b4243..c8ccee5 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -563,7 +563,7 @@ AC_CHECK_HEADERS(sys/time.h sys/times.h sys/select.h termcap.h termio.h \
+ 		 utmp.h utmpx.h sys/types.h pwd.h grp.h poll.h sys/mman.h \
+ 		 netinet/in_systm.h pcre.h langinfo.h wchar.h stddef.h \
+ 		 sys/stropts.h iconv.h ncurses.h ncursesw/ncurses.h \
+-		 ncurses/ncurses.h)
++		 ncurses/ncurses.h gdbm.h)
+ if test x$dynamic = xyes; then
+   AC_CHECK_HEADERS(dlfcn.h)
+   AC_CHECK_HEADERS(dl.h)
+@@ -834,6 +834,8 @@ elif test x$zsh_cv_decl_ospeed_must_define = xyes; then
+   AC_DEFINE(MUST_DEFINE_OSPEED)
+ fi
+ 
++AC_CHECK_LIB(gdbm, gdbm_open)
++
+ dnl --------------
+ dnl CHECK TYPEDEFS
+ dnl --------------
+@@ -1130,7 +1132,8 @@ AC_CHECK_FUNCS(strftime strptime mktime timelocal \
+ 	       wctomb iconv \
+ 	       grantpt unlockpt ptsname \
+ 	       htons ntohs \
+-	       regcomp regexec regerror regfree)
++	       regcomp regexec regerror regfree \
++	       gdbm_open)
+ AC_FUNC_STRCOLL
+ 
+ if test x$enable_cap = xyes; then
+

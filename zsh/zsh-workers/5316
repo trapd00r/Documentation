@@ -1,0 +1,154 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Date: Mon, 8 Feb 1999 10:18:17 +0100 (MET)
+Message-Id: <199902080918.KAA26988@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: memory fix for matchers
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5316
+
+
+Since a shell function called from the completion code could change
+the matcher(s) (`-M') currently used, we should make it use a
+reference counting scheme as we did for compctl's.
+
+Bye
+ Sven
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Fri Feb  5 20:39:30 1999
++++ Src/Zle/comp.h	Sun Feb  7 12:37:58 1999
+@@ -228,6 +228,7 @@
+ };
+ 
+ struct cmatcher {
++    int refc;			/* reference counter */
+     Cmatcher next;		/* next matcher */
+     int flags;			/* see CMF_* below */
+     Cpattern line;		/* what matches on the line */
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Fri Feb  5 22:10:38 1999
++++ Src/Zle/comp1.c	Sun Feb  7 12:41:19 1999
+@@ -249,6 +249,9 @@
+ {
+     Cmatcher n;
+ 
++    if (!m || --(m->refc))
++	return;
++
+     while (m) {
+ 	n = m->next;
+ 	freecpattern(m->line);
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Fri Feb  5 22:10:38 1999
++++ Src/Zle/compctl.c	Sun Feb  7 12:42:22 1999
+@@ -82,6 +82,7 @@
+     while (m) {
+ 	*p = n = (Cmatcher) zalloc(sizeof(struct cmatcher));
+ 
++	n->refc = 1;
+ 	n->next = NULL;
+ 	n->flags = m->flags;
+ 	n->line = cpcpattern(m->line);
+@@ -1782,8 +1783,11 @@
+     if (!*argv)
+ 	return 1;
+ 
++    match = cpcmatcher(match);
+     addmatchesptr(ipre, ppre, psuf, prpre, pre, suf, group,
+ 		  rs, f, a, match, argv);
++    freecmatcher(match);
++
+     return 0;
+ }
+ 
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Fri Feb  5 22:10:38 1999
++++ Src/Zle/zle_tricky.c	Sun Feb  7 13:09:09 1999
+@@ -212,6 +212,10 @@
+ 
+ static Cmlist mstack;
+ 
++/* A list with references to all matcher we used. */
++
++static LinkList matchers;
++
+ /* A heap of free Cline structures. */
+ 
+ static Cline freecl;
+@@ -2477,6 +2481,8 @@
+ 	mst.next = mstack;
+ 	mst.matcher = match;
+ 	mstack = &mst;
++	addlinknode(matchers, match);
++	match->refc++;
+     }
+     if ((aflags & CAF_MENU) && isset(AUTOMENU))
+ 	usemenu = 1;
+@@ -3259,9 +3265,12 @@
+ docompletion(char *s, int lst, int incmd)
+ {
+     HEAPALLOC {
++	LinkNode n;
++
+ 	pushheap();
+ 
+ 	ainfo = fainfo = NULL;
++	matchers = newlinklist();
+ 
+ 	/* Make sure we have the completion list and compctl. */
+ 	if (makecomplist(s, incmd, lst)) {
+@@ -3324,6 +3333,9 @@
+ 	    }
+ 	}
+       compend:
++	for (n = firstnode(matchers); n; incnode(n))
++	    freecmatcher((Cmatcher) getdata(n));
++
+ 	ll = strlen((char *)line);
+ 	if (cs > ll)
+ 	    cs = ll;
+@@ -3460,13 +3472,26 @@
+ makecomplist(char *s, int incmd, int lst)
+ {
+     struct cmlist ms;
+-    Cmlist m = cmatcher;
++    Cmlist m;
+ 
+     /* If we already have a list from a previous execution of this *
+      * function, skip the list building code.                      */
+     if (validlist)
+ 	return !nmatches;
+ 
++    if ((m = cmatcher)) {
++	Cmlist mm, *mp = &mm;
++
++	for (; m; m = m->next) {
++	    *mp = (Cmlist) halloc(sizeof(struct cmlist));
++	    (*mp)->matcher = m->matcher;
++	    (*mp)->next = NULL;
++	    mp = &((*mp)->next);
++	    addlinknode(matchers, m->matcher);
++	    m->matcher->refc++;
++	}
++	m = mm;
++    }
+     compmatcher = 1;
+     for (;;) {
+ 	if (m) {
+@@ -4111,6 +4136,8 @@
+ 	ms.next = mstack;
+ 	ms.matcher = cc->matcher;
+ 	mstack = &ms;
++	addlinknode(matchers, cc->matcher);
++	cc->matcher->refc++;
+     }
+     /* Insert the prefix (compctl -P), if any. */
+     if (cc->prefix) {
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

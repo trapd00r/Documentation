@@ -1,0 +1,229 @@
+From zsh-workers-return-27756-mason-zsh=primenet.com.au@zsh.org Fri Feb 26 11:56:07 2010
+Return-Path: <zsh-workers-return-27756-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15550 invoked by alias); 26 Feb 2010 11:56:07 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27756
+Received: (qmail 11150 invoked from network); 26 Feb 2010 11:55:53 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-3.0 required=5.0 tests=AWL,BAYES_00,
+	RCVD_IN_DNSWL_LOW,SPF_HELO_PASS autolearn=ham version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@zsh.org (Zsh hackers list)
+Subject: PATCH: uses "zsystem flock" for calendar file locking
+X-Mailer: MH-E 8.0.3; nmh 1.3; GNU Emacs 22.1.1
+Date: Fri, 26 Feb 2010 11:19:24 +0000
+Message-ID: <14935.1267183164@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 26 Feb 2010 11:19:26.0485 (UTC) FILETIME=[8E47F450:01CAB6D5]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A-09-22-10 (www.mailcontrol.com) on 10.71.0.141
+
+This uses the new file locking for the calendar system where available.
+This is probably a useful enhancement for the one and a half of us using
+it.
+
+Note I deliberately didn't use a timeout for the new form.  Locking
+should be much more reliable and the file only locked for short periods
+of time, while experience suggests blocking for a lock is much more
+effective than waking up to poll, which has pathologies if multiple
+files are trying to grab the lock.  The only case where I can see this
+leading to long delays is with calendar_edit.
+
+I've also added a test to abandon lock attempts if an interrupt sets the
+error flag.
+
+Index: Doc/Zsh/calsys.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/calsys.yo,v
+retrieving revision 1.16
+diff -p -u -r1.16 calsys.yo
+--- Doc/Zsh/calsys.yo	2 Mar 2009 10:12:15 -0000	1.16
++++ Doc/Zsh/calsys.yo	26 Feb 2010 11:17:53 -0000
+@@ -470,7 +470,9 @@ tt(calendar -s) is called to update it.
+ 
+ This function locks out the calendar system during the edit.
+ Hence it should be used to edit the calendar file if there is any
+-possibility of a calendar event occurring meanwhile.
++possibility of a calendar event occurring meanwhile.  Note this
++can lead to another shell with calendar functions enabled hanging waiting
++for a lock, so it is necessary to quit the editor as soon as possible.
+ )
+ findex(calendar_parse)
+ item(tt(calendar_parse) var(calendar-entry))(
+Index: Functions/Calendar/calendar
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/Calendar/calendar,v
+retrieving revision 1.11
+diff -p -u -r1.11 calendar
+--- Functions/Calendar/calendar	3 Nov 2009 09:57:39 -0000	1.11
++++ Functions/Calendar/calendar	26 Feb 2010 11:17:53 -0000
+@@ -253,13 +253,21 @@ if (( verbose )); then
+   fi
+ fi
+ 
++# start of subshell for OS file locking
++(
+ # start of block for following always to clear up lockfiles.
++# Not needed but harmless if OS file locking is used.
+ {
+   if [[ -n $donefile ]]; then
+     # Attempt to lock both $donefile and $calendar.
+     # Don't lock $newfile; we've tried our best to make
+     # the name unique.
+-    calendar_lockfiles $calendar $donefile || return 1
++    if zmodload -F zsh/system b:zsystem && zsystem supports flock; then
++      zsystem flock $calendar
++      zsystem flock $donefile
++    else
++      calendar_lockfiles $calendar $donefile || exit 1
++    fi
+   fi
+ 
+   calendar_read $calendar
+@@ -414,4 +422,5 @@ Old calendar left in $calendar.old." >&2
+   (( ${#lockfiles} )) && rm -f $lockfiles
+ }
+ 
+-return $rstat
++exit $rstat
++)
+Index: Functions/Calendar/calendar_add
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/Calendar/calendar_add,v
+retrieving revision 1.10
+diff -p -u -r1.10 calendar_add
+--- Functions/Calendar/calendar_add	22 Feb 2008 02:56:14 -0000	1.10
++++ Functions/Calendar/calendar_add	26 Feb 2010 11:17:53 -0000
+@@ -68,9 +68,18 @@ if [[ $addline = ${~uidpat} ]]; then
+   my_uid=${(U)match[1]}
+ fi
+ 
++# start of subshell for OS file locking
++(
+ # start of block for following always to clear up lockfiles.
++# Not needed but harmless if OS file locking is used.
+ {
+-  (( nolock )) || calendar_lockfiles $calendar || return 1
++  if (( ! nolock )); then
++    if zmodload -F zsh/system b:zsystem && zsystem supports flock; then
++      zsystem flock $calendar
++    else
++      calendar_lockfiles $calendar || exit 1
++    fi
++  fi
+ 
+   if [[ -f $calendar ]]; then
+     calendar_read $calendar
+@@ -158,4 +167,5 @@ Old calendar left in $calendar.old." >&2
+   (( ${#lockfiles} )) && rm -f $lockfiles
+ }
+ 
+-return $rstat
++exit $rstat
++)
+Index: Functions/Calendar/calendar_edit
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/Calendar/calendar_edit,v
+retrieving revision 1.1
+diff -p -u -r1.1 calendar_edit
+--- Functions/Calendar/calendar_edit	26 Mar 2007 14:33:33 -0000	1.1
++++ Functions/Calendar/calendar_edit	26 Feb 2010 11:17:53 -0000
+@@ -10,12 +10,21 @@ done
+ 
+ zstyle -s ':datetime:calendar:' calendar-file calendar || calendar=~/calendar
+ 
++# start of subshell for OS file locking
++(
++# start of block for following always to clear up lockfiles.
++# Not needed but harmless if OS file locking is used.
+ {
+-  calendar_lockfiles $calendar || return 1
++  if zmodload -F zsh/system b:zsystem && zsystem supports flock; then
++    zsystem flock $calendar
++  else
++    calendar_lockfiles $calendar || exit 1
++  fi
+ 
+   eval $editor \$calendar
+ } always {
+   (( ${#lockfiles} )) && rm -f $lockfiles
+ }
++)
+ 
+ (( cal_running )) && calendar -s
+Index: Functions/Calendar/calendar_sort
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Functions/Calendar/calendar_sort,v
+retrieving revision 1.1
+diff -p -u -r1.1 calendar_sort
+--- Functions/Calendar/calendar_sort	1 Dec 2006 10:23:07 -0000	1.1
++++ Functions/Calendar/calendar_sort	26 Feb 2010 11:17:53 -0000
+@@ -11,9 +11,16 @@ integer i
+ # Read the calendar file from the calendar-file style
+ zstyle -s ':datetime:calendar:' calendar-file calendar || calendar=~/calendar
+ 
+-# Start block for "always" to handle lockfile
++# start of subshell for OS file locking
++(
++# start of block for following always to clear up lockfiles.
++# Not needed but harmless if OS file locking is used.
+ {
+-  calendar_lockfiles $calendar || return 1
++  if zmodload -F zsh/system b:zsystem && zsystem supports flock; then
++    zsystem flock $calendar
++  else
++    calendar_lockfiles $calendar || exit 1
++  fi
+ 
+   new=$calendar.new.$$
+   calendar_read $calendar
+@@ -65,3 +72,4 @@ Old calendar left in $calendar.old"
+ } always {
+   (( ${#lockfiles} )) && rm -rf $lockfiles
+ }
++)
+Index: Src/Modules/system.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/system.c,v
+retrieving revision 1.11
+diff -p -u -r1.11 system.c
+--- Src/Modules/system.c	25 Feb 2010 11:16:08 -0000	1.11
++++ Src/Modules/system.c	26 Feb 2010 11:17:53 -0000
+@@ -463,6 +463,8 @@ bin_zsystem_flock(char *nam, char **args
+     if (timeout > 0) {
+ 	time_t end = time(NULL) + (time_t)timeout;
+ 	while (fcntl(flock_fd, F_SETLK, &lck) < 0) {
++	    if (errflag)
++		return 1;
+ 	    if (errno != EINTR && errno != EACCES && errno != EAGAIN) {
+ 		zwarnnam(nam, "failed to lock file %s: %e", args[0], errno);
+ 		return 1;
+@@ -473,6 +475,8 @@ bin_zsystem_flock(char *nam, char **args
+ 	}
+     } else {
+ 	while (fcntl(flock_fd, F_SETLKW, &lck) < 0) {
++	    if (errflag)
++		return 1;
+ 	    if (errno == EINTR)
+ 		continue;
+ 	    zwarnnam(nam, "failed to lock file %s: %e", args[0], errno);
+
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

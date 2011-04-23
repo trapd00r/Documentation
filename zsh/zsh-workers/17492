@@ -1,0 +1,160 @@
+From zsh-workers-return-17492-mason-zsh=primenet.com.au@sunsite.dk Tue Jul 30 20:50:52 2002
+Return-Path: <zsh-workers-return-17492-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21505 invoked from network); 30 Jul 2002 20:50:51 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 30 Jul 2002 20:50:51 -0000
+Received: (qmail 24314 invoked by alias); 30 Jul 2002 20:50:37 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17492
+Received: (qmail 24301 invoked from network); 30 Jul 2002 20:50:35 -0000
+Date: Tue, 30 Jul 2002 15:50:31 -0500
+From: Dan Nelson <dnelson@allantgroup.com>
+To: Peter Stephenson <pws@csr.com>
+Cc: zsh-workers@sunsite.dk
+Subject: Re: Quoting in zsh -x output
+Message-ID: <20020730205031.GD95493@dan.emsphone.com>
+References: <sxsznw96v1o.fsf@florida.munich.redhat.com> <21447.1028048600@csr.com>
+Mime-Version: 1.0
+Content-Type: multipart/mixed; boundary="sm4nu43k4a2Rpi4c"
+Content-Disposition: inline
+In-Reply-To: <21447.1028048600@csr.com>
+X-OS: FreeBSD 5.0-CURRENT
+X-message-flag: Outlook Error
+User-Agent: Mutt/1.5.1i
+
+
+--sm4nu43k4a2Rpi4c
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+In the last episode (Jul 30), Peter Stephenson said:
+> Hrvoje Niksic wrote:
+> > I suggest modifying the zsh `-x' output to quote its arguments the
+> > way Bash does.  What do the others think?
+> 
+> This would be nice, but it's not a trivial change.  The xtrace output
+> is done at the last minute after quoting information has been
+> stripped.  This is deliberate, in order to output exactly what is
+> being evaluated after all substitutions, which is the information you
+> can't get any other way.  This is at odds with showing all the
+> quotes.  It's possible there's some compromise position which would
+> show a lot of everything --- the quotes get stripped at quite a late
+> stage.  However, there's no way of doing it perfectly without a great
+> deal of work --- consider expansions like "$@".
+
+I think all bash does is check each argument for spaces, single-quotes,
+or backslashes, and then quotes and escapes that argument.  It doesn't
+care what quoting the user had on the commandline:
+
+$ echo one\ two 'one two' "one two"
++ echo 'one two' 'one two' 'one two'
+
+I did a quick hack that replaced a bunch of fprintf/zputs with
+quotedzputs, and it seems to work fine.  It ends up quoting "one'two"
+as 'one'\''two' for some reason, single-quoting "one",
+backslash-escaping "'", and single-quoting "two".  Weird, but valid.
+This is my first zsh hack, and I'm probably doing everything wrong, but
+it shows that it's really not difficult.  Even "$@" works.
+
+-- 
+	Dan Nelson
+	dnelson@allantgroup.com
+
+--sm4nu43k4a2Rpi4c
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename=patch-dn-xtrace
+
+--- Src/builtin.c~	Tue Oct 16 04:49:17 2001
++++ Src/builtin.c	Tue Jul 30 15:01:53 2002
+@@ -356,10 +356,14 @@ execbuiltin(LinkList args, Builtin bn)
+ 	if (xtr) {
+ 	    printprompt4();
+ 	    fprintf(xtrerr, "%s", name);
+-	    if (xarg)
+-		fprintf(xtrerr, " %s", xarg);
+-	    while (*oargv)
+-		fprintf(xtrerr, " %s", *oargv++);
++	    if (xarg) {
++	        fputc(' ', xtrerr);
++	        quotedzputs(xarg, xtrerr);
++	    }
++	    while (*oargv) {
++	        fputc(' ', xtrerr);
++	        quotedzputs(*oargv++, xtrerr);
++	    }
+ 	    fputc('\n', xtrerr);
+ 	    fflush(xtrerr);
+ 	}
+--- Src/cond.c~	Wed Oct 24 11:03:02 2001
++++ Src/cond.c	Tue Jul 30 15:29:48 2002
+@@ -147,9 +147,14 @@ evalcond(Estate state)
+ 		singsub(&rt);
+ 		untokenize(rt);
+ 	    }
+-	    fprintf(xtrerr, " %s %s %s", left, condstr[ctype], rt);
+-	} else
+-	    fprintf(xtrerr, " -%c %s", ctype, left);
++	    fputc(' ',xtrerr);
++	    quotedzputs(left, xtrerr);
++	    fprintf(xtrerr, " %s ", condstr[ctype]);
++	    quotedzputs(rt, xtrerr);
++	} else {
++	    fprintf(xtrerr, " -%c ", ctype);
++	    quotedzputs(left, xtrerr);
++	}
+     }
+ 
+     if (ctype >= COND_EQ && ctype <= COND_GE) {
+--- Src/exec.c.orig	Wed Oct 24 06:16:32 2001
++++ Src/exec.c	Tue Jul 30 14:56:50 2002
+@@ -1275,7 +1275,7 @@ makecline(LinkList list)
+ 
+ 	for (node = firstnode(list); node; incnode(node)) {
+ 	    *ptr++ = (char *)getdata(node);
+-	    zputs(getdata(node), xtrerr);
++	    quotedzputs(getdata(node), xtrerr);
+ 	    if (nextnode(node))
+ 		fputc(' ', xtrerr);
+ 	}
+@@ -1544,8 +1544,10 @@ addvars(Estate state, Wordcode pc, int e
+ 		untokenize(peekfirst(vl));
+ 		val = ztrdup(ugetnode(vl));
+ 	    }
+-	    if (xtr)
+-		fprintf(xtrerr, "%s ", val);
++	    if (xtr) {
++		quotedzputs(val, xtrerr);
++		fputc(' ', xtrerr);
++	    }
+ 	    if (export && !strchr(name, '[')) {
+ 		if (export < 0 && isset(RESTRICTED) &&
+ 		    (pm = (Param) paramtab->removenode(paramtab, name)) &&
+@@ -1583,8 +1585,10 @@ addvars(Estate state, Wordcode pc, int e
+ 	*ptr = NULL;
+ 	if (xtr) {
+ 	    fprintf(xtrerr, "( ");
+-	    for (ptr = arr; *ptr; ptr++)
+-		fprintf(xtrerr, "%s ", *ptr);
++	    for (ptr = arr; *ptr; ptr++) {
++		quotedzputs(*ptr, xtrerr);
++		fputc(' ', xtrerr);
++	    }
+ 	    fprintf(xtrerr, ") ");
+ 	}
+ 	setaparam(name, arr);
+@@ -3187,7 +3191,7 @@ execshfunc(Shfunc shf, LinkList args)
+ 	    for (lptr = firstnode(args); lptr; incnode(lptr)) {
+ 		if (lptr != firstnode(args))
+ 		    fputc(' ', xtrerr);
+-		fprintf(xtrerr, "%s", (char *)getdata(lptr));
++		quotedzputs((char *)getdata(lptr), xtrerr);
+ 	    }
+ 	fputc('\n', xtrerr);
+ 	fflush(xtrerr);
+
+--sm4nu43k4a2Rpi4c--
+

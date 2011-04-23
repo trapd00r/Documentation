@@ -1,0 +1,99 @@
+From pws@hydra.ifh.de Mon Mar 25 22:20:53 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id WAA13236 for <mason@werple.mira.net.au>; Mon, 25 Mar 1996 22:20:49 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id FAA27937; Mon, 25 Mar 1996 05:56:52 -0500 (EST)
+Resent-Date: Mon, 25 Mar 1996 05:56:52 -0500 (EST)
+Message-Id: <9603251055.AA15871@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: zsh hangs on IRIX 5.2 / me to: (SunOS4.1.3 + Solaris 2.4) 
+In-Reply-To: "leibniz!stucki@leibniz.math.fu-berlin.de"'s message of "Fri, 22 Mar 1996 22:50:31 MET."
+             <m0u0Eko-00080xC@leibniz.math.fu-berlin.de> 
+Date: Mon, 25 Mar 1996 11:55:54 +0100
+From: Peter Stephenson <pws@hydra.ifh.de>
+Resent-Message-ID: <"w6h7f3.0.Oq6.pldLn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/854
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 2868
+Status: OR
+
+leibniz!stucki@leibniz.math.fu-berlin.de wrote:
+> - BUT a zsh WAITING FOR A PROCESS TO COMPLETE,
+>   RUNS FOREVER READING 'nothing' FROM STDIN
+>   IF THE SUBPROCESS VANISHES AND
+>   ZSH WAKES UP ON A 'DEAD' TTY.
+
+I've been trying to reproduce this on our IRIX systems but have so far
+failed; presumably there's another ingredient I haven't found (I can't
+believe zsh's in Dahlem can be *that* different to those in Zeuthen,
+or do we have to wait for Berlin-Brandenburg? -:)).
+
+If you enter a sleep command and type more than 20 ^D's while you're
+waiting for it to finish, the shell exits, as I would expect given the
+current code.  Something funny must be happening when the tty goes
+away which I don't understand.  The only things I can think of are (1)
+that read() is returning `real' ^D's instead of simply a 0 from read,
+which is very unlikely, or (2) that zle is not being used and the
+error is somewhere else.  Here's the relevant code from the line
+editor, in getkey(), zle_main.c, if anyone can think of anything.
+It's been like this for some time.
+
+(N.B.: the 20 maximum here is for ^D's typed while zsh wasn't looking
+at input.  The 10 maximum applies if it was; the counter for that is
+back in the main loop.)
+
+You can at least see if this is the problem by removing the
+`if (isset(IGNOREEOF)...) continue' and seeing if the problem goes
+away.  That will have the side-effect that a ^D in typeahead will
+cause the shell to exit.
+
+
+while ((r = read(SHTTY, &cc, 1)) != 1) {
+    if (r == 0) {
+	/* The test for IGNOREEOF was added to make zsh ignore ^Ds
+	   that were typed while commands are running.  Unfortuantely
+	   this caused trouble under at least one system (SunOS 4.1).
+	   Here shells that lost their xterm (e.g. if it was killed
+	   with -9) didn't fail to read from the terminal but instead
+	   happily continued to read EOFs, so that the above read
+	   returned with 0, and, with IGNOREEOF set, this caused
+	   an infinite loop.  The simple way around this was to add
+	   the counter (icnt) so that this happens 20 times and than
+	   the shell gives up (yes, this is a bit dirty...). */
+	if (isset(IGNOREEOF) && icnt++ < 20)
+	    continue;
+	stopmsg = 1;
+	zexit(1);
+    }
+    icnt = 0;
+    if (errno == EINTR) {
+	die = 0;
+	if (!errflag)
+	    continue;
+	errflag = 0;
+	errno = old_errno;
+	return EOF;
+    } else if (errno == EWOULDBLOCK) {
+	fcntl(0, F_SETFL, 0);
+    } else if (errno == EIO && !die) {
+	ret = jobbingv;
+	jobbingv = OPT_SET;
+	attachtty(mypgrp);
+	refresh();	/* kludge! */
+	jobbingv = ret;
+	die = 1;
+    } else if (errno != 0) {
+	zerr("error on TTY read: %e", NULL, errno);
+	stopmsg = 1;
+	zexit(1);
+    }
+}
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+
+

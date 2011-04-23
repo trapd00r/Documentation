@@ -1,0 +1,175 @@
+From zsh-workers-return-12295-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Jul 18 08:31:00 2000
+Return-Path: <zsh-workers-return-12295-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5560 invoked from network); 18 Jul 2000 08:30:59 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 18 Jul 2000 08:30:59 -0000
+Received: (qmail 9391 invoked by alias); 18 Jul 2000 08:30:44 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12295
+Received: (qmail 9372 invoked from network); 18 Jul 2000 08:30:43 -0000
+Date: Tue, 18 Jul 2000 01:30:15 -0700 (PDT)
+From: Wayne Davison <wayned@users.sourceforge.net>
+X-Sender: wayne@phong.blorf.net
+To: Zsh Workers <zsh-workers@sunsite.auc.dk>
+Subject: PATCH: a couple history-builtin-related fixes
+Message-ID: <Pine.LNX.4.21.0007180113260.11794-100000@phong.blorf.net>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+In my work to get rid of remhist(), I discovered that I needed to
+provide some extra information to the history (fc -l) command so that
+it could output correctly (i.e. it needs to know if the current
+command was removed from the history).  With this information, I can
+easily fix the bugs I found in remhist() and the history builtin, so
+I've done that as a separate patch.  Afterward, I'll float my
+remhist()-removing patch by the list to see how people like it before
+I commit it.
+
+This patch (which I did commit) fixes 2 problems:
+
+ + If you have HIST_IGNORE_SPACE set and you type " history", it would
+   output the wrong set of lines (it would omit the last line in the
+   history).
+
+ + In the above scenario, if HIST_NO_STORE is also set, remhist()
+   would remove the last line of the history, even though it was not
+   a history command.
+
+I also went ahead and removed the spaceflag variable.
+
+..wayne..
+
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/builtin.c
+@@ -1247,10 +1247,12 @@
+ 	return 1;
+     }
+     /* default values of first and last, and range checking */
+-    if (first == -1)
+-	first = ops['l']? addhistnum(curhist,-16,0) : addhistnum(curhist,-1,0);
++    if (first == -1) {
++	first = ops['l']? addhistnum(curline.histnum,-16,0)
++			: addhistnum(curline.histnum,-1,0);
++    }
+     if (last == -1)
+-	last = ops['l']? addhistnum(curhist,-1,0) : first;
++	last = ops['l']? addhistnum(curline.histnum,-1,0) : first;
+     if (first < firsthist())
+ 	first = firsthist();
+     if (last == -1)
+@@ -1315,8 +1317,8 @@
+      * numbers indicate reversed numbering.           */
+     if ((cmd = atoi(s))) {
+ 	if (cmd < 0)
+-	    cmd = addhistnum(curhist,cmd,HIST_FOREIGN);
+-	if (cmd >= curhist) {
++	    cmd = addhistnum(curline.histnum,cmd,HIST_FOREIGN);
++	if (cmd >= curline.histnum) {
+ 	    zwarnnam("fc", "bad history number: %d", 0, cmd);
+ 	    return -1;
+ 	}
+Index: Src/hist.c
+@@ -55,12 +55,7 @@
+  
+ /**/
+ mod_export int stophist;
+- 
+-/* this line began with a space, so junk it if HISTIGNORESPACE is on */
+- 
+-/**/
+-int spaceflag;
+- 
++
+ /* if != 0, we are expanding the current line */
+ 
+ /**/
+@@ -741,7 +736,7 @@
+ hbegin(int dohist)
+ {
+     isfirstln = isfirstch = 1;
+-    errflag = histdone = spaceflag = 0;
++    errflag = histdone = 0;
+     stophist = (!dohist || !interact || unset(SHINSTDIN)) ? 2 : 0;
+     if (stophist == 2 || (inbufflags & INP_ALIAS)) {
+ 	chline = hptr = NULL;
+@@ -976,8 +971,10 @@
+      && (hist_ignore_all_dups = isset(HISTIGNOREALLDUPS)) != 0)
+ 	histremovedups();
+     /* For history sharing, lock history file once for both read and write */
+-    if (isset(SHAREHISTORY) && lockhistfile(hf, 0))
++    if (isset(SHAREHISTORY) && lockhistfile(hf, 0)) {
+ 	readhistfile(hf, 0, HFILE_USE_OPTIONS | HFILE_FAST);
++	curline.histnum = curhist+1;
++    }
+     flag = histdone;
+     histdone = 0;
+     if (hptr < chline + 1)
+@@ -990,8 +987,7 @@
+ 	    } else
+ 		save = 0;
+ 	}
+-	if (!*chline || !strcmp(chline, "\n") ||
+-	    (isset(HISTIGNORESPACE) && spaceflag))
++	if (chwordpos <= 2 || (isset(HISTIGNORESPACE) && *chline == ' '))
+ 	    save = 0;
+     }
+     if (flag & (HISTFLAG_DONE | HISTFLAG_RECALL)) {
+@@ -1038,6 +1034,7 @@
+ 	     */
+ 	    keepflags = he->flags & HIST_OLD; /* Avoid re-saving */
+ 	    freehistdata(he, 0);
++	    curline.histnum = curhist;
+ 	} else {
+ 	    keepflags = 0;
+ 	    he = prepnexthistent();
+@@ -1073,7 +1070,7 @@
+     if (hist_ring == &curline)
+ 	return;
+     if (!(histactive & HA_ACTIVE)) {
+-	if (!(histactive & HA_JUNKED)) {
++	if (!(histactive & HA_JUNKED) && curline.histnum == curhist) {
+ 	    freehistnode((HashNode)hist_ring);
+ 	    histactive |= HA_JUNKED;
+ 	    /* curhist-- is delayed until the next hbegin() */
+Index: Src/input.c
+@@ -273,9 +273,6 @@
+ 	free(ingetcline);
+ 	return lexstop = errflag = 1;
+     }
+-    /* Look for a space, to see if this shouldn't be put into history */
+-    if (isfirstln)
+-	spaceflag = *ingetcline == ' ';
+     if (isset(VERBOSE)) {
+ 	/* Output the whole line read so far. */
+ 	zputs(ingetcline, stderr);
+Index: Src/lex.c
+@@ -177,7 +177,6 @@
+     int isfirstch;
+     int histactive;
+     int histdone;
+-    int spaceflag;
+     int stophist;
+     int hlinesz;
+     char *hline;
+@@ -233,7 +232,6 @@
+     ls->isfirstch = isfirstch;
+     ls->histactive = histactive;
+     ls->histdone = histdone;
+-    ls->spaceflag = spaceflag;
+     ls->stophist = stophist;
+     ls->hline = chline;
+     ls->hptr = hptr;
+@@ -294,7 +292,6 @@
+     isfirstch = lstack->isfirstch;
+     histactive = lstack->histactive;
+     histdone = lstack->histdone;
+-    spaceflag = lstack->spaceflag;
+     stophist = lstack->stophist;
+     chline = lstack->hline;
+     hptr = lstack->hptr;
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

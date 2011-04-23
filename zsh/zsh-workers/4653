@@ -1,0 +1,818 @@
+From zsh-workers-request@math.gatech.edu Mon Nov 16 17:41:32 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2353 invoked from network); 16 Nov 1998 17:41:26 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 16 Nov 1998 17:41:26 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id MAA20875;
+	Mon, 16 Nov 1998 12:33:11 -0500 (EST)
+Resent-Date: Mon, 16 Nov 1998 12:33:11 -0500 (EST)
+Message-Id: <9811161716.AA45746@ibmth.df.unipi.it>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: PATCH: 3.1.5: assoc array memory mucking around tedium
+Date: Mon, 16 Nov 1998 18:16:32 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+Resent-Message-ID: <"K2eVg2.0.665.M76Ks"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4653
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+The following very dull patch is my current best guess to keep memory
+management of AA's in order.  At this stage it's probably best for
+other people (= Bart, presumably) to play with it, even if there's the
+odd buglet remaining.  Needless to say, it goes on top of everything
+else.  Tomorrow I might update my patched test version for hard core
+enthusiasts.
+
+I fixed the bug Bart already spotted, where the tpm copied to wasn't
+actually used in save_params().
+
+It keeps copyparam() etc., i.e. it does a deep copy of any special
+AA's for restoration after a builtin or function.  I'm still not 100%
+convinced of the need for this at the moment, since we haven't yet
+agreed on what special AA's are going to do, but this is how to get it
+to work: I've added a useless special AA called $testhash for the sole
+purpose of making sure it does.  It will have to be deleted for
+production code, of course.  It's not a full test, since a real
+special AA will have its own get/set methods ($testhash uses the
+standard ones), and that could be where the fun starts.
+
+One potentially interesting thing I did do:  since it was necessary to
+make
+  testhash=(....) func
+work to test this (for reasons discussed in my last posting), I added
+the simplest possible form of whole hash assignment,
+  testhash=(key1 value1 ...)
+or
+  set -A testhash key1 value1 ...
+so the syntax is identical to ordinary arrays, and you need to
+predeclare with typeset -A (not for $testhash, since that's special).
+However, that's entirely symmetric with everything else about AA's at
+the moment.  I don't know what ksh93 thinks about this, I would guess
+it converts them mindlessly into ordinary arrays at that point.
+
+By the way, that means the way to copy whole AAs on the command line
+is currently
+% typesest -A hash
+% hash=(${(kv)testhash})
+which is entirely logical but maybe not completely obvious.  (It
+doesn't use copyparam(), either.)
+
+I've moved some param stuff from hashtable.c to params.c, since I
+needed to pass a flag to one of them: there was a memory leak in that
+the values of the parameters stored in the AA didn't get unset.
+
+There was a small bug in the paramvals alloc().
+
+gethparam() is now separate from getaparam(): shifting an AA now fails
+(silently, as it always did with scalars, which wouldn't be my choice
+but I haven't altered it), but zle will still check the values of AA's
+when looking through variables for completions, i.e. zle does the same
+thing as before.
+
+I changed the test whether to delete a parameter, instead of marking
+it unset, to `if (locallevel && locallevel >= pm->level)': the first
+part wasn't there before, so they never got deleted, even at top
+level.  I hope that >= is still correct, but I think so.  (This is
+independent of AA's.)
+
+Warnings about three more hanging else's went over my boredom
+threshold, so they were zapped.
+
+Further motivation is mentioned in comments.  The main point is that
+when copying an AA using copyparam(), the hash part has to be
+assignable as a fully-paid-up, freeable paramtable, so various
+additions to get it to work were necessary.  In particular, PM_SPECIAL
+flags are removed from lower level `struct param's, since after
+copying they aren't any more.  It's up to the sets.hfn() of the
+special AA how it deals with that, but it makes sense since sets.hfn()
+is in any case going to be passed a non-special hash table when it's
+assigned to directly --- which is what it's for.  So if copyparam() is
+wrong about this, so is the rest of the code.
+
+I've also discovered I don't understand UNIX memory management.
+Memory usage jumps around all over the place, even where I'm pretty
+sure there's no leak.
+
+*** Src/Zle/zle_tricky.c.bart2	Sat Nov 14 15:31:43 1998
+--- Src/Zle/zle_tricky.c	Mon Nov 16 11:57:48 1998
+***************
+*** 4415,4421 ****
+      } else {
+  	/* Otherwise it should be a parameter name. */
+  	char **arr = NULL, *val;
+! 	if (!(arr = getaparam(nam)) && (val = getsparam(nam))) {
+  	    arr = (char **)ncalloc(2*sizeof(char *));
+  	    arr[0] = val;
+  	    arr[1] = NULL;
+--- 4415,4422 ----
+      } else {
+  	/* Otherwise it should be a parameter name. */
+  	char **arr = NULL, *val;
+! 	if (!(arr = getaparam(nam)) && !(arr = gethparam(nam)) &&
+! 	    (val = getsparam(nam))) {
+  	    arr = (char **)ncalloc(2*sizeof(char *));
+  	    arr[0] = val;
+  	    arr[1] = NULL;
+*** Src/exec.c.bart2	Sat Nov 14 15:15:01 1998
+--- Src/exec.c	Mon Nov 16 17:30:07 1998
+***************
+*** 1004,1014 ****
+  untokenize(char *s)
+  {
+      for (; *s; s++)
+! 	if (itok(*s))
+  	    if (*s == Nularg)
+  		chuck(s--);
+  	    else
+  		*s = ztokens[*s - Pound];
+  }
+  
+  /* Open a file for writing redicection */
+--- 1004,1015 ----
+  untokenize(char *s)
+  {
+      for (; *s; s++)
+! 	if (itok(*s)) {
+  	    if (*s == Nularg)
+  		chuck(s--);
+  	    else
+  		*s = ztokens[*s - Pound];
++ 	}
+  }
+  
+  /* Open a file for writing redicection */
+***************
+*** 1924,1930 ****
+  		       (unset(RESTRICTED) || !(pm->flags & PM_RESTRICTED))) {
+  		Param tpm = (Param) alloc(sizeof *tpm);
+  		tpm->nam = s;
+! 		copyparam(tpm, pm);
+  	    }
+  	    addlinknode(*remove_p, s);
+  	    addlinknode(*restore_p, pm);
+--- 1925,1932 ----
+  		       (unset(RESTRICTED) || !(pm->flags & PM_RESTRICTED))) {
+  		Param tpm = (Param) alloc(sizeof *tpm);
+  		tpm->nam = s;
+! 		copyparam(tpm, pm, 1);
+! 		pm = tpm;
+  	    }
+  	    addlinknode(*remove_p, s);
+  	    addlinknode(*restore_p, pm);
+*** Src/hashtable.c.bart2	Wed Nov 11 09:38:30 1998
+--- Src/hashtable.c	Mon Nov 16 15:47:31 1998
+***************
+*** 1061,1165 ****
+      putchar('\n');
+  }
+  
+- /**********************************/
+- /* Parameter Hash Table Functions */
+- /**********************************/
+- 
+- /**/
+- void
+- freeparamnode(HashNode hn)
+- {
+-     Param pm = (Param) hn;
+-  
+-     zsfree(pm->nam);
+-     zfree(pm, sizeof(struct param));
+- }
+- 
+- /* Print a parameter */
+- 
+- /**/
+- void
+- printparamnode(HashNode hn, int printflags)
+- {
+-     Param p = (Param) hn;
+-     char *t, **u;
+- 
+-     if (p->flags & PM_UNSET)
+- 	return;
+- 
+-     /* Print the attributes of the parameter */
+-     if (printflags & PRINT_TYPE) {
+- 	if (p->flags & PM_INTEGER)
+- 	    printf("integer ");
+- 	else if (p->flags & PM_ARRAY)
+- 	    printf("array ");
+- 	else if (p->flags & PM_HASHED)
+- 	    printf("association ");
+- 	if (p->flags & PM_LEFT)
+- 	    printf("left justified %d ", p->ct);
+- 	if (p->flags & PM_RIGHT_B)
+- 	    printf("right justified %d ", p->ct);
+- 	if (p->flags & PM_RIGHT_Z)
+- 	    printf("zero filled %d ", p->ct);
+- 	if (p->flags & PM_LOWER)
+- 	    printf("lowercase ");
+- 	if (p->flags & PM_UPPER)
+- 	    printf("uppercase ");
+- 	if (p->flags & PM_READONLY)
+- 	    printf("readonly ");
+- 	if (p->flags & PM_TAGGED)
+- 	    printf("tagged ");
+- 	if (p->flags & PM_EXPORTED)
+- 	    printf("exported ");
+-     }
+- 
+-     if (printflags & PRINT_NAMEONLY) {
+- 	zputs(p->nam, stdout);
+- 	putchar('\n');
+- 	return;
+-     }
+- 
+-     /* How the value is displayed depends *
+-      * on the type of the parameter       */
+-     quotedzputs(p->nam, stdout);
+-     putchar('=');
+-     switch (PM_TYPE(p->flags)) {
+-     case PM_SCALAR:
+- 	/* string: simple output */
+- 	if (p->gets.cfn && (t = p->gets.cfn(p)))
+- 	    quotedzputs(t, stdout);
+- 	putchar('\n');
+- 	break;
+-     case PM_INTEGER:
+- 	/* integer */
+- 	printf("%ld\n", p->gets.ifn(p));
+- 	break;
+-     case PM_ARRAY:
+- 	/* array */
+- 	putchar('(');
+- 	u = p->gets.afn(p);
+- 	if(*u) {
+- 	    quotedzputs(*u++, stdout);
+- 	    while (*u) {
+- 		putchar(' ');
+- 		quotedzputs(*u++, stdout);
+- 	    }
+- 	}
+- 	printf(")\n");
+- 	break;
+-     case PM_HASHED:
+- 	/* association */
+- 	putchar('(');
+- 	{
+-             HashTable ht = p->gets.hfn(p);
+-             if (ht)
+- 		scanhashtable(ht, 0, 0, 0, ht->printnode, 0);
+- 	}
+- 	printf(")\n");
+- 	break;
+-     }
+- }
+- 
+  /****************************************/
+  /* Named Directory Hash Table Functions */
+  /****************************************/
+--- 1061,1066 ----
+*** Src/params.c.bart2	Sat Nov 14 15:15:14 1998
+--- Src/params.c	Mon Nov 16 17:34:17 1998
+***************
+*** 232,237 ****
+--- 232,242 ----
+  IPDEF9("psvar", &psvar, "PSVAR"),
+  IPDEF9("watch", &watch, "WATCH"),
+  
++ /*TEST BEGIN*/
++ #define IPDEF10(A) {NULL,A,PM_HASHED|PM_SPECIAL|PM_DONTIMPORT,BR((void *)0),SFN(hashsetfn),GFN(hashgetfn),stdunsetfn,0,NULL,NULL,NULL,0}
++ IPDEF10("testhash"),
++ /*TEST END*/
++ 
+  #ifdef DYNAMIC
+  IPDEF9F("module_path", &module_path, "MODULE_PATH", PM_RESTRICTED),
+  #endif
+***************
+*** 277,286 ****
+  static void
+  scancopyparams(HashNode hn, int flags)
+  {
+      Param pm = (Param)hn;
+!     Param tpm = (Param) alloc(sizeof *tpm);
+      tpm->nam = ztrdup(pm->nam);
+!     copyparam(tpm, pm);
+      addhashnode(outtable, tpm->nam, tpm);
+  }
+  
+--- 282,292 ----
+  static void
+  scancopyparams(HashNode hn, int flags)
+  {
++     /* Going into a real parameter, so always use permanent storage */
+      Param pm = (Param)hn;
+!     Param tpm = (Param) zcalloc(sizeof *tpm);
+      tpm->nam = ztrdup(pm->nam);
+!     copyparam(tpm, pm, 0);
+      addhashnode(outtable, tpm->nam, tpm);
+  }
+  
+***************
+*** 342,348 ****
+      numparamvals = 0;
+      if (ht)
+  	scanhashtable(ht, 0, 0, 0, scancountparams, flags);
+!     paramvals = (char **) alloc(numparamvals * sizeof(char **) + 1);
+      if (ht) {
+  	numparamvals = 0;
+  	scanhashtable(ht, 0, 0, 0, scanparamvals, flags);
+--- 348,354 ----
+      numparamvals = 0;
+      if (ht)
+  	scanhashtable(ht, 0, 0, 0, scancountparams, flags);
+!     paramvals = (char **) alloc((numparamvals + 1) * sizeof(char *));
+      if (ht) {
+  	numparamvals = 0;
+  	scanhashtable(ht, 0, 0, 0, scanparamvals, flags);
+***************
+*** 485,490 ****
+--- 491,526 ----
+      noerrs = 0;
+  }
+  
++ /* assign various functions used for non-special parameters */
++ 
++ /**/
++ static void
++ assigngetset(Param pm)
++ {
++     switch (PM_TYPE(pm->flags)) {
++     case PM_SCALAR:
++ 	pm->sets.cfn = strsetfn;
++ 	pm->gets.cfn = strgetfn;
++ 	break;
++     case PM_INTEGER:
++ 	pm->sets.ifn = intsetfn;
++ 	pm->gets.ifn = intgetfn;
++ 	break;
++     case PM_ARRAY:
++ 	pm->sets.afn = arrsetfn;
++ 	pm->gets.afn = arrgetfn;
++ 	break;
++     case PM_HASHED:
++ 	pm->sets.hfn = hashsetfn;
++ 	pm->gets.hfn = hashgetfn;
++ 	break;
++     default:
++ 	DPUTS(1, "BUG: tried to create param node without valid flag");
++ 	break;
++     }
++     pm->unsetfn = stdunsetfn;
++ }
++ 
+  /* Create a parameter, so that it can be assigned to.  Returns NULL if the *
+   * parameter already exists or can't be created, otherwise returns the     *
+   * parameter node.  If a parameter of the same name exists in an outer     *
+***************
+*** 530,559 ****
+  	pm = (Param) alloc(sizeof *pm);
+      pm->flags = flags;
+  
+!     if(!(pm->flags & PM_SPECIAL)) {
+! 	switch (PM_TYPE(flags)) {
+! 	case PM_SCALAR:
+! 	    pm->sets.cfn = strsetfn;
+! 	    pm->gets.cfn = strgetfn;
+! 	    break;
+! 	case PM_INTEGER:
+! 	    pm->sets.ifn = intsetfn;
+! 	    pm->gets.ifn = intgetfn;
+! 	    break;
+! 	case PM_ARRAY:
+! 	    pm->sets.afn = arrsetfn;
+! 	    pm->gets.afn = arrgetfn;
+! 	    break;
+! 	case PM_HASHED:
+! 	    pm->sets.hfn = hashsetfn;
+! 	    pm->gets.hfn = hashgetfn;
+! 	    break;
+! 	default:
+! 	    DPUTS(1, "BUG: tried to create param node without valid flag");
+! 	    break;
+! 	}
+! 	pm->unsetfn = stdunsetfn;
+!     }
+      return pm;
+  }
+  
+--- 566,573 ----
+  	pm = (Param) alloc(sizeof *pm);
+      pm->flags = flags;
+  
+!     if(!(pm->flags & PM_SPECIAL))
+! 	assigngetset(pm);
+      return pm;
+  }
+  
+***************
+*** 561,570 ****
+  
+  /**/
+  void
+! copyparam(Param tpm, Param pm)
+  {
+      PERMALLOC {
+  	tpm->flags = pm->flags;
+  	switch (PM_TYPE(pm->flags)) {
+  	case PM_SCALAR:
+  	    tpm->u.str = ztrdup(pm->gets.cfn(pm));
+--- 575,592 ----
+  
+  /**/
+  void
+! copyparam(Param tpm, Param pm, int toplevel)
+  {
++     /*
++      * Note that tpm, into which we're copying, may not be in permanent
++      * storage.  However, the values themselves are later used directly
++      * to set the parameter, so must be permanently allocated (in accordance
++      * with sets.?fn() usage).
++      */
+      PERMALLOC {
+  	tpm->flags = pm->flags;
++ 	if (!toplevel)
++ 	    tpm->flags &= ~PM_SPECIAL;
+  	switch (PM_TYPE(pm->flags)) {
+  	case PM_SCALAR:
+  	    tpm->u.str = ztrdup(pm->gets.cfn(pm));
+***************
+*** 580,585 ****
+--- 602,616 ----
+  	    break;
+  	}
+      } LASTALLOC;
++     /*
++      * If called from inside an associative array, that array is later going
++      * to be passed as a real parameter, so we need the gets and sets
++      * functions to be useful.  However, the saved associated array is
++      * not itself special, so we just use the standard ones.
++      * This is also why we switch off PM_SPECIAL.
++      */
++     if (!toplevel)
++ 	assigngetset(tpm);
+  }
+  
+  /* Return 1 if the string s is a valid identifier, else return 0. */
+***************
+*** 962,972 ****
+      s = t = *pptr;
+      garr = NULL;
+  
+!     if (idigit(*s))
+  	if (bracks >= 0)
+  	    ppar = zstrtol(s, &s, 10);
+  	else
+  	    ppar = *s++ - '0';
+      else if (iident(*s))
+  	while (iident(*s))
+  	    s++;
+--- 993,1004 ----
+      s = t = *pptr;
+      garr = NULL;
+  
+!     if (idigit(*s)) {
+  	if (bracks >= 0)
+  	    ppar = zstrtol(s, &s, 10);
+  	else
+  	    ppar = *s++ - '0';
++     }
+      else if (iident(*s))
+  	while (iident(*s))
+  	    s++;
+***************
+*** 1077,1084 ****
+  	    break;
+  	}
+  
+! 	if (v->a == 0 && v->b == -1)
+  	    LASTALLOC_RETURN s;
+  	if (v->a < 0)
+  	    v->a += strlen(s);
+  	if (v->b < 0)
+--- 1109,1117 ----
+  	    break;
+  	}
+  
+! 	if (v->a == 0 && v->b == -1) {
+  	    LASTALLOC_RETURN s;
++ 	}
+  	if (v->a < 0)
+  	    v->a += strlen(s);
+  	if (v->b < 0)
+***************
+*** 1268,1284 ****
+  	freearray(val);
+  	return;
+      }
+!     if (PM_TYPE(v->pm->flags) != PM_ARRAY) {
+  	freearray(val);
+  	zerr("attempt to assign array value to non-array", NULL, 0);
+  	return;
+      }
+!     if (v->a == 0 && v->b == -1)
+! 	(v->pm->sets.afn) (v->pm, val);
+!     else {
+  	char **old, **new, **p, **q, **r;
+  	int n, ll, i;
+  
+  	if (v->inv && unset(KSHARRAYS))
+  	    v->a--, v->b--;
+  	q = old = v->pm->gets.afn(v->pm);
+--- 1301,1325 ----
+  	freearray(val);
+  	return;
+      }
+!     if (PM_TYPE(v->pm->flags) & ~(PM_ARRAY|PM_HASHED)) {
+  	freearray(val);
+  	zerr("attempt to assign array value to non-array", NULL, 0);
+  	return;
+      }
+!     if (v->a == 0 && v->b == -1) {
+! 	if (PM_TYPE(v->pm->flags) == PM_HASHED)
+! 	    arrhashsetfn(v->pm, val);
+! 	else
+! 	    (v->pm->sets.afn) (v->pm, val);
+!     } else {
+  	char **old, **new, **p, **q, **r;
+  	int n, ll, i;
+  
++ 	if ((PM_TYPE(v->pm->flags) == PM_HASHED)) {
++ 	    freearray(val);
++ 	    zerr("attempt to set slice of associative array", NULL, 0);
++ 	    return;
++ 	}
+  	if (v->inv && unset(KSHARRAYS))
+  	    v->a--, v->b--;
+  	q = old = v->pm->gets.afn(v->pm);
+***************
+*** 1346,1353 ****
+  {
+      Value v;
+  
+!     if (!idigit(*s) && (v = getvalue(&s, 0)))
+! 	return getvaluearr(v);
+      return NULL;
+  }
+  
+--- 1387,1409 ----
+  {
+      Value v;
+  
+!     if (!idigit(*s) && (v = getvalue(&s, 0)) &&
+! 	PM_TYPE(v->pm->flags) == PM_ARRAY)
+! 	return v->pm->gets.afn(v->pm);
+!     return NULL;
+! }
+! 
+! /* Retrieve an assoc array parameter as an array */
+! 
+! /**/
+! char **
+! gethparam(char *s)
+! {
+!     Value v;
+! 
+!     if (!idigit(*s) && (v = getvalue(&s, 0)) &&
+! 	PM_TYPE(v->pm->flags) == PM_HASHED)
+! 	return paramvalarr(v->pm->gets.hfn(v->pm), SCANPM_WANTVALS);
+      return NULL;
+  }
+  
+***************
+*** 1412,1418 ****
+      } else {
+  	if (!(v = getvalue(&s, 1)))
+  	    createparam(t, PM_ARRAY);
+! 	else if (PM_TYPE(v->pm->flags) != PM_ARRAY &&
+  		 !(v->pm->flags & PM_SPECIAL)) {
+  	    int uniq = v->pm->flags & PM_UNIQUE;
+  	    unsetparam(t);
+--- 1468,1474 ----
+      } else {
+  	if (!(v = getvalue(&s, 1)))
+  	    createparam(t, PM_ARRAY);
+! 	else if (!(PM_TYPE(v->pm->flags) & (PM_ARRAY|PM_HASHED)) &&
+  		 !(v->pm->flags & PM_SPECIAL)) {
+  	    int uniq = v->pm->flags & PM_UNIQUE;
+  	    unsetparam(t);
+***************
+*** 1502,1508 ****
+       * is called.  Beyond that, there is an ambiguity:  should   *
+       * foo() { local bar; unset bar; } make the global bar       *
+       * available or not?  The following makes the answer "no".   */
+!     if (locallevel >= pm->level)
+  	return;
+  
+      paramtab->removenode(paramtab, pm->nam); /* remove parameter node from table */
+--- 1558,1564 ----
+       * is called.  Beyond that, there is an ambiguity:  should   *
+       * foo() { local bar; unset bar; } make the global bar       *
+       * available or not?  The following makes the answer "no".   */
+!     if (locallevel && locallevel >= pm->level)
+  	return;
+  
+      paramtab->removenode(paramtab, pm->nam); /* remove parameter node from table */
+***************
+*** 1603,1619 ****
+      return pm->u.hash;
+  }
+  
+  /* Function to set value of an association parameter */
+  
+  /**/
+  static void
+  hashsetfn(Param pm, HashTable x)
+  {
+!     if (pm->u.hash && pm->u.hash != x)
+  	deletehashtable(pm->u.hash);
+      pm->u.hash = x;
+  }
+  
+  /* This function is used as the set function for      *
+   * special parameters that cannot be set by the user. */
+  
+--- 1659,1719 ----
+      return pm->u.hash;
+  }
+  
++ /* Flag to freeparamnode to unset the struct */
++ 
++ static int delunset;
++ 
+  /* Function to set value of an association parameter */
+  
+  /**/
+  static void
+  hashsetfn(Param pm, HashTable x)
+  {
+!     if (pm->u.hash && pm->u.hash != x) {
+! 	/* The parameters in the hash table need to be unset *
+! 	 * before being deleted.                             */
+! 	int odelunset = delunset;
+! 	delunset = 1;
+  	deletehashtable(pm->u.hash);
++ 	delunset = odelunset;
++     }
+      pm->u.hash = x;
+  }
+  
++ /* Function to set value of an association parameter using key/value pairs */
++ 
++ /**/
++ static void
++ arrhashsetfn(Param pm, char **val)
++ {
++     /* Best not to shortcut this by using the existing hash table,   *
++      * since that could cause trouble for special hashes.  This way, *
++      * it's up to pm->sets.hfn() what to do.                         */
++     int alen = arrlen(val);
++     HashTable opmtab = paramtab, ht;
++     char **aptr = val;
++     Value v = (Value) hcalloc(sizeof *v);
++     v->b = -1;
++ 
++     if (alen % 2) {
++ 	freearray(val);
++ 	zerr("bad set of key/value pairs for associative array\n",
++ 	     NULL, 0);
++ 	return;
++     }
++     ht = paramtab = newparamtable(17, pm->nam);
++     while (*aptr) {
++ 	/* The parameter name is ztrdup'd... */
++ 	v->pm = createparam(*aptr, PM_SCALAR|PM_UNSET);
++ 	zsfree(*aptr++);
++ 	/* ...but we can use the value without copying. */
++ 	setstrvalue(v, *aptr++);
++     }
++     paramtab = opmtab;
++     pm->sets.hfn(pm, ht);
++     free(val);		/* not freearray() */
++ }
++ 
+  /* This function is used as the set function for      *
+   * special parameters that cannot be set by the user. */
+  
+***************
+*** 2373,2376 ****
+--- 2473,2580 ----
+      Param pm = (Param)hn;
+      if(pm->level > locallevel)
+  	unsetparam_pm(pm, 0, 0);
++ }
++ 
++ 
++ /**********************************/
++ /* Parameter Hash Table Functions */
++ /**********************************/
++ 
++ /**/
++ void
++ freeparamnode(HashNode hn)
++ {
++     Param pm = (Param) hn;
++  
++     /* Since the second flag to unsetfn isn't used, I don't *
++      * know what its value should be.                       */
++     if (delunset)
++ 	pm->unsetfn(pm, 1);
++     zsfree(pm->nam);
++     zfree(pm, sizeof(struct param));
++ }
++ 
++ /* Print a parameter */
++ 
++ /**/
++ void
++ printparamnode(HashNode hn, int printflags)
++ {
++     Param p = (Param) hn;
++     char *t, **u;
++ 
++     if (p->flags & PM_UNSET)
++ 	return;
++ 
++     /* Print the attributes of the parameter */
++     if (printflags & PRINT_TYPE) {
++ 	if (p->flags & PM_INTEGER)
++ 	    printf("integer ");
++ 	else if (p->flags & PM_ARRAY)
++ 	    printf("array ");
++ 	else if (p->flags & PM_HASHED)
++ 	    printf("association ");
++ 	if (p->flags & PM_LEFT)
++ 	    printf("left justified %d ", p->ct);
++ 	if (p->flags & PM_RIGHT_B)
++ 	    printf("right justified %d ", p->ct);
++ 	if (p->flags & PM_RIGHT_Z)
++ 	    printf("zero filled %d ", p->ct);
++ 	if (p->flags & PM_LOWER)
++ 	    printf("lowercase ");
++ 	if (p->flags & PM_UPPER)
++ 	    printf("uppercase ");
++ 	if (p->flags & PM_READONLY)
++ 	    printf("readonly ");
++ 	if (p->flags & PM_TAGGED)
++ 	    printf("tagged ");
++ 	if (p->flags & PM_EXPORTED)
++ 	    printf("exported ");
++     }
++ 
++     if (printflags & PRINT_NAMEONLY) {
++ 	zputs(p->nam, stdout);
++ 	putchar('\n');
++ 	return;
++     }
++ 
++     /* How the value is displayed depends *
++      * on the type of the parameter       */
++     quotedzputs(p->nam, stdout);
++     putchar('=');
++     switch (PM_TYPE(p->flags)) {
++     case PM_SCALAR:
++ 	/* string: simple output */
++ 	if (p->gets.cfn && (t = p->gets.cfn(p)))
++ 	    quotedzputs(t, stdout);
++ 	putchar('\n');
++ 	break;
++     case PM_INTEGER:
++ 	/* integer */
++ 	printf("%ld\n", p->gets.ifn(p));
++ 	break;
++     case PM_ARRAY:
++ 	/* array */
++ 	putchar('(');
++ 	u = p->gets.afn(p);
++ 	if(*u) {
++ 	    quotedzputs(*u++, stdout);
++ 	    while (*u) {
++ 		putchar(' ');
++ 		quotedzputs(*u++, stdout);
++ 	    }
++ 	}
++ 	printf(")\n");
++ 	break;
++     case PM_HASHED:
++ 	/* association */
++ 	putchar('(');
++ 	{
++             HashTable ht = p->gets.hfn(p);
++             if (ht)
++ 		scanhashtable(ht, 0, 0, 0, ht->printnode, 0);
++ 	}
++ 	printf(")\n");
++ 	break;
++     }
+  }
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56100 Pisa, Italy
+

@@ -1,0 +1,126 @@
+From zsh-workers-return-6224-mason-zsh=primenet.com.au@sunsite.auc.dk Thu May 06 10:00:08 1999
+Return-Path: <zsh-workers-return-6224-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3802 invoked from network); 6 May 1999 09:59:56 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 6 May 1999 09:59:56 -0000
+Received: (qmail 15218 invoked by alias); 6 May 1999 09:59:47 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6224
+Received: (qmail 15211 invoked from network); 6 May 1999 09:59:42 -0000
+Message-Id: <9905060935.AA26094@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: clobbers typeahead saga, latest installment
+Date: Thu, 06 May 1999 11:35:10 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+I played around some more with my previous typeahead patch.  There were a
+couple of problems.
+
+1. As I'd half guessed, kungetbuf could get filled up in the wrong order
+because the stuff read always got stuck in to be read first.  I had a patch
+for this (longer than I might have wished).
+
+2. However, I played around some more on IRIX over a slowish line, which
+actually helped show up the problems in this case.  The patch I sent set
+up the terminal for non-canonical mode unconditionally.  However, there was
+no guarantee the shell had finished processing all the lines of typeahead
+at that point.  That meant the terminal could be for a short time in
+non-canonical mode even though the keys being read were typeahead from
+kungetbuf.  Because of the difficulty of mixing the two modes on the
+systems we're talking about, that non-canonical mode typeahead sometimes got
+inserted at the wrong place.  This is a pretty fundamental problem with
+what I was doing, and may be why zsetterm() simply refused to do anything
+when there was typeahead before.
+
+A little thought showed that the old typeahead strategy could be made more
+robust without too much work by adding another FIONREAD test at the point
+the key was about to be read.  This is only used if zsetterm() has declined
+to alter the terminal mode; if there is still typeahead, fine, just read
+a character; if there isn't, fine, we can now set up the terminal for
+non-canonical mode processing with no worries.  This guarantees the very
+next character read will always be read in the correct mode with no
+argy-bargy.  So I am much happier with this patch.  (I have checked on the
+IRIX system that was giving trouble, of course.)
+
+One minor sophistication still possible is to make the first FIONREAD store
+the value it returned; then you wouldn't have to call the ioctl() again
+until those had been used up.  But I don't think that's really necessary.
+
+I send a diff against my previous patch, since the hunks that removed the
+CLOBBERS_TYPEAHEAD configuration test are still appropriate.
+
+--- Src/Zle/zle_main.c.df	Mon May  3 17:12:17 1999
++++ Src/Zle/zle_main.c	Thu May  6 11:30:27 1999
+@@ -111,6 +111,10 @@
+ /**/
+ int feepflag;
+ 
++#ifdef FIONREAD
++static int delayzsetterm;
++#endif
++
+ /* set up terminal */
+ 
+ /**/
+@@ -124,11 +128,25 @@
+ 
+     ioctl(SHTTY, FIONREAD, (char *)&val);
+     if (val) {
+-	char *tmpline = (char *)zalloc(val);
+-	read(SHTTY, tmpline, val);
+-	ungetkeys(tmpline, val);
+-	zfree(tmpline, val);
+-    }
++	/*
++	 * Problems can occur on some systems when switching from
++	 * canonical to non-canonical input.  The former is usually
++	 * set while running programmes, but the latter is necessary
++	 * for zle.  If there is input in canonical mode, then we
++	 * need to read it without setting up the terminal.  Furthermore,
++	 * while that input gets processed there may be more input
++	 * being typed (i.e. further typeahead).  This means that
++	 * we can't set up the terminal for zle *at all* until
++	 * we are sure there is no more typeahead to come.  So
++	 * if there is typeahead, we set the flag delayzsetterm.
++	 * Then getkey() performs another FIONREAD call; if that is
++	 * 0, we have finally used up all the typeahead, and it is
++	 * safe to alter the terminal, which we do at that point.
++	 */
++	delayzsetterm = 1;
++	return;
++    } else
++	delayzsetterm = 0;
+ #endif
+ 
+ /* sanitize the tty */
+@@ -302,7 +320,19 @@
+     if (kungetct)
+ 	ret = STOUC(kungetbuf[--kungetct]);
+     else {
+-	if (keytmout) {
++#ifdef FIONREAD
++	if (delayzsetterm) {
++	    int val;
++	    ioctl(SHTTY, FIONREAD, (char *)&val);
++	    if (!val)
++		zsetterm();
++	}
++#endif
++	if (keytmout
++#ifdef FIONREAD
++	    && ! delayzsetterm
++#endif
++	    ) {
+ 	    if (keytimeout > 500)
+ 		exp100ths = 500;
+ 	    else if (keytimeout > 0)
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

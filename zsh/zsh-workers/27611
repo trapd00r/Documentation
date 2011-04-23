@@ -1,0 +1,312 @@
+From zsh-workers-return-27611-mason-zsh=primenet.com.au@zsh.org Wed Jan 20 17:13:27 2010
+Return-Path: <zsh-workers-return-27611-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6005 invoked by alias); 20 Jan 2010 17:13:27 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27611
+Received: (qmail 4086 invoked from network); 20 Jan 2010 17:13:23 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-3.0 required=5.0 tests=AWL,BAYES_00,
+	RCVD_IN_DNSWL_LOW,SPF_HELO_PASS autolearn=ham version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Wed, 20 Jan 2010 16:46:48 +0000
+From: Peter Stephenson <pws@csr.com>
+To: Zsh hackers list <zsh-workers@zsh.org>
+Subject: Re: subscript expanded twice in a[subcript]++ (Was: problem with
+ RANDOM and arrays)
+Message-ID: <20100120164648.7c23769f@news01>
+In-Reply-To: <chaz20100120133218.GB3872@yahoo.fr>
+References: <chaz20100111201312.GB3902@seebyte.com>
+	<chaz20100120133218.GB3872@yahoo.fr>
+Organization: CSR
+X-Mailer: Claws Mail 3.5.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 20 Jan 2010 16:46:49.0075 (UTC) FILETIME=[28E49430:01CA99F0]
+X-Scanned-By: MailControl A-09-22-10 (www.mailcontrol.com) on 10.68.0.124
+
+Had an idea...  the second level down in the parameter code contains the
+evaluated subscript, so we can cache that, and be as paranoid as we feel
+about the validity of the cached value.
+
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.36
+diff -u -r1.36 math.c
+--- Src/math.c	16 Oct 2008 09:34:51 -0000	1.36
++++ Src/math.c	20 Jan 2010 16:41:54 -0000
+@@ -27,6 +27,8 @@
+  *
+  */
+ 
++struct mathvalue;
++
+ #include "zsh.mdh"
+ #include "math.pro"
+ 
+@@ -304,7 +306,16 @@
+ static int sp = -1;			/* stack pointer */
+ 
+ struct mathvalue {
++    /*
++     * If we need to get a variable, this is the string to be passed
++     * to the parameter code.  It may include a subscript.
++     */
+     char *lval;
++    /*
++     * If this is not zero, we've retrieved a variable and this
++     * stores a reference to it.
++     */
++    Value pval;
+     mnumber val;
+ };
+ 
+@@ -317,6 +328,26 @@
+     MPREC_ARG
+ };
+ 
++
++/*
++ * Get a number from a variable.
++ * Try to be clever about reusing subscripts by caching the Value structure.
++ */
++static mnumber
++getmathparam(struct mathvalue *mptr)
++{
++    if (!mptr->pval) {
++	char *s = mptr->lval;
++	mptr->pval = (Value)zhalloc(sizeof(struct value));
++	if (!getvalue(mptr->pval, &s, 1))
++	{
++	    mptr->pval = NULL;
++	    return zero_mnumber;
++	}
++    }
++    return getnumvalue(mptr->pval);
++}
++
+ static mnumber
+ mathevall(char *s, enum prec_type prec_tp, char **ep)
+ {
+@@ -384,7 +415,7 @@
+ 	ret.u.l = 0;
+     } else {
+ 	if (stack[0].val.type == MN_UNSET)
+-	    ret = getnparam(stack[0].lval);
++	    ret = getmathparam(stack);
+ 	else
+ 	    ret = stack[0].val;
+     }
+@@ -742,6 +773,7 @@
+ 	sp++;
+     stack[sp].val = val;
+     stack[sp].lval = lval;
++    stack[sp].pval = NULL;
+     if (getme)
+ 	stack[sp].val.type = MN_UNSET;
+ }
+@@ -753,7 +785,7 @@
+     struct mathvalue *mv = stack+sp;
+ 
+     if (mv->val.type == MN_UNSET && !noget)
+-	mv->val = getnparam(mv->lval);
++	mv->val = getmathparam(mv);
+     sp--;
+     return errflag ? zero_mnumber : mv->val;
+ }
+@@ -790,9 +822,29 @@
+ 
+ /**/
+ static mnumber
+-setvar(char *s, mnumber v)
++setmathvar(struct mathvalue *mvp, mnumber v)
+ {
+-    if (!s) {
++    if (mvp->pval) {
++	/*
++	 * This value may have been hanging around for a while.
++	 * Be ultra-paranoid in checking the variable is still valid.
++	 */
++	char *s = mvp->lval, *ptr;
++	Param pm;
++	DPUTS(!mvp->lval, "no variable name but variable value in math");
++	if ((ptr = strchr(s, '[')))
++	    s = dupstrpfx(s, ptr - s);
++	pm = (Param) paramtab->getnode(paramtab, s);
++	if (pm == mvp->pval->pm) {
++	    if (noeval)
++		return v;
++	    setnumvalue(mvp->pval, v);
++	    return v;
++	}
++	/* Different parameter, start again from scratch */
++	mvp->pval = NULL;
++    }
++    if (!mvp->lval) {
+ 	zerr("lvalue required");
+ 	v.type = MN_INTEGER;
+ 	v.u.l = 0;
+@@ -800,8 +852,8 @@
+     }
+     if (noeval)
+ 	return v;
+-    untokenize(s);
+-    setnparam(s, v);
++    untokenize(mvp->lval);
++    setnparam(mvp->lval, v);
+     return v;
+ }
+ 
+@@ -1101,8 +1153,9 @@
+ 	    }
+ 	}
+ 	if (tp & (OP_E2|OP_E2IO)) {
++	    struct mathvalue *mvp = stack + sp + 1;
+ 	    lv = stack[sp+1].lval;
+-	    push(setvar(lv,c), lv, 0);
++	    push(setmathvar(mvp,c), mvp->lval, 0);
+ 	} else
+ 	    push(c,NULL, 0);
+ 	return;
+@@ -1110,7 +1163,7 @@
+ 
+     spval = &stack[sp].val;
+     if (stack[sp].val.type == MN_UNSET)
+-	*spval = getnparam(stack[sp].lval);
++	*spval = getmathparam(stack + sp);
+     switch (what) {
+     case NOT:
+ 	if (spval->type & MN_FLOAT) {
+@@ -1119,6 +1172,7 @@
+ 	} else
+ 	    spval->u.l = !spval->u.l;
+ 	stack[sp].lval = NULL;
++	stack[sp].pval = NULL;
+ 	break;
+     case COMP:
+ 	if (spval->type & MN_FLOAT) {
+@@ -1127,6 +1181,7 @@
+ 	} else
+ 	    spval->u.l = ~spval->u.l;
+ 	stack[sp].lval = NULL;
++	stack[sp].pval = NULL;
+ 	break;
+     case POSTPLUS:
+ 	a = *spval;
+@@ -1134,7 +1189,7 @@
+ 	    a.u.d++;
+ 	else
+ 	    a.u.l++;
+-	(void)setvar(stack[sp].lval, a);
++	(void)setmathvar(stack + sp, a);
+ 	break;
+     case POSTMINUS:
+ 	a = *spval;
+@@ -1142,10 +1197,11 @@
+ 	    a.u.d--;
+ 	else
+ 	    a.u.l--;
+-	(void)setvar(stack[sp].lval, a);
++	(void)setmathvar(stack + sp, a);
+ 	break;
+     case UPLUS:
+ 	stack[sp].lval = NULL;
++	stack[sp].pval = NULL;
+ 	break;
+     case UMINUS:
+ 	if (spval->type & MN_FLOAT)
+@@ -1153,6 +1209,7 @@
+ 	else
+ 	    spval->u.l = -spval->u.l;
+ 	stack[sp].lval = NULL;
++	stack[sp].pval = NULL;
+ 	break;
+     case QUEST:
+ 	DPUTS(sp < 2, "BUG: math: three shall be the number of the counting.");
+@@ -1172,14 +1229,14 @@
+ 	    spval->u.d++;
+ 	else
+ 	    spval->u.l++;
+-	setvar(stack[sp].lval, *spval);
++	setmathvar(stack + sp, *spval);
+ 	break;
+     case PREMINUS:
+ 	if (spval->type & MN_FLOAT)
+ 	    spval->u.d--;
+ 	else
+ 	    spval->u.l--;
+-	setvar(stack[sp].lval, *spval);
++	setmathvar(stack + sp, *spval);
+ 	break;
+     default:
+ 	zerr("out of integers");
+@@ -1196,7 +1253,7 @@
+     int tst;
+ 
+     if (stack[sp].val.type == MN_UNSET)
+-	*spval = getnparam(stack[sp].lval);
++	*spval = getmathparam(stack + sp);
+     tst = (spval->type & MN_FLOAT) ? (zlong)spval->u.d : spval->u.l; 
+ 
+     switch (tk) {
+@@ -1337,7 +1394,7 @@
+ 	    break;
+ 	case QUEST:
+ 	    if (stack[sp].val.type == MN_UNSET)
+-		stack[sp].val = getnparam(stack[sp].lval);
++		stack[sp].val = getmathparam(stack + sp);
+ 	    q = (stack[sp].val.type == MN_FLOAT) ? (zlong)stack[sp].val.u.d :
+ 		stack[sp].val.u.l;
+ 
+Index: Test/C01arith.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/C01arith.ztst,v
+retrieving revision 1.17
+diff -u -r1.17 C01arith.ztst
+--- Test/C01arith.ztst	16 Oct 2008 09:34:51 -0000	1.17
++++ Test/C01arith.ztst	20 Jan 2010 16:41:55 -0000
+@@ -188,3 +188,25 @@
+ >0xFF
+ >FF
+ 
++  array=(1)
++  x=0
++  (( array[++x]++ ))
++  print $x
++  print $#array
++  print $array
++0:no double increment for subscript
++>1
++>1
++>2
++
++  # This is a bit naughty...  the value of array
++  # isn't well defined since there's no sequence point
++  # between the increments of x, however we just want
++  # to be sure that in this case, unlike the above,
++  # x does get incremented twice.
++  x=0
++  array=(1 2)
++  (( array[++x] = array[++x] + 1 ))
++  print $x
++0:double increment for repeated expression
++>2
+
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

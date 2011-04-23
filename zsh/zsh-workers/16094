@@ -1,0 +1,99 @@
+From zsh-workers-return-16094-mason-zsh=primenet.com.au@sunsite.dk Sun Oct 21 19:07:45 2001
+Return-Path: <zsh-workers-return-16094-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18018 invoked from network); 21 Oct 2001 19:07:44 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 21 Oct 2001 19:07:44 -0000
+Received: (qmail 39 invoked by alias); 21 Oct 2001 19:07:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16094
+Received: (qmail 21 invoked from network); 21 Oct 2001 19:07:37 -0000
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-Id: <1011021190727.ZM14572@candle.brasslantern.com>
+Date: Sun, 21 Oct 2001 19:07:27 +0000
+In-Reply-To: <1011019175644.ZM9169@candle.brasslantern.com>
+Comments: In reply to Bart Schaefer <schaefer@brasslantern.com>
+        "Re: unlimited file descripters causes problems for zsh-4.0.2" (Oct 19,  5:56pm)
+References: <200110182344.TAA12655@sassy.aa.ops.us.uu.net> 
+	<1011019164041.ZM8348@candle.brasslantern.com> 
+	<1011019175644.ZM9169@candle.brasslantern.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.dk
+Subject: Re: unlimited file descripters causes problems for zsh-4.0.2
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Oct 19,  5:56pm, Bart Schaefer wrote:
+}
+} } What I'm more concerned about is closeallelse() in exec.c, which is going
+} } to make up to several billion close() calls
+} 
+} Here's a suggestion:  Once, at startup, we scan all the way to zopenmax()
+} looking for open descriptors, and set a global to the largest number we
+} find.
+
+The following patch approximately implements the above.  It does not yet
+change init.c to use a constant for fdtable_size, which is still needed
+to prevent zsh from allocating huge amounts of memory if a descriptor
+with a very large number is already open when the shell starts up.
+
+I'm not able to test this on a machine that really implements a huge max.
+number of file descriptors, so I won't commit it until someone else has
+tried it.
+
+Index: compat.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/compat.c,v
+retrieving revision 1.2
+diff -c -r1.2 compat.c
+--- compat.c	2001/07/10 09:05:20	1.2
++++ compat.c	2001/10/21 19:00:17
+@@ -198,12 +198,32 @@
+ mod_export long
+ zopenmax(void)
+ {
+-    long openmax = sysconf(_SC_OPEN_MAX);
++    static long openmax = 0;
+ 
+-    if (openmax < 1)
+-	return OPEN_MAX;
+-    else
+-	return openmax;
++    if (openmax < 1) {
++	if ((openmax = sysconf(_SC_OPEN_MAX)) < 1) {
++	    openmax = OPEN_MAX;
++	} else if (openmax > OPEN_MAX) {
++	    /* On some systems, "limit descriptors unlimited" or the  *
++	     * equivalent will set openmax to a huge number.  Unless  *
++	     * there actually is a file descriptor > OPEN_MAX already *
++	     * open, nothing in zsh requires the true maximum, and in *
++	     * fact it causes inefficiency elsewhere if we report it. *
++	     * So, report the maximum of OPEN_MAX or the largest open *
++	     * descriptor (is there a better way to find that?).      */
++	    long i, j = OPEN_MAX;
++	    for (i = j; i < openmax; i += (errno != EINTR)) {
++		errno = 0;
++		if (fcntl(i, F_GETFL, 0) < 0 &&
++		    (errno == EBADF || errno == EINTR))
++		    continue;
++		j = i;
++	    }
++	    openmax = j;
++	}
++    }
++
++    return (max_zsh_fd > openmax) ? max_zsh_fd : openmax;
+ }
+ #endif
+ 
+
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

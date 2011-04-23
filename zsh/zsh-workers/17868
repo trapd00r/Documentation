@@ -1,0 +1,271 @@
+From zsh-workers-return-17868-mason-zsh=primenet.com.au@sunsite.dk Mon Oct 28 18:56:46 2002
+Return-Path: <zsh-workers-return-17868-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8693 invoked from network); 28 Oct 2002 18:56:46 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 28 Oct 2002 18:56:46 -0000
+Received: (qmail 8025 invoked by alias); 28 Oct 2002 18:56:25 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17868
+Received: (qmail 8004 invoked from network); 28 Oct 2002 18:56:21 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: SECONDS can be floating point
+Date: Mon, 28 Oct 2002 18:55:52 +0000
+Message-ID: <22634.1035831352@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+This allows typeset to switch the SECONDS special parameter between
+integer and floating point, with evident increase of precision (which is
+not the same as accuracy!)  This method preserves backward compatability
+and doesn't require any additions to the interface.  The downside is
+that as usual the logic in `typeset' is rather hairy --- I've already
+had a battle with things like
+  fn() { local -F SECONDS; }
+
+It's also possible that you may be using functions which assume SECONDS
+is an integer, hence it might be safest not to change the type globally.
+Looks like the functions we already have with SECONDS in are robust
+about this (though I haven't tested explicitly).
+
+Index: Doc/Zsh/params.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/params.yo,v
+retrieving revision 1.16
+diff -u -r1.16 params.yo
+--- Doc/Zsh/params.yo	5 Aug 2002 12:33:28 -0000	1.16
++++ Doc/Zsh/params.yo	28 Oct 2002 18:51:35 -0000
+@@ -589,6 +589,12 @@
+ is assigned a value, then the value returned upon reference
+ will be the value that was assigned plus the number of seconds
+ since the assignment.
++
++Unlike other special parameters, the type of the tt(SECONDS) parameter can
++be changed using the tt(typeset) command.  Only integer and one of the
++floating point types are allowed.  For example, `tt(typeset -F SECONDS)'
++causes the value to be reported as a floating point number.  The precision
++is six decimal places, although not all places may be useful.
+ )
+ vindex(SHLVL)
+ item(tt(SHLVL) <S>)(
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.86
+diff -u -r1.86 builtin.c
+--- Src/builtin.c	19 Sep 2002 17:57:57 -0000	1.86
++++ Src/builtin.c	28 Oct 2002 18:51:35 -0000
+@@ -1653,6 +1653,13 @@
+     return &asg;
+ }
+ 
++/* for new special parameters */
++enum {
++    NS_NONE,
++    NS_NORMAL,
++    NS_SECONDS
++};
++
+ /* function to set a single parameter */
+ 
+ /**/
+@@ -1661,7 +1668,7 @@
+ 	       int on, int off, int roff, char *value, Param altpm,
+ 	       Options ops, int auxlen)
+ {
+-    int usepm, tc, keeplocal = 0, newspecial = 0;
++    int usepm, tc, keeplocal = 0, newspecial = NS_NONE, readonly;
+     char *subscript;
+ 
+     /*
+@@ -1694,14 +1701,15 @@
+ 	 * local.  It can be applied either to the special or in the
+ 	 * typeset/local statement for the local variable.
+ 	 */
+-	newspecial = (pm->flags & PM_SPECIAL)
+-	    && !(on & PM_HIDE) && !(pm->flags & PM_HIDE & ~off);
++	if ((pm->flags & PM_SPECIAL)
++	    && !(on & PM_HIDE) && !(pm->flags & PM_HIDE & ~off))
++	    newspecial = NS_NORMAL;
+ 	usepm = 0;
+     }
+ 
+     /* attempting a type conversion, or making a tied colonarray? */
+     tc = 0;
+-    if (usepm || newspecial) {
++    if (usepm || newspecial != NS_NONE) {
+ 	int chflags = ((off & pm->flags) | (on & ~pm->flags)) &
+ 	    (PM_INTEGER|PM_EFLOAT|PM_FFLOAT|PM_HASHED|
+ 	     PM_ARRAY|PM_TIED|PM_AUTOLOAD);
+@@ -1716,11 +1724,31 @@
+      * with a special or a parameter which isn't loaded yet (which
+      * may be special when it is loaded; we can't tell yet).
+      */
+-    if (tc || ((usepm || newspecial) && (off & pm->flags & PM_READONLY))) {
++    if ((readonly =
++	 ((usepm || newspecial != NS_NONE) && 
++	  (off & pm->flags & PM_READONLY))) ||
++	tc) {
+ 	if (pm->flags & PM_SPECIAL) {
+-	    zerrnam(cname, "%s: can't change type of a special parameter",
+-		    pname, 0);
+-	    return NULL;
++	    int err = 1;
++	    if (!readonly && !strcmp(pname, "SECONDS"))
++	    {
++		if (newspecial != NS_NONE)
++		{
++		    newspecial = NS_SECONDS;
++		    err = 0;	/* and continue */
++		    tc = 0;	/* but don't do a normal conversion */
++		} else if (!setsecondstype(pm, on, off)) {
++		    if (value && !setsparam(pname, ztrdup(value)))
++			return NULL;
++		    return pm;
++		}
++	    }
++	    if (err)
++	    {
++		zerrnam(cname, "%s: can't change type of a special parameter",
++			pname, 0);
++		return NULL;
++	    }
+ 	} else if (pm->flags & PM_AUTOLOAD) {
+ 	    zerrnam(cname, "%s: can't change type of autoloaded parameter",
+ 		    pname, 0);
+@@ -1820,7 +1848,7 @@
+ 	unsetparam_pm(pm, 0, 1);
+     }
+ 
+-    if (newspecial) {
++    if (newspecial != NS_NONE) {
+ 	Param tpm, pm2;
+ 	if ((pm->flags & PM_RESTRICTED) && isset(RESTRICTED)) {
+ 	    zerrnam(cname, "%s: restricted", pname, 0);
+@@ -1866,6 +1894,8 @@
+ 	 * because we've checked for unpleasant surprises above.
+ 	 */
+ 	pm->flags = (PM_TYPE(pm->flags) | on | PM_SPECIAL) & ~off;
++	if (newspecial == NS_SECONDS)
++	    setsecondstype(pm, on, off);
+ 	/*
+ 	 * Final tweak: if we've turned on one of the flags with
+ 	 * numbers, we should use the appropriate integer.
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.65
+diff -u -r1.65 params.c
+--- Src/params.c	5 Aug 2002 12:36:00 -0000	1.65
++++ Src/params.c	28 Oct 2002 18:51:35 -0000
+@@ -141,7 +141,7 @@
+ IPDEF1("HISTSIZE", histsizegetfn, histsizesetfn, PM_RESTRICTED),
+ IPDEF1("RANDOM", randomgetfn, randomsetfn, 0),
+ IPDEF1("SAVEHIST", savehistsizegetfn, savehistsizesetfn, PM_RESTRICTED),
+-IPDEF1("SECONDS", secondsgetfn, secondssetfn, 0),
++IPDEF1("SECONDS", intsecondsgetfn, intsecondssetfn, 0),
+ IPDEF1("UID", uidgetfn, uidsetfn, PM_DONTIMPORT | PM_RESTRICTED),
+ IPDEF1("EUID", euidgetfn, euidsetfn, PM_DONTIMPORT | PM_RESTRICTED),
+ IPDEF1("TTYIDLE", ttyidlegetfn, nullintsetfn, PM_READONLY),
+@@ -2657,7 +2657,7 @@
+ 
+ /**/
+ zlong
+-secondsgetfn(Param pm)
++intsecondsgetfn(Param pm)
+ {
+     return time(NULL) - shtimer.tv_sec;
+ }
+@@ -2666,12 +2666,60 @@
+ 
+ /**/
+ void
+-secondssetfn(Param pm, zlong x)
++intsecondssetfn(Param pm, zlong x)
+ {
+     shtimer.tv_sec = time(NULL) - x;
+     shtimer.tv_usec = 0;
+ }
+ 
++/**/
++double
++floatsecondsgetfn(Param pm)
++{
++    struct timeval now;
++    struct timezone dummy_tz;
++
++    gettimeofday(&now, &dummy_tz);
++
++    return (double)(now.tv_sec - shtimer.tv_sec) +
++	(double)(now.tv_usec - shtimer.tv_usec) / 1000000.0;
++}
++
++/**/
++void
++floatsecondssetfn(Param pm, double x)
++{
++    struct timeval now;
++    struct timezone dummy_tz;
++
++    gettimeofday(&now, &dummy_tz);
++    shtimer.tv_sec = now.tv_sec - (int)x;
++    shtimer.tv_usec = now.tv_usec - (int)((x - (double)(int)x) * 1000000.0);
++}
++
++/**/
++int
++setsecondstype(Param pm, int on, int off)
++{
++    int newflags = (pm->flags | on) & ~off;
++    int tp = PM_TYPE(newflags);
++    /* Only one of the numeric types is allowed. */
++    if (tp == PM_EFLOAT || tp == PM_FFLOAT)
++    {
++	pm->gets.ffn = floatsecondsgetfn;
++	pm->sets.ffn = floatsecondssetfn;
++    }
++    else if (tp == PM_INTEGER)
++    {
++	pm->gets.ifn = intsecondsgetfn;
++	pm->sets.ifn = intsecondssetfn;
++    }
++    else
++	return 1;
++    pm->flags = newflags;
++    return 0;
++}
++
+ /* Function to get value for special parameter `USERNAME' */
+ 
+ /**/
+@@ -3422,6 +3470,8 @@
+ 	     */
+ 	    Param tpm = pm->old;
+ 
++	    if (!strcmp(pm->nam, "SECONDS"))
++		setsecondstype(pm, PM_TYPE(tpm->flags), PM_TYPE(pm->flags));
+ 	    DPUTS(!tpm || PM_TYPE(pm->flags) != PM_TYPE(tpm->flags) ||
+ 		  !(tpm->flags & PM_SPECIAL),
+ 		  "BUG: in restoring scope of special parameter");
+
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

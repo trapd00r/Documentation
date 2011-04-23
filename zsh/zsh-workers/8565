@@ -1,0 +1,156 @@
+From zsh-workers-return-8565-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Nov 05 12:51:48 1999
+Return-Path: <zsh-workers-return-8565-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19212 invoked from network); 5 Nov 1999 12:51:46 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Nov 1999 12:51:46 -0000
+Received: (qmail 13833 invoked by alias); 5 Nov 1999 12:51:34 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8565
+Received: (qmail 13823 invoked from network); 5 Nov 1999 12:51:19 -0000
+Date: Fri, 5 Nov 1999 13:51:14 +0100 (MET)
+Message-Id: <199911051251.NAA03010@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Oliver Kiddle's message of Thu, 04 Nov 1999 19:54:01 +0000
+Subject: Re: Bug with parameter expansion
+
+
+Oliver Kiddle wrote:
+
+> I get the following with tab bound to expand-or-complete:
+> 
+> zsh -f
+> export PATH=$PATH<tab>
+> 
+> expands to:
+> export PATH\=/usr/bin:/etc:....
+> 
+> In other words, the equals is quoted which it shouldn't be.
+
+Hm. As far as I know, even though `=' is in `SPECCHARS', it is only
+special if it is at the beginning of a word. So the patch makes it be
+quoted only then.
+
+> Also, if I
+> expand $PWD or some variable containing a directory name, I get a space
+> suffix when a slash would be more useful. What would be nice is if there
+> was a check to see if the variable contained a directory name and a
+> slash used for the suffix if so.
+
+The problem is that the expansion code doesn't really look at the word 
+from the line. It just gives it to `prefork()' (which does expansions
+like this one) and the gives the resulting list of words to
+`globlist()' (which does, of course, the globbing).
+
+Even after the first step we can't find out how the words were
+generated without checking the original string. So we would have to
+see if there was a valid parameter expansion and then see if that
+yielded a directory name. Hm. I don't use the built-in expansion code, 
+so I wouldn't really be against that, I just fear that someone else
+may come a bit later complaining about it. Also, I'm not sure if I'm
+not missing anything important here... (btw, I use the `_expand'
+completer; have you had a look at that? the patch below improves it a
+bit).
+
+Any comments? Would everybody (using this style of expansion) find
+this auto-add-a-slash behaviour useful (or do you think that it is the
+only right thing to do)?
+
+> There is another case where I'd like a slash suffix to be used:
+> 
+> I have a function named switch which outputs a directory name which it
+> generates from the current directory so I regularly use it as $(switch).
+> 
+> If I type:
+> cd $(switch)<tab> it expands and uses a space suffix which is fine.
+> cd $(switch)/<tab> it expands and uses a slash suffix which is very
+> useful.
+> cd $(switch)/Rel<tab> it expands, leaves '/Rel' on the end and uses a
+> space suffix.
+> 
+> The second case seems to be some sort of special case. What I would like
+> is for the third case to be no different, i.e. a / after the $(...) is
+> significant in deciding the suffix and any following characters are
+> irrelevant (unless there is another $(...) later on the line). Another
+> way of thinking of it is that I want it to try to do completion after
+> the expansion - basically, in the third case, I want to complete to the
+> 'Releases' directory.
+
+There is indeed some extra code to test if the result ends in a slash
+(all this is in the function `zle_tricky.c:doexpansion()', btw, if you
+want to have a look). Trying to change the third case needs the same
+parsing/checking as in the parameter expansion case above, so...
+
+> In the longer term, it would be nice to have a mechanism where variables
+> can be generated each time they are read by a shell function. Ksh 93
+> apparently has such a feature using two 'discipline functions' -
+> varname.get and varname.set which are each called when the variable is
+> read and assigned to respectively. This would be useful to me with my
+> switch (and other related functions) because variables are more
+> convenient on the command line and it could be read twice so left intact
+> on the command-line while allowing completion after it. I can think of
+> many other uses though, especially with associative arrays.
+
+;-) I added that to my list as soon as I read it in the ksh manual. I
+fear that we sometimes calll the parameter functions in places where
+it is dangerous to a shell function (or difficult to make sure that
+the function can't do any harm). I.e. I think we would have to
+prohibit calling these functions in some places. And finding out where 
+to do that may take some time, so I haven't even tried to look at it
+yet.
+
+Bye
+ Sven
+
+diff -u oldsrc/utils.c Src/utils.c
+--- oldsrc/utils.c	Fri Nov  5 09:01:15 1999
++++ Src/utils.c	Fri Nov  5 13:17:17 1999
+@@ -3073,7 +3073,7 @@
+ 	  }
+ 	  continue;
+ 	}
+-	else if (ispecial(*u) &&
++	else if (ispecial(*u) && (*u != '=' || u == s) &&
+ 	    (!instring ||
+ 	     (isset(BANGHIST) && *u == (char)bangchar) ||
+ 	     (instring == 2 &&
+diff -u oldcompletion/Core/_expand Completion/Core/_expand
+--- oldcompletion/Core/_expand	Thu Nov  4 14:50:47 1999
++++ Completion/Core/_expand	Fri Nov  5 13:38:04 1999
+@@ -77,6 +77,10 @@
+   expl2=(-n)
+ fi
+ 
++# Quote the results and remove unnecessary quotes before `='s.
++
++    exp=( "${(@)${(@)${(@q)exp}//\\\\=/=}/#=/\\=}" )
++
+ # We have expansions, should we menucomplete them?
+ 
+ if [[ -z "$compconfig[expand_menu]" ]]; then
+@@ -112,7 +116,7 @@
+      "$compconfig[expand_original]" != *last* ]] &&
+       compadd "$expl[@]" -UQ -V _expand_original - "$word"
+ 
+-  [[ "$compconfig[expand_menu]" = *last* &&
++  [[ $#exp -ne 1 && "$compconfig[expand_menu]" = *last* &&
+      "$compconfig[expand_menu]" != *only* ]] &&
+       compadd "$expl2[@]" -UQ -V _expand_all - "$exp"
+ 
+@@ -122,7 +126,7 @@
+     compadd -UQ -X "${compconfig[expand_prompt]//\\%o/$word}" \
+             $group _expand - "$exp[@]"
+   fi
+-  [[ "$compconfig[expand_menu]" != *last* &&
++  [[ $#exp -ne 1 && "$compconfig[expand_menu]" != *last* &&
+      "$compconfig[expand_menu]" != *only* ]] &&
+       compadd "$expl2[@]" -UQ -V _expand_all - "$exp"
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

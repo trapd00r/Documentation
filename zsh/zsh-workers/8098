@@ -1,0 +1,218 @@
+From zsh-workers-return-8098-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Sep 29 16:13:00 1999
+Return-Path: <zsh-workers-return-8098-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17124 invoked from network); 29 Sep 1999 16:12:59 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 29 Sep 1999 16:12:59 -0000
+Received: (qmail 28705 invoked by alias); 29 Sep 1999 16:12:53 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8098
+Received: (qmail 28698 invoked from network); 29 Sep 1999 16:12:52 -0000
+Message-Id: <9909291537.AA22206@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.6-pws-6: compdef -K
+Date: Wed, 29 Sep 1999 17:37:21 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+This implements compdef -K, which is like compdef -k but you can define
+multiple widgets to use the same function.  One use of this is to create
+completion and listing widgets simultaneously, but I've used it to make
+_history_complete_word work better: it now defines two widgets,
+_history-complete-older and _history-complete-newer, which it can use to
+decide which way it's going.
+
+I haven't altered _history_complete_word otherwise, because I don't know
+what Adam's doing with it, but for some reason it's stopped working with
+menu completion again, because zsh insists on saying it's using automenu
+when it's using ordinary menu completion, and for some other reason even
+with history_stop set it won't stop cycling through them.
+
+--- Completion/Commands/w2_history_complete_word	Wed Sep 29 16:38:55 1999
++++ Completion/Commands/_history_complete_word	Wed Sep 29 16:54:15 1999
+@@ -1,4 +1,4 @@
+-#compdef -k complete-word \e/ \e,
++#compdef -K _history-complete-older complete-word \e/ _history-complete-newer complete-word \e,
+ #
+ # Complete words from the history
+ #
+@@ -20,19 +20,11 @@
+ 
+   local expl direction
+ 
+-  case "$KEYS" in 
+-    ',')  direction='newer'
+-            ;;
+-    '/')  direction='older'
+-            ;;
+-        *)  print <<EOF
+-The keypress \`$KEYS\' was not understood by _history_complete_word.
+-You must alter _history_complete_word if you want to bind it to keys
+-other than the defaults, so that it knows which direction the key
+-should move in the history.
+-EOF
+-            return 1
+-  esac
++  if [[ $WIDGET = *newer ]]; then
++    direction=older
++  else
++    direction=newer
++  fi
+ 
+   [[ -z "$compconfig[history_list]" ]] && compstate[list]=''
+ 
+--- Completion/Core/w2compinit	Mon Sep 20 10:39:47 1999
++++ Completion/Core/compinit	Wed Sep 29 17:04:03 1999
+@@ -27,6 +27,17 @@
+ #     rather than by the context.  The widget has the same name as
+ #     the autoload file and can be bound using bindkey in the normal way.
+ #
++#   `#compdef -K <widget-name> <style> <key-sequence> [ ... ]
++#     This is similar to -k, except it takes any number of sets of
++#     three arguments.  In each set, the widget <widget-name> will
++#     be defined, which will behave as <style>, as with -k, and will
++#     be bound to <key-sequence>, exactly one of which must be defined.
++#     <widget-name> must be different for each:  this must begin with an
++#     underscore, else one will be added, and should not clash with other
++#     completion widgets (names based on the name of the function are the
++#     clearest), but is otherwise arbitrary.  It can be tested in the
++#     function by the parameter $WIDGET.
++#
+ #   `#autoload'
+ #     this is for helper functions that are not used to
+ #     generate matches, but should automatically be loaded
+@@ -157,11 +168,11 @@
+     return 1
+   fi
+   
+-  while getopts "anpPkd" opt; do
++  while getopts "anpPkKd" opt; do
+     case "$opt" in
+     a)    autol=yes;;
+     n)    new=yes;;
+-    [pPk]) if [[ -n "$type" ]]; then
++    [pPkK]) if [[ -n "$type" ]]; then
+             # Error if both `-p' and `-k' are given (or one of them
+ 	    # twice).
+             echo "$0: type already set to $type"
+@@ -171,6 +182,8 @@
+ 	    type=pattern
+ 	  elif [[ "$opt" = P ]]; then
+ 	    type=postpattern
++	  elif [[ "$opt" = K ]]; then
++	    type=widgetkey
+ 	  else
+ 	    type=key
+ 	  fi
+@@ -211,6 +224,24 @@
+       fi
+       _postpatcomps=("$_postpatcomps[@]" "$1 $func")
+       ;;
++    widgetkey)
++      while [[ -n $1 ]]; do
++	if [[ $# -lt 3 ]]; then
++	  echo "$0: compdef -K requires <widget> <comp-widget> <key>"
++	  return 1
++	fi
++	[[ $1 = _* ]] || 1="_$1"
++	[[ $2 = .* ]] || 2=".$2"
++	zle -C "$1" "$2" "$func"
++	if [[ -n $new ]]; then
++	  bindkey "$3" | read -A opt
++	  [[ $opt[-1] = undefined-key ]] && bindkey "$3" "$1"
++	else
++	  bindkey "$3" "$1"
++	fi
++	shift 3
++      done
++      ;;	 
+     key)
+       if [[ $# -lt 2 ]]; then
+         echo "$0: missing keys"
+@@ -416,7 +447,7 @@
+       shift _i_line
+       case $_i_tag in
+       (\#compdef)
+-	if [[ $_i_line[1] = -[pPk](n|) ]]; then
++	if [[ $_i_line[1] = -[pPkK](n|) ]]; then
+ 	  compdef ${_i_line[1]}na "${_i_file:t}" "${(@)_i_line[2,-1]}"
+ 	else
+ 	  compdef -na "${_i_file:t}" "${_i_line[@]}"
+--- Doc/Zsh/w2compsys.yo	Wed Sep 29 17:05:00 1999
++++ Doc/Zsh/compsys.yo	Wed Sep 29 17:25:19 1999
+@@ -176,6 +176,22 @@
+ name as the file and can also be bound to other keys using tt(bindkey) 
+ as usual.
+ )
++item(tt(#compdef -K) var(widget-name) var(style) var(key-sequences) ...)(
++This is similar to tt(-k), with the same var(style) and var(key-sequences)
++arguments arguments, preceeded by a string giving the name of a widget.
++In this case only one var(key-sequences) argument may be given, but the
++entire set of three arguments may be repeated with a different set of
++arguments.  In particular, the var(widget-name) must be distinct in each
++set.  It should begin with `tt(_)', else one will be added, and should not
++clash with the name of any existing widget: names based on the name of the
++function are most useful.  For example,
++
++example(#compdef -K _foo_complete complete-word "^X^C" \ 
++  _foo_list list-choices "^X^D")
++
++(all on one line) defines a widget tt(_foo_complete) for completion, bound
++to `tt(^X^C)', and a widget tt(_foo_list) for listing, bound to `tt(^X^D)'.
++)
+ item(tt(#autoload))(
+ This is used for files defining utility function that are not to be
+ called directly as completion functions but should be loaded automatically
+@@ -201,7 +217,8 @@
+ xitem(tt(compdef -d) var(names...))
+ xitem(tt(compdef -p) [ tt(-a) ] var(function pattern))
+ xitem(tt(compdef -P) [ tt(-a) ] var(function pattern))
+-item(tt(compdef -k) [ tt(-a) ] var(function style key-sequences...))(
++xitem(tt(compdef -k) [ tt(-an) ] var(function style key-sequences...))
++item(tt(compdef -K) [ tt(-an) ] var(function name style key-sequences ...))(
+ The first form tells the completion system to call the given
+ var(function) when completing for the contexts or commands
+ whose var(names) are given:  this is like the tt(#compdef) tag.  If the
+@@ -209,16 +226,16 @@
+ contexts or commands will not be altered.  These definitions can be deleted
+ by giving the tt(-d) option as in the second form.
+ 
+-The third form is similar to the first, but var(function) will be called
+-for all commands whose name matches the var(pattern); this is like the
+-tt(#compdef -p) function tag.
++The form with tt(-p) is similar to the first, but var(function) will be
++called for all commands whose name matches the var(pattern); this is like
++the tt(#compdef -p) function tag.
+ 
+-The fourth form is like the third, but the var(function) will be
++The form with tt(-P) is like the third, but the var(function) will be
+ called only if no function for the command itself was found or if one
+ was found and it set the tt(_compskip) parameter to a value em(not)
+ containing the substring `tt(patterns)'.
+ 
+-The fifth form defines a widget with the same name as the var(function)
++The form with tt(-k) defines a widget with the same name as the var(function)
+ which will be called for each of the var(key-sequences); this is like the
+ tt(#compdef -k) tag.  The function should generate the completions needed
+ and will otherwise behave like the builtin widget whose name is given as
+@@ -229,6 +246,12 @@
+ tt(menu-select) if the tt(complist) module is loaded.  The option tt(-n)
+ prevents the key being bound if it is already to bound to something other
+ than tt(undefined-key).
++
++The form with tt(-K) is similar and defines multiple widgets based on the
++same var(function), each of which requires the set of three arguments
++var(name), var(style) and var(key-sequences), where the latter two are as
++for tt(-k) and the first must be a unique widget name beginning with an
++underscore.
+ 
+ In each of the forms supporting it the tt(-a) option makes the
+ var(function) autoloadable (exactly equivalent to
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

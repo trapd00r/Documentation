@@ -1,0 +1,389 @@
+From zsh-workers-return-17081-mason-zsh=primenet.com.au@sunsite.dk Tue May 07 11:25:58 2002
+Return-Path: <zsh-workers-return-17081-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27439 invoked from network); 7 May 2002 11:25:56 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 7 May 2002 11:25:56 -0000
+Received: (qmail 22397 invoked by alias); 7 May 2002 11:25:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17081
+Received: (qmail 22386 invoked from network); 7 May 2002 11:25:44 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: zselect builtin.
+Date: Tue, 07 May 2002 12:25:15 +0100
+Message-ID: <17029.1020770715@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+Here's a builtin to act as a front end to a `select' system call.  The
+name clash with the `select' builtin is unfortunate but seems inevitable
+--- trying to disguise the system operation underneath looks pointless,
+although I could call it zpoll if I implemented the poll-based version.
+
+Any comments before I commit this?
+
+Index: Src/Modules/zselect.c
+===================================================================
+RCS file: Src/Modules/zselect.c
+diff -N Src/Modules/zselect.c
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Src/Modules/zselect.c	7 May 2002 11:22:22 -0000
+@@ -0,0 +1,268 @@
++/*
++ * zselect.c - builtin support for select system call
++ *
++ * This file is part of zsh, the Z shell.
++ *
++ * Copyright (c) 1998-2001 Peter Stephenson
++ * All rights reserved.
++ *
++ * Permission is hereby granted, without written agreement and without
++ * license or royalty fees, to use, copy, modify, and distribute this
++ * software and to distribute modified versions of this software for any
++ * purpose, provided that the above copyright notice and the following
++ * two paragraphs appear in all copies of this software.
++ *
++ * In no event shall Peter Stephenson or the Zsh Development
++ * Group be liable to any party for direct, indirect, special, incidental,
++ * or consequential damages arising out of the use of this software and
++ * its documentation, even if Peter Stephenson, and the Zsh
++ * Development Group have been advised of the possibility of such damage.
++ *
++ * Peter Stephenson and the Zsh Development Group specifically
++ * disclaim any warranties, including, but not limited to, the implied
++ * warranties of merchantability and fitness for a particular purpose.  The
++ * software provided hereunder is on an "as is" basis, and Peter Stephenson
++ * and the Zsh Development Group have no obligation to provide maintenance,
++ * support, updates, enhancements, or modifications.
++ *
++ */
++
++#include "zselect.mdh"
++#include "zselect.pro"
++
++/* Helper functions */
++
++/*
++ * Handle an fd by adding it to the current fd_set.
++ * Return 1 for error (after printing a message), 0 for OK.
++ */
++static int
++handle_digits(char *nam, char *argptr, fd_set *fdset, int *fdcount,
++	      int *fdmax)
++{
++    int fd;
++    char *endptr;
++
++    if (!isdigit(STOUC(*argptr))) {
++	zwarnnam(nam, "expecting file descriptor: %s", argptr, 0);
++	return 1;
++    }
++    fd = (int)zstrtol(argptr, &endptr, 10);
++    if (*endptr) {
++	zwarnnam(nam, "garbage after file descriptor: %s", endptr, 0);
++	return 1;
++    }
++
++    FD_SET(fd, fdset);
++    (*fdcount)++;
++    if (fd+1 > *fdmax)
++	*fdmax = fd+1;
++    return 0;
++}
++
++/* The builtin itself */
++
++/**/
++static int
++bin_zselect(char *nam, char **args, char *ops, int func)
++{
++#ifdef HAVE_SELECT
++    int i, fd, fdsetind = 0, fdcount = 0, fdmax = 0;
++    fd_set fdset[3];
++    const char fdchar[3] = "rwe";
++    struct timeval tv, *tvptr = NULL;
++    char *outarray = "reply", **outdata, **outptr;
++    LinkList fdlist;
++
++    for (i = 0; i < 3; i++)
++	FD_ZERO(fdset+i);
++
++    for (; *args; args++) {
++	char *argptr = *args, *endptr;
++	zlong tempnum;
++	if (*argptr == '-') {
++	    for (argptr++; *argptr; argptr++) {
++		switch (*argptr) {
++		    /*
++		     * Array name for reply, if not $reply.
++		     * This gets set to e.g. `-r 0 -w 1' if 0 is ready
++		     * for reading and 1 is ready for writing.
++		     */
++		case 'a':
++		    if (argptr[1])
++			argptr++;
++		    else if (args[1]) {
++			argptr = *++args;
++		    } else {
++			zwarnnam(nam, "argument expected after -%c", NULL,
++				 *argptr);
++			return 1;
++		    }
++		    if (idigit(*argptr) || !isident(argptr)) {
++			zwarnnam(nam, "invalid array name: %s", argptr, 0);
++			return 1;
++		    }
++		    outarray = argptr;
++		    /* set argptr to next to last char because of increment */
++		    while (argptr[1])
++			argptr++;
++		    break;
++
++		    /* Following numbers indicate fd's for reading */
++		case 'r':
++		    fdsetind = 0;
++		    break;
++
++		    /* Following numbers indicate fd's for writing */
++		case 'w':
++		    fdsetind = 1;
++		    break;
++
++		    /* Following numbers indicate fd's for errors */
++		case 'e':
++		    fdsetind = 2;
++		    break;
++
++		    /*
++		     * Get a timeout value in hundredths of a second
++		     * (same units as KEYTIMEOUT).  0 means just poll.
++		     * If not given, blocks indefinitely.
++		     */
++		case 't':
++		    if (argptr[1])
++			argptr++;
++		    else if (args[1]) {
++			argptr = *++args;
++		    } else {
++			zwarnnam(nam, "argument expected after -%c", NULL, 
++				 *argptr);
++			return 1;
++		    }
++		    if (!idigit(*argptr)) {
++			zwarnnam(nam, "number expected after -t", NULL, 0);
++			return 1;
++		    }
++		    tempnum = zstrtol(argptr, &endptr, 10);
++		    if (*endptr) {
++			zwarnnam(nam, "garbage after -t argument: %s",
++				 endptr, 0);
++			return 1;
++		    }
++		    /* timevalue now active */
++		    tvptr = &tv;
++		    tv.tv_sec = (long)(tempnum / 100);
++		    tv.tv_usec = (long)(tempnum % 100) * 10000L;
++
++		    /* remember argptr is incremented at end of loop */
++		    argptr = endptr - 1;
++		    break;
++
++		    /* Digits following option without arguments are fd's. */
++		default:
++		    if (handle_digits(nam, argptr, fdset+fdsetind,
++				      &fdcount, &fdmax))
++			return 1;
++		}
++	    }
++	} else if (handle_digits(nam, argptr, fdset+fdsetind, &fdcount,
++				 &fdmax))
++	    return 1;
++    }
++
++    if (!fdcount) {
++	/* No fd's selected. Not an error, but not succesful. */
++	return 1;
++    }
++
++    errno = 0;
++    do {
++	i = select(fdmax, (SELECT_ARG_2_T)fdset, (SELECT_ARG_2_T)(fdset+1),
++		   (SELECT_ARG_2_T)(fdset+2), tvptr);
++    } while (i < 0 && errno == EINTR && !errflag);
++
++    if (i <= 0) {
++	if (i < 0)
++	    zwarnnam(nam, "error on select: %e", NULL, errno);
++	/* else no fd's set.  Presumably a timeout. */
++	return 1;
++    }
++
++    /*
++     * Make a linked list of all file descriptors which are ready.
++     * These go into an array preceded by -r, -w or -e for read, write,
++     * error as appropriate.  Typically there will only be one set
++     * so this looks rather like overkill.
++     */
++    fdlist = znewlinklist();
++    for (i = 0; i < 3; i++) {
++	int doneit = 0;
++	for (fd = 0; fd < fdmax; fd++) {
++	    if (FD_ISSET(fd, fdset+i)) {
++		char buf[BDIGBUFSIZE];
++		if (!doneit) {
++		    buf[0] = '-';
++		    buf[1] = fdchar[i];
++		    buf[2] = 0;
++		    zaddlinknode(fdlist, ztrdup(buf));
++		    doneit = 1;
++		}
++		convbase(buf, fd, 10);
++		zaddlinknode(fdlist, ztrdup(buf));
++	    }
++	}
++    }
++
++    /* convert list to array */
++    fdcount = countlinknodes(fdlist);
++    outptr = outdata = (char **)zalloc(fdcount*sizeof(char *));
++    while (nonempty(fdlist))
++	*outptr++ = getlinknode(fdlist);
++    *outptr = '\0';
++    /* and store in array parameter */
++    setaparam(outarray, outdata);
++    freelinklist(fdlist, NULL);
++
++    return 0;
++#else
++    /* TODO: use poll */
++    zerrnam(nam, "your system does not implement the select system call.",
++	    NULL, );
++    return 2;
++#endif
++}
++
++static struct builtin bintab[] = {
++    BUILTIN("zselect", 0, bin_zselect, 0, -1, 0, NULL, NULL),
++};
++
++/* The load/unload routines required by the zsh library interface */
++
++/**/
++int
++setup_(Module m)
++{
++    return 0;
++}
++
++/**/
++int
++boot_(Module m)
++{
++    return !addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++}
++
++
++/**/
++int
++cleanup_(Module m)
++{
++    deletebuiltins("zselect", bintab, sizeof(bintab)/sizeof(*bintab));
++    return 0;
++}
++
++/**/
++int
++finish_(Module m)
++{
++    return 0;
++}
+Index: Src/Modules/zselect.mdd
+===================================================================
+RCS file: Src/Modules/zselect.mdd
+diff -N Src/Modules/zselect.mdd
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Src/Modules/zselect.mdd	7 May 2002 11:22:22 -0000
+@@ -0,0 +1,6 @@
++name=zsh/zselect
++link=dynamic
++load=no
++
++objects="zselect.o"
++autobins="zselect"
+Index: Doc/Zsh/mod_zselect.yo
+===================================================================
+RCS file: Doc/Zsh/mod_zselect.yo
+diff -N Doc/Zsh/mod_zselect.yo
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Doc/Zsh/mod_zselect.yo	7 May 2002 11:22:22 -0000
+@@ -0,0 +1,49 @@
++COMMENT(!MOD!zsh/zselect
++Block and return when file descriptors are ready.
++!MOD!)
++The tt(zsh/zselect) module makes available one builtin command:
++
++startitem()
++findex(zselect)
++cindex(select, system call)
++cindex(file descriptors, waiting for)
++item(tt(zselect) [ tt(-rwe) tt(-t) var(timeout) tt(-a) var(array) ] [ var(fd) ... ])(
++The tt(zselect) builtin is a front-end to the `select' system call, which
++blocks until a file descriptor is ready for reading or writing, or has an
++error condition, with an optional timeout.  If this is not available on
++your system, the command prints an error message and returns status 2
++(normal errors return status 1).  For more information, see your systems
++documentation for manref(select)(3).  Note there is no connection with the
++shell builtin of the same name.
++
++Arguments and options may be intermingled in any order.  Non-option
++arguments are file descriptors, which must be decimal integers.  By
++default, file descriptors are to be tested for reading, i.e. tt(zselect)
++will return when data is availble to be read from the file descriptor, or
++more precisely, when a read operation from the file descriptor will not
++block.  After a tt(-r), tt(-w) and tt(-e), the given file descriptors are
++to be tested for reading, writing, or error conditions.  These options and
++an arbitrary list of file descriptors may be given in any order.
++
++The option `tt(-t) var(timeout)' specifies a timeout in hundredths of a
++second.  This may be zero, in which case the file descriptors will simply
++be polled and tt(zselect) will return immediately.
++
++The option `tt(-a) var(array)' indicates that tt(array) should be set to
++indicate the file descriptor(s) which are ready.  If the option is not
++given, the array tt(reply) will be used for this purpose.  The array will
++contain a string similar to the arguments for tt(zselect).  For example,
++
++example(zselect -t 0 -r 0 -w 1)
++
++might return immediately with status 0 and tt($reply) containing `tt(-r 0 -w
++1)' to show that both file descriptors are ready for the requested
++operations.
++
++The command returns 0 if some file descriptors are ready for reading.  If
++the operation timed out, or a timeout of 0 was given and no file
++descriptors were ready, or there was an error, it returns status 1 and
++the array will not be set (nor modified in any way).  If there was an error
++in the select operation the appropriate error message is printed.
++)
++enditem()
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

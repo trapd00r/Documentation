@@ -1,0 +1,529 @@
+From zsh-workers-return-13215-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Dec 03 20:48:56 2000
+Return-Path: <zsh-workers-return-13215-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 21435 invoked from network); 3 Dec 2000 20:48:54 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Dec 2000 20:48:54 -0000
+Received: (qmail 23988 invoked by alias); 3 Dec 2000 20:48:45 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13215
+Received: (qmail 23979 invoked from network); 3 Dec 2000 20:48:44 -0000
+Date: Sun, 3 Dec 2000 15:48:42 -0500
+From: Clint Adams <schizo@debian.org>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: termcap/terminfo support in modules
+Message-ID: <20001203154842.B23776@dman.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.2.5i
+
+This is my attempt to get the echotc builtin out of the core
+and to provide a terminfo equivalent, as well as a terminfo parameter.
+The goal is to be able to do something like this in a startup script:
+
+bindkey -M emacs "$terminfo[kdch1]" delete-char
+
+There is an obvious lack of error-checking, but I digress.
+
+Documentation will follow in some number of hours.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.38
+diff -u -r1.38 builtin.c
+--- Src/builtin.c	2000/11/11 19:50:28	1.38
++++ Src/builtin.c	2000/12/03 20:33:07
+@@ -55,7 +55,6 @@
+     BUILTIN("disable", 0, bin_enable, 0, -1, BIN_DISABLE, "afmr", NULL),
+     BUILTIN("disown", 0, bin_fg, 0, -1, BIN_DISOWN, NULL, NULL),
+     BUILTIN("echo", BINF_PRINTOPTS | BINF_ECHOPTS, bin_print, 0, -1, BIN_ECHO, "neE", "-"),
+-    BUILTIN("echotc", 0, bin_echotc, 1, -1, 0, NULL, NULL),
+     BUILTIN("emulate", 0, bin_emulate, 1, 1, 0, "LR", NULL),
+     BUILTIN("enable", 0, bin_enable, 0, -1, BIN_ENABLE, "afmr", NULL),
+     BUILTIN("eval", BINF_PSPECIAL, bin_eval, 0, -1, BIN_EVAL, NULL, NULL),
+@@ -2896,76 +2895,6 @@
+ 	fputc(ops['N'] ? '\0' : '\n', fout);
+     if (fout != stdout)
+ 	fclose(fout);
+-    return 0;
+-}
+-
+-/* echotc: output a termcap */
+-
+-/**/
+-int
+-bin_echotc(char *name, char **argv, char *ops, int func)
+-{
+-    char *s, buf[2048], *t, *u;
+-    int num, argct;
+-
+-    s = *argv++;
+-    if (termflags & TERM_BAD)
+-	return 1;
+-    if ((termflags & TERM_UNKNOWN) && (isset(INTERACTIVE) || !init_term()))
+-	return 1;
+-    /* if the specified termcap has a numeric value, display it */
+-    if ((num = tgetnum(s)) != -1) {
+-	printf("%d\n", num);
+-	return 0;
+-    }
+-    /* if the specified termcap is boolean, and set, say so  *
+-     * ncurses can tell if an existing boolean capability is *
+-     * off so in this case we print "no".                    */
+-#if !defined(NCURSES_VERSION) || !defined(COLOR_PAIR)
+-    if (tgetflag(s) > 0) {
+-	puts("yes");
+-	return (0);
+-    }
+-#else /* NCURSES_VERSION && COLOR_PAIR */
+-    switch (tgetflag(s)) {
+-    case -1:
+-	break;
+-    case 0:
+-	puts("no");
+-	return 0;
+-    default:
+-	puts("yes");
+-	return 0;
+-    }
+-#endif /* NCURSES_VERSION && COLOR_PAIR */
+-    /* get a string-type capability */
+-    u = buf;
+-    t = tgetstr(s, &u);
+-    if (!t || !*t) {
+-	/* capability doesn't exist, or (if boolean) is off */
+-	zwarnnam(name, "no such capability: %s", s, 0);
+-	return 1;
+-    }
+-    /* count the number of arguments required */
+-    for (argct = 0, u = t; *u; u++)
+-	if (*u == '%') {
+-	    if (u++, (*u == 'd' || *u == '2' || *u == '3' || *u == '.' ||
+-		      *u == '+'))
+-		argct++;
+-	}
+-    /* check that the number of arguments provided is correct */
+-    if (arrlen(argv) != argct) {
+-	zwarnnam(name, (arrlen(argv) < argct) ? "not enough arguments" :
+-		 "too many arguments", NULL, 0);
+-	return 1;
+-    }
+-    /* output string, through the proper termcap functions */
+-    if (!argct)
+-	tputs(t, 1, putraw);
+-    else {
+-	num = (argv[1]) ? atoi(argv[1]) : atoi(*argv);
+-	tputs(tgoto(t, atoi(*argv), num), num, putraw);
+-    }
+     return 0;
+ }
+ 
+Index: Src/Modules/termcap.c
+===================================================================
+RCS file: termcap.c
+diff -N termcap.c
+--- /dev/null	Tue May  5 13:32:27 1998
++++ termcap.c	Sun Dec  3 12:33:07 2000
+@@ -0,0 +1,134 @@
++/*
++ * termcap.c - termcap manipulation through curses
++ *
++ * This file is part of zsh, the Z shell.
++ *
++ * Copyright (c) 1992-1997 Paul Falstad
++ * All rights reserved.
++ *
++ * Permission is hereby granted, without written agreement and without
++ * license or royalty fees, to use, copy, modify, and distribute this
++ * software and to distribute modified versions of this software for any
++ * purpose, provided that the above copyright notice and the following
++ * two paragraphs appear in all copies of this software.
++ *
++ * In no event shall Paul Falstad or the Zsh Development Group be liable
++ * to any party for direct, indirect, special, incidental, or consequential
++ * damages arising out of the use of this software and its documentation,
++ * even if Paul Falstad and the Zsh Development Group have been advised of
++ * the possibility of such damage.
++ *
++ * Paul Falstad and the Zsh Development Group specifically disclaim any
++ * warranties, including, but not limited to, the implied warranties of
++ * merchantability and fitness for a particular purpose.  The software
++ * provided hereunder is on an "as is" basis, and Paul Falstad and the
++ * Zsh Development Group have no obligation to provide maintenance,
++ * support, updates, enhancements, or modifications.
++ *
++ */
++
++#include "termcap.mdh"
++#include "termcap.pro"
++
++/* echotc: output a termcap */
++
++/**/
++int
++bin_echotc(char *name, char **argv, char *ops, int func)
++{
++    char *s, buf[2048], *t, *u;
++    int num, argct;
++
++    s = *argv++;
++    if (termflags & TERM_BAD)
++	return 1;
++    if ((termflags & TERM_UNKNOWN) && (isset(INTERACTIVE) || !init_term()))
++	return 1;
++    /* if the specified termcap has a numeric value, display it */
++    if ((num = tgetnum(s)) != -1) {
++	printf("%d\n", num);
++	return 0;
++    }
++    /* if the specified termcap is boolean, and set, say so  *
++     * ncurses can tell if an existing boolean capability is *
++     * off so in this case we print "no".                    */
++#if !defined(NCURSES_VERSION) || !defined(COLOR_PAIR)
++    if (tgetflag(s) > 0) {
++	puts("yes");
++	return (0);
++    }
++#else /* NCURSES_VERSION && COLOR_PAIR */
++    switch (tgetflag(s)) {
++    case -1:
++	break;
++    case 0:
++	puts("no");
++	return 0;
++    default:
++	puts("yes");
++	return 0;
++    }
++#endif /* NCURSES_VERSION && COLOR_PAIR */
++    /* get a string-type capability */
++    u = buf;
++    t = tgetstr(s, &u);
++    if (!t || !*t) {
++	/* capability doesn't exist, or (if boolean) is off */
++	zwarnnam(name, "no such capability: %s", s, 0);
++	return 1;
++    }
++    /* count the number of arguments required */
++    for (argct = 0, u = t; *u; u++)
++	if (*u == '%') {
++	    if (u++, (*u == 'd' || *u == '2' || *u == '3' || *u == '.' ||
++		      *u == '+'))
++		argct++;
++	}
++    /* check that the number of arguments provided is correct */
++    if (arrlen(argv) != argct) {
++	zwarnnam(name, (arrlen(argv) < argct) ? "not enough arguments" :
++		 "too many arguments", NULL, 0);
++	return 1;
++    }
++    /* output string, through the proper termcap functions */
++    if (!argct)
++	tputs(t, 1, putraw);
++    else {
++	num = (argv[1]) ? atoi(argv[1]) : atoi(*argv);
++	tputs(tgoto(t, atoi(*argv), num), num, putraw);
++    }
++    return 0;
++}
++
++static struct builtin bintab[] = {
++    BUILTIN("echotc", 0, bin_echotc, 1, -1, 0, NULL, NULL),
++};
++
++/**/
++int
++setup_(Module m)
++{
++    return 0;
++}
++
++/**/
++int
++boot_(Module m)
++{
++    return !addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++}
++
++/**/
++int
++cleanup_(Module m)
++{
++    deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++    return 0;
++}
++
++/**/
++int
++finish_(Module m)
++{
++    return 0;
++}
+Index: Src/Modules/termcap.mdd
+===================================================================
+RCS file: termcap.mdd
+diff -N termcap.mdd
+--- /dev/null	Tue May  5 13:32:27 1998
++++ termcap.mdd	Sun Dec  3 12:33:07 2000
+@@ -0,0 +1,7 @@
++name=zsh/termcap
++link=either
++load=yes
++
++autobins="echotc"
++
++objects="termcap.o"
+Index: Src/Modules/terminfo.c
+===================================================================
+RCS file: terminfo.c
+diff -N terminfo.c
+--- /dev/null	Tue May  5 13:32:27 1998
++++ terminfo.c	Sun Dec  3 12:33:07 2000
+@@ -0,0 +1,226 @@
++/*
++ * terminfo.c - parameter interface to terminfo via curses
++ *
++ * This file is part of zsh, the Z shell.
++ *
++ * Copyright (c) 2000 Sven Wishnowsky, Clint Adams
++ * All rights reserved.
++ *
++ * Permission is hereby granted, without written agreement and without
++ * license or royalty fees, to use, copy, modify, and distribute this
++ * software and to distribute modified versions of this software for any
++ * purpose, provided that the above copyright notice and the following
++ * two paragraphs appear in all copies of this software.
++ *
++ * In no event shall Sven Wishnowsky, Clint Adams or the Zsh Development Group
++ * be liable to any party for direct, indirect, special, incidental, or
++ * consequential damages arising out of the use of this software and its
++ * documentation, even if Sven Wishnowsky, Clint Adams and the Zsh
++ * Development Group have been advised of the possibility of such damage.
++ *
++ * Sven Wishnowsky, Clint Adams and the Zsh Development Group specifically
++ * disclaim any warranties, including, but not limited to, the implied
++ * warranties of merchantability and fitness for a particular purpose.
++ * The software provided hereunder is on an "as is" basis, and Sven
++ * Wishnowsky, Clint Adams and the Zsh Development Group have no obligation
++ * to provide maintenance, support, updates, enhancements, or modifications.
++ *
++ */
++
++#include "terminfo.mdh"
++#include "terminfo.pro"
++
++static char terminfo_nam[] = "terminfo";
++static Param terminfo_pm;
++
++/* echoti: output a terminfo capability */
++
++/**/
++int
++bin_echoti(char *name, char **argv, char *ops, int func)
++{
++    char *s, buf[2048], *t, *u;
++    int num, argct;
++    
++    s = *argv++;
++    if (termflags & TERM_BAD)
++	return 1;
++    if ((termflags & TERM_UNKNOWN) && (isset(INTERACTIVE) || !init_term()))
++	return 1;
++    /* if the specified capability has a numeric value, display it */
++    if (((num = tigetnum(s)) != -1) && (num != -2)) {
++    printf("%d\n", num);
++    return 0;
++}
++
++switch (tigetflag(s)) {
++ case -1:
++     break;
++ case 0:
++     puts("no");
++     return 0;
++ default:
++     puts("yes");
++     return 0;
++}
++
++/* get a string-type capability */
++t = tigetstr(s);
++if (!t || !*t) {
++    /* capability doesn't exist, or (if boolean) is off */
++    zwarnnam(name, "no such terminfo capability: %s", s, 0);
++    return 1;
++}
++
++printf("%s", t);
++return 0;
++}
++
++static struct builtin bintab[] = {
++BUILTIN("echoti", 0, bin_echoti, 1, -1, 0, NULL, NULL),
++    };
++
++/* This says if we are cleaning up when the module is unloaded. */
++
++static int incleanup;
++
++/* Empty dummy function for special hash parameters. */
++
++/**/
++static void
++shempty(void)
++{
++}
++
++/* Create a simple special hash parameter. */
++
++/**/
++static Param
++createtihash()
++{
++    Param pm;
++    HashTable ht;
++
++    unsetparam(terminfo_nam);
++    
++    if (!(pm = createparam(terminfo_nam, PM_SPECIAL|PM_HIDE|PM_HIDEVAL|
++			   PM_REMOVABLE|PM_HASHED)))
++	return NULL;
++    
++    pm->level = pm->old ? locallevel : 0;
++    pm->gets.hfn = hashgetfn;
++    pm->sets.hfn = hashsetfn;
++    pm->unsetfn = stdunsetfn;
++    pm->u.hash = ht = newhashtable(7, terminfo_nam, NULL);
++    
++    ht->hash        = hasher;
++    ht->emptytable  = (TableFunc) shempty;
++    ht->filltable   = NULL;
++    ht->addnode     = (AddNodeFunc) shempty;
++    ht->getnode     = ht->getnode2 = getterminfo;
++    ht->removenode  = (RemoveNodeFunc) shempty;
++    ht->disablenode = NULL;
++    ht->enablenode  = NULL;
++    ht->freenode    = (FreeNodeFunc) shempty;
++    ht->printnode   = printparamnode;
++    ht->scantab     = scanterminfo;
++
++    return (terminfo_pm = pm);
++}
++
++/**/
++static HashNode
++getterminfo(HashTable ht, char *name)
++{
++    int len, num;
++    char *tistr;
++    Param pm = NULL;
++
++    if (termflags & TERM_BAD)
++	return 1;
++    if ((termflags & TERM_UNKNOWN) && (isset(INTERACTIVE) || !init_term()))
++	return 1;
++
++    unmetafy(name, &len);
++
++    pm = (Param) zhalloc(sizeof(struct param));
++    pm->nam = dupstring(name);
++    pm->flags = PM_READONLY;
++    pm->sets.cfn = NULL;
++    pm->gets.cfn = strgetfn;
++    pm->unsetfn = NULL;
++    pm->ct = 0;
++    pm->env = NULL;
++    pm->ename = NULL;
++    pm->old = NULL;
++    pm->level = 0;
++
++    if (((num = tigetnum(name)) != -1) && (num != -2)) {
++	pm->u.val = num;
++	pm->flags |= PM_INTEGER;
++    }
++    else if ((num = tigetflag(name)) != -1) {
++	pm->u.str = num ? dupstring("yes") : dupstring("no");
++	pm->flags |= PM_SCALAR;
++    }
++    else if ((tistr = tigetstr(name)) != NULL)
++    {
++	pm->u.str = dupstring(tistr);
++	pm->flags |= PM_SCALAR;
++    }
++    else
++    {
++    zwarn("no such capability: %s", name, 0);
++    pm->u.str = dupstring("");
++    pm->flags |= PM_UNSET;
++    }
++    return (HashNode) pm;
++
++}
++
++/**/
++static void
++scanterminfo(HashTable ht, ScanFunc func, int flags)
++{
++return 0;	    
++}
++
++/**/
++int
++setup_(Module m)
++{
++    incleanup = 0;
++
++    return 0;
++}
++
++/**/
++int
++boot_(Module m)
++{
++    return !createtihash() || !addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++}
++
++/**/
++int
++cleanup_(Module m)
++{
++    Param pm;
++
++    incleanup = 1;
++
++	if ((pm = (Param) paramtab->getnode(paramtab, terminfo_nam)) &&
++	    pm == terminfo_pm) {
++	    pm->flags &= ~PM_READONLY;
++	    unsetparam_pm(pm, 0, 1);
++	}
++    deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++    return 0;
++}
++
++/**/
++int
++finish_(Module m)
++{
++    return 0;
++}
+Index: Src/Modules/terminfo.mdd
+===================================================================
+RCS file: terminfo.mdd
+diff -N terminfo.mdd
+--- /dev/null	Tue May  5 13:32:27 1998
++++ terminfo.mdd	Sun Dec  3 12:33:07 2000
+@@ -0,0 +1,8 @@
++name=zsh/terminfo
++link=either
++load=yes
++
++autobins="echoti"
++autoparams="terminfo"
++
++objects="terminfo.o"
+

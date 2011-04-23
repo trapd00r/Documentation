@@ -1,0 +1,226 @@
+From zsh-workers-return-6995-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jul 07 08:15:53 1999
+Return-Path: <zsh-workers-return-6995-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9092 invoked from network); 7 Jul 1999 08:15:51 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 7 Jul 1999 08:15:51 -0000
+Received: (qmail 624 invoked by alias); 7 Jul 1999 08:15:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6995
+Received: (qmail 617 invoked from network); 7 Jul 1999 08:15:40 -0000
+Date: Wed, 7 Jul 1999 10:15:38 +0200 (MET DST)
+Message-Id: <199907070815.KAA08971@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Enhancing math expressions a bit
+
+
+I was finally tired of using tests like [[ '#key' -eq 8 ]], so this
+changes getkeystring() so that it can also parse only one character
+(btw, maybe we should turn the `fromwhere' argument into a flags
+argument and add some constants some day). The it makes math mode use
+this function to get the ASCII-value of a character. I.e. you can now
+say [[ '#key' -eq '#\\C-h' ]] and things like that.
+
+I'm not sure if this is the way to go, but the change to
+getkeystring() may be interesting to have in other places to and the
+change in math.c is then trivial. I was first thinking about an option 
+for `read' so that it returns strings like `C-h', dunno if this is
+better. If we once agree to use this patch, we should probably change
+the `keys' special parameter to a special scalar with just the literal 
+characters. Maybe we should also add an option to some builtin to get
+a human-readable form for the n'th character.
+
+Ok, with the last patch and the one below, I hacked these two widgets
+(they are probably a bit silly). I was tempted to put them into files
+in a directory `Widgets' and stick something like `#widdef' or
+`#zledef' in front, as if we were able to auto-autoload such things. I 
+would really like to generalise the completion-auot-loading code some
+day...
+
+This allows you to type a file-pattern step by step and displays all
+matching files below the prompt. Hitting return inserts all matched
+files in the command line. I just wanted to test the list-display-code.
+
+zle -N insert-files
+insert-files() {
+  local key str files
+
+  files=( *(N) )
+  if (( $#files )); then
+    zle -R "files: ${str}_" "$files[@]"
+  else
+    zle -R "files: ${str}_ (failed)"
+  fi
+  read -k key
+  while [[ '#key' -ne '#\\r' && '#key' -ne '#\\n' &&
+           '#key' -ne '#\\C-g' ]]; do
+    if [[ '#key' -eq '#\\C-h' || '#key' -eq '#\\C-?' ]]; then
+      [[ -n "$str" ]] && str="$str[1,-2]"
+    else
+      str="$str$key"
+    fi
+    files=( ${~str}*(N) )
+    if (( $#files )); then
+      zle -R "files: ${str}_" "$files[@]"
+    else
+      zle -R "files: ${str}_ (failed)"
+    fi
+    read -k key
+  done
+  zle -Rc
+  if [[ '#key' -ne '#\\C-g' && $#files -gt 0 ]]; then
+    [[ "$LBUFFER[-1]" = ' ' ]] || files=('' "$files[@]")
+    LBUFFER="$LBUFFER$files "
+  fi
+}
+
+
+Is your machine fast enough? If so you can try this one. Just start it 
+and it will attempt completion after every character you type, showing 
+the list of matches. There are even some configuration keys, although
+it should work with compctl, too.
+
+zle -N incremental-complete-word
+incremental-complete-word() {
+  local key lbuf="$LBUFFER" rbuf="$RBUFFER" pmpt
+
+  [[ -n "$compconfig[incremental_completer]" ]] &&
+      set ${(s.:.)compconfig[incremental_completer]}
+  pmpt="${compconfig[incremental_prompt]-incremental completion...}"
+
+  zle list-choices
+  zle -R "$pmpt"
+  read -k key
+
+  while [[ '#key' -ne '#\\r' && '#key' -ne '#\\n' &&
+           '#key' -ne '#\\C-g' ]]; do
+    if [[ "$key" = ${~compconfig[incremental_stop]} ]]; then
+      zle -U "$key"
+      return
+    elif [[ "$key" = ${~compconfig[incremental_break]} ]]; then
+      return
+    elif [[ '#key' -eq '#\\C-h' || '#key' -eq '#\\C-?' ]]; then
+      [[ $#LBUFFER -gt $#l ]] && LBUFFER="$LBUFFER[1,-2]"
+    elif [[ '#key' -eq '#\\t' ]]; then
+      zle complete-word "$@"
+    else
+      LBUFFER="$LBUFFER$key"
+    fi
+    zle list-choices "$@"
+    zle -R "$pmpt"
+    read -k key
+  done
+  if [[ '#key' -eq '#\\C-g' ]]; then
+    LBUFFER="$lbuf"
+    RBUFFER="$rbuf"
+  fi
+  zle -Rc
+}
+
+Bye
+ Sven
+
+diff -u -r kos/math.c Src/math.c
+--- kos/math.c	Wed Jul  7 09:13:15 1999
++++ Src/math.c	Wed Jul  7 09:14:55 1999
+@@ -357,9 +357,11 @@
+ 	    }
+ 	    if (*ptr == '#') {
+ 		if (*++ptr == '\\') {
++		    int v;
++
+ 		    ptr++;
+-		    yyval = *ptr == Meta ? *++ptr ^ 32 : *ptr;
+-		    ptr++;
++		    ptr = getkeystring(ptr, NULL, 6, &v);
++		    uuval = v;
+ 		    unary = 0;
+ 		    return NUM;
+ 		}
+diff -u -r kos/utils.c Src/utils.c
+--- kos/utils.c	Wed Jul  7 09:13:16 1999
++++ Src/utils.c	Wed Jul  7 09:13:49 1999
+@@ -3187,24 +3187,28 @@
+  *   4:  Do $'...' quoting.  Overwrites the existing string instead of
+  *       zhalloc'ing 
+  *   5:  As 2, but \- is special.  Expects misc to be defined.
++ *   6:  As 2, but parses only one character and returns end-pointer
++ *       and parsed character in *misc
+  */
+ 
+ /**/
+ char *
+ getkeystring(char *s, int *len, int fromwhere, int *misc)
+ {
+-    char *buf;
++    char *buf, tmp[1];
+     char *t, *u = NULL;
+     char svchar = '\0';
+     int meta = 0, control = 0;
+ 
+-    if (fromwhere != 4)
+-	buf = zhalloc(strlen(s) + 1);
++    if (fromwhere == 6)
++	t = tmp;
++    else if (fromwhere != 4)
++	t = buf = zhalloc(strlen(s) + 1);
+     else {
+-	buf = s;
++	t = buf = s;
+ 	s += 2;
+     }
+-    for (t = buf; *s; s++) {
++    for (; *s; s++) {
+ 	if (*s == '\\' && s[1]) {
+ 	    switch (*++s) {
+ 	    case 'a':
+@@ -3303,7 +3307,8 @@
+ 	} else if (fromwhere == 4 && *s == Snull) {
+ 	    for (u = t; (*u++ = *s++););
+ 	    return t + 1;
+-	} else if (*s == '^' && (fromwhere == 2 || fromwhere == 5)) {
++	} else if (*s == '^' &&
++		   (fromwhere == 2 || fromwhere == 5 || fromwhere == 6)) {
+ 	    control = 1;
+ 	    continue;
+ 	} else if (*s == Meta)
+@@ -3329,6 +3334,10 @@
+ 	    *t = t[-1] ^ 32;
+ 	    t[-1] = Meta;
+ 	    t++;
++	}
++	if (fromwhere == 6 && t != tmp) {
++	    *misc = (int) tmp[0];
++	    return s + 1;
+ 	}
+     }
+     DPUTS(fromwhere == 4, "BUG: unterminated $' substitution");
+diff -u -r kod/Zsh/arith.yo Doc/Zsh/arith.yo
+--- kod/Zsh/arith.yo	Wed Jul  7 09:13:27 1999
++++ Doc/Zsh/arith.yo	Wed Jul  7 09:13:49 1999
+@@ -74,11 +74,12 @@
+ and XOR operators.
+ 
+ An expression of the form `tt(#\)var(x)' where var(x) is any character
+-gives the ascii value of this character and an expression of the form
+-`tt(#)var(foo)' gives the ascii value of the first character of the value
+-of the parameter var(foo).  Note that this is different from the expression
+-`tt($#)var(foo)', a standard parameter substitution which gives the length
+-of the parameter var(foo).
++sequence such as `tt(a)', `tt(^A)', or `tt(\M-\C-x)' gives the ascii
++value of this character and an expression of the form `tt(#)var(foo)'
++gives the ascii value of the first character of the value of the
++parameter var(foo).  Note that this is different from the expression
++`tt($#)var(foo)', a standard parameter substitution which gives the
++length of the parameter var(foo).
+ 
+ Named parameters and subscripted arrays can be referenced by name within an
+ arithmetic expression without using the parameter expansion syntax.  For
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

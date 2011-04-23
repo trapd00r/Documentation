@@ -1,0 +1,179 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Wed Oct  2 03:38:36 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id DAA03664 for <mason@primenet.com.au>; Wed, 2 Oct 1996 03:38:31 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id NAA05456; Tue, 1 Oct 1996 13:12:01 -0400 (EDT)
+Resent-Date: Tue, 1 Oct 1996 13:12:01 -0400 (EDT)
+From: Louis.Granboulan@ens.fr (Louis Granboulan)
+Message-Id: <199610011711.TAA05214@pleurote.ens.fr>
+Subject: Prompt escape sequences.
+To: zsh-workers@math.gatech.edu
+Date: Tue, 1 Oct 1996 19:11:33 +0200 (MET DST)
+X-Mailer: ELM [version 2.4 PL24 ME8a]
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"Mzhop2.0.7L1.W3LKo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2182
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I wanted to add a new escape sequence %${varname} to print the
+content of a variable. Looking at putpromptchar, I found some
+bugs...
+
+print -P %2147483648v
+	does a segmentation fault because 2147483648 is translated
+	to a negative number by zstrtol.
+	The patch below corrects this bug.
+print -P %-%7-
+	outputs '%-%-' instead of '%-%7-'.
+	I did not correct this behaviour.
+	It may be easy to do.
+print -P 'a\0b'
+	outputs 'a', since \0 ends the string.
+	"print 'a\0b'" does output a null character.
+	I did not correct this behaviour.
+	We may need to rewrite the whole function.
+
+
+*** Src/zle_misc.c.orig	Tue Aug 13 22:24:14 1996
+--- Src/zle_misc.c	Tue Oct  1 19:05:11 1996
+***************
+*** 859,865 ****
+  putpromptchar(int doprint, int endchar)
+  {
+      char buf3[PATH_MAX], *ss;
+!     int t0, arg, test, sep;
+      struct tm *tm;
+      time_t timet;
+      Nameddir nd;
+--- 859,866 ----
+  putpromptchar(int doprint, int endchar)
+  {
+      char buf3[PATH_MAX], *ss;
+!     int t0, test, sep;
+!     unsigned int arg;
+      struct tm *tm;
+      time_t timet;
+      Nameddir nd;
+***************
+*** 894,909 ****
+  		case '.':
+  		case '~':
+  		    if ((nd = finddir(ss))) {
+! 			arg--;
+  			ss += strlen(nd->dir);
+  		    }
+  		case '/':
+  		case 'C':
+  		    for (; *ss; ss++)
+  			if (*ss == '/')
+! 			    arg--;
+! 		    if (arg <= 0)
+! 			test = 1;
+  		    break;
+  		case 't':
+  		case 'T':
+--- 895,909 ----
+  		case '.':
+  		case '~':
+  		    if ((nd = finddir(ss))) {
+! 			test++;
+  			ss += strlen(nd->dir);
+  		    }
+  		case '/':
+  		case 'C':
+  		    for (; *ss; ss++)
+  			if (*ss == '/')
+! 			    test++;
+! 		    test = (arg <= test);
+  		    break;
+  		case 't':
+  		case 'T':
+***************
+*** 1230,1235 ****
+--- 1230,1262 ----
+  		addbufspc(1);
+  		*bp++ = (geteuid())? '%' : '#';
+  		break;
++ 	    case '$':
++ 		if (fm[1] != '{') {
++ 		    *bp++ = '%';
++ 		    *bp++ = '$';
++ 		    break;
++ 		}
++ 		else {
++ 		    char **array, *variable, endname;
++ 		    fm++; variable = fm+1;
++                     while (*fm && *fm != '}') fm++;
++                     /* We don't need to allocate something for the var name */
++                     endname = *fm;
++                     *fm = NULL;
++                     if (arg) {
++ 		        array = getaparam(variable);
++ 		        variable = NULL;
++                         if ( array && (arrlen(array) >= arg) )
++ 		            variable = array[arg-1];
++                     }
++                     else
++ 		      variable = getsparam(variable);
++ 		    stradd(variable ? variable : "");
++                     *fm = endname;
++ 		}
++ 		if(!*fm)
++ 		    return 0;
++ 		break;
+  	    case 'v':
+  		if (!arg)
+  		    arg = 1;
+***************
+*** 1241,1247 ****
+  		break;
+  	    case '_':
+  		if (cmdsp) {
+! 		    if (arg > cmdsp || arg <= 0)
+  			arg = cmdsp;
+  		    for (t0 = cmdsp - arg; arg--; t0++) {
+  			stradd(cmdnames[cmdstack[t0]]);
+--- 1268,1274 ----
+  		break;
+  	    case '_':
+  		if (cmdsp) {
+! 		    if (arg > cmdsp || !arg)
+  			arg = cmdsp;
+  		    for (t0 = cmdsp - arg; arg--; t0++) {
+  			stradd(cmdnames[cmdstack[t0]]);
+*** Doc/zshparam.man.orig	Tue Aug 13 22:24:13 1996
+--- Doc/zshparam.man	Tue Oct  1 19:05:08 1996
+***************
+*** 579,584 ****
+--- 579,589 ----
+  The value of the first element of the $psvar array parameter.  Following
+  the '%' with an integer gives that element of the array.
+  .TP
++ .B %${\fIvarname\fB}
++ The value of the variable $varname.
++ Following the '%' with an integer gives that element of the array.
++ Using the $psvar array is faster.
++ .TP
+  \fB%{\fP...\fB%}\fP
+  Include a string as a literal escape sequence.
+  The string within the braces should not change the cursor
+*** Doc/zsh.texi.orig	Thu Aug 15 18:47:39 1996
+--- Doc/zsh.texi	Tue Oct  1 19:09:00 1996
+***************
+*** 4144,4149 ****
+--- 4144,4154 ----
+  Following the @code{%} with an integer gives that element of the
+  array.
+  
++ @item %$@{@var{varname}@}
++ The value of the variable @code{varname}.
++ Following the @code{%} with an integer gives that element of the array.
++ Using the $psvar array is faster.
++ 
+  @item %@{@dots{}%@}
+  Include a string as a literal escape sequence.  The string within the
+  braces should not change the cursor position.
+

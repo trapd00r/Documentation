@@ -1,0 +1,354 @@
+From zsh-workers-return-19958-mason-zsh=primenet.com.au@sunsite.dk Tue May 18 19:51:35 2004
+Return-Path: <zsh-workers-return-19958-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3395 invoked from network); 18 May 2004 19:51:24 -0000
+Received: from thor.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.86)
+  by ns1.primenet.com.au with SMTP; 18 May 2004 19:51:24 -0000
+Received: (qmail 12367 invoked from network); 18 May 2004 19:51:00 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 18 May 2004 19:51:00 -0000
+Received: (qmail 24227 invoked by alias); 18 May 2004 19:50:57 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19958
+Received: (qmail 24217 invoked from network); 18 May 2004 19:50:57 -0000
+Received: from thor.dotsrc.org (HELO a.mx.sunsite.dk) (qmailr@130.225.247.86)
+  by sunsite.dk with SMTP; 18 May 2004 19:50:54 -0000
+Received: (qmail 12115 invoked from network); 18 May 2004 19:50:54 -0000
+Received: from dsl3-63-249-88-2.cruzio.com (HELO binome.blorf.net) (63.249.88.2)
+  by a.mx.sunsite.dk with SMTP; 18 May 2004 19:50:51 -0000
+Received: by binome.blorf.net (Postfix, from userid 1000)
+	id 3953DB2BB; Tue, 18 May 2004 12:50:47 -0700 (PDT)
+Date: Tue, 18 May 2004 12:50:47 -0700
+From: Wayne Davison <wayned@users.sourceforge.net>
+To: Peter Stephenson <pws@csr.com>
+Cc: zsh-workers@sunsite.dk
+Subject: [PATCH] local history support, take 2
+Message-ID: <20040518195047.GA2578@blorf.net>
+References: <20040515002217.GE22331@blorf.net> <8428.1084879726@csr.com>
+Mime-Version: 1.0
+Content-Type: multipart/mixed; boundary="ZfOjI3PrQbgiZnxM"
+Content-Disposition: inline
+In-Reply-To: <8428.1084879726@csr.com>
+User-Agent: Mutt/1.5.5.1+cvs20040105i
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.0 required=6.0 tests=none autolearn=no version=2.63
+X-Spam-Hits: 0.0
+
+
+--ZfOjI3PrQbgiZnxM
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+On Tue, May 18, 2004 at 12:28:46PM +0100, Peter Stephenson wrote:
+> Well, it does seem to get the history numbers right when reading the
+> file back.
+
+If you mean the original history file, it doesn't read it back -- it
+restores the internal memory back, so everything is just as it was
+before the push.
+
+> You're proposing that you would *only* need the pushhist and pophist
+> functions to manipulate the history?  That sounds a good thing to me.
+
+Yes, I'm liking the idea more and more as I think about it.  I can
+imagine myself using some sub-history files to make certain tasks easier
+to redo.  For instance, if I'm doing a new release of one of my
+projects, I could push to a "release history" file that has those
+commands unobscured by other commands and in an easy-to-reuse order;
+then pop back to the normal history when I'm done.
+
+> Something else that occurs to me is that it would be useful to have the
+> history automatically popped when you leave the function scope.
+
+That would certainly be nice.  It was the reason behind my original
+"setopt localoptions tmphist" idea (which wasn't very flexible).  I
+haven't tried to do this yet, though.
+
+>   history -p 200 100 ~/.zcalc_history
+>   history -P
+
+Seems reasonable to me, so I changed my implementation to work that way.
+I reordered my suggested options to make them a little more flexible:
+
+    history -p [[[HISTFILE] HISTSIZE] SAVEHIST]
+
+This allows the user to get a clean history with "history -p" (with the
+default, new-shell values for HISTFILE, HISTSIZE, and SAVEHIST).  To
+switch to a new file (reading it in) but leaving HISTSIZE and SAVEHIST
+alone (like zcalc does) is now "history -p ~/.zcalc_history".  The
+final abbreviated option is to just set the desired HISTSIZE value
+(after the HISTFILE value) and have it affect both HISTFILE and
+SAVEHIST.
+
+> I could be persuaded to the view that the local behaviour is the right
+> one, so you never need an explicit pop, and the syntax becomes even
+> simpler.
+
+I think it would be nice to both have a pop option and to have that
+option automatically get executed on leaving a function scope if the
+user didn't already run it.  The reason I'm thinking I want an explicit
+option is so I can push/pop the history interactively.
+
+Here's my latest patch.  In addition to the change in syntax described
+above, it preserves another internal data item that I noticed needed to
+be saved, and it uses the new push/pop functions in place of some old
+push/pop code that was needed to rewrite the history file without
+affecting the user's history.  I also modified zexit() to be sure that
+it pops back to the top history file when it is doing a final saving of
+the history data.  Finally, the push stack is reallocated as needed
+instead of failing after 5 pushes.
+
+..wayne..
+
+--ZfOjI3PrQbgiZnxM
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="localhistory.patch"
+
+--- Functions/Misc/zcalc	13 May 2004 17:08:31 -0000	1.10
++++ Functions/Misc/zcalc	18 May 2004 19:15:46 -0000
+@@ -86,22 +86,13 @@
+ emulate -L zsh
+ setopt extendedglob
+ 
+-# can't be local since required in EXIT trap
+-zcalc_orighist=$HISTFILE
+-local temphist=${TMPPREFIX}zcalc_hist.$$ SAVEHIST=$HISTSIZE
+-HISTFILE=$temphist
+-fc -W
+-
+-local HISTSIZE=0
+-HISTSIZE=$SAVEHIST
+-HISTFILE=~/.zcalc_history
+-[[ -f $HISTFILE ]] && fc -R
++# push to our own history file
++history -p ~/.zcalc_history
+ 
+ zcalc_restore() {
+     unfunction zcalc_restore
+-    fc -W
+-    HISTFILE=$zcalc_orighist
+-    fc -R
++    # pop back to original history
++    history -P
+ }
+ trap zcalc_restore HUP INT QUIT EXIT
+ 
+--- Src/builtin.c	23 Apr 2004 11:17:15 -0000	1.118
++++ Src/builtin.c	18 May 2004 19:15:47 -0000
+@@ -82,7 +82,7 @@ static struct builtin builtins[] =
+     BUILTIN("hashinfo", 0, bin_hashinfo, 0, 0, 0, NULL, NULL),
+ #endif
+ 
+-    BUILTIN("history", 0, bin_fc, 0, -1, BIN_FC, "nrdDfEim", "l"),
++    BUILTIN("history", 0, bin_fc, 0, -1, BIN_FC, "nrdDfEimpP", "l"),
+     BUILTIN("integer", BINF_PLUSOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "Hghi:%lprtux", "i"),
+     BUILTIN("jobs", 0, bin_fg, 0, -1, BIN_JOBS, "dlpZrs", NULL),
+     BUILTIN("kill", 0, bin_kill, 0, -1, 0, NULL, NULL),
+@@ -1308,6 +1308,34 @@ bin_fc(char *nam, char **argv, Options o
+ 	zwarnnam(nam, "not interactive shell", NULL, 0);
+ 	return 1;
+     }
++    if (OPT_ISSET(ops,'p')) {
++	char *hf = "";
++	int hs = DEFAULT_HISTSIZE;
++	int shs = 0;
++	if (*argv) {
++	    hf = *argv++;
++	    if (*argv) {
++		hs = atoi(*argv++);
++		if (*argv)
++		    shs = atoi(*argv++);
++		else
++		    shs = hs;
++	    } else {
++		hs = histsiz;
++		shs = savehistsiz;
++	    }
++	}
++	if (!pushhiststack(hf, hs, shs))
++	    return 1;
++	if (*hf)
++	    readhistfile(hf, 1, HFILE_USE_OPTIONS);
++	return 0;
++    }
++    if (OPT_ISSET(ops,'P')) {
++	if (!nohistsave)
++	    savehistfile(NULL, 1, HFILE_USE_OPTIONS);
++	return !pophiststack();
++    }
+     /* with the -m option, the first argument is taken *
+      * as a pattern that history lines have to match   */
+     if (*argv && OPT_ISSET(ops,'m')) {
+@@ -4073,8 +4101,11 @@ zexit(int val, int from_where)
+ 	killrunjobs(from_where == 1);
+     }
+     if (isset(RCS) && interact) {
+-	if (!nohistsave)
++	if (!nohistsave) {
+ 	    savehistfile(NULL, 1, HFILE_USE_OPTIONS);
++	    while (pophiststack())
++		savehistfile(NULL, 1, HFILE_USE_OPTIONS);
++	}
+ 	if (islogin && !subsh) {
+ 	    sourcehome(".zlogout");
+ #ifdef GLOBAL_ZLOGOUT
+--- Src/hist.c	18 May 2004 18:45:05 -0000	1.49
++++ Src/hist.c	18 May 2004 19:15:49 -0000
+@@ -1791,13 +1791,28 @@ resizehistents(void)
+ }
+ 
+ /* Remember the last line in the history file so we can find it again. */
+-static struct {
++struct histfile_stats {
+     char *text;
+     time_t stim, mtim;
+     off_t fpos, fsiz;
+     int next_write_ev;
+ } lasthist;
+ 
++struct histsave {
++    struct histfile_stats lasthist;
++    char *histfile;
++    HashTable histtab;
++    Histent hist_ring;
++    int curhist;
++    int histlinect;
++    int histsiz;
++    int savehistsiz;
++};
++
++static struct histsave *histsave_stack;
++static int histsave_stack_size = 0;
++static int histsave_stack_pos = 0;
++
+ static int histfile_linect;
+ 
+ static int
+@@ -2078,32 +2093,14 @@ savehistfile(char *fn, int err, int writ
+ 	fclose(out);
+ 
+ 	if ((writeflags & (HFILE_SKIPOLD | HFILE_FAST)) == HFILE_SKIPOLD) {
+-	    HashTable remember_histtab = histtab;
+-	    Histent remember_hist_ring = hist_ring;
+-	    int remember_histlinect = histlinect;
+-	    int remember_curhist = curhist;
+-	    int remember_histsiz = histsiz;
+-	    int remember_histactive = histactive;
+-
+-	    hist_ring = NULL;
+-	    curhist = histlinect = 0;
+-	    histsiz = savehistsiz;
+-	    histactive = 0;
+-	    createhisttable(); /* sets histtab */
+-
++	    /* The NULL leaves HISTFILE alone, preserving fn's value. */
++	    pushhiststack(NULL, savehistsiz, savehistsiz);
+ 	    hist_ignore_all_dups |= isset(HISTSAVENODUPS);
+ 	    readhistfile(fn, err, 0);
+ 	    hist_ignore_all_dups = isset(HISTIGNOREALLDUPS);
+ 	    if (histlinect)
+ 		savehistfile(fn, err, 0);
+-	    deletehashtable(histtab);
+-
+-	    curhist = remember_curhist;
+-	    histlinect = remember_histlinect;
+-	    hist_ring = remember_hist_ring;
+-	    histtab = remember_histtab;
+-	    histsiz = remember_histsiz;
+-	    histactive = remember_histactive;
++	    pophiststack();
+ 	}
+     } else if (err)
+ 	zerr("can't write history file %s", fn, 0);
+@@ -2331,3 +2328,84 @@ bufferwords(LinkList list, char *buf, in
+ 
+     return list;
+ }
++
++/**/
++int
++pushhiststack(char *hf, int hs, int shs)
++{
++    struct histsave *h;
++    int curline_in_ring = hist_ring == &curline;
++
++    if (histsave_stack_pos == histsave_stack_size) {
++	histsave_stack_size += 5;
++	histsave_stack = zrealloc(histsave_stack,
++			    histsave_stack_size * sizeof (struct histsave));
++    }
++
++    if (curline_in_ring)
++	unlinkcurline();
++
++    h = &histsave_stack[histsave_stack_pos++];
++
++    h->lasthist = lasthist;
++    h->histfile = hf ? ztrdup(getsparam("HISTFILE")) : NULL;
++    h->histtab = histtab;
++    h->hist_ring = hist_ring;
++    h->curhist = curhist;
++    h->histlinect = histlinect;
++    h->histsiz = histsiz;
++    h->savehistsiz = savehistsiz;
++
++    memset(&lasthist, 0, sizeof lasthist);
++    if (hf) {
++	if (*hf)
++	    setsparam("HISTFILE", ztrdup(hf));
++	else
++	    unsetparam("HISTFILE");
++    }
++    hist_ring = NULL;
++    curhist = histlinect = 0;
++    histsiz = hs;
++    savehistsiz = shs;
++    inithist(); /* sets histtab */
++
++    if (curline_in_ring)
++	linkcurline();
++
++    return 1;
++}
++
++
++/**/
++int
++pophiststack(void)
++{
++    struct histsave *h;
++    int curline_in_ring = hist_ring == &curline;
++
++    if (histsave_stack_pos == 0)
++	return 0;
++
++    if (curline_in_ring)
++	unlinkcurline();
++
++    deletehashtable(histtab);
++    zsfree(lasthist.text);
++
++    h = &histsave_stack[--histsave_stack_pos];
++
++    lasthist = h->lasthist;
++    if (h->histfile)
++	setsparam("HISTFILE", h->histfile);
++    histtab = h->histtab;
++    hist_ring = h->hist_ring;
++    curhist = h->curhist;
++    histlinect = h->histlinect;
++    histsiz = h->histsiz;
++    savehistsiz = h->savehistsiz;
++
++    if (curline_in_ring)
++	linkcurline();
++
++    return 1;
++}
+
+--ZfOjI3PrQbgiZnxM--
+

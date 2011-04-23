@@ -1,0 +1,266 @@
+From zsh-workers-return-15877-mason-zsh=primenet.com.au@sunsite.dk Tue Sep 25 17:58:19 2001
+Return-Path: <zsh-workers-return-15877-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13244 invoked from network); 25 Sep 2001 17:58:18 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 25 Sep 2001 17:58:18 -0000
+Received: (qmail 19560 invoked by alias); 25 Sep 2001 17:58:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15877
+Received: (qmail 19541 invoked from network); 25 Sep 2001 17:58:09 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: PATCH: printf builtin 
+In-reply-to: "Oliver Kiddle"'s message of "Tue, 25 Sep 2001 18:17:25 BST."
+             <3BB0BC25.9BC2874F@yahoo.co.uk> 
+Date: Tue, 25 Sep 2001 18:57:36 +0100
+Message-ID: <11932.1001440656@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+Oliver Kiddle wrote:
+> Peter Stephenson wrote:
+> > It does seem to be that, since everything looks OK up to the call to
+> > printf.  As a test, I got it to work with a nasty hack using a void * and
+> > separate variables for different types.
+> 
+> Could you please send me this `nasty hack'. I'd prefer to get something
+> which works and has all the features required by POSIX, commit it and
+> then worry about the many possible improvements as and when I have time
+> and feel inclined to do them.
+
+I've stuck the revised printf below, but I'm sure you can do a lot better
+than that.  It's not a patch because I don't particularly want people to
+apply it.
+
+> Would you then suggest that in the final implementation, `%d' would
+> format a zlong and that we wouldn't bother with any size modifiers (or
+> just ignore them).
+
+Yes, absolutely.  We should use integers and doubles in the internal format
+only, and just ignore modifiers --- I don't see any possible effect beyond
+confusion in trying to support different sizes.  We could in principle cast
+to the required size, but this means that a simple %d won't work with the
+internal type, which is silly.
+
+The only possible exception is how we handle unsigned values.  printf will
+normally take the same bits and print them as if they were an unsigned
+value.  I'm unsure whether this is useful, but don't see another sensible
+interpretation of `printf %ud -1'.
+
+> > However, there seems to be another problem, since changing that to long or
+> > int (which are supposed to be the same here but I'm paranoid --- although
+> > strictly we should enforce %ld if we pass on a long) doesn't help.
+> 
+> Sorry. Are you saying that it still doesn't work with an int? That
+> wouldn't make sense.
+
+No, this was still with the union; there's something wrong there apart from
+the size of the integer variable.  It doesn't affect the version below.
+
+
+/* printf */
+
+/**/
+int
+bin_printf(char *name, char **args, char *ops, int func)
+{
+    int len, nnl, width, prec, type, ret = 0;
+    char *start, *endptr, *c, *fmt = getkeystring(*args, &len, 0, &nnl);
+    char **first = ++args;
+    char save;
+
+    /* instead of union */
+    char *stringval;
+    int intval;
+    double doubleval;
+    unsigned int uintval;
+    void **val;
+    
+    do {
+
+        for (c = fmt;c-fmt < len;c++) {
+	    type = prec = width = -1;
+
+	    if (*c != '%') {
+        	putchar(*c);
+		continue;
+	    }
+
+	    start = c++;
+	    if (*c == '%') {
+		putchar('%');
+		continue;
+	    }
+	    
+	    if (strchr("+- #", *c)) c++;
+	    
+	    if (*c == '*') {
+		width = (*args) ? strtoul(*args++, NULL, 0) : 0;
+		c++;
+	    } else {
+		while (idigit(*c)) c++;
+	    }
+	    
+	    if (*c == '.') {
+		c++;
+		if (*c == '*') {
+		    prec = (*args) ? strtoul(*args++, NULL, 0) : 0;
+		    c++;
+	    	} else {
+		    while (idigit(*c)) c++;
+		}
+	    }
+	    
+	    if (*c == 'l' || *c == 'L' || *c == 'h') c++;
+    	    
+	    switch (*c) {
+	    case 'c':
+		type = 1;
+		if (*args) {
+		    if (**args == Meta)
+		        intval = (*args)[1] ^ 32;
+		    else
+		        intval = **args;
+		    args++;
+		} else
+		    intval = 0;
+		break;
+	    case 's':
+		if (*args)
+		    stringval = unmetafy(*args++, NULL);
+		else
+		    continue;
+		break;
+	    case 'b':
+		if (*args) {
+		    int l;
+		    char *b = getkeystring(*args++, &l, 0, &nnl);
+		    fwrite(b, l, 1, stdout);
+		}
+		continue;
+	    case 'q':
+		if (*args) {
+		    *c = 's';
+		    stringval = bslashquote(unmetafy(*args++, NULL), NULL, 0);
+		} else
+		    continue;
+		break;
+    	    case 'd':
+	    case 'i':
+	    	type=1;
+		break;
+    	    case 'e':
+	    case 'E':
+	    case 'f':
+	    case 'g':
+	    case 'G':
+	    	type=2;
+		break;
+	    case 'o':
+	    case 'u':
+	    case 'x':
+	    case 'X':
+		type=3;
+		break;
+	    default:
+		if (*c) {
+		    save = c[1];
+		    c[1] = '\0';
+		}
+	    	zerrnam(name, "%s: invalid directive", start, 0);
+	    	if (*c) c[1] = save;
+	    	ret = 1;
+		continue;
+	    }
+	    
+	    if (type > 0) {
+		if (*args && (**args == '\'' || **args == '"' )) {
+		    if (type == 2)
+		    	doubleval = (*args)[1];
+		    else
+		    	intval = (*args)[1];
+		    args++;
+		} else {
+	    	    switch (type) {
+		    case 1:
+			intval = (*args) ? strtol(*args, &endptr, 0) : 0;
+			break;
+    	    	    case 2:
+			doubleval = (*args) ? strtod(*args, &endptr) : 0;
+			break;
+		    case 3:
+		        uintval = (*args) ? strtoul(*args, &endptr, 0) : 0;
+		    }
+		    if (*args) {
+			if (errno == ERANGE) {
+			    zerrnam(name, "`%s' arithmetic overflow", *args, 0);
+			    ret = 1;
+			} else if (**args && endptr == *args) {
+			    zerrnam(name, "`%s' expected numeric value", endptr, 0);
+			    ret = 1;
+			} else if (*endptr) {
+			    zerrnam(name, "`%s' not completely converted", *args, 0);
+			    ret = 1;
+			}
+			args++;
+		    }
+		}
+	    }
+	    save = c[1];
+	    c[1] = '\0';
+	    /* yuk */
+	    switch (type) {
+	    case 1:
+		val = (void *) &intval;
+		break;
+	    case 2:
+		val = (void *) &doubleval;
+		break;
+	    case 3:
+		val = (void *) &uintval;
+		break;
+	    default:
+		val = (void *) &stringval;
+		break;
+	    }
+	    if (width >= 0) {
+		if (prec >= 0)
+		    printf(start, width, prec, *val);
+		else
+		    printf(start, width, *val);
+	    } else {
+		if (prec >= 0)
+		    printf(start, prec, *val);
+		else
+		    printf(start, *val);
+	    }
+	    c[1] = save;
+	
+	}
+
+    /* if there are remaining args, reuse format string */
+    } while (*args && args != first);
+
+    return ret;
+}
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

@@ -1,0 +1,149 @@
+From zsh-workers-return-22727-mason-zsh=primenet.com.au@sunsite.dk Sun Sep 17 17:32:17 2006
+Return-Path: <zsh-workers-return-22727-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28075 invoked from network); 17 Sep 2006 17:32:14 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.5 (2006-08-29) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.5
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 17 Sep 2006 17:32:14 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 6958 invoked from network); 17 Sep 2006 17:32:08 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 17 Sep 2006 17:32:08 -0000
+Received: (qmail 1792 invoked by alias); 17 Sep 2006 17:32:05 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22727
+Received: (qmail 1782 invoked from network); 17 Sep 2006 17:32:04 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 17 Sep 2006 17:32:04 -0000
+Received: (qmail 6522 invoked from network); 17 Sep 2006 17:32:04 -0000
+Received: from mtaout02-winn.ispmail.ntl.com (81.103.221.48)
+  by a.mx.sunsite.dk with SMTP; 17 Sep 2006 17:32:03 -0000
+Received: from aamtaout01-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout02-winn.ispmail.ntl.com with ESMTP
+          id <20060917173202.ZTQO27023.mtaout02-winn.ispmail.ntl.com@aamtaout01-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Sun, 17 Sep 2006 18:32:02 +0100
+Received: from pwslaptop.csr.com ([81.107.41.155])
+          by aamtaout01-winn.ispmail.ntl.com with ESMTP
+          id <20060917173201.GXLE644.aamtaout01-winn.ispmail.ntl.com@pwslaptop.csr.com>
+          for <zsh-workers@sunsite.dk>; Sun, 17 Sep 2006 18:32:01 +0100
+Received: from pwslaptop.csr.com (pwslaptop.csr.com [127.0.0.1])
+	by pwslaptop.csr.com (8.13.7/8.13.7) with ESMTP id k8HHVvai017201
+	for <zsh-workers@sunsite.dk>; Sun, 17 Sep 2006 18:31:58 +0100
+Message-Id: <200609171731.k8HHVvai017201@pwslaptop.csr.com>
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: EOF && use 'exit' to exit
+Date: Sun, 17 Sep 2006 18:31:57 +0100
+
+If you try ^D at the command line you might see something like:
+
+% 
+zsh: u
+zsh: use 'exit' to exit.
+
+with the cursor in the middle.  This appeared as a result of a change to
+trashzle() so I could use it more easily from elsewhere.  However,
+closer investigation reveals that change is OK and it's simply uncovered
+an existing bug.
+
+Before, this happened:
+- zle printed the 'exit' message
+- zle was trashed
+- zle tried to return to the line with the prompt (if ALWAYSLASTPROMPT
+was set)
+- zle was trashed again: this put the cursor back on the line below the
+prompt, which it shouldn't because zle was already in the trashed state
+- zle returned to the main shell
+- eventually, at top level, the main shell looked to see if it should
+exit
+- it printed the 'exit' message again; this overwrote the previous one.
+- the new prompt was printed immediately below that as if that had
+always been the intention.
+
+Without the bogus additional trash, both messages are printed and zle
+gets confused.
+
+The fix, I think, is not to print the message from the main shell if it
+was handled by zle.  It's always been a bit mysterious to me how this
+worked without any signalling between the two; apparently it didn't, at
+least not recently.
+
+After looking at all the layers between zle and the top-level loop, the
+only clean way of doing that looked like a flag.  A cleaner interface
+between zle and the main shell would help, but that's another of those
+big jobs.
+
+The result is that ALWAYS_LAST_PROMPT is now respected if the message is
+printed by zle, which was the intention.
+
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.67
+diff -u -r1.67 init.c
+--- Src/init.c	10 Sep 2006 15:24:27 -0000	1.67
++++ Src/init.c	17 Sep 2006 17:30:16 -0000
+@@ -1245,6 +1245,13 @@
+ }
+ 
+ /*
++ * Used by zle to indicate it has already printed a "use 'exit' to exit"
++ * message.
++ */
++/**/
++mod_export int use_exit_printed;
++
++/*
+  * This is real main entry point. This has to be mod_export'ed
+  * so zsh.exe can found it on Cygwin
+  */
+@@ -1313,6 +1320,7 @@
+     init_misc();
+ 
+     for (;;) {
++	use_exit_printed = 0;
+ 	/*
+ 	 * See if we can free up some of jobtab.
+ 	 * We only do this at top level, because if we are
+@@ -1343,7 +1351,13 @@
+ 	    stopmsg = 1;
+ 	    zexit(lastval, 0);
+ 	}
+-	zerrnam("zsh", (!islogin) ? "use 'exit' to exit."
+-		: "use 'logout' to logout.");
++	/*
++	 * Don't print the message if it was already handled by
++	 * zle, since that makes special arrangements to keep
++	 * the display tidy.
++	 */
++	if (!use_exit_printed)
++	    zerrnam("zsh", (!islogin) ? "use 'exit' to exit."
++		    : "use 'logout' to logout.");
+     }
+ }
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.90
+diff -u -r1.90 zle_main.c
+--- Src/Zle/zle_main.c	10 Sep 2006 15:24:28 -0000	1.90
++++ Src/Zle/zle_main.c	17 Sep 2006 17:30:16 -0000
+@@ -1232,6 +1232,7 @@
+ 	    !zlell && isfirstln && (zlereadflags & ZLRF_IGNOREEOF)) {
+ 	    showmsg((!islogin) ? "zsh: use 'exit' to exit." :
+ 		    "zsh: use 'logout' to logout.");
++	    use_exit_printed = 1;
+ 	    eofsent = 1;
+ 	    ret = 1;
+ 	} else {
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

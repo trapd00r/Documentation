@@ -1,0 +1,111 @@
+From zsh-workers-return-12393-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jul 27 06:57:35 2000
+Return-Path: <zsh-workers-return-12393-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9169 invoked from network); 27 Jul 2000 06:57:33 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Jul 2000 06:57:33 -0000
+Received: (qmail 3243 invoked by alias); 27 Jul 2000 06:57:19 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12393
+Received: (qmail 3236 invoked from network); 27 Jul 2000 06:57:16 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000727065708.ZM26483@candle.brasslantern.com>
+Date: Thu, 27 Jul 2000 06:57:08 +0000
+In-Reply-To: <hvoaef56z0x.fsf@serein.m17n.org>
+Comments: In reply to Tanaka Akira <akr@m17n.org>
+        "wait for non-child PID" (Jul 26,  6:06pm)
+References: <hvoaef56z0x.fsf@serein.m17n.org> 
+	<20000726190953.A22895@scowler.net> 
+	<hvolmyoqhol.fsf@serein.m17n.org>
+In-Reply-To: <20000726190953.A22895@scowler.net>
+Comments: In reply to Clint Adams <schizo@debian.org>
+        "Re: wait for non-child PID" (Jul 26,  7:09pm)
+In-Reply-To: <hvolmyoqhol.fsf@serein.m17n.org>
+Comments: In reply to Tanaka Akira <akr@m17n.org>
+        "Re: wait for non-child PID" (Jul 27,  2:13pm)
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH (?): Re: wait for non-child PID
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Jul 26,  6:06pm, Tanaka Akira wrote:
+}
+} I heard that wait has a problem if the argument is non-child PID.
+} [Zsh] blocks forever.  (It is interruptible.)
+} 
+} bash detects that the PID is not child of the shell.
+
+Hmm, this is an interesting portability problem.  Zsh does sometimes
+create child processes that it might conceivably be reasonable for a
+script to wait for, but that are not listed in its job tables.  So
+there's no obvious internal way to check whether a PID is a child, and
+we can't rely on waitpid() or wait4() being available.
+
+A quick check with strace (without looking at source) shows that bash
+reports "is not a child" without using any system calls, so it must be
+using a table of child process IDs.
+
+On Jul 26,  7:09pm, Clint Adams wrote:
+}
+} I'm glad that zsh's wait will wait on processes that aren't children of the
+} shell.  Is there a reason that it shouldn't?
+
+One obvious counter-example is `wait $$' ...
+
+The `wait' builtin uses zsh's waitforpid() function, which loops doing
+kill(pid,0) to make sure the process is still running, and if so rather
+than use wait4() or the like (see above) it does a sigpause() or the
+equivalent.  The kill will eventually fail for any process that exits;
+but zsh only comes out of the sigpause() when it gets a signal of some
+kind, which may never happen if the waited-for pid is not a child.
+
+On Jul 27,  2:13pm, Tanaka Akira wrote:
+} 
+} A zsh can waits the process, but the zsh doesn't notice its status
+} change because the zsh is not the parent of it and SIGCHLD cannot
+} reached to the zsh.  Is it useful?
+
+It's certainly not useful as currently implemented.  It'd at least have
+to recognize that waiting when (pid == 1 || pid == getpid()) is silly,
+and it'd have to use a polling time-out for any PID that is not known
+to be a child.
+
+Short of doing that, the only thing to do seems to be to rely on the job
+table.  I won't commit the following patch until we're reasonably sure
+that there are no interesting cases of child processes that can't be
+detected by findproc() -- something I'm not entirely certain of myself.
+
+Also, we might want to change the error message to be ksh-like rather
+than bash-like, if there's a difference.
+
+Note in passing:  bash prints "bash: wait: ..." but zwarnnam() prints
+only "wait: ..." and zwarn() prints only "zsh: ...".  Oh, well.
+
+Index: Src/jobs.c
+===================================================================
+@@ -1289,7 +1289,13 @@
+ 
+ 	if (func == BIN_WAIT && isanum(*argv)) {
+ 	    /* wait can take a pid; the others can't. */
+-	    waitforpid((long)atoi(*argv));
++	    pid_t pid = (long)atoi(*argv);
++	    Job j;
++	    Process p;
++	    if (findproc(pid, &j, &p))
++		waitforpid(pid);
++	    else
++		zwarnnam(name, "pid %d is not a child of this shell", 0, pid);
+ 	    retval = lastval2;
+ 	    thisjob = ocj;
+ 	    continue;
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

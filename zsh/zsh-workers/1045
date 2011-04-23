@@ -1,0 +1,310 @@
+From A.Main@dcs.warwick.ac.uk Fri May 10 20:15:12 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id UAA14127 for <mason@werple.mira.net.au>; Fri, 10 May 1996 20:15:08 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id FAA06819; Fri, 10 May 1996 05:38:59 -0400 (EDT)
+Resent-Date: Fri, 10 May 1996 05:38:59 -0400 (EDT)
+From: Zefram <A.Main@dcs.warwick.ac.uk>
+Message-Id: <22939.199605100938@stone.dcs.warwick.ac.uk>
+Subject: Re: fdtable bug
+To: zsh-workers@math.gatech.edu (Z Shell workers mailing list)
+Date: Fri, 10 May 1996 10:38:27 +0100 (BST)
+In-Reply-To: <7359.199605082350@stone.dcs.warwick.ac.uk> from "Zefram" at May 9, 96 00:50:47 am
+X-Patch: 92
+X-Loop: zefram@dcs.warwick.ac.uk
+X-Stardate: [-31]7482.00
+X-US-Congress: Moronic fuckers
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"4SVF93.0.Tg1.pwman"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1045
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 8093
+Status: O
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+There are actually *two* remaining bugs in redirection, after
+the patch I sent two days ago.  I have found and fixed them both.
+I'm reasonably confident that they are the last significant bugs
+in this area.  We shall see.
+
+One of the bugs, with fdtable, I've already described.  That's fixed
+in this patch by (1) a revision of the fd manipulation functions in
+utils.c (their semantics are now documented in comments), and (2)
+a change of the way the save array is used -- -2 now means `not
+redirected', and -1 means `was previously closed'.  This latter
+change alone should fix some bugs I don't actually have test cases
+for -- previously the two conditions were not properly distingushed.
+
+The other bug is an unusual case in addfd(), if its two fd arguments
+are equal.  See the new comment above the function.  To demonstrate:
+
+% exec 3>&-
+% echo foo >&3
+zsh: 3: bad file number
+% # that is as it should be
+% echo foo 3> file
+% echo foo >&3
+% cat file
+foo
+% # note that fd 3 is now permanently redirected
+
+ -zefram
+
+      Index: Src/exec.c
+      *** exec.c	1996/05/09 21:36:14	1.5
+      --- exec.c	1996/05/09 23:55:43
+      ***************
+      *** 978,984 ****
+         * two fds, the result of open("bar",...), and the result of     *
+         * open("ble",....).                                             */
+        
+      ! /* add a fd to an multio */
+        
+        /**/
+        void
+      --- 978,990 ----
+         * two fds, the result of open("bar",...), and the result of     *
+         * open("ble",....).                                             */
+        
+      ! /* Add a fd to an multio.  fd1 must be < 10, and may be in any state. *
+      !  * fd2 must be open, and is `consumed' by this function.  Note that   *
+      !  * fd1 == fd2 is possible, and indicates that fd1 was really closed.  *
+      !  * We effectively do `fd2 = movefd(fd2)' at the beginning of this     *
+      !  * function, but in most cases we can avoid an extra dup by delaying  *
+      !  * the movefd: we only >need< to move it if we're actually doing a    *
+      !  * multiple redirection.                                              */
+        
+        /**/
+        void
+      ***************
+      *** 989,996 ****
+            if (!mfds[fd1] || isset(NOMULTIOS)) {
+        	if(!mfds[fd1]) {		/* starting a new multio */
+        	    mfds[fd1] = (struct multio *) alloc(sizeof(struct multio));
+      ! 	    if (!forked && fd1 != fd2 && fd1 < 10)
+      ! 		save[fd1] = movefd(fd1);
+        	}
+        	redup(fd2, fd1);
+        	mfds[fd1]->ct = 1;
+      --- 995,1002 ----
+            if (!mfds[fd1] || isset(NOMULTIOS)) {
+        	if(!mfds[fd1]) {		/* starting a new multio */
+        	    mfds[fd1] = (struct multio *) alloc(sizeof(struct multio));
+      ! 	    if (!forked && save[fd1] == -2)
+      ! 		save[fd1] = (fd1 == fd2) ? -1 : movefd(fd1);
+        	}
+        	redup(fd2, fd1);
+        	mfds[fd1]->ct = 1;
+      ***************
+      *** 1110,1116 ****
+            type = cmd->type;
+        
+            for (i = 0; i < 10; i++) {
+      ! 	save[i] = -1;
+        	mfds[i] = NULL;
+            }
+        
+      --- 1116,1122 ----
+            type = cmd->type;
+        
+            for (i = 0; i < 10; i++) {
+      ! 	save[i] = -2;
+        	mfds[i] = NULL;
+            }
+        
+      ***************
+      *** 1428,1434 ****
+        		    init_io();
+        		break;
+        	    case CLOSE:
+      ! 		if (!forked && fn->fd1 < 10 && save[fn->fd1] == -1)
+        		    save[fn->fd1] = movefd(fn->fd1);
+        		closemn(mfds, fn->fd1);
+        		zclose(fn->fd1);
+      --- 1434,1440 ----
+        		    init_io();
+        		break;
+        	    case CLOSE:
+      ! 		if (!forked && fn->fd1 < 10 && save[fn->fd1] == -2)
+        		    save[fn->fd1] = movefd(fn->fd1);
+        		closemn(mfds, fn->fd1);
+        		zclose(fn->fd1);
+      ***************
+      *** 1477,1483 ****
+        
+            if (nullexec) {
+        	for (i = 0; i < 10; i++)
+      ! 	    if (save[i] != -1)
+        		zclose(save[i]);
+        	return;
+            }
+      --- 1483,1489 ----
+        
+            if (nullexec) {
+        	for (i = 0; i < 10; i++)
+      ! 	    if (save[i] != -2)
+        		zclose(save[i]);
+        	return;
+            }
+      ***************
+      *** 1543,1549 ****
+        		    fprintf(stderr, "zsh: exit %ld\n", (long)lastval);
+        		}
+        		fflush(stdout);
+      ! 		if (save[1] == -1) {
+        		    if (ferror(stdout)) {
+        			zerr("write error: %e", NULL, errno);
+        			clearerr(stdout);
+      --- 1549,1555 ----
+        		    fprintf(stderr, "zsh: exit %ld\n", (long)lastval);
+        		}
+        		fflush(stdout);
+      ! 		if (save[1] == -2) {
+        		    if (ferror(stdout)) {
+        			zerr("write error: %e", NULL, errno);
+        			clearerr(stdout);
+      ***************
+      *** 1673,1679 ****
+            int i;
+        
+            for (i = 0; i != 10; i++)
+      ! 	if (save[i] != -1)
+        	    redup(save[i], i);
+            errno = old_errno;
+        }
+      --- 1679,1685 ----
+            int i;
+        
+            for (i = 0; i != 10; i++)
+      ! 	if (save[i] != -2)
+        	    redup(save[i], i);
+            errno = old_errno;
+        }
+      Index: Src/utils.c
+      *** utils.c	1996/05/07 22:55:46	1.3
+      --- utils.c	1996/05/09 22:41:49
+      ***************
+      *** 851,902 ****
+        #endif   /*  TIOCGWINSZ */
+        }
+        
+      ! /* move a fd to a place >= 10 and mark the new fd in fdtable. */
+        
+        /**/
+        int
+        movefd(int fd)
+        {
+      !     int fe;
+      ! 
+      !     if (fd == -1 || fd >= 10)
+      ! 	return fd;
+        #ifdef F_DUPFD
+      !     fe = fcntl(fd, F_DUPFD, 10);
+        #else
+      !     fe = movefd(dup(fd));
+        #endif
+      !     close(fd);
+      !     fdtable[fd] = 0;
+      !     fdtable[fe] = 1;
+      !     return fe;
+        }
+        
+      ! /* move fd x to y */
+        
+        /**/
+        void
+        redup(int x, int y)
+        {
+      !     if (x != y && x >= 0) {
+        	dup2(x, y);
+        	close(x);
+        	fdtable[x] = 0;
+      - 	fdtable[y] = 1;
+            }
+        }
+        
+      ! /* close the given fd, and clear it from fdtable */
+        
+        /**/
+        int
+        zclose(int fd)
+        {
+      !     if (fd >= 0) {
+        	fdtable[fd] = 0;
+      ! 	return close(fd);
+      !     }
+      !     return EBADF;
+        }
+        
+        /* Get a file name relative to $TMPPREFIX which *
+      --- 851,904 ----
+        #endif   /*  TIOCGWINSZ */
+        }
+        
+      ! /* Move a fd to a place >= 10 and mark the new fd in fdtable.  If the fd *
+      !  * is already >= 10, it is not moved.  If it is invalid, -1 is returned. */
+        
+        /**/
+        int
+        movefd(int fd)
+        {
+      !     if(fd != -1 && fd < 10) {
+        #ifdef F_DUPFD
+      ! 	int fe = fcntl(fd, F_DUPFD, 10);
+        #else
+      ! 	int fe = movefd(dup(fd));
+        #endif
+      ! 	close(fd);
+      ! 	fdtable[fd] = 0;
+      ! 	fd = fe;
+      !     }
+      !     if(fd != -1)
+      ! 	fdtable[fd] = 1;
+      !     return fd;
+        }
+        
+      ! /* Move fd x to y.  If x == -1, fd y is closed. */
+        
+        /**/
+        void
+        redup(int x, int y)
+        {
+      !     if(x < 0) {
+      ! 	close(y);
+      ! 	fdtable[y] = 0;
+      !     } else if (x != y) {
+        	dup2(x, y);
+      + 	fdtable[y] = fdtable[x];
+        	close(x);
+        	fdtable[x] = 0;
+            }
+        }
+        
+      ! /* Close the given fd, and clear it from fdtable. */
+        
+        /**/
+        int
+        zclose(int fd)
+        {
+      !     if (fd >= 0)
+        	fdtable[fd] = 0;
+      !     return close(fd);
+        }
+        
+        /* Get a file name relative to $TMPPREFIX which *
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.2
+
+iQCVAwUBMZKI43D/+HJTpU/hAQFHNAP9HawGu40RFKgRwTyD9t7Dyuarkm+QrEVQ
+H/VPOjZXWTPfKyFtwUTL5eu6iHDtbzYKNxJKSMCQg26krIQW0SSwpQoDiL++wFOG
+/yfDaYX0FhxJjH2k/JEL9DoT8B2SDLlZ0Ac2s7iOhKuF9bxrEe4Q99FUE65M+0Yo
+MrpE1Ltg5WA=
+=PYae
+-----END PGP SIGNATURE-----
+
+

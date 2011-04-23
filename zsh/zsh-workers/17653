@@ -1,0 +1,451 @@
+From zsh-workers-return-17653-mason-zsh=primenet.com.au@sunsite.dk Thu Sep 12 05:20:02 2002
+Return-Path: <zsh-workers-return-17653-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14079 invoked from network); 12 Sep 2002 05:20:01 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 12 Sep 2002 05:20:01 -0000
+Received: (qmail 19382 invoked by alias); 12 Sep 2002 05:19:54 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17653
+Received: (qmail 19370 invoked from network); 12 Sep 2002 05:19:53 -0000
+Date: Thu, 12 Sep 2002 01:19:40 -0400
+From: Clint Adams <clint@zsh.org>
+To: zsh-workers@sunsite.dk
+Subject: db module
+Message-ID: <20020912051940.GA19672@dman.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.4i
+X-Virus-Scanned: by amavisd-milter (http://amavis.org/)
+
+This allows one to "tie" a Berkeley DB to an associative array (or is
+that the other way around?)
+
+I'm using two hacks.  The 'extradata' field in struct hashtable holds the
+db handle for that assoc array.  Unfortunately, this doesn't seem to be
+available from the set and unset functions for the individual elements,
+so I had to use a static variable.  That means that the last DB to be
+opened is the only one that be modified.  How can this be handled
+sanely?
+
+Other notes:
+
+configure only checks for DB 4.0, and only as libdb-4.
+There is not yet an option to set db type, so one is stuck with Hash.
+On the other hand, it will happily read existing BTree, Recno, Queue.
+Values can only be strings.
+Records are deleted by unsetting the element.
+The DB is closed by unsetting the assoc. array.
+If HAVE_DB_H isn't defined, the compile will break.
+This adds yet another library to be linked against all the modules.
+
+Examples:
+
+zdb_open -c things /tmp/newdb.db
+things[one]=alpha
+things[two]=beta
+things[three]=gamma
+unset "things[two]"
+unset things
+print ${(kv)things}
+zdb_open things /tmp/newdb.db
+print ${(kv)things}
+
+
+zdb_open spamwords ~/.bogofilter/spamlist.db
+print ${(kv)spamwords}
+unset spamwords
+
+
+Index: zshconfig.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/zshconfig.ac,v
+retrieving revision 1.28
+diff -u -r1.28 zshconfig.ac
+--- zshconfig.ac	6 May 2002 14:50:11 -0000	1.28
++++ zshconfig.ac	12 Sep 2002 04:55:45 -0000
+@@ -487,7 +487,7 @@
+ 		 limits.h fcntl.h libc.h sys/utsname.h sys/resource.h \
+ 		 locale.h errno.h stdio.h stdlib.h unistd.h sys/capability.h \
+ 		 utmp.h utmpx.h sys/types.h pwd.h grp.h poll.h sys/mman.h \
+-		 netinet/in_systm.h pcre.h langinfo.h)
++		 netinet/in_systm.h pcre.h langinfo.h db.h)
+ if test $dynamic = yes; then
+   AC_CHECK_HEADERS(dlfcn.h)
+   AC_CHECK_HEADERS(dl.h)
+@@ -657,6 +657,7 @@
+ 
+ dnl pcre-config should probably be employed here
+ AC_SEARCH_LIBS(pcre_compile, pcre)
++AC_SEARCH_LIBS(db_create_4000, db-4)
+ 
+ dnl ---------------------
+ dnl CHECK TERMCAP LIBRARY
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.42
+diff -u -r1.42 zsh.h
+--- Src/zsh.h	3 Sep 2002 09:33:37 -0000	1.42
++++ Src/zsh.h	12 Sep 2002 04:55:50 -0000
+@@ -825,6 +825,8 @@
+     ScanFunc printnode;		/* pointer to function to print a node        */
+     ScanTabFunc scantab;	/* pointer to function to scan table          */
+ 
++    void *extradata;
++
+ #ifdef HASHTABLE_INTERNAL_MEMBERS
+     HASHTABLE_INTERNAL_MEMBERS	/* internal use in hashtable.c                */
+ #endif
+Index: Src/Modules/db.c
+===================================================================
+RCS file: Src/Modules/db.c
+diff -N Src/Modules/db.c
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Src/Modules/db.c	12 Sep 2002 04:55:51 -0000
+@@ -0,0 +1,326 @@
++/*
++ * db.c - associative array interface to Berkeley DB
++ *
++ * This file is part of zsh, the Z shell.
++ *
++ * Copyright (c) 2002 by Clint Adams
++ * All rights reserved.
++ *
++ * Permission is hereby granted, without written agreement and without
++ * license or royalty fees, to use, copy, modify, and distribute this
++ * software and to distribute modified versions of this software for any
++ * purpose, provided that the above copyright notice and the following
++ * two paragraphs appear in all copies of this software.
++ *
++ * In no event shall Clint Adams or the Zsh Development Group be liable
++ * to any party for direct, indirect, special, incidental, or consequential
++ * damages arising out of the use of this software and its documentation,
++ * even if Clint Adams and the Zsh Development Group have been advised of
++ * the possibility of such damage.
++ *
++ * Clint Adams and the Zsh Development Group specifically disclaim any
++ * warranties, including, but not limited to, the implied warranties of
++ * merchantability and fitness for a particular purpose.  The software
++ * provided hereunder is on an "as is" basis, and Clint Adams and the
++ * Zsh Development Group have no obligation to provide maintenance,
++ * support, updates, enhancements, or modifications. 
++ *
++ */
++
++#include "db.mdh"
++#include "db.pro"
++
++static char db_nam[] = "db";
++
++#ifdef HAVE_DB_H
++
++#include <db.h>
++static DB *kludge = NULL;
++
++/* Empty dummy function for special hash parameters. */
++
++/**/
++static void
++shempty(void)
++{
++}
++
++/* Create the special hash parameter. */
++
++static Param
++createdbhashvar(char *param_name, DB *h)
++{
++    Param pm;
++    HashTable ht;
++
++    unsetparam(param_name);
++
++    if (!(pm = createparam(param_name, PM_SPECIAL|PM_HIDE|PM_HIDEVAL|
++			   PM_REMOVABLE|PM_HASHED)))
++	return NULL;
++
++    pm->level = pm->old ? locallevel : 0;
++    pm->gets.hfn = hashgetfn;
++    pm->sets.hfn = setdbentries;
++    pm->unsetfn = dbunsetfn;
++    pm->u.hash = ht = newhashtable(7, param_name, NULL);
++
++    ht->hash        = hasher;
++    ht->emptytable  = (TableFunc) shempty;
++    ht->filltable   = NULL;
++    ht->addnode     = (AddNodeFunc) shempty;
++    ht->getnode     = ht->getnode2 = getdbentry;
++    ht->removenode  = (RemoveNodeFunc) shempty;
++    ht->disablenode = NULL;
++    ht->enablenode  = NULL;
++    ht->freenode    = (FreeNodeFunc) shempty;
++    ht->printnode   = printparamnode;
++    ht->scantab     = scandatabase;
++    ht->extradata   = (void *)h;
++    kludge = h;
++
++    return pm;
++}
++
++/* Functions for the options special parameter. */
++
++/**/
++static void
++setdbentries(Param pm, HashTable ht)
++{
++    int i;
++    HashNode hn;
++
++    if (!ht)
++	return;
++
++    if (!(pm->flags & PM_READONLY))
++	for (i = 0; i < ht->hsize; i++)
++	    for (hn = ht->nodes[i]; hn; hn = hn->next) {
++		struct value v;
++
++		v.isarr = v.inv = v.start = 0;
++		v.end = -1;
++		v.arr = NULL;
++		v.pm = (Param) hn;
++
++		setdbentry(v.pm, ztrdup(getstrvalue(&v)));
++	    }
++    deleteparamtable(ht);
++}
++
++/**/
++static void
++unsetdbentry(Param pm, int exp)
++{
++    DB *h;
++    DBT key;
++    int ret;
++    char *fieldname = ztrdup(pm->nam);
++
++    h = kludge;
++
++    unmetafy(fieldname, &ret);
++
++    memset(&key, 0, sizeof(DBT));
++
++    key.data = fieldname;
++    key.size = strlen(fieldname) + 1;
++
++    if ((ret = h->del(h, NULL, &key, 0)))
++	h->err(h, ret, "db unset: %s", fieldname);
++
++    free(fieldname);
++    pm->flags |= PM_UNSET;
++}
++
++/**/
++static HashNode
++getdbentry(HashTable ht, char *name)
++{
++    DB *h;
++    DBT key;
++    DBT val;
++    int ret;
++
++    Param pm = NULL;
++
++    h = (DB *)ht->extradata;
++
++    pm = (Param) zhalloc(sizeof(struct param));
++    pm->nam = dupstring(name);
++    pm->flags = PM_SCALAR;
++    pm->sets.cfn = setdbentry;
++    pm->gets.cfn = strgetfn;
++    pm->unsetfn = unsetdbentry;
++    pm->ct = 0;
++    pm->env = NULL;
++    pm->ename = NULL;
++    pm->old = NULL;
++    pm->level = 0;
++
++    memset(&key, 0, sizeof(DBT));
++    memset(&val, 0, sizeof(DBT));
++
++    key.data = name;
++    key.size = strlen(name);
++
++    ret = h->get(h, NULL, &key, &val, 0);
++
++    if (ret == 0) {
++	pm->u.str = (char *)val.data;
++    }
++    else {
++	pm->u.str = "";
++	pm->flags |= PM_UNSET;
++	if (ret != DB_NOTFOUND) { h->err(h, ret, "db get: %s", name); }
++    }
++
++    return (HashNode) pm;
++}
++
++/**/
++static void
++setdbentry(Param pm, char *value)
++{
++    DB *h;
++    DBT key;
++    DBT val;
++    int ret;
++
++    h = kludge;
++
++    memset(&key, 0, sizeof(DBT));
++    memset(&val, 0, sizeof(DBT));
++
++    key.data = pm->nam;
++    key.size = strlen(pm->nam) + 1;
++
++    val.data = value;
++    val.size = strlen(value) + 1;
++
++    ret = h->put(h, NULL, &key, &val, 0);
++
++}
++
++/**/
++static void
++scandatabase(HashTable ht, ScanFunc func, int flags)
++{
++    struct param pm;
++
++    DB *h;
++    DBC *cursor;
++    DBT key, value;
++    int ret;
++
++    pm.flags = PM_SCALAR;
++    pm.sets.cfn = setdbentry;
++    pm.gets.cfn = strgetfn;
++    pm.unsetfn = unsetdbentry;
++    pm.ct = 0;
++    pm.env = NULL;
++    pm.ename = NULL;
++    pm.old = NULL;
++    pm.level = 0;
++
++    h = (DB *)ht->extradata;
++
++    if ((ret = h->cursor(h, NULL, &cursor, 0))) {
++	return;
++    }
++
++    memset(&key, 0, sizeof(DBT));
++    memset(&value, 0, sizeof(DBT));
++
++    while ((ret = cursor->c_get (cursor, &key, &value, DB_NEXT)) == 0) {
++	pm.nam = dupstring((char *)key.data);
++	pm.u.str = dupstring((char *)value.data);
++	func((HashNode) &pm, flags);
++    }
++
++}
++
++/**/
++mod_export void
++dbunsetfn(Param pm, int exp)
++{
++    DB *h;
++
++    h = (DB *)pm->u.hash->extradata;
++
++    h->close(h, 0);
++    pm->flags |= PM_UNSET;
++}
++
++static int
++bin_zdb_open(char *nam, char **args, Options ops, int func)
++{
++    DB *h;
++    DBTYPE type = DB_UNKNOWN;
++    u_int32_t flags = 0;
++    int ret, mode = 0;
++    char *assoc, *filename;
++
++    assoc = args[0];
++    filename = args[1];
++
++    if (db_create(&h, NULL, 0)) {
++	zwarnnam(nam, "strange db error", NULL, 0);
++	return 1; 
++    }
++
++    if (OPT_ISSET(ops,'c')) {
++	    type = DB_HASH;
++	    flags = DB_CREATE;
++    }
++
++    if (OPT_ISSET(ops,'r')) {
++	    flags = DB_RDONLY;
++    }
++
++    if (OPT_HASARG(ops,'m')) {
++	    mode = (int)strtol(OPT_ARG(ops,'m'), NULL, 8);
++    }
++
++    ret = h->open(h, filename, NULL, type, flags, mode);
++    if (ret || !createdbhashvar(assoc, h))
++	return 1;
++
++}
++
++#endif /* HAVE_DB_H */
++
++static struct builtin bintab[] = {
++	    BUILTIN("zdb_open", 0, bin_zdb_open, 2, 2, 0, "cm:r", NULL),
++};
++
++/**/
++int
++setup_(Module m)
++{
++    return 0;
++}
++
++/**/
++int
++boot_(Module m)
++{
++    return !addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++}
++
++
++/**/
++int
++cleanup_(Module m)
++{
++    deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++    return 0;
++}
++
++/**/
++int
++finish_(Module m)
++{
++    return 0;
++}
+Index: Src/Modules/db.mdd
+===================================================================
+RCS file: Src/Modules/db.mdd
+diff -N Src/Modules/db.mdd
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Src/Modules/db.mdd	12 Sep 2002 04:55:51 -0000
+@@ -0,0 +1,7 @@
++name=zsh/db
++link=dynamic
++load=no
++
++autoparams="zdb_open"
++
++objects="db.o"
+

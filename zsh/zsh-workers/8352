@@ -1,0 +1,177 @@
+From zsh-workers-return-8352-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Oct 21 08:32:55 1999
+Return-Path: <zsh-workers-return-8352-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14858 invoked from network); 21 Oct 1999 08:32:53 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Oct 1999 08:32:53 -0000
+Received: (qmail 24570 invoked by alias); 21 Oct 1999 08:32:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8352
+Received: (qmail 24563 invoked from network); 21 Oct 1999 08:32:42 -0000
+Date: Thu, 21 Oct 1999 10:32:40 +0200 (MET DST)
+Message-Id: <199910210832.KAA32127@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Tanaka Akira's message of 21 Oct 1999 01:15:03 +0900
+Subject: Re: PATCH: _archie
+
+
+Tanaka Akira wrote:
+
+>   Sven Wischnowsky <wischnow@informatik.hu-berlin.de> writes:
+> 
+> > Combination of `computil' not reporting that options are allowed at
+> > that position and a bit of stupidity in `_arguments'.
+> 
+> Thanks. First <TAB> works well now. But second <TAB> doesn't.
+> 
+> ...
+> 
+> I think second <TAB> should insert "D" to command line, but zsh
+> doesn't insert anything.
+
+That was caused by `_arguments' invoking `_message' too early. That
+added an empty string as a match and set `compstate[insert]' to an
+empty string -- which then inhibitied the start of menucompletion.
+
+> (1) flex -<TAB> show the option "+" incorrectly.
+
+Parsing bug in `computil'. It took it as one of those both-`-'-and`+'-
+options.
+
+> (2) bison <TAB> doesn't complete files at all.
+> 
+> is27e1u11% bison <TAB>
+> 
+> In pws-6, it completes files in current directory.
+> 
+> # I found that _bison doesn't treat *.y specialy...
+> # It should be treated as well as *.(yacc|bison).
+
+It completed files for me, so I've just added the `*.y' case. Maybe
+you tried it without 8340?
+
+> (3) bison Sr<TAB> completes option letters after "Sr"
+
+Ouch. The code didn't test for the leading `[-+]' so it thought it had 
+found `-r'.
+
+> (4) cvs add <TAB> completes cvs commands.
+
+This is to be fixed by 8340.
+
+Bye
+ Sven
+
+diff -u oldsrc/Zle/computil.c Src/Zle/computil.c
+--- oldsrc/Zle/computil.c	Thu Oct 21 08:59:16 1999
++++ Src/Zle/computil.c	Thu Oct 21 10:28:49 1999
+@@ -583,8 +583,10 @@
+ 	    if ((multi = (*p == '*')))
+ 		p++;
+ 
+-	    if ((p[0] == '-' && p[1] == '+') ||
+-		(p[0] == '+' && p[1] == '-')) {
++	    if (((p[0] == '-' && p[1] == '+') ||
++		 (p[0] == '+' && p[1] == '-')) &&
++		p[2] && p[2] != ':' && p[2] != '[' &&
++		p[2] != '=' && p[2] != '-' && p[2] != '+') {
+ 		name = ++p;
+ 		*p = (again ? '-' : '+');
+ 		again = 1 - again;
+@@ -593,7 +595,12 @@
+ 		if (p[0] == '-' && p[1] == '-')
+ 		    p++;
+ 	    }
+-	    for (p++; *p && *p != ':' && *p != '[' &&
++	    if (!p[1]) {
++		free_cadef(ret);
++		zerrnam(nam, "invalid argument: %s", *args, 0);
++		return NULL;
++	    }
++	    for (p += 2; *p && *p != ':' && *p != '[' &&
+ 		     ((*p != '-' && *p != '+' && *p != '=') ||
+ 		      (p[1] != ':' && p[1] != '[')); p++)
+ 		if (*p == '\\' && p[1])
+@@ -834,8 +841,7 @@
+ ca_get_sopt(Cadef d, char *line, int full, char **end)
+ {
+     Caopt p;
+-
+-    line++;
++    char pre = *line++;
+ 
+     if (full) {
+ 	for (p = NULL; *line; line++)
+@@ -846,7 +852,7 @@
+     } else {
+ 	for (p = NULL; *line; line++)
+ 	    if ((p = d->single[STOUC(*line)]) && p->active &&
+-		p->args && p->type != CAO_NEXT) {
++		p->args && p->type != CAO_NEXT && p->name[0] == pre) {
+ 		if (end) {
+ 		    line++;
+ 		    if (p->type == CAO_EQUAL && *line == '=')
+@@ -854,9 +860,12 @@
+ 		    *end = line;
+ 		}
+ 		break;
+-	    } else if (!p || !p->active || (line[1] && p->args))
++	    } else if (!p || !p->active || (line[1] && p->args) ||
++		       p->name[0] != pre)
+ 		return NULL;
+-	if (end)
++	    else
++		p = NULL;
++	if (p && end)
+ 	    *end = line;
+ 	return p;
+     }
+diff -u -r oldcompletion/Base/_arguments Completion/Base/_arguments
+--- oldcompletion/Base/_arguments	Thu Oct 21 08:58:54 1999
++++ Completion/Base/_arguments	Thu Oct 21 09:21:03 1999
+@@ -5,7 +5,7 @@
+ 
+ setopt localoptions extendedglob
+ 
+-local long cmd="$words[1]" descr
++local long cmd="$words[1]" descr mesg
+ 
+ long=$argv[(I)--]
+ if (( long )); then
+@@ -189,7 +189,7 @@
+           # An empty action means that we should just display a message.
+ 
+           [[ -n "$matched" ]] && compadd -n -Q -S '' -s "$SUFFIX" - "$PREFIX"
+-          _message "$descr"
++          mesg="$descr"
+ 
+         elif [[ "$action" = \(\(*\)\) ]]; then
+ 
+@@ -286,6 +286,7 @@
+ 
+   [[ -n "$aret" ]] && return 300
+ 
++  [[ -n "$mesg" ]] && _message "$mesg"
+   [[ -n "$noargs" ]] && _message "$noargs"
+ 
+   # Set the return value.
+diff -u -r oldcompletion/User/_bison Completion/User/_bison
+--- oldcompletion/User/_bison	Thu Oct 21 08:59:03 1999
++++ Completion/User/_bison	Thu Oct 21 10:15:44 1999
+@@ -14,7 +14,7 @@
+   '(--version)-V[show version]' \
+   '(--help)-h[show help]' \
+   '(--yacc --fixed-output-file)-y[imitate yacc'"'"'s output file convention]' \
+-  ':input file:_files -g \*.\(\#i\)\(bison\|yacc\)' \
++  ':input file:_files -g \*.\(\#i\)\(bison\|yacc\|y\)' \
+   -- \
+   '*=outfile:parser file name:_files' \
+   '*file-prefix=prefix:output file prefix:' \
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

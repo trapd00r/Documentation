@@ -1,0 +1,212 @@
+From zsh-workers-return-7114-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Jul 13 13:33:22 1999
+Return-Path: <zsh-workers-return-7114-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18023 invoked from network); 13 Jul 1999 13:33:20 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 13 Jul 1999 13:33:20 -0000
+Received: (qmail 28125 invoked by alias); 13 Jul 1999 13:33:11 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7114
+Received: (qmail 28118 invoked from network); 13 Jul 1999 13:33:10 -0000
+Message-Id: <9907131302.AA40208@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.6-test-1: line number road train continues to rumble
+Date: Tue, 13 Jul 1999 15:02:15 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+The problem this time is that with a script (rather than a function)
+containing a bad condition, e.g.
+
+[[ foo bar ]]
+
+the error is reported on the next following line.  That's to do with
+herrflush() again: when reading line-by-line from a file, it flushes up to
+and including the newline.  So we need to resurrect my first fix for the
+condition line number problem in such a way that errors aren't flagged
+until after the flush.  I've introduced zwarn(), which we've been needing
+as it completes the set of four error message routines and which should
+really be used at other places in the code, but I was too lazy to change it
+before.
+
+I still like the previous patch, which doesn't bother flushing input
+character by character when reading from a string, even if it now doesn't
+affect this particular problem.  I'm not actually totally convinced
+herrflush() is needed at all unless we're reading interactive input (when
+it certainly is, to get the rest of the line into the history).  It may be
+a hang over from the days when input was done by stuffing a load of
+characters into the queue, so you had to be sure of getting out what you'd
+put in.
+
+--- Src/parse.c.zerr	Wed Jul  7 11:34:13 1999
++++ Src/parse.c	Tue Jul 13 14:28:42 1999
+@@ -72,7 +72,13 @@
+ 
+ #define YYERROR  { tok = LEXERR; return NULL; }
+ #define YYERRORV { tok = LEXERR; return; }
+-#define COND_ERROR(X,Y) do{herrflush();zerr(X,Y,0);YYERROR}while(0)
++#define COND_ERROR(X,Y) do { \
++  zwarn(X,Y,0); \
++  herrflush(); \
++  if (noerrs != 2) \
++    errflag = 1; \
++  YYERROR \
++} while(0)
+ 
+ #define make_list()     allocnode(N_LIST)
+ #define make_sublist()  allocnode(N_SUBLIST)
+@@ -140,11 +146,13 @@
+     }
+     if (!l) {
+ 	if (errflag) {
+-	    yyerror();
++	    yyerror(0);
+ 	    return NULL;
+ 	}
++	yyerror(1);
+ 	herrflush();
+-	yyerror();
++	if (noerrs != 2)
++	    errflag = 1;
+ 	return NULL;
+     } else {
+ 	l->right = par_event();
+@@ -163,7 +171,7 @@
+     yylex();
+     ret = par_list();
+     if (tok == LEXERR) {
+-	yyerror();
++	yyerror(0);
+ 	return NULL;
+     }
+     return ret;
+@@ -1480,7 +1488,7 @@
+ 
+ /**/
+ static void
+-yyerror(void)
++yyerror(int noerr)
+ {
+     int t0;
+ 
+@@ -1488,9 +1496,11 @@
+ 	if (!yytext || !yytext[t0] || yytext[t0] == '\n')
+ 	    break;
+     if (t0 == 20)
+-	zerr("parse error near `%l...'", yytext, 20);
++	zwarn("parse error near `%l...'", yytext, 20);
+     else if (t0)
+-	zerr("parse error near `%l'", yytext, t0);
++	zwarn("parse error near `%l'", yytext, t0);
+     else
+-	zerr("parse error", NULL, 0);
++	zwarn("parse error", NULL, 0);
++    if (!noerr && noerrs != 2)
++	errflag = 1;
+ }
+--- Src/utils.c.zerr	Wed Jul  7 17:49:52 1999
++++ Src/utils.c	Tue Jul 13 14:20:12 1999
+@@ -30,23 +30,12 @@
+ #include "zsh.mdh"
+ #include "utils.pro"
+ 
+-/* Print an error */
+-
+-/**/
+-void
+-zwarnnam(const char *cmd, const char *fmt, const char *str, int num)
+-{
+-    int waserr;
+-
+-    waserr = errflag;
+-    zerrnam(cmd, fmt, str, num);
+-    errflag = waserr;
+-}
+-
+ /* name of script being sourced */
+ 
+ /**/
+ char *scriptname;
++
++/* Print an error */
+  
+ /**/
+ void
+@@ -57,7 +46,27 @@
+ 	    errflag = 1;
+ 	return;
+     }
++    zwarn(fmt, str, num);
++    errflag = 1;
++}
++
++/**/
++void
++zerrnam(const char *cmd, const char *fmt, const char *str, int num)
++{
++    if (errflag || noerrs)
++	return;
++
++    zwarnnam(cmd, fmt, str, num);
+     errflag = 1;
++}
++
++/**/
++void
++zwarn(const char *fmt, const char *str, int num)
++{
++    if (errflag || noerrs)
++	return;
+     trashzle();
+     /*
+      * scriptname is set when sourcing scripts, so that we get the
+@@ -68,25 +77,29 @@
+     nicezputs((isset(SHINSTDIN) && !locallevel) ? "zsh" :
+ 	      scriptname ? scriptname : argzero, stderr);
+     fputs(": ", stderr);
+-    zerrnam(NULL, fmt, str, num);
++    zerrmsg(fmt, str, num);
+ }
+ 
+ /**/
+ void
+-zerrnam(const char *cmd, const char *fmt, const char *str, int num)
++zwarnnam(const char *cmd, const char *fmt, const char *str, int num)
+ {
+-    if (cmd) {
+-	if (errflag || noerrs)
+-	    return;
+-	errflag = 1;
+-	trashzle();
+-	if (unset(SHINSTDIN) || locallevel) {
+-	    nicezputs(scriptname ? scriptname : argzero, stderr);
+-	    fputs(": ", stderr);
+-	}
+-	nicezputs(cmd, stderr);
++    if (errflag || noerrs)
++	return;
++    trashzle();
++    if (unset(SHINSTDIN) || locallevel) {
++	nicezputs(scriptname ? scriptname : argzero, stderr);
+ 	fputs(": ", stderr);
+     }
++    nicezputs(cmd, stderr);
++    fputs(": ", stderr);
++    zerrmsg(fmt, str, num);
++}
++
++/**/
++void
++zerrmsg(const char *fmt, const char *str, int num)
++{
+     while (*fmt)
+ 	if (*fmt == '%') {
+ 	    fmt++;
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

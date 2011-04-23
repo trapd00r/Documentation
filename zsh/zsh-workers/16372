@@ -1,0 +1,159 @@
+From zsh-workers-return-16372-mason-zsh=primenet.com.au@sunsite.dk Fri Dec 21 16:18:11 2001
+Return-Path: <zsh-workers-return-16372-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8262 invoked from network); 21 Dec 2001 16:18:10 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 21 Dec 2001 16:18:10 -0000
+Received: (qmail 22613 invoked by alias); 21 Dec 2001 16:18:05 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16372
+Received: (qmail 22601 invoked from network); 21 Dec 2001 16:18:04 -0000
+X-VirusChecked: Checked
+X-Authentication-Warning: iris.logica.co.uk: Host kiddleo@rambo.logica.co.uk [158.234.33.58] claimed to be yahoo.co.uk
+Sender: kiddleo@iris.logica.co.uk
+Message-ID: <3C23609F.1ACA8889@yahoo.co.uk>
+Date: Fri, 21 Dec 2001 16:17:35 +0000
+From: Oliver Kiddle <okiddle@yahoo.co.uk>
+X-Mailer: Mozilla 4.77 [en] (X11; U; Linux 2.2.15 i686)
+X-Accept-Language: en
+MIME-Version: 1.0
+To: Gerald Britton <gbritton@mit.edu>
+CC: zsh-workers@sunsite.dk
+Subject: Re: kill builtin
+References: <20011220222614.A3168@nevermore.toe.doomcom.org>
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+
+Gerald Britton wrote:
+> 
+> Discovered today that redhat's initscripts try to execute roughly:
+> 
+>         $SHELL -c kill -SIGIO $PID
+> 
+> which works if root's shell is bash, the util-linux kill command also
+> accepts -SIG<SIG> args, however, zsh's kill builtin doesn't accept this.
+> it seems like a perfectly simple patch to do, and i'd probably do it myself
+> if it weren't for being behind a 14.4 cellular link at the moment (it was the
+> ppp-watch stuff in redhat's initscripts which tried to do that ;)
+
+Thanks for reporting this. The patch below adds that. We should
+probably do the same for trap.
+
+I seem to remember that strncasecmp isn't portable and we've not used
+it elsewhere so I've used an uppercase conversion followed by strncmp.
+As a result, it no longer uses a strcoll based comparison for finding
+the signals. Anyone know if that was necessary (seemed a bit weird to
+me)? For the trap builtin, strncasecmp would again be useful so it
+might be better just to implement one.
+
+Geoff Wing wrote:
+> 
+> kill problem:
+> 
+> % kill -n
+> <coredump>  Missing a check for the argument:
+
+kill -s suffers the same problem so 4.0 also needs fixing. The easiest
+might be if I just apply this and 16224 to 4.0 but if anyone objects I
+can instead fix kill -s in 4.0.
+
+I've also got it to print an error if no pids are specified.
+
+> _kill or _signals problem (for me):
+> 
+> % kill -SIG<TAB>
+> --> completing corrections
+> -IO    -SEGV  -SYS   -URG
+> --> completing original
+> -SIG
+> % kill -IOEGV
+
+I get a similar problem (-SEGVEGV). I can't see anything wrong with
+_signals so it seems to me to be _approximate/_correct.
+
+Anyway, I'm now away till January. Have a good Christmas everyone.
+
+Oliver
+
+Index: Completion/Unix/Type/_signals
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Unix/Type/_signals,v
+retrieving revision 1.2
+diff -u -r1.2 _signals
+--- Completion/Unix/Type/_signals	2001/11/06 15:07:00	1.2
++++ Completion/Unix/Type/_signals	2001/12/21 15:48:24
+@@ -21,9 +21,10 @@
+ 
+ if [[ -z "$minus" ]] ||
+    ! zstyle -T ":completion:${curcontext}:signals" prefix-needed ||
+-   [[ "$PREFIX" = -* ]]; then
++   [[ -prefix -* ]]; then
+   local disp tmp
+ 
++  [[ -prefix ${minus}SIG* ]] && minus+=SIG
+   if zstyle -t ":completion:${curcontext}:signals" prefix-hidden; then
+     tmp=( "${(@)signals[1,last]}" )
+     disp=(-d tmp)
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.14
+diff -u -r1.14 jobs.c
+--- Src/jobs.c	2001/11/06 15:07:00	1.14
++++ Src/jobs.c	2001/12/21 15:48:25
+@@ -1504,20 +1504,29 @@
+     	    if ((*argv)[1] == 'n' && (*argv)[2] == '\0') {
+ 	    	char *endp;
+ 
+-	    	sig = zstrtol(*++argv, &endp, 10);
++	    	if (!*++argv) {
++		    zwarnnam(nam, "-n: argument expected", NULL, 0);
++		    return 1;
++		}
++		sig = zstrtol(*argv, &endp, 10);
+ 		if (*endp) {
+ 		    zwarnnam(nam, "invalid signal number", signame, 0);
+ 		    return 1;
+ 		}
+ 	    } else {
+-		if ((*argv)[1] == 's' && (*argv)[2] == '\0')
+-		    signame = *++argv;
+-		else
++		if (!((*argv)[1] == 's' && (*argv)[2] == '\0'))
+ 		    signame = *argv + 1;
++		else if (!(*++argv)) {
++		    zwarnnam(nam, "-s: argument expected", NULL, 0);
++		    return 1;
++		} else
++		    signame = *argv;
++		makeuppercase(&signame);
++		if (!strncmp(signame, "SIG", 3)) signame+=3;
+ 
+ 		/* check for signal matching specified name */
+ 		for (sig = 1; sig <= SIGCOUNT; sig++)
+-		    if (!cstrpcmp(sigs + sig, &signame))
++		    if (!strcmp(*(sigs + sig), signame))
+ 			break;
+ 		if (*signame == '0' && !signame[1])
+ 		    sig = 0;
+@@ -1529,6 +1538,11 @@
+ 	    }
+ 	}
+ 	argv++;
++    }
++
++    if (!*argv) {
++    	zwarnnam(nam, "not enough arguments", NULL, 0);
++	return 1;
+     }
+ 
+     queue_signals();
+
+_____________________________________________________________________
+This message has been checked for all known viruses by the 
+MessageLabs Virus Scanning Service. For further information visit
+http://www.messagelabs.com/stats.asp
+

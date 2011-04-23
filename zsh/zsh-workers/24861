@@ -1,0 +1,776 @@
+From zsh-workers-return-24861-mason-zsh=primenet.com.au@sunsite.dk Tue Apr 22 10:50:52 2008
+Return-Path: <zsh-workers-return-24861-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14473 invoked from network); 22 Apr 2008 10:50:45 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.4 (2008-01-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.4
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 22 Apr 2008 10:50:45 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 93122 invoked from network); 22 Apr 2008 10:50:41 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 22 Apr 2008 10:50:41 -0000
+Received: (qmail 18425 invoked by alias); 22 Apr 2008 10:50:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 24861
+Received: (qmail 18407 invoked from network); 22 Apr 2008 10:50:38 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 22 Apr 2008 10:50:38 -0000
+Received: from cluster-d.mailcontrol.com (cluster-d.mailcontrol.com [217.69.20.190])
+	by bifrost.dotsrc.org (Postfix) with ESMTP id E018A808A37A
+	for <zsh-workers@sunsite.dk>; Tue, 22 Apr 2008 12:50:24 +0200 (CEST)
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly46d.srv.mailcontrol.com (MailControl) with ESMTP id m3MAoI1S002047
+	for <zsh-workers@sunsite.dk>; Tue, 22 Apr 2008 11:50:21 +0100
+Received: from news01.csr.com ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.3959);
+	 Tue, 22 Apr 2008 11:50:18 +0100
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.14.2/8.13.4) with ESMTP id m3MAoJlh031343
+	for <zsh-workers@sunsite.dk>; Tue, 22 Apr 2008 11:50:19 +0100
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.14.2/8.14.2/Submit) with ESMTP id m3MAoImm031340
+	for <zsh-workers@sunsite.dk>; Tue, 22 Apr 2008 11:50:19 +0100
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: alternative wcwidth() implementation
+X-Mailer: MH-E 8.0.3; nmh 1.2-20070115cvs; GNU Emacs 22.1.1
+Date: Tue, 22 Apr 2008 11:50:18 +0100
+Message-ID: <31339.1208861418@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 22 Apr 2008 10:50:18.0891 (UTC) FILETIME=[A7CD05B0:01C8A466]
+X-Scanned-By: MailControl A-08-00-04 (www.mailcontrol.com) on 10.68.0.156
+X-Virus-Scanned: ClamAV 0.91.2/6879/Tue Apr 22 11:07:39 2008 on bifrost
+X-Virus-Status: Clean
+
+This attempts to test for a broken wcwidth() and uses Markus Kuhn's if
+necessary.  It's a bit desperate, because we need to assume wchar_t is a
+Unicode code point, but at this stage we are desperate.
+
+Jun T. will have to decide if this is helping on MacOS, otherwise it's
+back to the drawing board.
+
+I note we should supposedly be defining _XOPEN_SOURCE to get wcwidth(),
+at least with glibc, but apparently generally don't (though I did for the
+configure test).  I'm a bit frightened of changing this, but POSIX does
+suggest it's part of the XSI extension, so probably we ought to.
+Indeed, we do define _XOPEN_SOURCE_EXTENDED if needed for curses.h;
+probably the right thing to do is in the #else case, #define
+_XOPEN_SOURCE if MULTIBYTE_SUPPORT is present.
+
+Index: configure.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/configure.ac,v
+retrieving revision 1.96
+diff -u -r1.96 configure.ac
+--- configure.ac	28 Mar 2008 11:56:46 -0000	1.96
++++ configure.ac	22 Apr 2008 10:36:01 -0000
+@@ -2266,8 +2266,63 @@
+ ])
+ AH_TEMPLATE([MULTIBYTE_SUPPORT],
+ [Define to 1 if you want support for multibyte character sets.])
++AH_TEMPLATE([BROKEN_WCWIDTH],
++[Define to 1 if the wcwidth() function is present but broken.])
+ if test x$zsh_cv_c_unicode_support = xyes; then
+   AC_DEFINE(MULTIBYTE_SUPPORT)
++
++  dnl Test for a wcwidth() implementation that gives the wrong width for
++  dnl zero-width combining characters.
++  dnl For the test we use a combining acute accent (\u0301).
++  dnl We input it as UTF-8 since that is the standard we can rely
++  dnl upon most:  we can't rely on a wchar_t being stored as a
++  dnl Unicode code point on all systems.
++  dnl The programme returns 0 only if all the conditions for brokenness
++  dnl are met:
++  dnl - the programme compiled, linked and ran
++  dnl - we successfully set a UTF-8 locale
++  dnl - the locale we set plausibly converted the UTF-8 string
++  dnl   for a zero-width combining character (the only way to be
++  dnl   100% sure would be to output it and ask if it looked right)
++  dnl - the converted wide character gave a non-zero width.
++  dnl locale -a is a fallback; on most systems we should find en_US.UTF-8.
++  [locale_prog='char *my_locales[] = {
++  "en_US.UTF-8", "en_GB.UTF-8", "en.UTF-8", '
++  locale_prog="$locale_prog"`locale -a 2>/dev/null | \
++    sed -e 's/utf8/UTF-8/' | grep UTF-8 | \
++    while read line; do echo " \"$line\","; done;`
++  locale_prog="$locale_prog 0 };
++  #define _XOPEN_SOURCE
++  #include <stdlib.h>
++  #include <locale.h>
++  #include <wchar.h>
++
++  int main() {
++    char **localep;
++    char comb_acute_mb[] = { (char)0xcc, (char)0x81 };
++    wchar_t wc;
++
++    for (localep = my_locales; *localep; localep++)
++      if (setlocale(LC_ALL, *localep) &&
++          mbtowc(&wc, comb_acute_mb, 2) == 2)
++	  break;
++    if (!*localep)
++      return 1;
++    if (wcwidth(wc) == 0)
++      return 1;
++    return 0;
++  }
++  "]
++
++  AC_CACHE_CHECK(if the wcwidth() function is broken,
++  zsh_cv_c_broken_wcwidth,
++  [AC_TRY_RUN([$locale_prog],
++  zsh_cv_c_broken_wcwidth=yes,
++  zsh_cv_c_broken_wcwidth=no,
++  zsh_cv_c_broken_wcwidth=no)])
++  if test x$zsh_cv_c_broken_wcwdith = xyes; then
++    AC_DEFINE(BROKEN_WCWIDTH)
++  fi
+ fi
+ 
+ dnl
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.190
+diff -u -r1.190 builtin.c
+--- Src/builtin.c	3 Apr 2008 15:20:22 -0000	1.190
++++ Src/builtin.c	22 Apr 2008 10:36:06 -0000
+@@ -3668,7 +3668,7 @@
+ 			width += l;
+ 			break;
+ 		    }
+-		    wcw = wcwidth(wc);
++		    wcw = WCWIDTH(wc);
+ 		    /* treat unprintable as 0 */
+ 		    if (wcw > 0)
+ 			width += wcw;
+Index: Src/compat.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/compat.c,v
+retrieving revision 1.16
+diff -u -r1.16 compat.c
+--- Src/compat.c	3 Mar 2008 12:29:56 -0000	1.16
++++ Src/compat.c	22 Apr 2008 10:36:07 -0000
+@@ -549,4 +549,327 @@
+ 		*endptr = any ? s - 1 : nptr;
+ 	return (acc);
+ }
+-#endif
++#endif /* HAVE_STRTOUL */
++
++/**/
++#ifdef BROKEN_WCWIDTH
++
++/*
++ * This is an implementation of wcwidth() and wcswidth() (defined in
++ * IEEE Std 1002.1-2001) for Unicode.
++ *
++ * http://www.opengroup.org/onlinepubs/007904975/functions/wcwidth.html
++ * http://www.opengroup.org/onlinepubs/007904975/functions/wcswidth.html
++ *
++ * In fixed-width output devices, Latin characters all occupy a single
++ * "cell" position of equal width, whereas ideographic CJK characters
++ * occupy two such cells. Interoperability between terminal-line
++ * applications and (teletype-style) character terminals using the
++ * UTF-8 encoding requires agreement on which character should advance
++ * the cursor by how many cell positions. No established formal
++ * standards exist at present on which Unicode character shall occupy
++ * how many cell positions on character terminals. These routines are
++ * a first attempt of defining such behavior based on simple rules
++ * applied to data provided by the Unicode Consortium.
++ *
++ * For some graphical characters, the Unicode standard explicitly
++ * defines a character-cell width via the definition of the East Asian
++ * FullWidth (F), Wide (W), Half-width (H), and Narrow (Na) classes.
++ * In all these cases, there is no ambiguity about which width a
++ * terminal shall use. For characters in the East Asian Ambiguous (A)
++ * class, the width choice depends purely on a preference of backward
++ * compatibility with either historic CJK or Western practice.
++ * Choosing single-width for these characters is easy to justify as
++ * the appropriate long-term solution, as the CJK practice of
++ * displaying these characters as double-width comes from historic
++ * implementation simplicity (8-bit encoded characters were displayed
++ * single-width and 16-bit ones double-width, even for Greek,
++ * Cyrillic, etc.) and not any typographic considerations.
++ *
++ * Much less clear is the choice of width for the Not East Asian
++ * (Neutral) class. Existing practice does not dictate a width for any
++ * of these characters. It would nevertheless make sense
++ * typographically to allocate two character cells to characters such
++ * as for instance EM SPACE or VOLUME INTEGRAL, which cannot be
++ * represented adequately with a single-width glyph. The following
++ * routines at present merely assign a single-cell width to all
++ * neutral characters, in the interest of simplicity. This is not
++ * entirely satisfactory and should be reconsidered before
++ * establishing a formal standard in this area. At the moment, the
++ * decision which Not East Asian (Neutral) characters should be
++ * represented by double-width glyphs cannot yet be answered by
++ * applying a simple rule from the Unicode database content. Setting
++ * up a proper standard for the behavior of UTF-8 character terminals
++ * will require a careful analysis not only of each Unicode character,
++ * but also of each presentation form, something the author of these
++ * routines has avoided to do so far.
++ *
++ * http://www.unicode.org/unicode/reports/tr11/
++ *
++ * Markus Kuhn -- 2007-05-26 (Unicode 5.0)
++ *
++ * Permission to use, copy, modify, and distribute this software
++ * for any purpose and without fee is hereby granted. The author
++ * disclaims all warranties with regard to this software.
++ *
++ * Latest version: http://www.cl.cam.ac.uk/~mgk25/ucs/wcwidth.c
++ */
++
++struct interval {
++  int first;
++  int last;
++};
++
++/* auxiliary function for binary search in interval table */
++static int bisearch(wchar_t ucs, const struct interval *table, int max) {
++  int min = 0;
++  int mid;
++
++  if (ucs < table[0].first || ucs > table[max].last)
++    return 0;
++  while (max >= min) {
++    mid = (min + max) / 2;
++    if (ucs > table[mid].last)
++      min = mid + 1;
++    else if (ucs < table[mid].first)
++      max = mid - 1;
++    else
++      return 1;
++  }
++
++  return 0;
++}
++
++
++/* The following two functions define the column width of an ISO 10646
++ * character as follows:
++ *
++ *    - The null character (U+0000) has a column width of 0.
++ *
++ *    - Other C0/C1 control characters and DEL will lead to a return
++ *      value of -1.
++ *
++ *    - Non-spacing and enclosing combining characters (general
++ *      category code Mn or Me in the Unicode database) have a
++ *      column width of 0.
++ *
++ *    - SOFT HYPHEN (U+00AD) has a column width of 1.
++ *
++ *    - Other format characters (general category code Cf in the Unicode
++ *      database) and ZERO WIDTH SPACE (U+200B) have a column width of 0.
++ *
++ *    - Hangul Jamo medial vowels and final consonants (U+1160-U+11FF)
++ *      have a column width of 0.
++ *
++ *    - Spacing characters in the East Asian Wide (W) or East Asian
++ *      Full-width (F) category as defined in Unicode Technical
++ *      Report #11 have a column width of 2.
++ *
++ *    - All remaining characters (including all printable
++ *      ISO 8859-1 and WGL4 characters, Unicode control characters,
++ *      etc.) have a column width of 1.
++ *
++ * This implementation assumes that wchar_t characters are encoded
++ * in ISO 10646.
++ */
++
++/**/
++int
++mk_wcwidth(wchar_t ucs)
++{
++  /* sorted list of non-overlapping intervals of non-spacing characters */
++  /* generated by "uniset +cat=Me +cat=Mn +cat=Cf -00AD +1160-11FF +200B c" */
++  static const struct interval combining[] = {
++    { 0x0300, 0x036F }, { 0x0483, 0x0486 }, { 0x0488, 0x0489 },
++    { 0x0591, 0x05BD }, { 0x05BF, 0x05BF }, { 0x05C1, 0x05C2 },
++    { 0x05C4, 0x05C5 }, { 0x05C7, 0x05C7 }, { 0x0600, 0x0603 },
++    { 0x0610, 0x0615 }, { 0x064B, 0x065E }, { 0x0670, 0x0670 },
++    { 0x06D6, 0x06E4 }, { 0x06E7, 0x06E8 }, { 0x06EA, 0x06ED },
++    { 0x070F, 0x070F }, { 0x0711, 0x0711 }, { 0x0730, 0x074A },
++    { 0x07A6, 0x07B0 }, { 0x07EB, 0x07F3 }, { 0x0901, 0x0902 },
++    { 0x093C, 0x093C }, { 0x0941, 0x0948 }, { 0x094D, 0x094D },
++    { 0x0951, 0x0954 }, { 0x0962, 0x0963 }, { 0x0981, 0x0981 },
++    { 0x09BC, 0x09BC }, { 0x09C1, 0x09C4 }, { 0x09CD, 0x09CD },
++    { 0x09E2, 0x09E3 }, { 0x0A01, 0x0A02 }, { 0x0A3C, 0x0A3C },
++    { 0x0A41, 0x0A42 }, { 0x0A47, 0x0A48 }, { 0x0A4B, 0x0A4D },
++    { 0x0A70, 0x0A71 }, { 0x0A81, 0x0A82 }, { 0x0ABC, 0x0ABC },
++    { 0x0AC1, 0x0AC5 }, { 0x0AC7, 0x0AC8 }, { 0x0ACD, 0x0ACD },
++    { 0x0AE2, 0x0AE3 }, { 0x0B01, 0x0B01 }, { 0x0B3C, 0x0B3C },
++    { 0x0B3F, 0x0B3F }, { 0x0B41, 0x0B43 }, { 0x0B4D, 0x0B4D },
++    { 0x0B56, 0x0B56 }, { 0x0B82, 0x0B82 }, { 0x0BC0, 0x0BC0 },
++    { 0x0BCD, 0x0BCD }, { 0x0C3E, 0x0C40 }, { 0x0C46, 0x0C48 },
++    { 0x0C4A, 0x0C4D }, { 0x0C55, 0x0C56 }, { 0x0CBC, 0x0CBC },
++    { 0x0CBF, 0x0CBF }, { 0x0CC6, 0x0CC6 }, { 0x0CCC, 0x0CCD },
++    { 0x0CE2, 0x0CE3 }, { 0x0D41, 0x0D43 }, { 0x0D4D, 0x0D4D },
++    { 0x0DCA, 0x0DCA }, { 0x0DD2, 0x0DD4 }, { 0x0DD6, 0x0DD6 },
++    { 0x0E31, 0x0E31 }, { 0x0E34, 0x0E3A }, { 0x0E47, 0x0E4E },
++    { 0x0EB1, 0x0EB1 }, { 0x0EB4, 0x0EB9 }, { 0x0EBB, 0x0EBC },
++    { 0x0EC8, 0x0ECD }, { 0x0F18, 0x0F19 }, { 0x0F35, 0x0F35 },
++    { 0x0F37, 0x0F37 }, { 0x0F39, 0x0F39 }, { 0x0F71, 0x0F7E },
++    { 0x0F80, 0x0F84 }, { 0x0F86, 0x0F87 }, { 0x0F90, 0x0F97 },
++    { 0x0F99, 0x0FBC }, { 0x0FC6, 0x0FC6 }, { 0x102D, 0x1030 },
++    { 0x1032, 0x1032 }, { 0x1036, 0x1037 }, { 0x1039, 0x1039 },
++    { 0x1058, 0x1059 }, { 0x1160, 0x11FF }, { 0x135F, 0x135F },
++    { 0x1712, 0x1714 }, { 0x1732, 0x1734 }, { 0x1752, 0x1753 },
++    { 0x1772, 0x1773 }, { 0x17B4, 0x17B5 }, { 0x17B7, 0x17BD },
++    { 0x17C6, 0x17C6 }, { 0x17C9, 0x17D3 }, { 0x17DD, 0x17DD },
++    { 0x180B, 0x180D }, { 0x18A9, 0x18A9 }, { 0x1920, 0x1922 },
++    { 0x1927, 0x1928 }, { 0x1932, 0x1932 }, { 0x1939, 0x193B },
++    { 0x1A17, 0x1A18 }, { 0x1B00, 0x1B03 }, { 0x1B34, 0x1B34 },
++    { 0x1B36, 0x1B3A }, { 0x1B3C, 0x1B3C }, { 0x1B42, 0x1B42 },
++    { 0x1B6B, 0x1B73 }, { 0x1DC0, 0x1DCA }, { 0x1DFE, 0x1DFF },
++    { 0x200B, 0x200F }, { 0x202A, 0x202E }, { 0x2060, 0x2063 },
++    { 0x206A, 0x206F }, { 0x20D0, 0x20EF }, { 0x302A, 0x302F },
++    { 0x3099, 0x309A }, { 0xA806, 0xA806 }, { 0xA80B, 0xA80B },
++    { 0xA825, 0xA826 }, { 0xFB1E, 0xFB1E }, { 0xFE00, 0xFE0F },
++    { 0xFE20, 0xFE23 }, { 0xFEFF, 0xFEFF }, { 0xFFF9, 0xFFFB },
++    { 0x10A01, 0x10A03 }, { 0x10A05, 0x10A06 }, { 0x10A0C, 0x10A0F },
++    { 0x10A38, 0x10A3A }, { 0x10A3F, 0x10A3F }, { 0x1D167, 0x1D169 },
++    { 0x1D173, 0x1D182 }, { 0x1D185, 0x1D18B }, { 0x1D1AA, 0x1D1AD },
++    { 0x1D242, 0x1D244 }, { 0xE0001, 0xE0001 }, { 0xE0020, 0xE007F },
++    { 0xE0100, 0xE01EF }
++  };
++
++  /* test for 8-bit control characters */
++  if (ucs == 0)
++    return 0;
++  if (ucs < 32 || (ucs >= 0x7f && ucs < 0xa0))
++    return -1;
++
++  /* binary search in table of non-spacing characters */
++  if (bisearch(ucs, combining,
++	       sizeof(combining) / sizeof(struct interval) - 1))
++    return 0;
++
++  /* if we arrive here, ucs is not a combining or C0/C1 control character */
++
++  return 1 + 
++    (ucs >= 0x1100 &&
++     (ucs <= 0x115f ||                    /* Hangul Jamo init. consonants */
++      ucs == 0x2329 || ucs == 0x232a ||
++      (ucs >= 0x2e80 && ucs <= 0xa4cf &&
++       ucs != 0x303f) ||                  /* CJK ... Yi */
++      (ucs >= 0xac00 && ucs <= 0xd7a3) || /* Hangul Syllables */
++      (ucs >= 0xf900 && ucs <= 0xfaff) || /* CJK Compatibility Ideographs */
++      (ucs >= 0xfe10 && ucs <= 0xfe19) || /* Vertical forms */
++      (ucs >= 0xfe30 && ucs <= 0xfe6f) || /* CJK Compatibility Forms */
++      (ucs >= 0xff00 && ucs <= 0xff60) || /* Fullwidth Forms */
++      (ucs >= 0xffe0 && ucs <= 0xffe6) ||
++      (ucs >= 0x20000 && ucs <= 0x2fffd) ||
++      (ucs >= 0x30000 && ucs <= 0x3fffd)));
++}
++
++
++/*
++ * The following functions are part of the original wcwidth.c:
++ * we don't use them but I've kept them in case - pws.
++ */
++#if 0
++int mk_wcswidth(const wchar_t *pwcs, size_t n)
++{
++  int w, width = 0;
++
++  for (;*pwcs && n-- > 0; pwcs++)
++    if ((w = mk_wcwidth(*pwcs)) < 0)
++      return -1;
++    else
++      width += w;
++
++  return width;
++}
++
++
++/*
++ * The following functions are the same as mk_wcwidth() and
++ * mk_wcswidth(), except that spacing characters in the East Asian
++ * Ambiguous (A) category as defined in Unicode Technical Report #11
++ * have a column width of 2. This variant might be useful for users of
++ * CJK legacy encodings who want to migrate to UCS without changing
++ * the traditional terminal character-width behaviour. It is not
++ * otherwise recommended for general use.
++ */
++int mk_wcwidth_cjk(wchar_t ucs)
++{
++  /* sorted list of non-overlapping intervals of East Asian Ambiguous
++   * characters, generated by "uniset +WIDTH-A -cat=Me -cat=Mn -cat=Cf c" */
++  static const struct interval ambiguous[] = {
++    { 0x00A1, 0x00A1 }, { 0x00A4, 0x00A4 }, { 0x00A7, 0x00A8 },
++    { 0x00AA, 0x00AA }, { 0x00AE, 0x00AE }, { 0x00B0, 0x00B4 },
++    { 0x00B6, 0x00BA }, { 0x00BC, 0x00BF }, { 0x00C6, 0x00C6 },
++    { 0x00D0, 0x00D0 }, { 0x00D7, 0x00D8 }, { 0x00DE, 0x00E1 },
++    { 0x00E6, 0x00E6 }, { 0x00E8, 0x00EA }, { 0x00EC, 0x00ED },
++    { 0x00F0, 0x00F0 }, { 0x00F2, 0x00F3 }, { 0x00F7, 0x00FA },
++    { 0x00FC, 0x00FC }, { 0x00FE, 0x00FE }, { 0x0101, 0x0101 },
++    { 0x0111, 0x0111 }, { 0x0113, 0x0113 }, { 0x011B, 0x011B },
++    { 0x0126, 0x0127 }, { 0x012B, 0x012B }, { 0x0131, 0x0133 },
++    { 0x0138, 0x0138 }, { 0x013F, 0x0142 }, { 0x0144, 0x0144 },
++    { 0x0148, 0x014B }, { 0x014D, 0x014D }, { 0x0152, 0x0153 },
++    { 0x0166, 0x0167 }, { 0x016B, 0x016B }, { 0x01CE, 0x01CE },
++    { 0x01D0, 0x01D0 }, { 0x01D2, 0x01D2 }, { 0x01D4, 0x01D4 },
++    { 0x01D6, 0x01D6 }, { 0x01D8, 0x01D8 }, { 0x01DA, 0x01DA },
++    { 0x01DC, 0x01DC }, { 0x0251, 0x0251 }, { 0x0261, 0x0261 },
++    { 0x02C4, 0x02C4 }, { 0x02C7, 0x02C7 }, { 0x02C9, 0x02CB },
++    { 0x02CD, 0x02CD }, { 0x02D0, 0x02D0 }, { 0x02D8, 0x02DB },
++    { 0x02DD, 0x02DD }, { 0x02DF, 0x02DF }, { 0x0391, 0x03A1 },
++    { 0x03A3, 0x03A9 }, { 0x03B1, 0x03C1 }, { 0x03C3, 0x03C9 },
++    { 0x0401, 0x0401 }, { 0x0410, 0x044F }, { 0x0451, 0x0451 },
++    { 0x2010, 0x2010 }, { 0x2013, 0x2016 }, { 0x2018, 0x2019 },
++    { 0x201C, 0x201D }, { 0x2020, 0x2022 }, { 0x2024, 0x2027 },
++    { 0x2030, 0x2030 }, { 0x2032, 0x2033 }, { 0x2035, 0x2035 },
++    { 0x203B, 0x203B }, { 0x203E, 0x203E }, { 0x2074, 0x2074 },
++    { 0x207F, 0x207F }, { 0x2081, 0x2084 }, { 0x20AC, 0x20AC },
++    { 0x2103, 0x2103 }, { 0x2105, 0x2105 }, { 0x2109, 0x2109 },
++    { 0x2113, 0x2113 }, { 0x2116, 0x2116 }, { 0x2121, 0x2122 },
++    { 0x2126, 0x2126 }, { 0x212B, 0x212B }, { 0x2153, 0x2154 },
++    { 0x215B, 0x215E }, { 0x2160, 0x216B }, { 0x2170, 0x2179 },
++    { 0x2190, 0x2199 }, { 0x21B8, 0x21B9 }, { 0x21D2, 0x21D2 },
++    { 0x21D4, 0x21D4 }, { 0x21E7, 0x21E7 }, { 0x2200, 0x2200 },
++    { 0x2202, 0x2203 }, { 0x2207, 0x2208 }, { 0x220B, 0x220B },
++    { 0x220F, 0x220F }, { 0x2211, 0x2211 }, { 0x2215, 0x2215 },
++    { 0x221A, 0x221A }, { 0x221D, 0x2220 }, { 0x2223, 0x2223 },
++    { 0x2225, 0x2225 }, { 0x2227, 0x222C }, { 0x222E, 0x222E },
++    { 0x2234, 0x2237 }, { 0x223C, 0x223D }, { 0x2248, 0x2248 },
++    { 0x224C, 0x224C }, { 0x2252, 0x2252 }, { 0x2260, 0x2261 },
++    { 0x2264, 0x2267 }, { 0x226A, 0x226B }, { 0x226E, 0x226F },
++    { 0x2282, 0x2283 }, { 0x2286, 0x2287 }, { 0x2295, 0x2295 },
++    { 0x2299, 0x2299 }, { 0x22A5, 0x22A5 }, { 0x22BF, 0x22BF },
++    { 0x2312, 0x2312 }, { 0x2460, 0x24E9 }, { 0x24EB, 0x254B },
++    { 0x2550, 0x2573 }, { 0x2580, 0x258F }, { 0x2592, 0x2595 },
++    { 0x25A0, 0x25A1 }, { 0x25A3, 0x25A9 }, { 0x25B2, 0x25B3 },
++    { 0x25B6, 0x25B7 }, { 0x25BC, 0x25BD }, { 0x25C0, 0x25C1 },
++    { 0x25C6, 0x25C8 }, { 0x25CB, 0x25CB }, { 0x25CE, 0x25D1 },
++    { 0x25E2, 0x25E5 }, { 0x25EF, 0x25EF }, { 0x2605, 0x2606 },
++    { 0x2609, 0x2609 }, { 0x260E, 0x260F }, { 0x2614, 0x2615 },
++    { 0x261C, 0x261C }, { 0x261E, 0x261E }, { 0x2640, 0x2640 },
++    { 0x2642, 0x2642 }, { 0x2660, 0x2661 }, { 0x2663, 0x2665 },
++    { 0x2667, 0x266A }, { 0x266C, 0x266D }, { 0x266F, 0x266F },
++    { 0x273D, 0x273D }, { 0x2776, 0x277F }, { 0xE000, 0xF8FF },
++    { 0xFFFD, 0xFFFD }, { 0xF0000, 0xFFFFD }, { 0x100000, 0x10FFFD }
++  };
++
++  /* binary search in table of non-spacing characters */
++  if (bisearch(ucs, ambiguous,
++	       sizeof(ambiguous) / sizeof(struct interval) - 1))
++    return 2;
++
++  return mk_wcwidth(ucs);
++}
++
++
++int mk_wcswidth_cjk(const wchar_t *pwcs, size_t n)
++{
++  int w, width = 0;
++
++  for (;*pwcs && n-- > 0; pwcs++)
++    if ((w = mk_wcwidth_cjk(*pwcs)) < 0)
++      return -1;
++    else
++      width += w;
++
++  return width;
++}
++#endif /* 0 */
++
++/**/
++#endif /* BROKEN_WCWIDTH */
++
+Index: Src/prompt.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/prompt.c,v
+retrieving revision 1.46
+diff -u -r1.46 prompt.c
+--- Src/prompt.c	17 Feb 2008 18:15:10 -0000	1.46
++++ Src/prompt.c	22 Apr 2008 10:36:07 -0000
+@@ -960,10 +960,10 @@
+ 		break;
+ 	    default:
+ 		/*
+-		 * If the character isn't printable, wcwidth() returns
++		 * If the character isn't printable, WCWIDTH() returns
+ 		 * -1.  We assume width 1.
+ 		 */
+-		wcw = wcwidth(wc);
++		wcw = WCWIDTH(wc);
+ 		if (wcw >= 0)
+ 		    w += wcw;
+ 		else
+@@ -1177,7 +1177,7 @@
+ 				remw--;
+ 				break;
+ 			    default:
+-				wcw = wcwidth(cc);
++				wcw = WCWIDTH(cc);
+ 				if (wcw >= 0)
+ 				    remw -= wcw;
+ 				else
+@@ -1249,7 +1249,7 @@
+ 				maxwidth--;
+ 				break;
+ 			    default:
+-				wcw = wcwidth(cc);
++				wcw = WCWIDTH(cc);
+ 				if (wcw >= 0)
+ 				    maxwidth -= wcw;
+ 				else
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.187
+diff -u -r1.187 utils.c
+--- Src/utils.c	21 Apr 2008 11:49:57 -0000	1.187
++++ Src/utils.c	22 Apr 2008 10:36:09 -0000
+@@ -548,7 +548,7 @@
+     }
+ 
+     if (widthp) {
+-	int wcw = wcwidth(c);
++	int wcw = WCWIDTH(c);
+ 	*widthp = (s - buf);
+ 	if (wcw >= 0)
+ 	    *widthp += wcw;
+@@ -581,7 +581,7 @@
+     /* assume a single-byte character if not valid */
+     if (wc == WEOF || unset(MULTIBYTE))
+ 	return 1;
+-    wcw = wcwidth(wc);
++    wcw = WCWIDTH(wc);
+     /* if not printable, assume width 1 */
+     if (wcw < 0)
+ 	return 1;
+@@ -4097,7 +4097,7 @@
+ 		 * Returns -1 if not a printable character.  We
+ 		 * turn this into 1 for backward compatibility.
+ 		 */
+-		int wcw = wcwidth(wc);
++		int wcw = WCWIDTH(wc);
+ 		if (wcw >= 0)
+ 		    num += wcw;
+ 		else
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.124
+diff -u -r1.124 zsh.h
+--- Src/zsh.h	21 Apr 2008 11:49:58 -0000	1.124
++++ Src/zsh.h	22 Apr 2008 10:36:11 -0000
+@@ -2256,12 +2256,21 @@
+ #define MB_METASTRWIDTH(str)	mb_metastrlen(str, 1)
+ #define MB_METASTRLEN2(str, widthp)	mb_metastrlen(str, widthp)
+ 
++#ifdef BROKEN_WCWIDTH
++#define WCWIDTH(wc)	wcwidth_mk(wc)
++#else
++#define WCWIDTH(wc)	wcwidth(wc)
++#endif
+ /*
+- * Note WCWIDTH() takes wint_t, typically as a convchar_t.
++ * Note WCWIDTH_WINT() takes wint_t, typically as a convchar_t.
+  * It's written to use the wint_t from mb_metacharlenconv() without
+  * further tests.
++ *
++ * This version has a non-multibyte definition that simply returns
++ * 1.  We never expose WCWIDTH() in the non-multibyte world since
++ * it's just a proxy for wcwidth() itself.
+  */
+-#define WCWIDTH(wc)	zwcwidth(wc)
++#define WCWIDTH_WINT(wc)	zwcwidth(wc)
+ 
+ #define MB_INCOMPLETE	((size_t)-2)
+ #define MB_INVALID	((size_t)-1)
+@@ -2286,9 +2295,6 @@
+  *
+  * wc is assumed to be a wchar_t (i.e. we don't need zwcwidth).
+  *
+- * This may need to be more careful if we import a wcwidth() for
+- * compatibility to try to avoid clashes with the system library.
+- *
+  * Pedantic note: in Unicode, a combining character need not be
+  * zero length.  However, we are concerned here about display;
+  * we simply need to know whether the character will be displayed
+@@ -2296,7 +2302,15 @@
+  * sense throughout the shell.  I am not aware of a way of
+  * detecting the Unicode trait in standard libraries.
+  */
+-#define IS_COMBINING(wc)	(wcwidth(wc) == 0)
++#ifdef BROKEN_WCWIDTH
++/*
++ * We can't be quite sure the wcwidth we've provided is entirely
++ * in agreement with the system's, so be extra safe.
++ */
++#define IS_COMBINING(wc)	(WCWIDTH(wc) == 0 && !iswcntrl(wc))
++#else
++#define IS_COMBINING(wc)	(WCWIDTH(wc) == 0)
++#endif
+ /*
+  * Test for the base of a combining character.
+  *
+@@ -2305,7 +2319,7 @@
+  * is, as long as it has non-zero width.  We need to avoid all forms of
+  * space because the shell will split words on any whitespace.
+  */
+-#define IS_BASECHAR(wc)		(iswgraph(wc) && wcwidth(wc) > 0)
++#define IS_BASECHAR(wc)		(iswgraph(wc) && WCWIDTH(wc) > 0)
+ 
+ #else /* not MULTIBYTE_SUPPORT */
+ 
+@@ -2317,7 +2331,7 @@
+ #define MB_METASTRWIDTH(str)	ztrlen(str)
+ #define MB_METASTRLEN2(str, widthp)	ztrlen(str)
+ 
+-#define WCWIDTH(c)	(1)
++#define WCWIDTH_WINT(c)	(1)
+ 
+ /* Leave character or string as is. */
+ #define ZWC(c)	c
+Index: Src/Zle/complist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complist.c,v
+retrieving revision 1.112
+diff -u -r1.112 complist.c
+--- Src/Zle/complist.c	20 Apr 2008 21:17:29 -0000	1.112
++++ Src/Zle/complist.c	22 Apr 2008 10:36:13 -0000
+@@ -1017,7 +1017,7 @@
+ 	}
+ 	else
+ #endif
+-	    width = WCWIDTH(cchar);
++	    width = WCWIDTH_WINT(cchar);
+ 
+ 	if (doesc && cchar == ZWC('%')) {
+ 	    p += len;
+Index: Src/Zle/zle_misc.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_misc.c,v
+retrieving revision 1.51
+diff -u -r1.51 zle_misc.c
+--- Src/Zle/zle_misc.c	21 Apr 2008 17:58:59 -0000	1.51
++++ Src/Zle/zle_misc.c	22 Apr 2008 10:36:17 -0000
+@@ -50,7 +50,8 @@
+     if (insmode)
+ 	spaceinline(m * len);
+     else {
+-	int pos = zlecs, diff, i;
++	int pos = zlecs, diff, i, width;
++	int lastchar_base = 0;
+ 
+ 	/*
+ 	 * Calculate the number of character positions we are
+@@ -59,10 +60,30 @@
+ 	 * (i.e. even if control, or double width, or with combining
+ 	 * characters) is treated as 1 for the purpose of replacing
+ 	 * what's there already.
++	 *
++	 * However, to do that we need to know whether combining
++	 * characters are going to be treated as such.  Here
++	 * lastchar_base = 0 is something that isn't a combining
++	 * character and won't be treated by zsh as the base for one
++	 * lastchar_base = 1 is a suitable base character.
++	 * We don't change lastchar_type for combining characters
++	 * since they only depend on the base character.
++	 *
++	 * The difference won't usually matter, but it means,
++	 * for example, that a combining character inserted at
++	 * the start of the line will overwrite rather than
++	 * insert, which would be illogical; similarly at the
++	 * start of a command line argument.
+ 	 */
+ 	for (i = 0, count = 0; i < len; i++) {
+-	    int width = wcwidth(zstr[i]);
+-	    count += (width != 0) ? 1 : 0;
++	    if (IS_COMBINING(zstr[i])) {
++		/* width is zero unless we didn't have a base character */
++		if (!lastchar_base)
++		    count += 1;
++	    } else {
++		count++;
++		lastchar_base = IS_BASECHAR(zstr[i]);
++	    }
+ 	}
+ 	/*
+ 	 * Ensure we replace a complete combining character
+Index: Src/Zle/zle_refresh.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_refresh.c,v
+retrieving revision 1.60
+diff -u -r1.60 zle_refresh.c
+--- Src/Zle/zle_refresh.c	21 Apr 2008 11:49:58 -0000	1.60
++++ Src/Zle/zle_refresh.c	22 Apr 2008 10:36:17 -0000
+@@ -1222,7 +1222,7 @@
+ 	    }
+ 	}
+ #ifdef MULTIBYTE_SUPPORT
+-	else if (iswprint(*t) && (width = wcwidth(*t)) > 0) {
++	else if (iswprint(*t) && (width = WCWIDTH(*t)) > 0) {
+ 	    int ichars;
+ 	    if (width > rpms.sen - rpms.s) {
+ 		int started = 0;
+@@ -1397,7 +1397,7 @@
+ 	for (; u < outputline + outll; u++) {
+ #ifdef MULTIBYTE_SUPPORT
+ 	    if (iswprint(*u)) {
+-		int width = wcwidth(*u);
++		int width = WCWIDTH(*u);
+ 		/* Handle wide characters as above */
+ 		if (width > rpms.sen - rpms.s) {
+ 		    do {
+@@ -2144,7 +2144,7 @@
+    characters occupying more than one column.  We could flag that
+    this has happened (since it's not that common to have characters
+    wider than one column), but for now it's easier not to use the
+-   trick if we are using wcwidth() on the prompt.  It's not that
++   trick if we are using WCWIDTH() on the prompt.  It's not that
+    common to be editing in the middle of the prompt anyway, I would
+    think.
+    */
+@@ -2264,7 +2264,7 @@
+ 	if (tmpline[t0] == ZWC('\t'))
+ 	    vsiz = (vsiz | 7) + 2;
+ #ifdef MULTIBYTE_SUPPORT
+-	else if (iswprint(tmpline[t0]) && (width = wcwidth(tmpline[t0]) > 0)) {
++	else if (iswprint(tmpline[t0]) && (width = WCWIDTH(tmpline[t0]) > 0)) {
+ 	    vsiz += width;
+ 	    if (isset(COMBININGCHARS) && IS_BASECHAR(tmpline[t0])) {
+ 		while (t0 < tmpll-1 && IS_COMBINING(tmpline[t0+1]))
+@@ -2340,7 +2340,7 @@
+ 	    vp++;
+ #ifdef MULTIBYTE_SUPPORT
+ 	} else if (iswprint(tmpline[t0]) &&
+-		   (width = wcwidth(tmpline[t0])) > 0) {
++		   (width = WCWIDTH(tmpline[t0])) > 0) {
+ 	    int ichars;
+ 	    if (isset(COMBININGCHARS) && IS_BASECHAR(tmpline[t0])) {
+ 		/*
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_tricky.c,v
+retrieving revision 1.93
+diff -u -r1.93 zle_tricky.c
+--- Src/Zle/zle_tricky.c	14 Apr 2008 14:57:54 -0000	1.93
++++ Src/Zle/zle_tricky.c	22 Apr 2008 10:36:17 -0000
+@@ -2375,7 +2375,7 @@
+ 		    }
+ 		} else
+ 		    p += clen;
+-		cc += WCWIDTH(cchar);
++		cc += WCWIDTH_WINT(cchar);
+ 		if (dopr && !(cc % columns))
+ 			fputs(" \010", shout);
+ 	    }
+
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+

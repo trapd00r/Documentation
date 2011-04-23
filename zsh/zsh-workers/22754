@@ -1,0 +1,425 @@
+From zsh-workers-return-22754-mason-zsh=primenet.com.au@sunsite.dk Thu Sep 21 17:04:53 2006
+Return-Path: <zsh-workers-return-22754-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1721 invoked from network); 21 Sep 2006 17:04:48 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.5 (2006-08-29) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO autolearn=ham version=3.1.5
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 21 Sep 2006 17:04:48 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 75727 invoked from network); 21 Sep 2006 17:04:42 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 21 Sep 2006 17:04:42 -0000
+Received: (qmail 10666 invoked by alias); 21 Sep 2006 17:04:37 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 22754
+Received: (qmail 10515 invoked from network); 21 Sep 2006 17:04:35 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 21 Sep 2006 17:04:35 -0000
+Received: (qmail 74396 invoked from network); 21 Sep 2006 17:04:35 -0000
+Received: from flock1.newmail.ru (80.68.241.157)
+  by a.mx.sunsite.dk with SMTP; 21 Sep 2006 17:04:33 -0000
+Received: (qmail 20843 invoked from network); 21 Sep 2006 17:04:27 -0000
+Received: from unknown (HELO cooker.local) (arvidjaar@newmail.ru@83.237.195.204)
+  by smtpd.newmail.ru with SMTP; 21 Sep 2006 17:04:27 -0000
+From: Andrey Borzenkov <arvidjaar@newmail.ru>
+To: zsh-workers@sunsite.dk
+Subject: PATCH: Re: Broken completion with UTF-8 description
+Date: Thu, 21 Sep 2006 21:04:17 +0400
+User-Agent: KMail/1.9.4
+References: <200609171853.57050.arvidjaar@newmail.ru> <20060917201612.fe9933d5.p.w.stephenson@ntlworld.com>
+In-Reply-To: <20060917201612.fe9933d5.p.w.stephenson@ntlworld.com>
+Content-Type: text/plain;
+  charset="utf-8"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: inline
+Message-Id: <200609212104.23198.arvidjaar@newmail.ru>
+
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA1
+
+On Sunday 17 September 2006 23:16, Peter Stephenson wrote:
+> That's another evening of my life gone.
+>
+
+Sorry about that esp. as this did not fixed this particular case due to it 
+taking different code path.
+
+Patch below seems to correctly compute display length in all cases (where it 
+is computed in compdesrcibe at all); all my tests using different combination 
+of ASCII and Russian descriptions and matches passed, including the original 
+example that started this thread.
+
+How are matches sorted currently? Do we have another function doing collate 
+sort or completion simply sorts in numerical order? I am not sure if using 
+strpcmp is the right thing but this is the first I caught.
+
+Half of the code is redundant. It behaves differently when we have to group 
+matches (with identical descriptions) and when not. Observing that no 
+grouping case is equal to group of size 1 allows eliminate this duplicated 
+part. It has one visible effect - now during menu selection in case of 
+grouping only match itself is highlighted while without grouping the whole 
+line (match + description) is highlighted. Anyone will miss current behavior?
+
+Code silently depends on another code somewhere inside of completion that I 
+have never found :/
+
+Please review as I am not sure is usage of ztrdup/zfree is right in this case.
+
+And it became noticeably slow (for Russian strings) on my PIII 733 now ...
+
+- -andrey
+
+Index: Src/subst.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/subst.c,v
+retrieving revision 1.61
+diff -u -p -r1.61 subst.c
+- --- Src/subst.c	20 Sep 2006 09:22:34 -0000	1.61
++++ Src/subst.c	21 Sep 2006 16:51:38 -0000
+@@ -581,7 +581,7 @@ strcatsub(char **d, char *pb, char *pe, 
+ typedef int (*CompareFn) _((const void *, const void *));
+ 
+ /**/
+- -int
++mod_export int
+ strpcmp(const void *a, const void *b)
+ {
+ #ifdef HAVE_STRCOLL
+Index: Src/Zle/computil.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/computil.c,v
+retrieving revision 1.95
+diff -u -p -r1.95 computil.c
+- --- Src/Zle/computil.c	17 Sep 2006 19:23:39 -0000	1.95
++++ Src/Zle/computil.c	21 Sep 2006 16:51:39 -0000
+@@ -33,6 +33,13 @@
+ 
+ /* Help for `_describe'. */
+ 
++/*
++ * FIXME this should be defined globally. I have to find other places
++ * where it is used
++ * */
++
++#define INTERMATCH_GAP 2
++
+ typedef struct cdset *Cdset;
+ typedef struct cdstr *Cdstr;
+ typedef struct cdrun *Cdrun;
+@@ -40,16 +47,18 @@ typedef struct cdrun *Cdrun;
+ struct cdstate {
+     int showd;			/* != 0 if descriptions should be shown */
+     char *sep;			/* the separator string */
+- -    int slen;			/* its length */
++    int slen;			/* its metafied length */
++    int swidth;			/* its screen width */
+     int maxmlen;                /* maximum length to allow for the matches */
+     Cdset sets;			/* the sets of matches */
+- -    int pre;                    /* longest prefix (before description) */
++    int pre;                    /* longest prefix length (before description) 
+*/
++    int premaxw;		/* ... and its screen width */
+     int suf;                    /* longest suffix (description) */
+     int maxg;                   /* size of largest group */
+     int maxglen;                /* columns for matches of largest group */
+     int groups;                 /* number of groups */
+     int descs;                  /* number of non-group matches with desc */
+- -    int gpre;                   /* prefix length for group display */
++    int gprew;                   /* prefix screen width for group display */
+     Cdrun runs;                 /* runs to report to shell code */
+ };
+ 
+@@ -59,6 +68,7 @@ struct cdstr {
+     char *desc;                 /* the description or NULL */
+     char *match;                /* the match to add */
+     int len;                    /* length of str or match */
++    int width;			/* ... and its screen width */
+     Cdstr other;                /* next string with the same description */
+     int kind;                   /* 0: not in a group, 1: the first, 2: other 
+*/
+     Cdset set;                  /* the set this string is in */
+@@ -123,7 +133,7 @@ cd_group(int maxg)
+ {
+     Cdset set1, set2;
+     Cdstr str1, str2, *strp;
+- -    int num, len;
++    int num, width;
+ 
+     cd_state.groups = cd_state.descs = cd_state.maxglen = 0;
+     cd_state.maxg = 0;
+@@ -140,20 +150,20 @@ cd_group(int maxg)
+                 continue;
+ 
+             num = 1;
+- -            len = str1->len + cd_state.slen;
+- -            if (len > cd_state.maxglen)
+- -                cd_state.maxglen = len;
++            width = str1->width + cd_state.swidth;
++            if (width > cd_state.maxglen)
++                cd_state.maxglen = width;
+             strp = &(str1->other);
+ 
+             for (set2 = set1; set2; set2 = set2->next) {
+                 for (str2 = (set2 == set1 ? str1->next : set2->strs);
+                      str2; str2 = str2->next)
+                     if (str2->desc && !strcmp(str1->desc, str2->desc)) {
+- -                        len += 2 + str2->len;
+- -                        if (len > cd_state.maxmlen || num == maxg)
++                        width += INTERMATCH_GAP + str2->width;
++                        if (width > cd_state.maxmlen || num == maxg)
+                             break;
+- -                        if (len > cd_state.maxglen)
+- -                            cd_state.maxglen = len;
++                        if (width > cd_state.maxglen)
++                            cd_state.maxglen = width;
+                         str1->kind = 1;
+                         str2->kind = 2;
+                         num++;
+@@ -194,6 +204,8 @@ cd_calc()
+             set->count++;
+             if ((l = strlen(str->str)) > cd_state.pre)
+                 cd_state.pre = l;
++            if ((l = MB_METASTRWIDTH(str->str)) > cd_state.premaxw)
++                cd_state.premaxw = l;
+             if (str->desc) {
+                 set->desc++;
+                 if ((l = strlen(str->desc)) > cd_state.suf)
+@@ -206,7 +218,18 @@ cd_calc()
+ static int
+ cd_sort(const void *a, const void *b)
+ {
+- -    return strcmp((*((Cdstr *) a))->str, (*((Cdstr *) b))->str);
++    char *as = ztrdup((*((Cdstr *) a))->str);
++    int aslen = strlen(as);
++    char *bs = ztrdup((*((Cdstr *) b))->str);
++    int bslen = strlen(bs);
++    int ret;
++
++    unmetafy(as, &ret);
++    unmetafy(bs, &ret);
++    ret = strpcmp(&as, &bs);
++    zfree(as, aslen);
++    zfree(bs, bslen);
++    return ret;
+ }
+ 
+ static int
+@@ -234,8 +257,8 @@ cd_prep()
+             for (str = set->strs; str; str = str->next) {
+                 if (str->kind != 1) {
+                     if (!str->kind && str->desc) {
+- -                        if (str->len > wids[0])
+- -                            wids[0] = str->len;
++                        if (str->width > wids[0])
++                            wids[0] = str->width;
+                         str->other = NULL;
+                         *strp++ = str;
+                     }
+@@ -248,23 +271,24 @@ cd_prep()
+                 for (; gp; gp = gn) {
+                     gn = gp->other;
+                     gp->other = NULL;
+- -                    for (gpp = &gs; *gpp && (*gpp)->len > gp->len;
++                    for (gpp = &gs; *gpp && (*gpp)->width > gp->width;
+                          gpp = &((*gpp)->other));
+                     gp->other = *gpp;
+                     *gpp = gp;
+                 }
+                 for (gp = gs, i = 0; gp; gp = gp->other, i++)
+- -                    if (gp->len > wids[i])
+- -                        wids[i] = gp->len;
++                    if (gp->width > wids[i])
++                        wids[i] = gp->width;
+ 
+                 *strp++ = gs;
+             }
+ 
+- -        cd_state.gpre = 0;
+- -        for (i = 0; i < cd_state.maxg; i++)
+- -            cd_state.gpre += wids[i] + 2;
++        cd_state.gprew = 0;
++        for (i = 0; i < cd_state.maxg; i++) {
++            cd_state.gprew += wids[i] + INTERMATCH_GAP;
++	}
+ 
+- -        if (cd_state.gpre > cd_state.maxmlen && cd_state.maxglen > 1)
++        if (cd_state.gprew > cd_state.maxmlen && cd_state.maxglen > 1)
+             return 1;
+ 
+         qsort(grps, lines, sizeof(Cdstr), cd_sort);
+@@ -443,12 +467,13 @@ cd_init(char *nam, char *hide, char *mle
+     }
+     setp = &(cd_state.sets);
+     cd_state.sep = ztrdup(sep);
+- -    cd_state.slen = ztrlen(sep);
++    cd_state.slen = strlen(sep);
++    cd_state.swidth = MB_METASTRWIDTH(sep);
+     cd_state.sets = NULL;
+     cd_state.showd = disp;
+     cd_state.maxg = cd_state.groups = cd_state.descs = 0;
+     cd_state.maxmlen = atoi(mlen);
+- -    itmp = columns - cd_state.slen - 4;
++    itmp = columns - cd_state.swidth - 4;
+     if (cd_state.maxmlen > itmp)
+         cd_state.maxmlen = itmp;
+     if (cd_state.maxmlen < 4)
+@@ -489,6 +514,7 @@ cd_init(char *nam, char *hide, char *mle
+             *tmp = '\0';
+             str->str = str->match = ztrdup(rembslash(*ap));
+             str->len = strlen(str->str);
++            str->width = MB_METASTRWIDTH(str->str);
+         }
+         if (str)
+             str->next = NULL;
+@@ -600,38 +626,57 @@ cd_get(char **params)
+ 
+         case CRT_DESC:
+             {
++		/*
++		 * The buffer size:
++		 *     max prefix length (cd_state.pre) +
++		 *     max padding (cd_state.premaxw generously :) +
++		 *     separator length (cd_state.slen) +
++		 *     inter matches gap (INTERMATCH_GAP) +
++		 *     max description length (cd_state.suf) +
++		 *     trailing \0
++		 */
+                 VARARR(char, buf,
+- -                       cd_state.pre + cd_state.suf + cd_state.slen + 3);
+- -                char *sufp = NULL;
+- -
+- -                memcpy(buf + cd_state.pre + 2, cd_state.sep, cd_state.slen);
+- -                buf[cd_state.pre] = buf[cd_state.pre + 1] = ' ';
+- -                sufp = buf + cd_state.pre + cd_state.slen + 2;
+- -
++                       cd_state.pre + cd_state.suf +
++		       cd_state.premaxw + cd_state.slen + 3);
+                 mats = mp = (char **) zalloc((run->count + 1) * sizeof(char 
+*));
+                 dpys = dp = (char **) zalloc((run->count + 1) * sizeof(char 
+*));
+ 
+                 for (str = run->strs; str; str = str->run) {
++		    char *p = buf, *pp, *d;
++		    int l, remw;
++
+                     *mp++ = ztrdup(str->match);
+- -                    memset(buf, ' ', cd_state.pre);
+- -                    memcpy(buf, str->str, str->len);
+- -                    strcpy(sufp, str->desc);
+- -                    if (MB_METASTRWIDTH(buf) >= columns - 1) {
+- -			char *termptr = buf;
++		    strcpy(p, str->str);
++		    p += str->len;
++                    memset(p, ' ', (l = (cd_state.premaxw - str->width + 
+INTERMATCH_GAP)));
++		    p += l;
++		    strcpy(p, cd_state.sep);
++		    p += cd_state.slen;
++
++		    /*
++		     * copy a character at once until no more screen width
++		     * is available. Leave 1 character at the end of screen
++		     * as safety margin
++		     */
++		    remw = columns - cd_state.premaxw - cd_state.swidth - 3;
++		    pp = p;
++		    d = str->desc;
++		    while (*d) {
+ 			int w;
+- -			MB_METACHARINIT();
+- -			for (w = columns - 1; *termptr && w > 0; ) {
+- -			    convchar_t cchar;
+- -			    int cw;
+- -			    termptr += MB_METACHARLENCONV(termptr, &cchar);
+- -			    cw = WCWIDTH(cchar);
+- -			    if (cw >= 0)
+- -				w -= cw;
+- -			    else
+- -				w--;
++
++			l = MB_METACHARLEN(d);
++			memcpy(pp, d, l);
++			pp[l] = '\0';
++			w = MB_METASTRWIDTH(p);
++			if (w > remw) {
++			    *pp = '\0';
++			    break;
+ 			}
+- -                        *termptr = '\0';
++
++			pp += l;
++			d += l;
+ 		    }
++
+                     *dp++ = ztrdup(buf);
+                 }
+                 *mp = *dp = NULL;
+@@ -684,10 +729,10 @@ cd_get(char **params)
+ 	default: /* This silences the "might be used uninitialized" warnings */
+         case CRT_EXPL:
+             {
+- -                int dlen = columns - cd_state.gpre - cd_state.slen;
+- -                VARARR(char, dbuf, dlen + cd_state.slen);
+- -                char buf[20];
+- -                int i = run->count;
++		/* add columns as safety margin */
++                VARARR(char, dbuf, cd_state.suf + cd_state.slen + columns);
++                char buf[20], *p, *pp, *d;
++                int i = run->count, remw, w, l;
+ 
+                 sprintf(buf, "-E%d", i);
+ 
+@@ -699,13 +744,29 @@ cd_get(char **params)
+                         *dp++ = ztrdup("");
+                         continue;
+                     }
+- -                    memset(dbuf + cd_state.slen, ' ', dlen - 1);
+- -                    dbuf[dlen + cd_state.slen - 1] = '\0';
++
+                     strcpy(dbuf, cd_state.sep);
+- -                    memcpy(dbuf + cd_state.slen,
+- -                           str->desc,
+- -                           ((int)strlen(str->desc) >= dlen ? dlen - 1 :
+- -                            (int)strlen(str->desc)));
++		    remw = columns - cd_state.gprew - cd_state.swidth - INTERMATCH_GAP;
++		    p = pp = dbuf + cd_state.slen;
++		    d = str->desc;
++		    while (*d) {
++			l = MB_METACHARLEN(d);
++			memcpy(pp, d, l);
++			pp[l] = '\0';
++			w = MB_METASTRWIDTH(p);
++			if (w > remw) {
++			    *pp = '\0';
++			    break;
++			}
++
++			pp += l;
++			d += l;
++		    }
++
++		    while (w++ < remw)
++			*pp++ = ' ';
++		    *pp = '\0';
++
+                     *dp++ = ztrdup(dbuf);
+                 }
+                 mats[0] = *dp = NULL;
+
+
+- -andrey
+-----BEGIN PGP SIGNATURE-----
+Version: GnuPG v1.4.5 (GNU/Linux)
+
+iD8DBQFFEsYXR6LMutpd94wRAqqWAJ9++5aNYVpYL2sbkkWi2jo/Ty/EIwCgy0SP
+fNR74jf1tEXziM2Z8L1CJak=
+=Df6S
+-----END PGP SIGNATURE-----
+

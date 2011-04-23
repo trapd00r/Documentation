@@ -1,0 +1,739 @@
+From zsh-workers-return-19242-mason-zsh=primenet.com.au@sunsite.dk Thu Nov 13 12:25:18 2003
+Return-Path: <zsh-workers-return-19242-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6687 invoked from network); 13 Nov 2003 12:25:16 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 13 Nov 2003 12:25:16 -0000
+Received: (qmail 12377 invoked by alias); 13 Nov 2003 12:24:59 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19242
+Received: (qmail 12354 invoked from network); 13 Nov 2003 12:24:58 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 13 Nov 2003 12:24:58 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.183.235] by sunsite.dk (MessageWall 1.0.8) with SMTP; 13 Nov 2003 12:24:56 -0000
+Received: from EXCHANGE02.csr.com (unverified) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.10) with ESMTP id <T65e175bd40c0a88d017d0@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Thu, 13 Nov 2003 12:24:46 +0000
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.5329);
+	 Thu, 13 Nov 2003 12:25:50 +0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: dynamic job table resizing
+Date: Thu, 13 Nov 2003 12:24:42 +0000
+Message-ID: <28504.1068726282@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 13 Nov 2003 12:25:50.0287 (UTC) FILETIME=[45F425F0:01C3A9E1]
+
+I've convinced myself that, barring extreme algorithmic contortions I
+haven't noticed, nothing is liable to be checking the job table at the
+same time as I want to resize it.  So here's the patch to remove the
+MAXJOB definition and make the size dynamic, eliminating those `job
+table full or recursion limit exceeded' messages during complex
+completions.
+
+--enable-max-jobtable-size goes, too; this isn't a problem as configure
+simply ignores unused --enable's.  (I still need to look and see if
+there's associated documentation to change.)
+
+Currently it's done as follows.  The table is allocated in units of
+MAXJOBS_ALLOC = 50 jobs (the typical value of MAXJOB before).
+
+It's expanded any time we need another slot, but only in one place, in
+initjob() which is called at the top of execpline().  There is a
+MAX_MAXJOBS definition, currently arbitrarily set to 1000, to prevent
+infinite recursion.  This may need tweaking, but actually a more obvious
+way of preventing accidents is `limit' or `ulimit', so I'm not too
+worried.
+
+The job table is only shrunk at the top level, when we're about to read
+a new command from standard input or the next syntactic construct of the
+script being executed.  This has two positive effects:  it's safe, and
+we don't keep changing the size of the table in the middle of a complex
+operation such as some of the completion functions.  Also, we only
+shrink it if there are at least 20 places still spare.  This means the
+actual value of MAXJOBS_ALLOC shouldn't be too important; the shell will
+find a reasonable level.
+
+If you're looking at the code, note that the new `maxjob' is the last
+valid job, whereas MAXJOB was the size of the table, hence as an index
+was one more than the last possible job.
+
+If I've made any small slip-ups, as opposed to gross idiocies, they are
+likely to be either off-by-one errors or places where I've used maxjob
+instead of jobtabsize or vice versa.
+
+Index: acconfig.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/acconfig.h,v
+retrieving revision 1.16
+diff -u -r1.16 acconfig.h
+--- acconfig.h	11 Sep 2003 07:00:06 -0000	1.16
++++ acconfig.h	13 Nov 2003 12:07:36 -0000
+@@ -142,10 +142,6 @@
+ /* Define to be a string corresponding the vendor of the machine */
+ #undef VENDOR
+ 
+-/* Define to limit job table size */
+-#undef MAXJOB
+-#undef NEED_LINUX_TASKS_H
+-
+ /* Define if your system defines `struct winsize' in sys/ptem.h.  */
+ #undef WINSIZE_IN_PTEM
+ 
+Index: zshconfig.ac
+===================================================================
+RCS file: /cvsroot/zsh/zsh/zshconfig.ac,v
+retrieving revision 1.41
+diff -u -r1.41 zshconfig.ac
+--- zshconfig.ac	15 Sep 2003 09:20:21 -0000	1.41
++++ zshconfig.ac	13 Nov 2003 12:07:36 -0000
+@@ -417,43 +417,6 @@
+   AC_DEFINE(HAVE_VARIABLE_LENGTH_ARRAYS)
+ fi
+ 
+-AC_MSG_CHECKING(what to set MAXJOB to)
+-dnl Do you want to alter the maximum job table size?
+-ifdef([max_jobtable_size],[undefine([max_jobtable_size])])dnl
+-AC_ARG_ENABLE(max-jobtable-size,
+-[  --enable-max-jobtable-size=MAX    limit job table size to MAX],
+-
+-[if test x$enableval = xyes; then
+-
+-   AC_EGREP_CPP(yes,
+-   [#include <linux/tasks.h>
+-    #ifdef MAX_TASKS_PER_USER
+-    yes
+-    #endif
+-   ],
+-   maxj=max)
+-
+-   if test x$maxj = xmax; then
+-    AC_DEFINE(MAXJOB, MAX_TASKS_PER_USER)
+-    AC_DEFINE(NEED_LINUX_TASKS_H)
+-    AC_MSG_RESULT(${msg}MAX_TASKS_PER_USER)
+-   else
+-    AC_DEFINE(MAXJOB, 256)
+-    AC_MSG_RESULT(${msg}256)
+-   fi
+-
+- elif test x$enableval = xno; then
+- AC_DEFINE(MAXJOB,512)
+- AC_MSG_RESULT(${msg}512)
+- else
+- AC_DEFINE_UNQUOTED(MAXJOB,$enableval)
+- AC_MSG_RESULT(${msg}${enableval}) 
+-fi],
+-[
+-AC_DEFINE(MAXJOB, 50)
+- AC_MSG_RESULT(${msg}50) 
+-])
+-
+ dnl ------------------
+ dnl CHECK FOR PROGRAMS
+ dnl ------------------
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.108
+diff -u -r1.108 builtin.c
+--- Src/builtin.c	29 Oct 2003 19:17:30 -0000	1.108
++++ Src/builtin.c	13 Nov 2003 12:07:37 -0000
+@@ -3981,11 +3981,11 @@
+ {
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++)
++    for (i = 1; i <= maxjob; i++)
+ 	if (i != thisjob && (jobtab[i].stat & STAT_LOCKED) &&
+ 	    !(jobtab[i].stat & STAT_NOPRINT))
+ 	    break;
+-    if (i < MAXJOB) {
++    if (i <= maxjob) {
+ 	if (jobtab[i].stat & STAT_STOPPED) {
+ 
+ #ifdef USE_SUSPENDED
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.56
+diff -u -r1.56 exec.c
+--- Src/exec.c	3 Nov 2003 13:57:53 -0000	1.56
++++ Src/exec.c	13 Nov 2003 12:07:37 -0000
+@@ -216,7 +216,10 @@
+ {
+     pid_t pid;
+ 
+-    if (thisjob >= MAXJOB - 1) {
++    /*
++     * Is anybody willing to explain this test?
++     */
++    if (thisjob >= jobtabsize - 1 && !expandjobtab()) {
+ 	zerr("job table full", NULL, 0);
+ 	return -1;
+     }
+@@ -1024,7 +1027,12 @@
+     ipipe[0] = ipipe[1] = opipe[0] = opipe[1] = 0;
+     child_block();
+ 
+-    /* get free entry in job table and initialize it */
++    /*
++     * Get free entry in job table and initialize it.
++     * This is currently the only call to initjob(), so this
++     * is also the only place where we can expand the job table
++     * under us.
++     */
+     if ((thisjob = newjob = initjob()) == -1) {
+ 	child_unblock();
+ 	return 1;
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.37
+diff -u -r1.37 init.c
+--- Src/init.c	29 Oct 2003 19:17:30 -0000	1.37
++++ Src/init.c	13 Nov 2003 12:07:37 -0000
+@@ -1207,7 +1207,7 @@
+     setlocale(LC_ALL, "");
+ #endif
+ 
+-    init_hackzero(argv, environ);
++    init_jobs(argv, environ);
+ 
+     /*
+      * Provisionally set up the type table to allow metafication.
+@@ -1261,6 +1261,13 @@
+     init_misc();
+ 
+     for (;;) {
++	/*
++	 * See if we can free up some of jobtab.
++	 * We only do this at top level, because if we are
++	 * executing stuff we may refer to them by job pointer.
++	 */
++	maybeshrinkjobtab();
++
+ 	do
+ 	    loop(1,0);
+ 	while (tok != ENDINPUT && (tok != LEXERR || isset(SHINSTDIN)));
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.23
+diff -u -r1.23 jobs.c
+--- Src/jobs.c	29 Oct 2003 19:17:30 -0000	1.23
++++ Src/jobs.c	13 Nov 2003 12:07:37 -0000
+@@ -59,7 +59,17 @@
+ /* the job table */
+  
+ /**/
+-mod_export struct job jobtab[MAXJOB];
++mod_export struct job *jobtab;
++
++/* Size of the job table. */
++
++/**/
++mod_export size_t jobtabsize;
++
++/* The highest numbered job in the jobtable */
++
++/**/
++mod_export size_t maxjob;
+ 
+ /* If we have entered a subshell, the original shell's job table. */
+ static struct job *oldjobtab;
+@@ -135,7 +145,7 @@
+     Process pn;
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++)
++    for (i = 1; i <= maxjob; i++)
+     {
+ 	for (pn = aux ? jobtab[i].auxprocs : jobtab[i].procs;
+ 	     pn; pn = pn->next)
+@@ -168,7 +178,7 @@
+ {
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++)
++    for (i = 1; i <= maxjob; i++)
+ 	if ((jobtab[i].stat & STAT_SUPERJOB) &&
+ 	    jobtab[i].other == sub &&
+ 	    jobtab[i].gleader)
+@@ -446,14 +456,14 @@
+ {
+     int i;
+ 
+-    for (i = MAXJOB - 1; i; i--)
++    for (i = maxjob; i; i--)
+ 	if ((jobtab[i].stat & STAT_INUSE) && (jobtab[i].stat & STAT_STOPPED) &&
+ 	    !(jobtab[i].stat & STAT_SUBJOB) && i != curjob && i != thisjob) {
+ 	    prevjob = i;
+ 	    return;
+ 	}
+ 
+-    for (i = MAXJOB - 1; i; i--)
++    for (i = maxjob; i; i--)
+ 	if ((jobtab[i].stat & STAT_INUSE) && !(jobtab[i].stat & STAT_SUBJOB) &&
+ 	    i != curjob && i != thisjob) {
+ 	    prevjob = i;
+@@ -650,7 +660,10 @@
+     if (jn->stat & STAT_NOPRINT)
+ 	return;
+ 
+-    if (jn < jobtab || jn >= jobtab + MAXJOB)
++    /*
++     * Wow, what a hack.  Did I really write this? --- pws
++     */
++    if (jn < jobtab || jn >= jobtab + jobtabsize)
+ 	job = jn - oldjobtab;
+     else
+ 	job = jn - jobtab;
+@@ -838,15 +851,24 @@
+ 	zsfree(jn->pwd);
+     jn->pwd = NULL;
+     if (jn->stat & STAT_WASSUPER) {
++	/* careful in case we shrink and move the job table */
++	int job = jn - jobtab;
+ 	if (deleting)
+ 	    deletejob(jobtab + jn->other);
+ 	else
+ 	    freejob(jobtab + jn->other, 0);
++	jn = jobtab + job;
+     }
+     jn->gleader = jn->other = 0;
+     jn->stat = jn->stty_in_env = 0;
+     jn->filelist = NULL;
+     jn->ty = NULL;
++
++    /* Find the new highest job number. */
++    if (maxjob == jn - jobtab) {
++	while (maxjob && !(jobtab[maxjob].stat & STAT_INUSE))
++	    maxjob--;
++    }
+ }
+ 
+ /*
+@@ -932,7 +954,7 @@
+ {
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++)
++    for (i = 1; i <= maxjob; i++)
+ 	if (jobtab[i].stat && jobtab[i].filelist)
+ 	    return 1;
+     return 0;
+@@ -1032,7 +1054,7 @@
+ {
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++) {
++    for (i = 1; i <= maxjob; i++) {
+ 	/*
+ 	 * See if there is a jobtable worth saving.
+ 	 * We never free the saved version; it only happens
+@@ -1054,6 +1076,21 @@
+     memset(jobtab, 0, sizeof(jobtab)); /* zero out table */
+ }
+ 
++static int initnewjob(int i)
++{
++    jobtab[i].stat = STAT_INUSE;
++    if (jobtab[i].pwd) {
++	zsfree(jobtab[i].pwd);
++	jobtab[i].pwd = NULL;
++    }
++    jobtab[i].gleader = 0;
++
++    if (i > maxjob)
++	maxjob = i;
++
++    return i;
++}
++
+ /* Get a free entry in the job table and initialize it. */
+ 
+ /**/
+@@ -1062,16 +1099,12 @@
+ {
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++)
+-	if (!jobtab[i].stat) {
+-	    jobtab[i].stat = STAT_INUSE;
+-	    if (jobtab[i].pwd) {
+-		zsfree(jobtab[i].pwd);
+-		jobtab[i].pwd = NULL;
+-	    }
+-	    jobtab[i].gleader = 0;
+-	    return i;
+-	}
++    for (i = 1; i < jobtabsize; i++)
++	if (!jobtab[i].stat)
++	    return initnewjob(i);
++
++    if (expandjobtab())
++	return initnewjob(i);
+ 
+     zerr("job table full or recursion limit exceeded", NULL, 0);
+     return -1;
+@@ -1083,7 +1116,7 @@
+ {
+     int i;
+ 
+-    for (i = 1; i < MAXJOB; i++)
++    for (i = 1; i <= maxjob; i++)
+ 	if (jobtab[i].stat && !jobtab[i].pwd)
+ 	    jobtab[i].pwd = ztrdup(pwd);
+ }
+@@ -1144,7 +1177,7 @@
+ {
+     int i;
+  
+-    for (i = 1; i < MAXJOB; i++)
++    for (i = 1; i <= maxjob; i++)
+         if (jobtab[i].stat & STAT_CHANGED)
+             printjob(jobtab + i, 0, 1);
+ }
+@@ -1220,7 +1253,7 @@
+     /* a digit here means we have a job number */
+     if (idigit(*s)) {
+ 	jobnum = atoi(s);
+-	if (jobnum && jobnum < MAXJOB && jobtab[jobnum].stat &&
++	if (jobnum && jobnum <= maxjob && jobtab[jobnum].stat &&
+ 	    !(jobtab[jobnum].stat & STAT_SUBJOB) && jobnum != thisjob) {
+ 	    returnval = jobnum;
+ 	    goto done;
+@@ -1233,7 +1266,7 @@
+     if (*s == '?') {
+ 	struct process *pn;
+ 
+-	for (jobnum = MAXJOB - 1; jobnum >= 0; jobnum--)
++	for (jobnum = maxjob; jobnum >= 0; jobnum--)
+ 	    if (jobtab[jobnum].stat && !(jobtab[jobnum].stat & STAT_SUBJOB) &&
+ 		jobnum != thisjob)
+ 		for (pn = jobtab[jobnum].procs; pn; pn = pn->next)
+@@ -1267,17 +1300,33 @@
+ static char *hackzero;
+ static int hackspace;
+ 
+-/* Initialise the jobs -Z system.  The technique is borrowed from perl: *
+- * check through the argument and environment space, to see how many of *
+- * the strings are in contiguous space.  This determines the value of   *
+- * hackspace.                                                           */
++
++/* Initialise job handling. */
+ 
+ /**/
+ void
+-init_hackzero(char **argv, char **envp)
++init_jobs(char **argv, char **envp)
+ {
+     char *p, *q;
++    size_t init_bytes = MAXJOBS_ALLOC*sizeof(struct job);
+ 
++    /*
++     * Initialise the job table.  If this fails, we're in trouble.
++     */
++    jobtab = (struct job *)zalloc(init_bytes);
++    if (!jobtab) {
++	zerr("failed to allocate job table, aborting.", NULL, 0);
++	exit(1);
++    }
++    jobtabsize = MAXJOBS_ALLOC;
++    memset(jobtab, 0, init_bytes);
++
++    /*
++     * Initialise the jobs -Z system.  The technique is borrowed from
++     * perl: check through the argument and environment space, to see
++     * how many of the strings are in contiguous space.  This determines
++     * the value of hackspace.
++     */
+     hackzero = *argv;
+     p = strchr(hackzero, 0);
+     while(*++argv) {
+@@ -1296,6 +1345,77 @@
+     hackspace = p - hackzero;
+ }
+ 
++
++/*
++ * We have run out of space in the job table.
++ * Expand it by an additional MAXJOBS_ALLOC slots.
++ */
++
++/*
++ * An arbitrary limit on the absolute maximum size of the job table.
++ * This prevents us taking over the entire universe.
++ * Ought to be a multiple of MAXJOBS_ALLOC, but doesn't need to be.
++ */
++#define MAX_MAXJOBS	1000
++
++/**/
++int
++expandjobtab(void)
++{
++    size_t newsize = jobtabsize + MAXJOBS_ALLOC;
++    struct job *newjobtab;
++
++    if (newsize > MAX_MAXJOBS)
++	return 0;
++
++    newjobtab = (struct job *)zrealloc(jobtab, newsize * sizeof(struct job));
++    if (!newjobtab)
++	return 0;
++
++    /*
++     * Clear the new section of the table; this is necessary for
++     * the jobs to appear unused.
++     */
++    memset(newjobtab + jobtabsize, 0, MAXJOBS_ALLOC * sizeof(struct job));
++
++    jobtab = newjobtab;
++    jobtabsize = newsize;
++
++    return 1;
++}
++
++
++/*
++ * See if we can reduce the job table.  We can if we go over
++ * a MAXJOBS_ALLOC boundary.  However, we leave a boundary,
++ * currently 20 jobs, so that we have a place for immediate
++ * expansion and don't play ping pong with the job table size.
++ */
++
++/**/
++void
++maybeshrinkjobtab(void)
++{
++    size_t jobbound;
++
++    queue_signals();
++    jobbound = maxjob + MAXJOBS_ALLOC - (maxjob % MAXJOBS_ALLOC);
++    if (jobbound < jobtabsize && jobbound > maxjob + 20) {
++	struct job *newjobtab;
++
++	/* Hope this can't fail, but anyway... */
++	newjobtab = (struct job *)zrealloc(jobtab,
++					   jobbound*sizeof(struct job));
++
++	if (newjobtab) {
++	    jobtab = newjobtab;
++	    jobtabsize = jobbound;
++	}
++    }
++    unqueue_signals();
++}
++
++
+ /* bg, disown, fg, jobs, wait: most of the job control commands are     *
+  * here.  They all take the same type of argument.  Exception: wait can *
+  * take a pid or a job specifier, whereas the others only work on jobs. */
+@@ -1365,17 +1485,17 @@
+ 	} else if (func == BIN_JOBS) {
+ 	    /* List jobs. */
+ 	    struct job *jobptr;
+-	    int maxjob, ignorejob;
++	    int curmaxjob, ignorejob;
+ 	    if (unset(MONITOR) && oldmaxjob) {
+ 		jobptr = oldjobtab;
+-		maxjob = oldmaxjob;
++		curmaxjob = oldmaxjob;
+ 		ignorejob = 0;
+ 	    } else {
+ 		jobptr = jobtab;
+-		maxjob = MAXJOB;
++		curmaxjob = maxjob;
+ 		ignorejob = thisjob;
+ 	    }
+-	    for (job = 0; job != maxjob; job++, jobptr++)
++	    for (job = 0; job != curmaxjob; job++, jobptr++)
+ 		if (job != ignorejob && jobptr->stat) {
+ 		    if ((!OPT_ISSET(ops,'r') && !OPT_ISSET(ops,'s')) ||
+ 			(OPT_ISSET(ops,'r') && OPT_ISSET(ops,'s')) ||
+@@ -1387,7 +1507,7 @@
+ 	    unqueue_signals();
+ 	    return 0;
+ 	} else {   /* Must be BIN_WAIT, so wait for all jobs */
+-	    for (job = 0; job != MAXJOB; job++)
++	    for (job = 0; job <= maxjob; job++)
+ 		if (job != thisjob && jobtab[job].stat)
+ 		    zwaitjob(job, SIGINT);
+ 	    unqueue_signals();
+@@ -1731,7 +1851,7 @@
+ {
+     int jobnum;
+ 
+-    for (jobnum = MAXJOB - 1; jobnum >= 0; jobnum--)
++    for (jobnum = maxjob; jobnum >= 0; jobnum--)
+ 	if (!(jobtab[jobnum].stat & (STAT_SUBJOB | STAT_NOPRINT)) &&
+ 	    jobtab[jobnum].stat && jobtab[jobnum].procs && jobnum != thisjob &&
+ 	    jobtab[jobnum].procs->text && strpfx(s, jobtab[jobnum].procs->text))
+Index: Src/prompt.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/prompt.c,v
+retrieving revision 1.13
+diff -u -r1.13 prompt.c
+--- Src/prompt.c	29 Oct 2003 19:17:30 -0000	1.13
++++ Src/prompt.c	13 Nov 2003 12:07:37 -0000
+@@ -291,7 +291,7 @@
+ 			test = 1;
+ 		    break;
+ 		case 'j':
+-		    for (numjobs = 0, j = 1; j < MAXJOB; j++)
++		    for (numjobs = 0, j = 1; j <= maxjob; j++)
+ 			if (jobtab[j].stat && jobtab[j].procs &&
+ 		    	    !(jobtab[j].stat & STAT_NOPRINT)) numjobs++;
+ 		    if (numjobs >= arg)
+@@ -383,7 +383,7 @@
+ 		bp += strlen(bp);
+ 		break;
+ 	    case 'j':
+-		for (numjobs = 0, j = 1; j < MAXJOB; j++)
++		for (numjobs = 0, j = 1; j <= maxjob; j++)
+ 		    if (jobtab[j].stat && jobtab[j].procs &&
+ 		    	!(jobtab[j].stat & STAT_NOPRINT)) numjobs++;
+ 		addbufspc(DIGBUFSIZE);
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.22
+diff -u -r1.22 signals.c
+--- Src/signals.c	2 May 2003 10:25:33 -0000	1.22
++++ Src/signals.c	13 Nov 2003 12:07:37 -0000
+@@ -582,7 +582,7 @@
+  
+     if (unset(HUP))
+         return;
+-    for (i = 1; i < MAXJOB; i++)
++    for (i = 1; i <= maxjob; i++)
+         if ((from_signal || i != thisjob) && (jobtab[i].stat & STAT_LOCKED) &&
+             !(jobtab[i].stat & STAT_NOPRINT) &&
+             !(jobtab[i].stat & STAT_STOPPED)) {
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.50
+diff -u -r1.50 zsh.h
+--- Src/zsh.h	24 Sep 2003 14:55:33 -0000	1.50
++++ Src/zsh.h	13 Nov 2003 12:07:37 -0000
+@@ -684,10 +684,6 @@
+ /* Definitions for job table and job control */
+ /********************************************/
+ 
+-#ifdef NEED_LINUX_TASKS_H
+-#include <linux/tasks.h>
+-#endif
+-
+ /* entry in the job table */
+ 
+ struct job {
+@@ -730,6 +726,9 @@
+ };
+ 
+ #define JOBTEXTSIZE 80
++
++/* Size to initialise the job table to, and to increment it by when needed. */
++#define MAXJOBS_ALLOC	(50)
+ 
+ /* node in job process lists */
+ 
+Index: Src/Modules/parameter.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/parameter.c,v
+retrieving revision 1.27
+diff -u -r1.27 parameter.c
+--- Src/Modules/parameter.c	29 Oct 2003 19:17:48 -0000	1.27
++++ Src/Modules/parameter.c	13 Nov 2003 12:07:37 -0000
+@@ -1181,7 +1181,7 @@
+     pm->old = NULL;
+     pm->level = 0;
+ 
+-    if ((job = atoi(name)) >= 1 && job < MAXJOB &&
++    if ((job = atoi(name)) >= 1 && job <= maxjob &&
+ 	jobtab[job].stat && jobtab[job].procs &&
+ 	!(jobtab[job].stat & STAT_NOPRINT))
+ 	pm->u.str = pmjobtext(job);
+@@ -1210,7 +1210,7 @@
+     pm.old = NULL;
+     pm.level = 0;
+ 
+-    for (job = 1; job < MAXJOB; job++) {
++    for (job = 1; job <= maxjob; job++) {
+ 	if (jobtab[job].stat && jobtab[job].procs &&
+ 	    !(jobtab[job].stat & STAT_NOPRINT)) {
+ 	    if (func != scancountparams) {
+@@ -1291,7 +1291,7 @@
+     pm->old = NULL;
+     pm->level = 0;
+ 
+-    if ((job = atoi(name)) >= 1 && job < MAXJOB &&
++    if ((job = atoi(name)) >= 1 && job <= maxjob &&
+ 	jobtab[job].stat && jobtab[job].procs &&
+ 	!(jobtab[job].stat & STAT_NOPRINT))
+ 	pm->u.str = pmjobstate(job);
+@@ -1320,7 +1320,7 @@
+     pm.old = NULL;
+     pm.level = 0;
+ 
+-    for (job = 1; job < MAXJOB; job++) {
++    for (job = 1; job <= maxjob; job++) {
+ 	if (jobtab[job].stat && jobtab[job].procs &&
+ 	    !(jobtab[job].stat & STAT_NOPRINT)) {
+ 	    if (func != scancountparams) {
+@@ -1366,7 +1366,7 @@
+     pm->old = NULL;
+     pm->level = 0;
+ 
+-    if ((job = atoi(name)) >= 1 && job < MAXJOB &&
++    if ((job = atoi(name)) >= 1 && job <= maxjob &&
+ 	jobtab[job].stat && jobtab[job].procs &&
+ 	!(jobtab[job].stat & STAT_NOPRINT))
+ 	pm->u.str = pmjobdir(job);
+@@ -1395,7 +1395,7 @@
+     pm.old = NULL;
+     pm.level = 0;
+ 
+-    for (job = 1; job < MAXJOB; job++) {
++    for (job = 1; job <= maxjob; job++) {
+        if (jobtab[job].stat && jobtab[job].procs &&
+            !(jobtab[job].stat & STAT_NOPRINT)) {
+            if (func != scancountparams) {
+Index: Src/Zle/compctl.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compctl.c,v
+retrieving revision 1.15
+diff -u -r1.15 compctl.c
+--- Src/Zle/compctl.c	29 Oct 2003 19:17:48 -0000	1.15
++++ Src/Zle/compctl.c	13 Nov 2003 12:07:37 -0000
+@@ -3631,7 +3631,7 @@
+ 	int i;
+ 	char *j;
+ 
+-	for (i = 0; i < MAXJOB; i++)
++	for (i = 0; i <= maxjob; i++)
+ 	    if ((jobtab[i].stat & STAT_INUSE) &&
+ 		jobtab[i].procs && jobtab[i].procs->text) {
+ 		int stopped = jobtab[i].stat & STAT_STOPPED;
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

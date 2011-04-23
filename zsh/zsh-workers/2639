@@ -1,0 +1,512 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Thu Dec 26 03:53:28 1996
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 13149 invoked from network); 26 Dec 1996 03:53:23 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 26 Dec 1996 03:53:23 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id WAA15448; Wed, 25 Dec 1996 22:50:58 -0500 (EST)
+Resent-Date: Wed, 25 Dec 1996 22:50:58 -0500 (EST)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199612260345.EAA02595@hzoli.ppp.cs.elte.hu>
+Subject: Re: pwd -r odd failure mode
+To: zefram@dcs.warwick.ac.uk (Zefram)
+Date: Thu, 26 Dec 1996 04:45:42 +0100 (MET)
+Cc: zsh-workers@math.gatech.edu
+In-Reply-To: <4102.199612231959@stone.dcs.warwick.ac.uk> from Zefram at "Dec 23, 96 07:59:43 pm"
+X-Mailer: ELM [version 2.4ME+ PL17 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"azpk02.0.Jn3.XOVmo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2639
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Zefram wrote:
+> On some systems, pwd -r from a deleted directory can pick the first
+> pathname from the parent directory -- possibly a file -- and call that the
+> current directory.  The code responsible for this is a bit of zgetcwd()
+> that, if it fails to find the current directory's inode, reads the
+> directory again, accepting anything on the same device.  I don't see
+> how such an algorithm could ever produce a correct answer, and it isn't
+> commented, so just removing it seems sensible.  Does anyone know better?
+
+That code was not completely useless, it was necessary when . and .. are on
+different filesystems.  The right fix is to add check for the inode as
+well.  Below I include a much bigger patch for the problem.  I do not
+tested it much, I've just finished it as 4.44am so it may be buggy.
+
+Before this patch zsh was unable to handle pathnames longer than PATH_MAX.
+I also noticed that on Linux chdir accepts 4*PATH_MAX long strings.
+
+With this patch zsh can handle arbitrary long pathnames in PWD and in the
+output of pwd -r.  It completely rewrites the zgetcwd function and adds a
+new zchdir function which is identical to the chdir system call but it
+accepts arbitrary long pathnames.
+
+If you applied Zefram's patch in article 2618, remove it before applying
+this.
+
+Zoltan
+
+
+*** Src/builtin.c	1996/12/25 16:04:45	3.1.1.1
+--- Src/builtin.c	1996/12/26 03:32:22
+***************
+*** 1105,1162 ****
+  char *
+  cd_try_chdir(char *pfix, char *dest)
+  {
+!     char buf[PATH_MAX], buf2[PATH_MAX];
+!     char *s;
+!     int dotsct;
+  
+      /* handle directory prefix */
+      if (pfix && *pfix) {
+! 	if (strlen(dest) + strlen(pfix) + 1 >= PATH_MAX)
+! 	    return NULL;
+! 	sprintf(buf, "%s/%s", (!strcmp("/", pfix)) ? "" : pfix, dest);
+!     } else {
+! 	if (strlen(dest) >= PATH_MAX)
+! 	    return NULL;
+! 	strcpy(buf, dest);
+      }
+      /* Normalise path.  See the definition of fixdir() for what this means. */
+!     dotsct = fixdir(buf2, buf);
+  
+!     /* if the path is absolute, the test and return value are (relatively)
+!     simple */
+!     if (buf2[0] == '/')
+! 	return (chdir(unmeta(buf)) == -1) ? NULL : ztrdup(buf2);
+!     /* If the path is a simple `downward' relative path, the test is again
+!     fairly simple.  The relative path must be added to the end of the current
+!     directory. */
+!     if (!dotsct) {
+! 	if (chdir(unmeta(buf)) == -1)
+! 	    return NULL;
+! 	if (*buf2) {
+! 	    if (strlen(pwd) + strlen(buf2) + 1 >= PATH_MAX)
+! 		return NULL;
+! 	    sprintf(buf, "%s/%s", (!strcmp("/", pwd)) ? "" : pwd, buf2);
+! 	} else
+! 	    strcpy(buf, pwd);
+! 	return ztrdup(buf);
+      }
+!     /* There are one or more .. segments at the beginning of the relative path.
+!     A corresponding number of segments must be removed from the end of the
+!     current directory before the downward relative path is appended. */
+!     strcpy(buf, pwd);
+!     s = buf + strlen(buf) - 1;
+!     while (dotsct--)
+! 	while (s != buf)
+! 	    if (*--s == '/')
+! 		break;
+!     if (s == buf || *buf2)
+! 	s++;
+!     strcpy(s, buf2);
+!     /* For some reason, this chdir must be attempted with both the newly
+!     created path and the original non-normalised version. */
+!     if (chdir(unmeta(buf)) != -1 || chdir(unmeta(dest)) != -1)
+! 	return ztrdup(buf);
+!     return NULL;
+  }
+  
+  /* do the extra processing associated with changing directory */
+--- 1105,1146 ----
+  char *
+  cd_try_chdir(char *pfix, char *dest)
+  {
+!     char *buf;
+  
+      /* handle directory prefix */
+      if (pfix && *pfix) {
+! 	if (*pfix == '/')
+! 	    buf = tricat(pfix, "/", dest);
+! 	else {
+! 	    int pwl = strlen(pwd);
+! 	    int pfl = strlen(pfix);
+! 
+! 	    buf = zalloc(pwl + pfl + strlen(dest) + 3);
+! 	    strcpy(buf, pwd);
+! 	    buf[pwl] = '/';
+! 	    strcpy(buf + pwl + 1, pfix);
+! 	    buf[pwl + 1 + pfl] = '/';
+! 	    strcpy(buf + pwl + pfl + 2, dest);
+! 	}
+!     } else if (*dest == '/')
+! 	buf = ztrdup(dest);
+!     else {
+! 	int pwl = strlen(pwd);
+! 
+! 	buf = zalloc(pwl + strlen(dest) + 2);
+! 	strcpy(buf, pwd);
+! 	buf[pwl] = '/';
+! 	strcpy(buf + pwl + 1, dest);
+      }
++ 
+      /* Normalise path.  See the definition of fixdir() for what this means. */
+!     fixdir(buf);
+  
+!     if (zchdir(buf) == -1) {
+! 	zsfree(buf);
+! 	return NULL;
+      }
+!     return metafy(buf, -1, META_NOALLOC);
+  }
+  
+  /* do the extra processing associated with changing directory */
+***************
+*** 1247,1262 ****
+      putchar('\n');
+  }
+  
+! /* Normalise a path.  Segments consisting of ., and foo/.. combinations, *
+!  * are removed.  The number of .. segments at the beginning of the       *
+!  * path is returned.  The normalised path, minus leading ..s, is copied  *
+!  * to dest.                                                              */
+  
+  /**/
+! int
+! fixdir(char *dest, char *src)
+  {
+!     int ct = 0;
+      char *d0 = dest;
+  
+  /*** if have RFS superroot directory ***/
+--- 1231,1244 ----
+      putchar('\n');
+  }
+  
+! /* Normalise a path.  Segments consisting of ., and foo/.. *
+!  * combinations, are removed and the path is unmetafied.   */
+  
+  /**/
+! void
+! fixdir(char *src)
+  {
+!     char *dest = src;
+      char *d0 = dest;
+  
+  /*** if have RFS superroot directory ***/
+***************
+*** 1284,1300 ****
+  	    while (dest > d0 + 1 && dest[-1] == '/')
+  		dest--;
+  	    *dest = '\0';
+! 	    return ct;
+  	}
+! 	if (src[0] == '.' && src[1] == '.' &&
+  	  (src[2] == '\0' || src[2] == '/')) {
+! 	    /* remove a foo/.. combination, or increment ct, as appropriate */
+! 	    if (dest > d0 + 1) {
+! 		for (dest--; dest > d0 + 1 && dest[-1] != '/'; dest--);
+! 		if (dest[-1] != '/')
+! 		    dest--;
+! 	    } else
+! 		ct++;
+  	    src++;
+  	    while (*++src == '/');
+  	} else if (src[0] == '.' && (src[1] == '/' || src[1] == '\0')) {
+--- 1266,1279 ----
+  	    while (dest > d0 + 1 && dest[-1] == '/')
+  		dest--;
+  	    *dest = '\0';
+! 	    return;
+  	}
+! 	if (dest > d0 + 1 && src[0] == '.' && src[1] == '.' &&
+  	  (src[2] == '\0' || src[2] == '/')) {
+! 	    /* remove a foo/.. combination */
+! 	    for (dest--; dest > d0 + 1 && dest[-1] != '/'; dest--);
+! 	    if (dest[-1] != '/')
+! 		dest--;
+  	    src++;
+  	    while (*++src == '/');
+  	} else if (src[0] == '.' && (src[1] == '/' || src[1] == '\0')) {
+***************
+*** 1303,1309 ****
+  	} else {
+  	    /* copy a normal segment into the output */
+  	    while (*src != '/' && *src != '\0')
+! 		*dest++ = *src++;
+  	}
+      }
+  }
+--- 1282,1289 ----
+  	} else {
+  	    /* copy a normal segment into the output */
+  	    while (*src != '/' && *src != '\0')
+! 		if ((*dest++ = *src++) == Meta)
+! 		    dest[-1] = *src++ ^ 32;
+  	}
+      }
+  }
+*** Src/compat.c	1996/12/21 02:35:32	3.1.1.0
+--- Src/compat.c	1996/12/26 02:29:35
+***************
+*** 109,158 ****
+  char *
+  zgetcwd(void)
+  {
+!     static char buf0[PATH_MAX];
+!     char *buf2 = buf0 + 1;
+!     char buf3[PATH_MAX];
+      struct stat sbuf;
+      struct dirent *de;
+      DIR *dir;
+!     ino_t ino, rootino = (ino_t) ~ 0;
+!     dev_t dev, rootdev = (dev_t) ~ 0;
+  
+      holdintr();
+!     buf2[0] = '\0';
+!     buf0[0] = '/';
+  
+!     if (stat(buf0, &sbuf) >= 0) {
+! 	rootino = sbuf.st_ino;
+! 	rootdev = sbuf.st_dev;
+!     }
+  
+      for (;;) {
+! 	if (stat(".", &sbuf) < 0) {
+! 	    chdir(buf0);
+! 	    noholdintr();
+! 	    return ztrdup(".");
+! 	}
+! 	ino = sbuf.st_ino;
+! 	dev = sbuf.st_dev;
+! 	if (stat("..", &sbuf) < 0) {
+! 	    chdir(buf0);
+! 	    noholdintr();
+! 	    return ztrdup(".");
+! 	}
+! 	if ((sbuf.st_ino == ino && sbuf.st_dev == dev) ||
+! 	    (ino == rootino && dev == rootdev)) {
+! 	    chdir(buf0);
+! 	    noholdintr();
+! 	    return ztrdup(buf0);
+! 	}
+! 	dir = opendir("..");
+! 	if (!dir) {
+! 	    chdir(buf0);
+  	    noholdintr();
+! 	    return ztrdup(".");
+  	}
+! 	chdir("..");
+  	while ((de = readdir(dir))) {
+  	    char *fn = de->d_name;
+  	    /* Ignore `.' and `..'. */
+--- 109,155 ----
+  char *
+  zgetcwd(void)
+  {
+!     char nbuf[PATH_MAX+3];
+!     char *buf;
+!     int bufsiz, pos, len;
+      struct stat sbuf;
+      struct dirent *de;
+      DIR *dir;
+!     ino_t ino, pino;
+!     dev_t dev, pdev;
+! 
+!     if (stat(".", &sbuf) < 0)
+! 	return(ztrdup("."));
+  
+      holdintr();
+!     buf = halloc(bufsiz = PATH_MAX);
+!     pos = bufsiz - 1;
+!     buf[pos] = '\0';
+!     strcpy(nbuf, "../");
+  
+!     pino = sbuf.st_ino;
+!     pdev = sbuf.st_dev;
+  
+      for (;;) {
+! 	if (stat("..", &sbuf) < 0)
+! 	    break;
+! 
+! 	ino = pino;
+! 	dev = pdev;
+! 	pino = sbuf.st_ino;
+! 	pdev = sbuf.st_dev;
+! 
+! 	if (ino == pino && dev == pdev) {
+! 	    if (!buf[pos])
+! 		buf[--pos] = '/';
+! 	    zchdir(buf + pos);
+  	    noholdintr();
+! 	    return buf + pos;
+  	}
+! 
+! 	if (!(dir = opendir("..")))
+! 	    break;
+! 
+  	while ((de = readdir(dir))) {
+  	    char *fn = de->d_name;
+  	    /* Ignore `.' and `..'. */
+***************
+*** 160,194 ****
+  		(fn[1] == '\0' ||
+  		 (fn[1] == '.' && fn[2] == '\0')))
+  		continue;
+! 	    if ((ino_t) de->d_ino == ino) {
+! 		lstat(fn, &sbuf);
+! 		if (sbuf.st_dev == dev)
+! 		    goto match;
+  	    }
+  	}
+  	closedir(dir);
+! 	dir = opendir(".");
+! 	while ((de = readdir(dir))) {
+! 	    char *fn = de->d_name;
+! 	    /* Ignore `.' and `..'. */
+! 	    if (fn[0] == '.' &&
+! 		(fn[1] == '\0' ||
+! 		 (fn[1] == '.' && fn[2] == '\0')))
+! 		continue;
+! 	    lstat(fn, &sbuf);
+! 	    if (sbuf.st_dev == dev)
+! 		goto match;
+! 	}
+! 	noholdintr();
+! 	closedir(dir);
+! 	return ztrdup(".");
+!       match:
+! 	strcpy(buf3, de->d_name);
+! 	if (*buf2)
+! 	    strcat(buf3, "/");
+! 	strcat(buf3, buf2);
+! 	strcpy(buf2, buf3);
+! 	closedir(dir);
+      }
+  }
+  
+--- 157,223 ----
+  		(fn[1] == '\0' ||
+  		 (fn[1] == '.' && fn[2] == '\0')))
+  		continue;
+! 	    if (dev != pdev || (ino_t) de->d_ino == ino) {
+! 		strncpy(nbuf + 3, fn, PATH_MAX);
+! 		lstat(nbuf, &sbuf);
+! 		if (sbuf.st_dev == dev && sbuf.st_ino == ino)
+! 		    break;
+  	    }
+  	}
+  	closedir(dir);
+! 	if (!de)
+! 	    break;
+! 	len = strlen(nbuf + 2);
+! 	pos -= len;
+! 	while (pos <= 1) {
+! 	    char *newbuf = halloc(2*bufsiz);
+! 	    memcpy(newbuf + bufsiz, buf, bufsiz);
+! 	    buf = newbuf;
+! 	    pos += bufsiz;
+! 	    bufsiz *= 2;
+! 	}
+! 	memcpy(buf + pos, nbuf + 2, len);
+! 	if (chdir(".."))
+! 	    break;
+      }
++     if (*buf)
++ 	zchdir(buf + pos + 1);
++     noholdintr();
++     return ztrdup(".");
+  }
+  
++ /* chdir with arbitrary long pathname */
++ 
++ /**/
++ int
++ zchdir(char *dir)
++ {
++     char *s;
++     int currdir = -2;
++ 
++     for (;;) {
++ 	if (!*dir)
++ 	    return 0;
++ 	if (!chdir(dir))
++ 	    return 0;
++ 	if ((errno != ENAMETOOLONG && errno != ENOMEM) ||
++ 	    strlen(dir) < PATH_MAX)
++ 	    break;
++ 	for (s = dir + PATH_MAX - 1; s > dir && *s != '/'; s--);
++ 	if (s == dir)
++ 	    break;
++ 	if (currdir == -2)
++ 	    currdir = open(".", O_RDONLY);
++ 	*s = '\0';
++ 	if (chdir(dir)) {
++ 	    *s = '/';
++ 	    break;
++ 	}
++ 	*s = '/';
++ 	while (*++s == '/');
++ 	dir = s;
++     }
++     if (currdir >= 0)
++ 	fchdir(currdir);
++     return -1;
++ }
+*** Src/utils.c	1996/12/25 16:04:45	3.1.1.2
+--- Src/utils.c	1996/12/26 03:26:21
+***************
+*** 2624,2632 ****
+  #endif
+  
+  /* Escape tokens and null characters.  Buf is the string which should be    *
+!  * escaped.  len is the length of the string.  If len is -1, buf should     *
+!  * be null terminated.  If len is non-zero and the third paramerer is not   *
+!  * META_DUP buf should point to an at least len+1 long memory area.  The    *
+   * return value points to the quoted string.  If the given string does not  *
+   * contain any special character which should be quoted and the third       *
+   * parameter is not META_DUP, buf is returned unchanged (a terminating null *
+--- 2624,2632 ----
+  #endif
+  
+  /* Escape tokens and null characters.  Buf is the string which should be    *
+!  * escaped.  len is the length of the string.  If len is -1, buf should be  *
+!  * null terminated.  If len is non-negative and the third paramerer is not  *
+!  * META_DUP, buf should point to an at least len+1 long memory area.  The   *
+   * return value points to the quoted string.  If the given string does not  *
+   * contain any special character which should be quoted and the third       *
+   * parameter is not META_DUP, buf is returned unchanged (a terminating null *
+***************
+*** 2744,2760 ****
+  /* This function converts a zsh internal string to a form which can be *
+   * passed to a system call as a filename.  The result is stored in a   *
+   * single static area.  NULL returned if the result is longer than     *
+!  * PATH_MAX.                                                           */
+  
+  /**/
+  char *
+  unmeta(const char *file_name)
+  {
+!     static char fn[PATH_MAX];
+      char *p;
+      const char *t;
+  
+!     for (t = file_name, p = fn; *t && p < fn + PATH_MAX - 1; p++)
+  	if ((*p = *t++) == Meta)
+  	    *p = *t++ ^ 32;
+      if (*t)
+--- 2744,2760 ----
+  /* This function converts a zsh internal string to a form which can be *
+   * passed to a system call as a filename.  The result is stored in a   *
+   * single static area.  NULL returned if the result is longer than     *
+!  * 4 * PATH_MAX.                                                       */
+  
+  /**/
+  char *
+  unmeta(const char *file_name)
+  {
+!     static char fn[4 * PATH_MAX];
+      char *p;
+      const char *t;
+  
+!     for (t = file_name, p = fn; *t && p < fn + 4 * PATH_MAX - 1; p++)
+  	if ((*p = *t++) == Meta)
+  	    *p = *t++ ^ 32;
+      if (*t)
+

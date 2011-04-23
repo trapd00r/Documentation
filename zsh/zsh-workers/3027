@@ -1,0 +1,218 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Tue Mar 25 23:10:42 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 14602 invoked from network); 25 Mar 1997 23:10:40 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 25 Mar 1997 23:10:40 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id RAA03155; Tue, 25 Mar 1997 17:55:28 -0500 (EST)
+Resent-Date: Tue, 25 Mar 1997 17:55:28 -0500 (EST)
+Date: Mon, 24 Mar 1997 18:51:47 GMT
+From: Zefram <zefram@dcs.warwick.ac.uk>
+Message-Id: <28097.199703241851@stone.dcs.warwick.ac.uk>
+Subject: jobs -Z
+X-Patch: 225
+Resent-Message-ID: <"zNxjp2.0.En.WV5Ep"@euclid>
+To: zsh-workers@math.gatech.edu
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3027
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+-----BEGIN PGP SIGNED MESSAGE-----
+
+This patch attempts to make jobs -Z respectable.  It is documented.
+It is forbidden in RESTRICTED mode.  Some cleverness is adapted from
+perl, to determine how much argument space can be safely overwritten.
+Unused parts of the argument space are zeroed out, to clearly delimit
+the data being presented.  Metafication is handled correctly.
+
+I considered changing the mechanism from running this command to assigning
+to $0, Perl style, but as $0 acts oddly in functions I decided that
+adding even more special behaviour would be a bad idea.  I'd rather not
+add yet another special parameter for this.
+
+ -zefram
+
+ *** Doc/Zsh/builtins.yo	1997/03/22 14:32:03	1.12
+ --- Doc/Zsh/builtins.yo	1997/03/23 03:13:02
+ ***************
+ *** 552,558 ****
+   integers are not permitted.
+   )
+   findex(jobs)
+ ! item(tt(jobs) [ tt(-dlprs) ] [ var(job) ... ])(
+   Lists information about each given job, or all jobs
+   if var(job) is omitted.  The tt(-l) flag lists process
+   IDs, and the tt(-p) flag lists process groups.
+ --- 552,559 ----
+   integers are not permitted.
+   )
+   findex(jobs)
+ ! xitem(tt(jobs) [ tt(-dlprs) ] [ var(job) ... ])
+ ! item(tt(jobs -Z) var(string))(
+   Lists information about each given job, or all jobs
+   if var(job) is omitted.  The tt(-l) flag lists process
+   IDs, and the tt(-p) flag lists process groups.
+ ***************
+ *** 561,566 ****
+ --- 562,572 ----
+   If the tt(-d) flag is given, the directory from which the job was
+   started (which may not be the current directory of the job) will also
+   be shown.
+ + 
+ + The tt(-Z) option replaces the shell's argument and environment space with
+ + the given string, truncated if necessary to fit.  This will normally be
+ + visible in tt(ps) (manref(ps)(1)) listings.  This feature is typically
+ + used by daemons, to indicate their state.
+   )
+   findex(kill)
+   cindex(killing jobs)
+ *** Doc/Zsh/restricted.yo	1997/03/23 02:39:09	1.3
+ --- Doc/Zsh/restricted.yo	1997/03/23 03:14:32
+ ***************
+ *** 22,27 ****
+ --- 22,29 ----
+   itemiz(redirecting output to files)
+   itemiz(using the tt(exec) builtin command to replace the shell with another
+   command)
+ + itemiz(using tt(jobs -Z) to overwrite the shell process' argument and
+ + environment space)
+   itemiz(using the tt(ARGV0) parameter to override tt(argv[0]) for external
+   commands)
+   itemiz(turning off restricted mode with tt(set +r) or tt(unsetopt
+ *** Src/globals.h	1997/03/22 01:55:37	1.37
+ --- Src/globals.h	1997/03/23 02:59:12
+ ***************
+ *** 346,352 ****
+    
+   EXTERN char *argzero;           /* $0 */
+    
+ - EXTERN char *hackzero;
+   EXTERN char *scriptname;        /* name of script being sourced */
+   
+   EXTERN long lineno;             /* $LINENO       */
+ --- 346,351 ----
+ *** Src/init.c	1997/03/22 01:55:38	1.43
+ --- Src/init.c	1997/03/23 03:04:06
+ ***************
+ *** 107,113 ****
+       LinkList paramlist;
+       int bourne = (emulation == EMULATE_KSH || emulation == EMULATE_SH);
+   
+ !     hackzero = argzero = *argv++;
+       SHIN = 0;
+   
+       /* There's a bit of trickery with opts[INTERACTIVE] here.  It starts *
+ --- 107,113 ----
+       LinkList paramlist;
+       int bourne = (emulation == EMULATE_KSH || emulation == EMULATE_SH);
+   
+ !     argzero = *argv++;
+       SHIN = 0;
+   
+       /* There's a bit of trickery with opts[INTERACTIVE] here.  It starts *
+ *** Src/jobs.c	1997/03/04 00:25:46	1.16
+ --- Src/jobs.c	1997/03/23 03:03:07
+ ***************
+ *** 933,938 ****
+ --- 933,974 ----
+       return returnval;
+   }
+   
+ + /* For jobs -Z (which modifies the shell's name as seen in ps listings).  *
+ +  * hackzero is the start of the safely writable space, and hackspace is   *
+ +  * its length, excluding a final NUL terminator that will always be left. */
+ + 
+ + static char *hackzero;
+ + static int hackspace;
+ + 
+ + /* Initialise the jobs -Z system.  The technique is borrowed from perl: *
+ +  * check through the argument and environment space, to see how many of *
+ +  * the strings are in contiguous space.  This determines the value of   *
+ +  * hackspace.                                                           */
+ + 
+ + /**/
+ + void
+ + init_hackzero(char **argv, char **envp)
+ + {
+ +     char *p, *q;
+ + 
+ +     hackzero = *argv;
+ +     p = strchr(hackzero, 0);
+ +     while(*++argv) {
+ + 	q = *argv;
+ + 	if(q != p+1)
+ + 	    goto done;
+ + 	p = strchr(q, 0);
+ +     }
+ +     for(; *envp; envp++) {
+ + 	q = *envp;
+ + 	if(q != p+1)
+ + 	    goto done;
+ + 	p = strchr(q, 0);
+ +     }
+ +     done:
+ +     hackspace = p - hackzero;
+ + }
+ + 
+   /* bg, disown, fg, jobs, wait: most of the job control commands are     *
+    * here.  They all take the same type of argument.  Exception: wait can *
+    * take a pid or a job specifier, whereas the others only work on jobs. */
+ ***************
+ *** 944,951 ****
+       int job, lng, firstjob = -1, retval = 0;
+   
+       if (ops['Z']) {
+ ! 	if (*argv)
+ ! 	    strcpy(hackzero, *argv);
+   	return 0;
+       }
+   
+ --- 980,1000 ----
+       int job, lng, firstjob = -1, retval = 0;
+   
+       if (ops['Z']) {
+ ! 	int len;
+ ! 
+ ! 	if(isset(RESTRICTED)) {
+ ! 	    zwarnnam(name, "-Z is restricted", NULL, 0);
+ ! 	    return 1;
+ ! 	}
+ ! 	if(!argv[0] || argv[1]) {
+ ! 	    zwarnnam(name, "-Z requires one argument", NULL, 0);
+ ! 	    return 1;
+ ! 	}
+ ! 	unmetafy(*argv, &len);
+ ! 	if(len > hackspace)
+ ! 	    len = hackspace;
+ ! 	memcpy(hackzero, *argv, len);
+ ! 	memset(hackzero + len, 0, hackspace - len);
+   	return 0;
+       }
+   
+ *** Src/main.c	1997/01/29 03:25:18	1.7
+ --- Src/main.c	1997/03/23 02:58:57
+ ***************
+ *** 44,49 ****
+ --- 44,51 ----
+   
+       global_permalloc();
+   
+ +     init_hackzero(argv, environ);
+ + 
+       for (t = argv; *t; *t = metafy(*t, -1, META_ALLOC), t++);
+   
+       if (!(zsh_name = strrchr(argv[0], '/')))
+
+-----BEGIN PGP SIGNATURE-----
+Version: 2.6.3ia
+Charset: ascii
+
+iQCVAwUBMzSiH3D/+HJTpU/hAQGNDQP+LPmHVBkMKamxaN9kZP2kbbycziRnLGE4
+0fdlsuOMVi/pWuz6UIEWe2WM8IemG7yuXOY+XGeFL+UnjWRne7qrxopnltrjE/QU
+jurdQJYYHvZJg1u0NiQIfRBwOKPUQw7JD2YQRytpHdkSNH783JqIhXxvEAKWDPqj
+9QNkwBq1U14=
+=eoiK
+-----END PGP SIGNATURE-----
+

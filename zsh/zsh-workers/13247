@@ -1,0 +1,1719 @@
+From zsh-workers-return-13247-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Dec 11 09:51:14 2000
+Return-Path: <zsh-workers-return-13247-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 5278 invoked from network); 11 Dec 2000 09:51:10 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 Dec 2000 09:51:10 -0000
+Received: (qmail 6203 invoked by alias); 11 Dec 2000 09:51:01 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13247
+Received: (qmail 6194 invoked from network); 11 Dec 2000 09:50:59 -0000
+Date: Mon, 11 Dec 2000 10:50:57 +0100 (MET)
+Message-Id: <200012110950.KAA18628@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 4 Dec 2000 10:35:06 +0000
+Subject: signal queueing (was: Re: Last patch)
+
+
+
+Here is what I have now (not to be committed yet). It removes the trap 
+queues (not the smallest part of the patch, I think) and inserts pairs 
+of queue/unqueue_signals() in various places.
+
+Things I hope to have handled:
+
+- The globals in the completion code (simply by disallowing recursive
+  invocation of completion).
+- Internal zle widgets by using queu/unqueue in execzlefunc().
+- History queue/unqueue in several places.
+- The builtins that access global tables, except for the job handling
+  stuff (bin_fg(), bin_kill(), bin_suspend()).
+
+
+That leaves (next to all the things I haven't though about):
+
+- Execution code. As Bart said, we use child_(|un)block() there
+  already, I haven't yet checked which placed would be made safe by
+  changing that to block or queue other signals.
+- Shell functions. Of course, this is execution code, too, it's just
+  that we move around Shfunc's and Eprog's there a lot (and then there 
+  is autoloading).
+- Parameter table. This is probably the biggest problem. Queueing in
+  or around prefork() would help already. And the set?param()
+  functions. But there are many places where we use Value or Param
+  pointers or where we use get?param() function which don't copy the
+  parameter's value (and they shouldn't do that).
+
+Does anyone have good ideas how to tackle these? Any things I forgot?
+
+
+
+Bye
+ Sven
+
+diff -u -r ../oz/Src/Modules/zftp.c ./Src/Modules/zftp.c
+--- ../oz/Src/Modules/zftp.c	Sun Dec 10 10:14:32 2000
++++ ./Src/Modules/zftp.c	Sun Dec 10 10:29:00 2000
+@@ -801,7 +801,7 @@
+ 		cmdbuf[0] = (char)IAC;
+ 		cmdbuf[1] = (char)DONT;
+ 		cmdbuf[2] = ch;
+-		ztrapwrite(zfsess->cfd, cmdbuf, 3);
++		write(zfsess->cfd, cmdbuf, 3);
+ 		continue;
+ 
+ 	    case DO:
+@@ -811,7 +811,7 @@
+ 		cmdbuf[0] = (char)IAC;
+ 		cmdbuf[1] = (char)WONT;
+ 		cmdbuf[2] = ch;
+-		ztrapwrite(zfsess->cfd, cmdbuf, 3);
++		write(zfsess->cfd, cmdbuf, 3);
+ 		continue;
+ 
+ 	    case EOF:
+@@ -996,7 +996,7 @@
+ 	return 6;
+     }
+     zfalarm(tmout);
+-    ret = ztrapwrite(zfsess->cfd, cmd, strlen(cmd));
++    ret = write(zfsess->cfd, cmd, strlen(cmd));
+     alarm(0);
+ 
+     if (ret <= 0) {
+@@ -1470,7 +1470,7 @@
+     int ret;
+ 
+     if (!tmout)
+-	return ztrapread(fd, bf, sz);
++	return read(fd, bf, sz);
+ 
+     if (setjmp(zfalrmbuf)) {
+ 	alarm(0);
+@@ -1479,7 +1479,7 @@
+     }
+     zfalarm(tmout);
+ 
+-    ret = ztrapread(fd, bf, sz);
++    ret = read(fd, bf, sz);
+ 
+     /* we don't bother turning off the whole alarm mechanism here */
+     alarm(0);
+@@ -1495,7 +1495,7 @@
+     int ret;
+ 
+     if (!tmout)
+-	return ztrapwrite(fd, bf, sz);
++	return write(fd, bf, sz);
+ 
+     if (setjmp(zfalrmbuf)) {
+ 	alarm(0);
+@@ -1504,7 +1504,7 @@
+     }
+     zfalarm(tmout);
+ 
+-    ret = ztrapwrite(fd, bf, sz);
++    ret = write(fd, bf, sz);
+ 
+     /* we don't bother turning off the whole alarm mechanism here */
+     alarm(0);
+@@ -2846,7 +2846,7 @@
+ 	if (!zfnopen) {
+ 	    /* Write the final status in case this is a subshell */
+ 	    lseek(zfstatfd, zfsessno*sizeof(int), 0);
+-	    ztrapwrite(zfstatfd, zfstatusp+zfsessno, sizeof(int));
++	    write(zfstatfd, zfstatusp+zfsessno, sizeof(int));
+ 
+ 	    close(zfstatfd);
+ 	    zfstatfd = -1;
+@@ -3123,7 +3123,7 @@
+ 	/* Get the status in case it was set by a forked process */
+ 	int oldstatus = zfstatusp[zfsessno];
+ 	lseek(zfstatfd, 0, 0);
+-	ztrapread(zfstatfd, zfstatusp, sizeof(int)*zfsesscnt);
++	read(zfstatfd, zfstatusp, sizeof(int)*zfsesscnt);
+ 	if (zfsess->cfd != -1 && (zfstatusp[zfsessno] & ZFST_CLOS)) {
+ 	    /* got closed in subshell without us knowing */
+ 	    zcfinish = 2;
+@@ -3212,7 +3212,7 @@
+ 	 * but only for the active session.
+ 	 */
+ 	lseek(zfstatfd, zfsessno*sizeof(int), 0);
+-	ztrapwrite(zfstatfd, zfstatusp+zfsessno, sizeof(int));
++	write(zfstatfd, zfstatusp+zfsessno, sizeof(int));
+     }
+     return ret;
+ }
+diff -u -r ../oz/Src/Modules/zpty.c ./Src/Modules/zpty.c
+--- ../oz/Src/Modules/zpty.c	Sun Dec 10 10:14:32 2000
++++ ./Src/Modules/zpty.c	Sun Dec 10 10:29:09 2000
+@@ -539,7 +539,7 @@
+ 
+     for (; !errflag && !breaks && !retflag && !contflag && len;
+ 	 len -= written, s += written) {
+-	if ((written = ztrapwrite(cmd->fd, s, len)) < 0 && cmd->nblock &&
++	if ((written = write(cmd->fd, s, len)) < 0 && cmd->nblock &&
+ #ifdef EWOULDBLOCK
+ 	    errno == EWOULDBLOCK
+ #else
+@@ -583,7 +583,7 @@
+ 	int n;
+ 	char buf[BUFSIZ];
+ 
+-	while ((n = ztrapread(0, buf, BUFSIZ)) > 0)
++	while ((n = read(0, buf, BUFSIZ)) > 0)
+ 	    if (ptywritestr(cmd, buf, n))
+ 		return 1;
+     }
+diff -u -r ../oz/Src/Zle/zle_main.c ./Src/Zle/zle_main.c
+--- ../oz/Src/Zle/zle_main.c	Sun Dec 10 10:14:30 2000
++++ ./Src/Zle/zle_main.c	Sun Dec 10 10:52:17 2000
+@@ -313,17 +313,12 @@
+ breakread(int fd, char *buf, int n)
+ {
+     fd_set f;
+-    int ret;
+ 
+     FD_ZERO(&f);
+     FD_SET(fd, &f);
+ 
+-    ALLOWTRAPS {
+-	ret = (select(fd + 1, (SELECT_ARG_2_T) & f, NULL, NULL, NULL) == -1 ?
+-	       EOF : read(fd, buf, n));
+-    } DISALLOWTRAPS;
+-
+-    return ret;
++    return (select(fd + 1, (SELECT_ARG_2_T) & f, NULL, NULL, NULL) == -1 ?
++	    EOF : read(fd, buf, n));
+ }
+ 
+ # define read    breakread
+@@ -394,7 +389,7 @@
+ #  else
+ 	    ioctl(SHTTY, TCSETA, &ti.tio);
+ #  endif
+-	    r = ztrapread(SHTTY, &cc, 1);
++	    r = read(SHTTY, &cc, 1);
+ #  ifdef HAVE_TERMIOS_H
+ 	    tcsetattr(SHTTY, TCSANOW, &shttyinfo.tio);
+ #  else
+@@ -405,7 +400,7 @@
+ #endif
+ 	}
+ 	for (;;) {
+-	    r = ztrapread(SHTTY, &cc, 1);
++	    r = read(SHTTY, &cc, 1);
+ 	    if (r == 1)
+ 		break;
+ 	    if (r == 0) {
+@@ -664,8 +659,11 @@
+ 		ret = completecall(args);
+ 		if (atcurhist)
+ 		    histline = curhist;
+-	    } else
++	    } else {
++		queue_signals();
+ 		ret = w->u.fn(args);
++		unqueue_signals();
++	    }
+ 	    if (!(wflags & ZLE_NOTCOMMAND))
+ 		lastcmd = wflags;
+ 	}
+diff -u -r ../oz/Src/Zle/zle_tricky.c ./Src/Zle/zle_tricky.c
+--- ../oz/Src/Zle/zle_tricky.c	Sun Dec 10 10:14:31 2000
++++ ./Src/Zle/zle_tricky.c	Sun Dec 10 10:36:44 2000
+@@ -535,24 +535,33 @@
+ static int
+ docomplete(int lst)
+ {
++    static int active = 0;
++
+     char *s, *ol;
+     int olst = lst, chl = 0, ne = noerrs, ocs, ret = 0, dat[2];
+ 
++    if (active) {
++	zwarn("completion cannot be used recursively (yet)", NULL, 0);
++	return 1;
++    }
++    active = 1;
+     if (undoing)
+ 	setlastline();
+ 
+     if (!module_loaded("zsh/complete"))
+ 	load_module("zsh/compctl");
+ 
+-    if (runhookdef(BEFORECOMPLETEHOOK, (void *) &lst))
++    if (runhookdef(BEFORECOMPLETEHOOK, (void *) &lst)) {
++	active = 0;
+ 	return 0;
+-
++    }
+     /* Expand history references before starting completion.  If anything *
+      * changed, do no more.                                               */
+ 
+-    if (doexpandhist())
++    if (doexpandhist()) {
++	active = 0;
+ 	return 0;
+-
++    }
+     metafy_line();
+ 
+     ocs = cs;
+@@ -608,6 +617,7 @@
+ 	    unmetafy_line();
+ 	    zsfree(s);
+ 	    zsfree(qword);
++	    active = 0;
+ 	    return 1;
+ 	}
+ 	ocs = cs;
+@@ -785,6 +795,7 @@
+     dat[1] = ret;
+     runhookdef(AFTERCOMPLETEHOOK, (void *) dat);
+ 
++    active = 0;
+     return dat[1];
+ }
+ 
+diff -u -r ../oz/Src/builtin.c ./Src/builtin.c
+--- ../oz/Src/builtin.c	Sun Dec 10 10:14:26 2000
++++ ./Src/builtin.c	Sun Dec 10 20:48:25 2000
+@@ -407,7 +407,9 @@
+      * print nodes NOT containing the DISABLED flag, else scanhashtable will *
+      * print nodes containing the DISABLED flag.                             */
+     if (!*argv) {
++	queue_signals();
+ 	scanhashtable(ht, 1, flags1, flags2, ht->printnode, 0);
++	unqueue_signals();
+ 	return 0;
+     }
+ 
+@@ -416,8 +418,11 @@
+ 	for (; *argv; argv++) {
+ 	    /* parse pattern */
+ 	    tokenize(*argv);
+-	    if ((pprog = patcompile(*argv, PAT_STATIC, 0)))
++	    if ((pprog = patcompile(*argv, PAT_STATIC, 0))) {
++		queue_signals();
+ 		match += scanmatchtable(ht, pprog, 0, 0, scanfunc, 0);
++		unqueue_signals();
++	    }
+ 	    else {
+ 		untokenize(*argv);
+ 		zwarnnam(name, "bad pattern : %s", *argv, 0);
+@@ -431,6 +436,7 @@
+     }
+ 
+     /* Take arguments literally -- do not glob */
++    queue_signals();
+     for (; *argv; argv++) {
+ 	    if ((hn = ht->getnode2(ht, *argv))) {
+ 		scanfunc(hn, 0);
+@@ -439,6 +445,7 @@
+ 		returnval = 1;
+ 	    }
+ 	}
++    unqueue_signals();
+     return returnval;
+ }
+ 
+@@ -511,6 +518,7 @@
+     inittyptab();
+ 
+     /* Show the parameters, possibly with values */
++    queue_signals();
+     if (!hadopt && !*args)
+ 	scanhashtable(paramtab, 1, 0, 0, paramtab->printnode,
+ 	    hadplus ? PRINT_NAMEONLY : 0);
+@@ -520,8 +528,10 @@
+ 	scanhashtable(paramtab, 1, PM_ARRAY, 0, paramtab->printnode,
+ 	    hadplus ? PRINT_NAMEONLY : 0);
+     }
+-    if (!*args && !hadend)
++    if (!*args && !hadend) {
++	unqueue_signals();
+ 	return 0;
++    }
+     if (array)
+ 	args++;
+     if (sort)
+@@ -550,6 +560,7 @@
+ 	freearray(pparams);
+ 	pparams = zarrdup(args);
+     }
++    unqueue_signals();
+     return 0;
+ }
+ 
+@@ -588,6 +599,7 @@
+ 
+     /* with the -v option, provide a numbered list of directories, starting at
+     zero */
++    queue_signals();
+     if (ops['v']) {
+ 	LinkNode node;
+ 	int pos = 1;
+@@ -599,11 +611,13 @@
+ 	    fprintdir(getdata(node), stdout);
+ 	}
+ 	putchar('\n');
++	unqueue_signals();
+ 	return 0;
+     }
+     /* given no arguments, list the stack normally */
+     if (!*argv) {
+ 	printdirstack();
++	unqueue_signals();
+ 	return 0;
+     }
+     /* replace the stack with the specified directories */
+@@ -614,6 +628,7 @@
+ 	freelinklist(dirstack, freestr);
+ 	dirstack = l;
+     }
++    unqueue_signals();
+     return 0;
+ }
+ 
+@@ -693,9 +708,11 @@
+     }
+   brk:
+     chasinglinks = ops['P'] || (isset(CHASELINKS) && !ops['L']);
++    queue_signals();
+     zpushnode(dirstack, ztrdup(pwd));
+     if (!(dir = cd_get_dest(nam, argv, ops, func))) {
+ 	zsfree(getlinknode(dirstack));
++	unqueue_signals();
+ 	return 1;
+     }
+     cd_new_pwd(func, dir);
+@@ -715,6 +732,7 @@
+ 	    chdir(unmeta(pwd));
+ 	}
+     }
++    unqueue_signals();
+     return 0;
+ }
+ 
+@@ -1192,19 +1210,23 @@
+ 	    return 1;
+ 	}
+     }
++    queue_signals();
+     if (ops['R']) {
+ 	/* read history from a file */
+ 	readhistfile(*argv, 1, ops['I'] ? HFILE_SKIPOLD : 0);
++	unqueue_signals();
+ 	return 0;
+     }
+     if (ops['W']) {
+ 	/* write history to a file */
+ 	savehistfile(*argv, 1, ops['I'] ? HFILE_SKIPOLD : 0);
++	unqueue_signals();
+ 	return 0;
+     }
+     if (ops['A']) {
+ 	/* append history to a file */
+ 	savehistfile(*argv, 1, HFILE_APPEND | (ops['I'] ? HFILE_SKIPOLD : 0));
++	unqueue_signals();
+ 	return 0;
+     }
+     /* put foo=bar type arguments into the substitution list */
+@@ -1226,20 +1248,25 @@
+     if (*argv) {
+ 	minflag = **argv == '-';
+ 	first = fcgetcomm(*argv);
+-	if (first == -1)
++	if (first == -1) {
++	    unqueue_signals();
+ 	    return 1;
++	}
+ 	argv++;
+     }
+     /* interpret and check second history line specifier */
+     if (*argv) {
+ 	last = fcgetcomm(*argv);
+-	if (last == -1)
++	if (last == -1) {
++	    unqueue_signals();
+ 	    return 1;
++	}
+ 	argv++;
+     }
+     /* There is a maximum of two history specifiers.  At least, there *
+      * will be as long as the history list is one-dimensional.        */
+     if (*argv) {
++	unqueue_signals();
+ 	zwarnnam("fc", "too many arguments", NULL, 0);
+ 	return 1;
+     }
+@@ -1256,11 +1283,13 @@
+ 	last = (minflag) ? curhist : first;
+     else if (last < first)
+ 	last = first;
+-    if (ops['l'])
++    if (ops['l']) {
+ 	/* list the required part of the history */
+ 	retval = fclist(stdout, !ops['n'], ops['r'], ops['D'],
+ 			ops['d'] + ops['f'] * 2 + ops['E'] * 4 + ops['i'] * 8,
+ 			first, last, asgf, pprog);
++	unqueue_signals();
++    }
+     else {
+ 	/* edit history file, and (if successful) use the result as a new command */
+ 	int tempfd;
+@@ -1272,6 +1301,7 @@
+ 	if (((tempfd = open(fil, O_WRONLY | O_CREAT | O_EXCL | O_NOCTTY, 0600))
+ 	    == -1) ||
+ 		((out = fdopen(tempfd, "w")) == NULL)) {
++	    unqueue_signals();
+ 	    zwarnnam("fc", "can't open temp file: %e", NULL, errno);
+ 	} else {
+ 	    if (!fclist(out, 0, ops['r'], 0, 0, first, last, asgf, pprog)) {
+@@ -1281,6 +1311,7 @@
+ 		if (!editor)
+ 		    editor = DEFAULT_FCEDIT;
+ 
++		unqueue_signals();
+ 		if (fcedit(editor, fil)) {
+ 		    if (stuff(fil))
+ 			zwarnnam("fc", "%e: %s", s, errno);
+@@ -1289,7 +1320,8 @@
+ 			retval = lastval;
+ 		    }
+ 		}
+-	    }
++	    } else
++		unqueue_signals();
+ 	}
+ 	unlink(fil);
+     }
+@@ -1847,6 +1879,8 @@
+ 
+     on &= ~off;
+ 
++    queue_signals();
++
+     /* Given no arguments, list whatever the options specify. */
+     if (!*argv) {
+ 	if (!(on|roff))
+@@ -1854,6 +1888,7 @@
+ 	if (roff || ops['+'])
+ 	    printflags |= PRINT_NAMEONLY;
+ 	scanhashtable(paramtab, 1, on|roff, 0, paramtab->printnode, printflags);
++	unqueue_signals();
+ 	return 0;
+     }
+ 
+@@ -1868,20 +1903,27 @@
+ 
+ 	if (ops['m']) {
+ 	    zwarnnam(name, "incompatible options for -T", NULL, 0);
++	    unqueue_signals();
+ 	    return 1;
+ 	}
+ 	on &= ~off;
+ 	if (!argv[1] || argv[2]) {
+ 	    zwarnnam(name, "-T requires names of scalar and array", NULL, 0);
++	    unqueue_signals();
+ 	    return 1;
+ 	}
+ 
+-	if (!(asg = getasg(argv[0])))
++	if (!(asg = getasg(argv[0]))) {
++	    unqueue_signals();
+ 	    return 1;
++	}
+ 	asg0 = *asg;
+-	if (!(asg = getasg(argv[1])))
++	if (!(asg = getasg(argv[1]))) {
++	    unqueue_signals();
+ 	    return 1;
++	}
+ 	if (!strcmp(asg0.name, asg->name)) {
++	    unqueue_signals();
+ 	    zerrnam(name, "can't tie a variable to itself", NULL, 0);
+ 	    return 1;
+ 	}
+@@ -1910,9 +1952,10 @@
+ 				 (Param)paramtab->getnode(paramtab,
+ 							  asg->name),
+ 				 func, (on | PM_ARRAY) & ~PM_EXPORTED,
+-				 off, roff, asg->value, NULL)))
++				 off, roff, asg->value, NULL))) {
++	    unqueue_signals();
+ 	    return 1;
+-
++	}
+ 	/*
+ 	 * Create the tied colonarray.  We make it as a normal scalar
+ 	 * and fix up the oddities later.
+@@ -1924,6 +1967,7 @@
+ 	    if (oldval)
+ 		zsfree(oldval);
+ 	    unsetparam_pm(apm, 1, 1);
++	    unqueue_signals();
+ 	    return 1;
+ 	}
+ 
+@@ -1931,6 +1975,7 @@
+ 	apm->ename = ztrdup(asg0.name);
+ 	if (oldval)
+ 	    setsparam(asg0.name, oldval);
++	unqueue_signals();
+ 
+ 	return 0;
+     }
+@@ -1987,6 +2032,7 @@
+ 		    returnval = 1;
+ 	    }
+ 	}
++	unqueue_signals();
+ 	return returnval;
+     }
+ 
+@@ -2005,6 +2051,7 @@
+ 			    func, on, off, roff, asg->value, NULL))
+ 	    returnval = 1;
+     }
++    unqueue_signals();
+     return returnval;
+ }
+ 
+@@ -2074,6 +2121,9 @@
+      * are given, we will print only functions containing these  *
+      * flags, else we'll print them all.                         */
+     if (!*argv) {
++	int ret = 0;
++
++	queue_signals();
+ 	if (ops['X'] == 1) {
+ 	    if ((shf = (Shfunc) shfunctab->getnode(shfunctab, scriptname))) {
+ 		DPUTS(!shf->funcdef,
+@@ -2083,14 +2133,15 @@
+ 		shfunctab->addnode(shfunctab, ztrdup(scriptname), shf);
+ 	    }
+ 	    shf->flags = on;
+-	    return eval_autoload(shf, scriptname, ops, func);
++	    ret = eval_autoload(shf, scriptname, ops, func);
+ 	} else {
+ 	    if (ops['U'] && !ops['u'])
+ 		on &= ~PM_UNDEFINED;
+ 	    scanhashtable(shfunctab, 1, on|off, DISABLED, shfunctab->printnode,
+ 			  pflags);
+ 	}
+-	return 0;
++	unqueue_signals();
++	return ret;
+     }
+ 
+     /* With the -m option, treat arguments as glob patterns */
+@@ -2101,6 +2152,7 @@
+ 	    tokenize(*argv);
+ 	    if ((pprog = patcompile(*argv, PAT_STATIC, 0))) {
+ 		/* with no options, just print all functions matching the glob pattern */
++		queue_signals();
+ 		if (!(on|off)) {
+ 		    scanmatchtable(shfunctab, pprog, 0, DISABLED,
+ 				   shfunctab->printnode, pflags);
+@@ -2120,6 +2172,7 @@
+ 			    }
+ 		    }
+ 		}
++		unqueue_signals();
+ 	    } else {
+ 		untokenize(*argv);
+ 		zwarnnam(name, "bad pattern : %s", *argv, 0);
+@@ -2130,6 +2183,7 @@
+     }
+ 
+     /* Take the arguments literally -- do not glob */
++    queue_signals();
+     for (; *argv; argv++) {
+ 	if (ops['w'])
+ 	    returnval = dump_autoload(name, *argv, on, ops, func);
+@@ -2155,6 +2209,7 @@
+ 	} else
+ 	    returnval = 1;
+     }
++    unqueue_signals();
+     return returnval;
+ }
+ 
+@@ -2206,6 +2261,7 @@
+ 	    tokenize(s);
+ 	    if ((pprog = patcompile(s, PAT_STATIC, NULL))) {
+ 		/* Go through the parameter table, and unset any matches */
++		queue_signals();
+ 		for (i = 0; i < paramtab->hsize; i++) {
+ 		    for (pm = (Param) paramtab->nodes[i]; pm; pm = next) {
+ 			/* record pointer to next, since we may free this one */
+@@ -2218,6 +2274,7 @@
+ 			}
+ 		    }
+ 		}
++		unqueue_signals();
+ 	    } else {
+ 		untokenize(s);
+ 		zwarnnam(name, "bad pattern : %s", s, 0);
+@@ -2231,6 +2288,7 @@
+     }
+ 
+     /* do not glob -- unset the given parameter */
++    queue_signals();
+     while ((s = *argv++)) {
+ 	char *ss = strchr(s, '[');
+ 	char *sse = ss;
+@@ -2268,6 +2326,7 @@
+ 	if (ss)
+ 	    *ss = '[';
+     }
++    unqueue_signals();
+     return returnval;
+ }
+ 
+@@ -2313,6 +2372,7 @@
+ 		returnval = 1;
+ 		continue;
+ 	    }
++	    queue_signals();
+ 	    if (!ops['p']) {
+ 		/* -p option is for path search only.    *
+ 		 * We're not using it, so search for ... */
+@@ -2339,11 +2399,13 @@
+ 	    scanmatchtable(cmdnamtab, pprog, 0, 0,
+ 			   cmdnamtab->printnode, printflags);
+ 
++	    unqueue_signals();
+ 	}
+-    return returnval;
++	return returnval;
+     }
+ 
+     /* Take arguments literally -- do not glob */
++    queue_signals();
+     for (; *argv; argv++) {
+ 	informed = 0;
+ 
+@@ -2436,6 +2498,7 @@
+ 	    returnval = 1;
+ 	}
+     }
++    unqueue_signals();
+     return returnval;
+ }
+ 
+@@ -2496,10 +2559,13 @@
+ 
+     /* Given no arguments, display current hash table. */
+     if (!*argv) {
++	queue_signals();
+ 	scanhashtable(ht, 1, 0, 0, ht->printnode, printflags);
++	unqueue_signals();
+ 	return 0;
+     }
+ 
++    queue_signals();
+     while (*argv) {
+ 	void *hn;
+ 	if (ops['m']) {
+@@ -2553,6 +2619,7 @@
+ 	    ht->printnode(hn, 0);
+ 	argv++;
+     }
++    unqueue_signals();
+     return returnval;
+ }
+ 
+@@ -2586,6 +2653,7 @@
+ 	    tokenize(*argv);
+ 	    if ((pprog = patcompile(*argv, PAT_STATIC, NULL))) {
+ 		/* remove all nodes matching glob pattern */
++		queue_signals();
+ 		for (i = 0; i < ht->hsize; i++) {
+ 		    for (hn = ht->nodes[i]; hn; hn = nhn) {
+ 			/* record pointer to next, since we may free this one */
+@@ -2596,6 +2664,7 @@
+ 			}
+ 		    }
+ 		}
++		unqueue_signals();
+ 	    } else {
+ 		untokenize(*argv);
+ 		zwarnnam(name, "bad pattern : %s", *argv, 0);
+@@ -2609,6 +2678,7 @@
+     }
+ 
+     /* Take arguments literally -- do not glob */
++    queue_signals();
+     for (; *argv; argv++) {
+ 	if ((hn = ht->removenode(ht, *argv))) {
+ 	    ht->freenode(hn);
+@@ -2617,6 +2687,7 @@
+ 	    returnval = 1;
+ 	}
+     }
++    unqueue_signals();
+     return returnval;
+ }
+ 
+@@ -2656,7 +2727,9 @@
+     /* In the absence of arguments, list all aliases.  If a command *
+      * line flag is specified, list only those of that type.        */
+     if (!*argv) {
++	queue_signals();
+ 	scanhashtable(aliastab, 1, flags1, flags2, aliastab->printnode, printflags);
++	unqueue_signals();
+ 	return 0;
+     }
+ 
+@@ -2667,8 +2740,10 @@
+ 	    tokenize(*argv);  /* expand argument */
+ 	    if ((pprog = patcompile(*argv, PAT_STATIC, NULL))) {
+ 		/* display the matching aliases */
++		queue_signals();
+ 		scanmatchtable(aliastab, pprog, flags1, flags2,
+ 			       aliastab->printnode, printflags);
++		unqueue_signals();
+ 	    } else {
+ 		untokenize(*argv);
+ 		zwarnnam(name, "bad pattern : %s", *argv, 0);
+@@ -2679,6 +2754,7 @@
+     }
+ 
+     /* Take arguments literally.  Don't glob */
++    queue_signals();
+     while ((asg = getasg(*argv++))) {
+ 	if (asg->value && !ops['L']) {
+ 	    /* The argument is of the form foo=bar and we are not *
+@@ -2694,6 +2770,7 @@
+ 	} else
+ 	    returnval = 1;
+     }
++    unqueue_signals();
+     return returnval;
+ }
+ 
+@@ -2774,7 +2851,10 @@
+ 	}
+ 	/* -D option -- interpret as a directory, and use ~ */
+ 	if(ops['D']) {
+-	    Nameddir d = finddir(args[n]);
++	    Nameddir d;
++
++	    queue_signals();
++	    d = finddir(args[n]);
+ 	    if(d) {
+ 		char *arg = zhalloc(strlen(args[n]) + 1);
+ 		sprintf(arg, "~%s%s", d->nam,
+@@ -2782,12 +2862,15 @@
+ 		args[n] = arg;
+ 		len[n] = strlen(args[n]);
+ 	    }
++	    unqueue_signals();
+ 	}
+     }
+ 
+     /* -z option -- push the arguments onto the editing buffer stack */
+     if (ops['z']) {
++	queue_signals();
+ 	zpushnode(bufstack, sepjoin(args, NULL, 0));
++	unqueue_signals();
+ 	return 0;
+     }
+     /* -s option -- add the arguments to the history list */
+@@ -2795,6 +2878,7 @@
+ 	int nwords = 0, nlen, iwords;
+ 	char **pargs = args;
+ 
++	queue_signals();
+ 	ent = prepnexthistent();
+ 	while (*pargs++)
+ 	    nwords++;
+@@ -2813,6 +2897,7 @@
+ 	ent->stim = ent->ftim = time(NULL);
+ 	ent->flags = 0;
+ 	addhistnode(histtab, ent->text, ent);
++	unqueue_signals();
+ 	return 0;
+     }
+     /* -u and -p -- output to other than standard output */
+@@ -2908,10 +2993,12 @@
+     char **s;
+  
+     /* optional argument can be either numeric or an array */
++    queue_signals();
+     if (*argv && !getaparam(*argv))
+         num = mathevali(*argv++);
+  
+     if (num < 0) {
++	unqueue_signals();
+         zwarnnam(name, "argument to shift must be non-negative", NULL, 0);
+         return 1;
+     }
+@@ -2940,6 +3027,7 @@
+ 	    pparams = s;
+ 	}
+     }
++    unqueue_signals();
+     return ret;
+ }
+ 
+@@ -3169,7 +3257,7 @@
+ 	}
+     }
+     if (sigtrapped[SIGEXIT])
+-	dotrap(SIGEXIT, 1);
++	dotrap(SIGEXIT);
+     runhookdef(EXITHOOK, NULL);
+     if (mypid != getpid())
+ 	_exit(val);
+@@ -3415,7 +3503,7 @@
+ 		    *bptr = readchar;
+ 		    val = 1;
+ 		    readchar = -1;
+-		} else if ((val = ztrapread(readfd, bptr, nchars)) <= 0)
++		} else if ((val = read(readfd, bptr, nchars)) <= 0)
+ 		    break;
+ 	    
+ 		/* decrement number of characters read from number required */
+@@ -3429,7 +3517,7 @@
+ 	if (!izle && !ops['u'] && !ops['p']) {
+ 	    /* dispose of result appropriately, etc. */
+ 	    if (isem)
+-		while (val > 0 && ztrapread(SHTTY, &d, 1) == 1 && d != '\n');
++		while (val > 0 && read(SHTTY, &d, 1) == 1 && d != '\n');
+ 	    else
+ 		settyinfo(&shttyinfo);
+ 	    if (haso) {
+@@ -3686,7 +3774,7 @@
+     }
+     for (;;) {
+ 	/* read a character from readfd */
+-	ret = ztrapread(readfd, &cc, 1);
++	ret = read(readfd, &cc, 1);
+ 	switch (ret) {
+ 	case 1:
+ 	    /* return the character read */
+@@ -3839,6 +3927,7 @@
+ 
+     /* If given no arguments, list all currently-set traps */
+     if (!*argv) {
++	queue_signals();
+ 	for (sig = 0; sig < VSIGCOUNT; sig++) {
+ 	    if (sigtrapped[sig] & ZSIG_FUNC) {
+ 		char fname[20];
+@@ -3860,6 +3949,7 @@
+ 		}
+ 	    }
+ 	}
++	unqueue_signals();
+ 	return 0;
+     }
+ 
+diff -u -r ../oz/Src/exec.c ./Src/exec.c
+--- ../oz/Src/exec.c	Sun Dec 10 10:14:26 2000
++++ ./Src/exec.c	Sun Dec 10 10:24:37 2000
+@@ -759,8 +759,6 @@
+     } else
+ 	lv = (execfuncs[code - WC_CURSH])(state, 0);
+ 
+-    RUNTRAPS();
+-
+     return lastval = lv;
+ }
+ 
+@@ -892,19 +890,19 @@
+ 	noerrexit = oldnoerrexit;
+ 
+ 	if (sigtrapped[SIGDEBUG])
+-	    dotrap(SIGDEBUG, 1);
++	    dotrap(SIGDEBUG);
+ 
+ 	/* Check whether we are suppressing traps/errexit *
+ 	 * (typically in init scripts) and if we haven't  *
+ 	 * already performed them for this sublist.       */
+ 	if (!noerrexit && !donetrap) {
+ 	    if (sigtrapped[SIGZERR] && lastval) {
+-		dotrap(SIGZERR, 1);
++		dotrap(SIGZERR);
+ 		donetrap = 1;
+ 	    }
+ 	    if (lastval && isset(ERREXIT)) {
+ 		if (sigtrapped[SIGEXIT])
+-		    dotrap(SIGEXIT, 1);
++		    dotrap(SIGEXIT);
+ 		if (mypid != getpid())
+ 		    _exit(lastval);
+ 		else
+@@ -1186,10 +1184,9 @@
+ 	else
+ 	    list_pipe_text[0] = '\0';
+     }
+-    if (WC_PIPE_TYPE(pcode) == WC_PIPE_END) {
++    if (WC_PIPE_TYPE(pcode) == WC_PIPE_END)
+ 	execcmd(state, input, output, how, last1 ? 1 : 2);
+-	RUNTRAPS();
+-    } else {
++    else {
+ 	int old_list_pipe = list_pipe;
+ 	Wordcode next = state->pc + (*state->pc);
+ 	wordcode code;
+@@ -1224,14 +1221,12 @@
+ 		entersubsh(how, 2, 0);
+ 		close(synch[1]);
+ 		execcmd(state, input, pipes[1], how, 0);
+-		RUNTRAPS();
+ 		_exit(lastval);
+ 	    }
+ 	} else {
+ 	    /* otherwise just do the pipeline normally. */
+ 	    subsh_close = pipes[0];
+ 	    execcmd(state, input, pipes[1], how, 0);
+-	    RUNTRAPS();
+ 	}
+ 	zclose(pipes[1]);
+ 	state->pc = next;
+diff -u -r ../oz/Src/hashtable.c ./Src/hashtable.c
+--- ../oz/Src/hashtable.c	Sun Dec 10 10:14:26 2000
++++ ./Src/hashtable.c	Sun Dec 10 20:30:04 2000
+@@ -560,11 +560,14 @@
+ bin_hashinfo(char *nam, char **args, char *ops, int func)
+ {
+     HashTable ht;
++
+     printf("----------------------------------------------------\n");
++    queue_signals();
+     for(ht = firstht; ht; ht = ht->next) {
+ 	ht->printinfo(ht);
+ 	printf("----------------------------------------------------\n");
+     }
++    unqueue_signals();
+     return 0;
+ }
+ 
+diff -u -r ../oz/Src/hist.c ./Src/hist.c
+--- ../oz/Src/hist.c	Sun Dec 10 10:14:27 2000
++++ ./Src/hist.c	Sun Dec 10 11:33:27 2000
+@@ -382,6 +382,7 @@
+ 
+ 	/* get event number */
+ 
++	queue_signals();
+ 	if (c == '?') {
+ 	    for (;;) {
+ 		c = ingetc();
+@@ -397,6 +398,7 @@
+ 	    evset = 0;
+ 	    if (ev == -1) {
+ 		herrflush();
++		unqueue_signals();
+ 		zerr("no such event: %s", buf, 0);
+ 		return -1;
+ 	    }
+@@ -450,6 +452,7 @@
+ 		evset = 1;
+ 	    } else if ((ev = hcomsearch(buf)) == -1) {
+ 		herrflush();
++		unqueue_signals();
+ 		zerr("event not found: %s", buf, 0);
+ 		return -1;
+ 	    } else
+@@ -458,9 +461,10 @@
+ 
+ 	/* get the event */
+ 
+-	if (!(ehist = gethist(defev = ev)))
++	if (!(ehist = gethist(defev = ev))) {
++	    unqueue_signals();
+ 	    return -1;
+-
++	}
+ 	/* extract the relevant arguments */
+ 
+ 	argc = getargc(ehist);
+@@ -473,6 +477,7 @@
+ 		    argc = getargc(ehist);
+ 		} else {
+ 		    herrflush();
++		    unqueue_signals();
+ 		    zerr("Ambiguous history reference", NULL, 0);
+ 		    return -1;
+ 		}
+@@ -486,8 +491,10 @@
+ 	} else {
+ 	    inungetc(c);
+ 	    larg = farg = getargspec(argc, marg, evset);
+-	    if (larg == -2)
++	    if (larg == -2) {
++		unqueue_signals();
+ 		return -1;
++	    }
+ 	    if (farg != -1)
+ 		cflag = 0;
+ 	    c = ingetc();
+@@ -497,8 +504,10 @@
+ 	    } else if (c == '-') {
+ 		cflag = 0;
+ 		larg = getargspec(argc, marg, evset);
+-		if (larg == -2)
++		if (larg == -2) {
++		    unqueue_signals();
+ 		    return -1;
++		}
+ 		if (larg == -1)
+ 		    larg = argc - 1;
+ 	    } else
+@@ -508,8 +517,11 @@
+ 	    farg = 0;
+ 	if (larg == -1)
+ 	    larg = argc;
+-	if (!(sline = getargs(ehist, farg, larg)))
++	if (!(sline = getargs(ehist, farg, larg))) {
++	    unqueue_signals();
+ 	    return -1;
++	}
++	unqueue_signals();
+     }
+ 
+     /* do the modifiers */
+@@ -1004,6 +1016,7 @@
+ 
+     DPUTS(stophist != 2 && !(inbufflags & INP_ALIAS) && !chline,
+ 	  "BUG: chline is NULL in hend()");
++    queue_signals();
+     if (histdone & HISTFLAG_SETTY)
+ 	settyinfo(&shttyinfo);
+     if (!(histactive & HA_NOINC))
+@@ -1013,6 +1026,7 @@
+ 	zfree(chwords, chwordlen*sizeof(short));
+ 	chline = NULL;
+ 	histactive = 0;
++	unqueue_signals();
+ 	return 1;
+     }
+     if (hist_ignore_all_dups != isset(HISTIGNOREALLDUPS)
+@@ -1107,6 +1121,7 @@
+     if (isset(SHAREHISTORY)? histfileIsLocked() : isset(INCAPPENDHISTORY))
+ 	savehistfile(hf, 0, HFILE_USE_OPTIONS | HFILE_FAST);
+     unlockhistfile(hf); /* It's OK to call this even if we aren't locked */
++    unqueue_signals();
+     return !(flag & HISTFLAG_NOEXEC || errflag);
+ }
+ 
+diff -u -r ../oz/Src/init.c ./Src/init.c
+--- ../oz/Src/init.c	Sun Dec 10 10:14:27 2000
++++ ./Src/init.c	Sun Dec 10 10:23:21 2000
+@@ -170,7 +170,7 @@
+ 	}
+ 	if (isset(SINGLECOMMAND) && toplevel) {
+ 	    if (sigtrapped[SIGEXIT])
+-		dotrap(SIGEXIT, 1);
++		dotrap(SIGEXIT);
+ 	    exit(lastval);
+ 	}
+ 	if (justonce)
+diff -u -r ../oz/Src/input.c ./Src/input.c
+--- ../oz/Src/input.c	Sun Dec 10 10:14:27 2000
++++ ./Src/input.c	Sun Dec 10 10:25:00 2000
+@@ -141,9 +141,7 @@
+     for (;;) {
+ 	do {
+ 	    errno = 0;
+-	    ALLOWTRAPS {
+-		c = fgetc(bshin);
+-	    } DISALLOWTRAPS;
++	    c = fgetc(bshin);
+ 	} while (c < 0 && errno == EINTR);
+ 	if (c < 0 || c == '\n') {
+ 	    if (c == '\n')
+diff -u -r ../oz/Src/jobs.c ./Src/jobs.c
+--- ../oz/Src/jobs.c	Sun Dec 10 10:14:27 2000
++++ ./Src/jobs.c	Sun Dec 10 10:25:13 2000
+@@ -378,7 +378,7 @@
+ 	    zrefresh();
+     }
+     if (sigtrapped[SIGCHLD] && job != thisjob)
+-	dotrap(SIGCHLD, 0);
++	dotrap(SIGCHLD);
+ 
+     /* When MONITOR is set, the foreground process runs in a different *
+      * process group from the shell, so the shell will not receive     *
+@@ -389,7 +389,7 @@
+ 
+ 	if (sig == SIGINT || sig == SIGQUIT) {
+ 	    if (sigtrapped[sig]) {
+-		dotrap(sig, 0);
++		dotrap(sig);
+ 		/* We keep the errflag as set or not by dotrap.
+ 		 * This is to fulfil the promise to carry on
+ 		 * with the jobs if trap returns zero.
+@@ -878,9 +878,7 @@
+ 	else
+ 	    kill(pid, SIGCONT);
+ 
+-	ALLOWTRAPS {
+-	    child_suspend(SIGINT);
+-	} DISALLOWTRAPS;
++	child_suspend(SIGINT);
+ 	child_block();
+     }
+     child_unblock();
+@@ -902,9 +900,7 @@
+ 	while (!errflag && jn->stat &&
+ 	       !(jn->stat & STAT_DONE) &&
+ 	       !(interact && (jn->stat & STAT_STOPPED))) {
+-	    ALLOWTRAPS {
+-		child_suspend(sig);
+-	    } DISALLOWTRAPS;
++	    child_suspend(sig);
+ 	    /* Commenting this out makes ^C-ing a job started by a function
+ 	       stop the whole function again.  But I guess it will stop
+ 	       something else from working properly, we have to find out
+diff -u -r ../oz/Src/mem.c ./Src/mem.c
+--- ../oz/Src/mem.c	Sun Dec 10 10:14:27 2000
++++ ./Src/mem.c	Sun Dec 10 20:33:55 2000
+@@ -1200,6 +1200,7 @@
+     char *b, *c, buf[40];
+     long u = 0, f = 0, to, cu;
+ 
++    queue_signals();
+     if (ops['v']) {
+ 	printf("The lower and the upper addresses of the heap. Diff gives\n");
+ 	printf("the difference between them, i.e. the size of the heap.\n\n");
+@@ -1328,6 +1329,7 @@
+     if (h_m[1024])
+ 	printf("big\t%d\n", h_m[1024]);
+ 
++    unqueue_signals();
+     return 0;
+ }
+ 
+diff -u -r ../oz/Src/module.c ./Src/module.c
+--- ../oz/Src/module.c	Sun Dec 10 10:14:27 2000
++++ ./Src/module.c	Sun Dec 10 20:52:51 2000
+@@ -763,10 +763,13 @@
+      * chain of aliases.  This makes sure the actual module loaded
+      * is the right one.
+      */
++    queue_signals();
+     if (!(node = find_module(name, 1, &name))) {
+ 	if (!(linked = module_linked(name)) &&
+-	    !(handle = do_load_module(name)))
++	    !(handle = do_load_module(name))) {
++	    unqueue_signals();
+ 	    return 0;
++	}
+ 	m = zcalloc(sizeof(*m));
+ 	m->nam = ztrdup(name);
+ 	if (handle) {
+@@ -782,19 +785,25 @@
+ 	    if (!set)
+ 		finish_module(m);
+ 	    delete_module(node);
++	    unqueue_signals();
+ 	    return 0;
+ 	}
+ 	m->flags |= MOD_INIT_S | MOD_INIT_B;
+ 	m->flags &= ~MOD_SETUP;
++	unqueue_signals();
+ 	return 1;
+     } 
+     m = (Module) getdata(node);
+-    if (m->flags & MOD_SETUP)
++    if (m->flags & MOD_SETUP) {
++	unqueue_signals();
+ 	return 1;
++    }
+     if (m->flags & MOD_UNLOAD)
+ 	m->flags &= ~MOD_UNLOAD;
+-    else if ((m->flags & MOD_LINKED) ? m->u.linked : m->u.handle)
++    else if ((m->flags & MOD_LINKED) ? m->u.linked : m->u.handle) {
++	unqueue_signals();
+ 	return 1;
++    }
+     if (m->flags & MOD_BUSY) {
+ 	zerr("circular dependencies for module %s", name, 0);
+ 	return 0;
+@@ -804,14 +813,17 @@
+ 	for (n = firstnode(m->deps); n; incnode(n))
+ 	    if (!load_module((char *) getdata(n))) {
+ 		m->flags &= ~MOD_BUSY;
++		unqueue_signals();
+ 		return 0;
+ 	    }
+     m->flags &= ~MOD_BUSY;
+     if (!m->u.handle) {
+ 	handle = NULL;
+ 	if (!(linked = module_linked(name)) &&
+-	    !(handle = do_load_module(name)))
++	    !(handle = do_load_module(name))) {
++	    unqueue_signals();
+ 	    return 0;
++	}
+ 	if (handle) {
+ 	    m->u.handle = handle;
+ 	    m->flags |= MOD_SETUP;
+@@ -825,6 +837,7 @@
+ 	    else
+ 		m->u.linked = NULL;
+ 	    m->flags &= ~MOD_SETUP;
++	    unqueue_signals();
+ 	    return 0;
+ 	}
+ 	m->flags |= MOD_INIT_S;
+@@ -837,10 +850,12 @@
+ 	else
+ 	    m->u.handle = NULL;
+ 	m->flags &= ~MOD_SETUP;
++	unqueue_signals();
+ 	return 0;
+     }
+     m->flags |= MOD_INIT_B;
+     m->flags &= ~MOD_SETUP;
++    unqueue_signals();
+     return 1;
+ }
+ 
+@@ -858,19 +873,23 @@
+ {
+     Module m = NULL;
+     LinkNode node;
++    int ret = 1;
+ 
+     /* Resolve aliases and actual loadable module as for load_module */
++    queue_signals();
+     node = find_module(module, 1, &module);
+     if (node && (m = ((Module) getdata(node)))->u.handle &&
+ 	!(m->flags & MOD_UNLOAD)) {
+ 	if (test) {
++	    unqueue_signals();
+ 	    zwarnnam(nam, "module %s already loaded.", module, 0);
+ 	    return 0;
+ 	}
+     } else
+-	return load_module(module);
++	ret = load_module(module);
++    unqueue_signals();
+ 
+-    return 1;
++    return ret;
+ }
+ 
+ /**/
+@@ -941,6 +960,8 @@
+ {
+     int ops_bcpf = ops['b'] || ops['c'] || ops['p'] || ops['f'];
+     int ops_au = ops['a'] || ops['u'];
++    int ret = 1;
++
+     if (ops_bcpf && !ops_au) {
+ 	zwarnnam(nam, "-b, -c, -f, and -p must be combined with -a or -u",
+ 		 NULL, 0);
+@@ -967,22 +988,24 @@
+ 	zwarnnam(nam, "-e cannot be combined with other options", NULL, 0);
+ 	return 1;
+     }
++    queue_signals();
+     if (ops['e'])
+-	return bin_zmodload_exist(nam, args, ops);
++	ret = bin_zmodload_exist(nam, args, ops);
+     else if (ops['d'])
+-	return bin_zmodload_dep(nam, args, ops);
++	ret = bin_zmodload_dep(nam, args, ops);
+     else if ((ops['a'] || ops['b']) && !(ops['c'] || ops['p'] || ops['f']))
+-	return bin_zmodload_auto(nam, args, ops);
++	ret = bin_zmodload_auto(nam, args, ops);
+     else if (ops['c'] && !(ops['b'] || ops['p']))
+-	return bin_zmodload_cond(nam, args, ops);
++	ret = bin_zmodload_cond(nam, args, ops);
+     else if (ops['f'] && !(ops['b'] || ops['p']))
+-	return bin_zmodload_math(nam, args, ops);
++	ret = bin_zmodload_math(nam, args, ops);
+     else if (ops['p'] && !(ops['b'] || ops['c']))
+-	return bin_zmodload_param(nam, args, ops);
++	ret = bin_zmodload_param(nam, args, ops);
+     else if (!(ops['a'] || ops['b'] || ops['c'] || ops['p']))
+-	return bin_zmodload_load(nam, args, ops);
++	ret = bin_zmodload_load(nam, args, ops);
+     else
+ 	zwarnnam(nam, "use only one of -b, -c, or -p", NULL, 0);
++    unqueue_signals();
+ 
+     return 1;
+ }
+diff -u -r ../oz/Src/parse.c ./Src/parse.c
+--- ../oz/Src/parse.c	Sun Dec 10 10:14:27 2000
++++ ./Src/parse.c	Sun Dec 10 21:06:27 2000
+@@ -2312,7 +2312,7 @@
+ int
+ bin_zcompile(char *nam, char **args, char *ops, int func)
+ {
+-    int map, flags;
++    int map, flags, ret;
+     char *dump;
+ 
+     if ((ops['k'] && ops['z']) || (ops['R'] && ops['M']) ||
+@@ -2359,15 +2359,22 @@
+     }
+     map = (ops['M'] ? 2 : (ops['R'] ? 0 : 1));
+ 
+-    if (!args[1] && !(ops['c'] || ops['a']))
+-	return build_dump(nam, dyncat(*args, FD_EXT), args, ops['U'], map, flags);
+-
++    if (!args[1] && !(ops['c'] || ops['a'])) {
++	queue_signals();
++	ret = build_dump(nam, dyncat(*args, FD_EXT), args, ops['U'], map, flags);
++	unqueue_signals();
++	return ret;
++    }
+     dump = (strsfx(FD_EXT, *args) ? *args : dyncat(*args, FD_EXT));
+ 
+-    return ((ops['c'] || ops['a']) ?
+-	    build_cur_dump(nam, dump, args + 1, ops['m'], map,
+-			   (ops['c'] ? 1 : 0) | (ops['a'] ? 2 : 0)) :
+-	    build_dump(nam, dump, args + 1, ops['U'], map, flags));
++    queue_signals();
++    ret = ((ops['c'] || ops['a']) ?
++	   build_cur_dump(nam, dump, args + 1, ops['m'], map,
++			  (ops['c'] ? 1 : 0) | (ops['a'] ? 2 : 0)) :
++	   build_dump(nam, dump, args + 1, ops['U'], map, flags));
++    unqueue_signals();
++
++    return ret;
+ }
+ 
+ /* Load the header of a dump file. Returns NULL if the file isn't a
+@@ -2825,9 +2832,12 @@
+     int rd, rc, rn;
+     char *dig, *wc;
+ 
+-    if (strsfx(FD_EXT, path))
+-	return check_dump_file(path, NULL, name, ksh);
+-
++    if (strsfx(FD_EXT, path)) {
++	queue_signals();
++	prog = check_dump_file(path, NULL, name, ksh);
++	unqueue_signals();
++	return prog;
++    }
+     dig = dyncat(path, FD_EXT);
+     wc = dyncat(file, FD_EXT);
+ 
+@@ -2839,20 +2849,24 @@
+      * both the uncompiled function file and its compiled version (or they
+      * don't exist) and the digest file contains the definition for the
+      * function. */
++    queue_signals();
+     if (!rd &&
+ 	(rc || std.st_mtime > stc.st_mtime) &&
+ 	(rn || std.st_mtime > stn.st_mtime) &&
+-	(prog = check_dump_file(dig, &std, name, ksh)))
++	(prog = check_dump_file(dig, &std, name, ksh))) {
++	unqueue_signals();
+ 	return prog;
+-
++    }
+     /* No digest file. Now look for the per-function compiled file. */
+     if (!rc &&
+ 	(rn || stc.st_mtime > stn.st_mtime) &&
+-	(prog = check_dump_file(wc, &stc, name, ksh)))
++	(prog = check_dump_file(wc, &stc, name, ksh))) {
++	unqueue_signals();
+ 	return prog;
+-
++    }
+     /* No compiled file for the function. The caller (getfpfunc() will
+      * check if the directory contains the uncompiled file for it. */
++    unqueue_signals();
+     return NULL;
+ }
+ 
+@@ -2872,18 +2886,24 @@
+     else
+ 	tail = file;
+ 
+-    if (strsfx(FD_EXT, file))
+-	return check_dump_file(file, NULL, tail, NULL);
+-
++    if (strsfx(FD_EXT, file)) {
++	queue_signals();
++	prog = check_dump_file(file, NULL, tail, NULL);
++	unqueue_signals();
++	return prog;
++    }
+     wc = dyncat(file, FD_EXT);
+ 
+     rc = stat(wc, &stc);
+     rn = stat(file, &stn);
+ 
++    queue_signals();
+     if (!rc && (rn || stc.st_mtime > stn.st_mtime) &&
+-	(prog = check_dump_file(wc, &stc, tail, NULL)))
++	(prog = check_dump_file(wc, &stc, tail, NULL))) {
++	unqueue_signals();
+ 	return prog;
+-
++    }
++    unqueue_signals();
+     return NULL;
+ }
+ 
+diff -u -r ../oz/Src/signals.c ./Src/signals.c
+--- ../oz/Src/signals.c	Sun Dec 10 10:14:28 2000
++++ ./Src/signals.c	Sun Dec 10 20:45:00 2000
+@@ -497,7 +497,7 @@
+  
+     case SIGHUP:
+         if (sigtrapped[SIGHUP])
+-            dotrap(SIGHUP, 0);
++            dotrap(SIGHUP);
+         else {
+             stopmsg = 1;
+             zexit(SIGHUP, 1);
+@@ -506,7 +506,7 @@
+  
+     case SIGINT:
+         if (sigtrapped[SIGINT])
+-            dotrap(SIGINT, 0);
++            dotrap(SIGINT);
+         else {
+ 	    if ((isset(PRIVILEGED) || isset(RESTRICTED)) &&
+ 		isset(INTERACTIVE) && noerrexit < 0)
+@@ -523,14 +523,14 @@
+     case SIGWINCH:
+         adjustwinsize(1);  /* check window size and adjust */
+ 	if (sigtrapped[SIGWINCH])
+-	    dotrap(SIGWINCH, 0);
++	    dotrap(SIGWINCH);
+         break;
+ #endif
+ 
+     case SIGALRM:
+         if (sigtrapped[SIGALRM]) {
+ 	    int tmout;
+-            dotrap(SIGALRM, 0);
++            dotrap(SIGALRM);
+ 
+ 	    if ((tmout = getiparam("TMOUT")))
+ 		alarm(tmout);           /* reset the alarm */
+@@ -549,7 +549,7 @@
+         break;
+  
+     default:
+-        dotrap(sig, 0);
++        dotrap(sig);
+         break;
+     }   /* end of switch(sig) */
+  
+@@ -703,6 +703,7 @@
+      * Call unsettrap() unconditionally, to make sure trap is saved
+      * if necessary.
+      */
++    queue_signals();
+     unsettrap(sig);
+ 
+     sigfuncs[sig] = l;
+@@ -729,6 +730,7 @@
+      * works just the same.
+      */
+     sigtrapped[sig] |= (locallevel << ZSIG_SHIFT);
++    unqueue_signals();
+     return 0;
+ }
+ 
+@@ -736,9 +738,13 @@
+ void
+ unsettrap(int sig)
+ {
+-    HashNode hn = removetrap(sig);
++    HashNode hn;
++
++    queue_signals();
++    hn = removetrap(sig);
+     if (hn)
+ 	shfunctab->freenode(hn);
++    unqueue_signals();
+ }
+ 
+ /**/
+@@ -751,6 +757,7 @@
+ 	(jobbing && (sig == SIGTTOU || sig == SIGTSTP || sig == SIGTTIN)))
+ 	return NULL;
+ 
++    queue_signals();
+     trapped = sigtrapped[sig];
+     /*
+      * Note that we save the trap here even if there isn't an existing
+@@ -762,9 +769,10 @@
+ 	(!trapped || locallevel > (sigtrapped[sig] >> ZSIG_SHIFT)))
+ 	dosavetrap(sig, locallevel);
+ 
+-    if (!trapped)
++    if (!trapped) {
++	unqueue_signals();
+         return NULL;
+-
++    }
+     sigtrapped[sig] = 0;
+     if (sig == SIGINT && interact) {
+ 	/* PWS 1995/05/16:  added test for interactive, also noholdintr() *
+@@ -790,6 +798,7 @@
+      */
+     if (trapped & ZSIG_FUNC) {
+ 	char func[20];
++	HashNode node;
+ 
+ 	sprintf(func, "TRAP%s", sigs[sig]);
+ 	/*
+@@ -797,11 +806,15 @@
+ 	 * that calls back into unsettrap();
+ 	 */
+ 	sigfuncs[sig] = NULL;
+-	return removehashnode(shfunctab, func);
++	node = removehashnode(shfunctab, func);
++	unqueue_signals();
++
++	return node;
+     } else if (sigfuncs[sig]) {
+ 	freeeprog(sigfuncs[sig]);
+ 	sigfuncs[sig] = NULL;
+     }
++    unqueue_signals();
+ 
+     return NULL;
+ }
+@@ -966,56 +979,15 @@
+ 	*sigtr &= ~ZSIG_IGNORED;
+ }
+ 
+-/* != 0 if trap handlers can be called immediately */
+-
+-/**/
+-mod_export int trapsallowed;
+-
+-/* Queued traps and allocated length of queue. */
+-
+-static int *trapqueue, trapqlen;
+-
+-/* Number of used slots in trap queue. */
+-
+-/**/
+-mod_export int trapqused;
+-
+-/* Standard call to execute a trap for a given signal.  The second
+- * argument should be zero if we may need to put the trap on the queue
+- * and 1 if it may be called immediately.  It should never be set to
+- * anything less than zero, that's used internally. */
++/* Standard call to execute a trap for a given signal. */
+ 
+ /**/
+ void
+-dotrap(int sig, int now)
++dotrap(int sig)
+ {
+     /* Copied from dotrapargs(). */
+     if ((sigtrapped[sig] & ZSIG_IGNORED) || !sigfuncs[sig] || errflag)
+ 	return;
+ 
+-    if (now || trapsallowed) {
+-	if (now < 0)
+-	    RUNTRAPS();
+-	dotrapargs(sig, sigtrapped+sig, sigfuncs[sig]);
+-    } else {
+-	if (trapqlen == trapqused)
+-	    trapqueue = (int *) zrealloc(trapqueue, (trapqlen += 32));
+-	trapqueue[trapqused++] = sig;
+-    }
+-}
+-
+-/**/
+-mod_export void
+-doqueuedtraps(void)
+-{
+-    int sig, ota = trapsallowed;
+-
+-    trapsallowed = 1;
+-    while (trapqused) {
+-	trapqused--;
+-	sig = *trapqueue;
+-	memcpy(trapqueue, trapqueue + 1, trapqused * sizeof(int));
+-	dotrap(sig, -1);
+-    }
+-    trapsallowed = ota;
++    dotrapargs(sig, sigtrapped+sig, sigfuncs[sig]);
+ }
+diff -u -r ../oz/Src/signals.h ./Src/signals.h
+--- ../oz/Src/signals.h	Sun Dec 10 10:14:28 2000
++++ ./Src/signals.h	Sun Dec 10 10:21:49 2000
+@@ -117,9 +117,3 @@
+ #else
+ extern sigset_t signal_unblock _((sigset_t));
+ #endif   /* POSIX_SIGNALS */
+-
+-#define RUNTRAPS() do { if (trapqused) doqueuedtraps(); } while (0)
+-#define ALLOWTRAPS do { RUNTRAPS(); trapsallowed++; do
+-#define DISALLOWTRAPS while (0); RUNTRAPS(); trapsallowed--; } while (0)
+-#define ALLOWTRAPS_RETURN(V) \
+-    do { RUNTRAPS(); trapsallowed--; return (V); } while (0)
+diff -u -r ../oz/Src/utils.c ./Src/utils.c
+--- ../oz/Src/utils.c	Sun Dec 10 10:14:28 2000
++++ ./Src/utils.c	Sun Dec 10 10:28:33 2000
+@@ -1418,38 +1418,12 @@
+ }
+ 
+ /**/
+-mod_export int
+-ztrapread(int fd, char *buf, int len)
+-{
+-    int ret;
+-
+-    ALLOWTRAPS {
+-	ret = read(fd, buf, len);
+-    } DISALLOWTRAPS;
+-
+-    return ret;
+-}
+-
+-/**/
+-mod_export int
+-ztrapwrite(int fd, char *buf, int len)
+-{
+-    int ret;
+-
+-    ALLOWTRAPS {
+-	ret = write(fd, buf, len);
+-    } DISALLOWTRAPS;
+-
+-    return ret;
+-}
+-
+-/**/
+ int
+ read1char(void)
+ {
+     char c;
+ 
+-    while (ztrapread(SHTTY, &c, 1) != 1) {
++    while (read(SHTTY, &c, 1) != 1) {
+ 	if (errno != EINTR || errflag || retflag || breaks || contflag)
+ 	    return -1;
+     }
+@@ -1467,7 +1441,7 @@
+     ioctl(SHTTY, FIONREAD, (char *)&val);
+     if (purge) {
+ 	for (; val; val--)
+-	    ztrapread(SHTTY, &c, 1);
++	    read(SHTTY, &c, 1);
+     }
+ #endif
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

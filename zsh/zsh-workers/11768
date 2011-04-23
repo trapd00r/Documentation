@@ -1,0 +1,182 @@
+From zsh-workers-return-11768-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Jun 06 08:35:25 2000
+Return-Path: <zsh-workers-return-11768-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 736 invoked from network); 6 Jun 2000 08:35:03 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 6 Jun 2000 08:35:03 -0000
+Received: (qmail 5503 invoked by alias); 6 Jun 2000 08:34:17 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11768
+Received: (qmail 5494 invoked from network); 6 Jun 2000 08:34:13 -0000
+Date: Tue, 6 Jun 2000 10:33:41 +0200 (MET DST)
+Message-Id: <200006060833.KAA08255@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 5 Jun 2000 14:21:30 +0000
+Subject: PATCH: Re: Getting "parse error" from _path_files
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> } > Returning to the original issue:  Perhaps it would be possible to special-
+> } > case parsing within ${(e)...} so that errors of this sort simply return an
+> } > empty value for the parameter rather than aborting the whole call chain?
+> }
+> } How about a parameter flag, the opposite of `X', but used for `e' to
+> } make it ignore parse errors and return an empty string in such cases?
+> } 
+> } Or make `e' not report errors normally and use `X' for `e', too, to
+> } make it report errors?
+> 
+> I'd forgotten about (X); yes, I think the latter (have (e) ignore errors
+> unless (X) is given) is the right solution.
+
+Here's the patch, it behaves exactly like (Q) with and without (X) and 
+that means...
+
+> It doesn't even have to ignore the errors silently; redirecting 2> is fine.
+> It just has to not abort the surrounding parse.
+
+that it normally doesn't even complain and that parse errors with (X)
+are fatal.
+
+Bye
+ Sven
+
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.18
+diff -u -r1.18 expn.yo
+--- Doc/Zsh/expn.yo	2000/05/24 15:20:26	1.18
++++ Doc/Zsh/expn.yo	2000/06/06 08:30:58
+@@ -643,7 +643,7 @@
+ tt(PROMPT_BANG) options.
+ )
+ item(tt(X))(
+-With this flag parsing errors occuring with the tt(Q) flag or the
++With this flag parsing errors occuring with the tt(Q) and tt(e) flags or the
+ pattern matching forms such as `tt(${)var(name)tt(#)var(pattern)tt(})' 
+ are reported. Without the flag they are silently ignored.
+ )
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.7
+diff -u -r1.7 lex.c
+--- Src/lex.c	2000/05/24 17:20:26	1.7
++++ Src/lex.c	2000/06/06 08:30:59
+@@ -1419,6 +1419,22 @@
+ mod_export int
+ parsestr(char *s)
+ {
++    int err;
++
++    if ((err = parsestrnoerr(s))) {
++	untokenize(s);
++	if (err > 32 && err < 127)
++	    zerr("parse error near `%c'", NULL, err);
++	else
++	    zerr("parse error", NULL, 0);
++    }
++    return err;
++}
++
++/**/
++mod_export int
++parsestrnoerr(char *s)
++{
+     int l = strlen(s), err;
+ 
+     lexsave();
+@@ -1434,13 +1450,6 @@
+     inpop();
+     DPUTS(cmdsp, "BUG: parsestr: cmdstack not empty.");
+     lexrestore();
+-    if (err) {
+-	untokenize(s);
+-	if (err > 32 && err < 127)
+-	    zerr("parse error near `%c'", NULL, err);
+-	else
+-	    zerr("parse error", NULL, 0);
+-    }
+     return err;
+ }
+ 
+Index: Src/subst.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/subst.c,v
+retrieving revision 1.9
+diff -u -r1.9 subst.c
+--- Src/subst.c	2000/06/02 01:54:16	1.9
++++ Src/subst.c	2000/06/06 08:30:59
+@@ -702,13 +702,13 @@
+ /* Parsing for the (e) flag. */
+ 
+ static int
+-subst_parse_str(char **sp, int single)
++subst_parse_str(char **sp, int single, int err)
+ {
+     char *s;
+ 
+     *sp = s = dupstring(*sp);
+ 
+-    if (!parsestr(s)) {
++    if (!(err ? parsestr(s) : parsestrnoerr(s))) {
+ 	if (!single) {
+ 	    for (; *s; s++)
+ 		if (*s == Qstring)
+@@ -1852,7 +1852,7 @@
+ 		if (prenum || postnum)
+ 		    x = dopadding(x, prenum, postnum, preone, postone,
+ 				  premul, postmul);
+-		if (eval && subst_parse_str(&x, (qt && !nojoin)))
++		if (eval && subst_parse_str(&x, (qt && !nojoin), quoteerr))
+ 		    return NULL;
+ 		xlen = strlen(x);
+ 		for (tn = firstnode(&tl);
+@@ -1888,7 +1888,7 @@
+ 	    if (prenum || postnum)
+ 		x = dopadding(x, prenum, postnum, preone, postone,
+ 			      premul, postmul);
+-	    if (eval && subst_parse_str(&x, (qt && !nojoin)))
++	    if (eval && subst_parse_str(&x, (qt && !nojoin), quoteerr))
+ 		return NULL;
+ 	    xlen = strlen(x);
+ 	    strcatsub(&y, ostr, aptr, x, xlen, NULL, globsubst, copied);
+@@ -1903,7 +1903,7 @@
+ 		if (prenum || postnum)
+ 		    x = dopadding(x, prenum, postnum, preone, postone,
+ 				  premul, postmul);
+-		if (eval && subst_parse_str(&x, (qt && !nojoin)))
++		if (eval && subst_parse_str(&x, (qt && !nojoin), quoteerr))
+ 		    return NULL;
+ 		if (qt && !*x && isarr != 2)
+ 		    y = dupstring(nulstring);
+@@ -1919,7 +1919,7 @@
+ 	    if (prenum || postnum)
+ 		x = dopadding(x, prenum, postnum, preone, postone,
+ 			      premul, postmul);
+-	    if (eval && subst_parse_str(&x, (qt && !nojoin)))
++	    if (eval && subst_parse_str(&x, (qt && !nojoin), quoteerr))
+ 		return NULL;
+ 	    xlen = strlen(x);
+ 	    *str = strcatsub(&y, aptr, aptr, x, xlen, fstr, globsubst, copied);
+@@ -1938,7 +1938,7 @@
+ 	if (prenum || postnum)
+ 	    x = dopadding(x, prenum, postnum, preone, postone,
+ 			  premul, postmul);
+-	if (eval && subst_parse_str(&x, (qt && !nojoin)))
++	if (eval && subst_parse_str(&x, (qt && !nojoin), quoteerr))
+ 	    return NULL;
+ 	xlen = strlen(x);
+ 	*str = strcatsub(&y, ostr, aptr, x, xlen, fstr, globsubst, copied);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,281 @@
+From zsh-workers-return-13336-mason-zsh=primenet.com.au@sunsite.dk Wed Jan 10 09:21:02 2001
+Return-Path: <zsh-workers-return-13336-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17336 invoked from network); 10 Jan 2001 09:20:57 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 10 Jan 2001 09:20:57 -0000
+Received: (qmail 665 invoked by alias); 10 Jan 2001 09:20:50 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13336
+Received: (qmail 658 invoked from network); 10 Jan 2001 09:20:50 -0000
+Date: Wed, 10 Jan 2001 10:20:43 +0100 (MET)
+Message-Id: <200101100920.KAA19862@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Felix Rosencrantz's message of Sat, 30 Dec 2000 14:58:58 -0800
+	(PST)
+Subject: PATCH: Re: Bug w/matching control + feature request
+
+
+Felix Rosencrantz wrote:
+
+> I'm seeing a problem with matching control and cursor placement.  I suspect
+> the problem might be related to too many match points...
+> 
+> Here's the case:
+> 
+> zsh@ zsh -f
+> host% echo $ZSH_VERSION
+> 3.1.9-dev-8
+> host% autoload -U compinit ; compinit -D ; compdef _tst tst
+> host% _tst () {
+> function> compadd -M 'r:|[.,_-]=** r:[^0-9]||[0-9]=**' glibc-2.1.94-3.i386.rpm
+> glibc-devel-2.1.94-3.i386.rpm glibc-profile-2.1.94-3.i386.rpm
+> function> }
+> host% tst glibc-2.1<TAB>
+> results in: 
+> host% tst glibc-2[.]1.94-3.i386.rpm
+> 
+> With the cursor sitting on the dot after the 2, rather than before the 2,
+> which seems like the place it would end up.
+
+Here is the patch. With matching control (especially with as, erm...
+`flexible' match specs as these) I can't really be sure if I haven't
+broken something else, but at least it still passes the tests in
+54compmatch (with one change in that file for a case where cursor
+positioning is now much better than before).
+
+> Hmm...  Since the matching specs and cursor positioning came up again,
+> it got me thinking about a feature request I've wanted.   There are times
+> when matching places the cursor at the undesired spot for finishing the
+> completion of the word I'm completing.  The matching code has an idea of
+> where several other reasonable cursor positions are (see the code
+> at  zsh/Src/Zle/compresult.c:415, which picks from several possible
+> cursor locations as hot spots, there are probably a few more.) 
+> 
+> It seems like there would need to be a global array that is accessible to the
+> completion functions, that would hold valid hot spots in the current word.
+> It would then be possible to write a widget that would cycle the cursor
+> between these spots.
+
+I haven't done this yet, although it would be rather simpler. I was
+pretty exhausted after fixing the other stuff.
+
+I may have a look and if it's as simple to implement as I think it is...
+
+
+Bye
+ Sven
+
+Index: Src/Zle/compmatch.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compmatch.c,v
+retrieving revision 1.27
+diff -u -r1.27 compmatch.c
+--- Src/Zle/compmatch.c	2000/10/13 08:44:58	1.27
++++ Src/Zle/compmatch.c	2001/01/10 09:15:41
+@@ -416,13 +416,32 @@
+ 
+     /* And add the cline. */
+     if (wl || ll) {
+-	n = get_cline(l, ll, w, wl, NULL, 0,
+-		      flags | ((m && m->wlen == -2) ? CLF_SKIP : 0));
+-	if (matchlastsub)
+-	    matchlastsub->next = n;
+-	else
+-	    matchsubs = n;
+-	matchlastsub = n;
++	Cline p, lp;
++
++	if ((p = n = bld_parts(w, wl, ll, &lp)) && n != lp) {
++	    for (; p->next != lp; p = p->next);
++
++	    if (matchsubs) {
++		matchlastsub->next = n->prefix;
++		n->prefix = matchsubs;
++	    }
++	    matchsubs = matchlastsub = lp;
++
++	    if (matchlastpart)
++		matchlastpart->next = n;
++	    else
++		matchparts = n;
++	    p->next = 0;
++	    matchlastpart = p;
++	} else {
++	    n = get_cline(l, ll, w, wl, NULL, 0,
++			  flags | ((m && m->wlen == -2) ? CLF_SKIP : 0));
++	    if (matchlastsub)
++		matchlastsub->next = n;
++	    else
++		matchsubs = n;
++	    matchlastsub = n;
++	}
+     }
+ }
+ 
+@@ -792,7 +811,6 @@
+ 			    add_match_sub(NULL, NULL, 0, w, ow - w);
+ 			else
+ 			    add_match_sub(NULL, NULL, 0, ow, w - ow);
+-
+ 			add_match_sub(mp, tl, mp->llen, tw, mp->wlen);
+ 		    }
+ 		    if (sfx) {
+@@ -1870,31 +1888,29 @@
+ 	    if ((o->flags & CLF_NEW) && !(n->flags & CLF_NEW)) {
+ 		Cline t, tn;
+ 
+-		for (t = o; (tn = t->next) && (tn->flags & CLF_NEW); t = tn);
+-		if (tn && cmp_anchors(tn, n, 0)) {
++		for (t = o; (tn = t->next) &&
++			 ((tn->flags & CLF_NEW) || !cmp_anchors(tn, n, 0));
++		     t = tn);
++		if (tn) {
+ 		    diff = sub_join(n, o, tn, 1);
+ 
+ 		    if (po)
+ 			po->next = tn;
+ 		    else
+ 			oo = tn;
++
+ 		    t->next = NULL;
+ 		    free_cline(o);
+ 		    x = o;
+ 		    o = tn;
+-#if 0
+-		    /*** These should be handled different from the ones
+-			 that compare anchors. */
++
+ 		    if (po && po->prefix && cmp_anchors(x, po, 0)) {
+ 			po->flags |= CLF_MISS;
+ 			po->max += diff;
+ 		    } else {
+-#endif
+ 			o->flags |= CLF_MISS;
+ 			o->max += diff;
+-#if 0
+ 		    }
+-#endif
+ 		    continue;
+ 		}
+ 	    }
+@@ -1907,19 +1923,13 @@
+ 		if (tn) {
+ 		    diff = sub_join(o, n, tn, 0);
+ 
+-#if 0
+-		    /*** These should be handled different from the ones
+-			 that compare anchors. */
+ 		    if (po && po->prefix && cmp_anchors(n, pn, 0)) {
+ 			po->flags |= CLF_MISS;
+ 			po->max += diff;
+ 		    } else {
+-#endif
+ 			o->flags |= CLF_MISS;
+ 			o->max += diff;
+-#if 0
+ 		    }
+-#endif
+ 		    n = tn;
+ 		    continue;
+ 		}
+@@ -1989,13 +1999,13 @@
+ 		    else
+ 			oo = to;
+ 		    o = to;
+-		} else
+-		    for (t = n; (tn = t->next) && !cmp_anchors(o, tn, 1); t = tn);
+-
++		}
+ 		if (tn) {
+ 		    diff = sub_join(o, n, tn, 0);
++
+ 		    o->flags |= CLF_MISS;
+ 		    o->max += diff;
++
+ 		    n = tn;
+ 		    po = o;
+ 		    o = o->next;
+@@ -2099,4 +2109,3 @@
+ 	return oo;
+     }
+ }
+-
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.28
+diff -u -r1.28 compresult.c
+--- Src/Zle/compresult.c	2001/01/08 15:25:04	1.28
++++ Src/Zle/compresult.c	2001/01/10 09:15:43
+@@ -163,13 +163,14 @@
+ cline_str(Cline l, int ins, int *csp)
+ {
+     Cline s;
+-    int ocs = cs, ncs, pcs, scs, pm, pmax, pmm, sm, smax, smm, d, dm, mid;
++    int ocs = cs, ncs, pcs, scs;
++    int pm, pmax, pmm, pma, sm, smax, smm, sma, d, dm, mid;
+     int i, j, li = 0, cbr;
+     Brinfo brp, brs;
+ 
+     l = cut_cline(l);
+ 
+-    pmm = smm = dm = pcs = scs = 0;
++    pmm = pma = smm = sma = dm = pcs = scs = 0;
+     pm = pmax = sm = smax = d = mid = cbr = -1;
+     brp = brs = NULL;
+ 
+@@ -242,9 +243,11 @@
+ 	/* Remember the position if this is the first prefix with
+ 	 * missing characters. */
+ 	if ((l->flags & CLF_MISS) && !(l->flags & CLF_SUF) &&
+-	    ((pmax < (l->min - l->max) && (!pmm || (l->flags & CLF_MATCHED))) ||
++	    (((pmax < (l->max - l->min) || (pma && l->max != l->min)) &&
++	      (!pmm || (l->flags & CLF_MATCHED))) ||
+ 	     ((l->flags & CLF_MATCHED) && !pmm))) {
+-	    pm = cs; pmax = l->min - l->max; pmm = l->flags & CLF_MATCHED;
++	    pm = cs; pmax = l->max - l->min; pmm = l->flags & CLF_MATCHED;
++	    pma = ((l->prefix || l->suffix) && l->min == cline_sublen(l));
+ 	}
+ 	if (ins) {
+ 	    int ocs, bl;
+@@ -289,10 +292,11 @@
+ 	    if (l->flags & CLF_MID)
+ 		mid = cs;
+ 	    else if ((l->flags & CLF_SUF) && 
+-		     ((smax < (l->min - l->max) &&
++		     (((smax < (l->min - l->max) || (sma && l->max != l->min)) &&
+ 		       (!smm || (l->flags & CLF_MATCHED))) ||
+ 		      ((l->flags & CLF_MATCHED) && !smm))) {
+ 		sm = cs; smax = l->min - l->max; smm = l->flags & CLF_MATCHED;
++		sma = ((l->prefix || l->suffix) && l->min == cline_sublen(l));
+ 	    }
+ 	}
+ 	if (ins) {
+Index: Test/54compmatch.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/54compmatch.ztst,v
+retrieving revision 1.6
+diff -u -r1.6 54compmatch.ztst
+--- Test/54compmatch.ztst	2000/10/16 10:55:56	1.6
++++ Test/54compmatch.ztst	2001/01/10 09:15:43
+@@ -414,9 +414,9 @@
+  test_code 'r:|[A-Z0-9]=** r:|=*' example6_list
+  comptest $'tst 2\t\t'
+ 0:Documentation example using "r:|[A-Z0-9]=* r:|=*", input 2
+->line: {tst 523}{}
++>line: {tst 5}{23}
+ >COMPADD:{}
+->line: {tst 523}{}
++>line: {tst 5}{23}
+ >COMPADD:{}
+ >NO:{5bar234}
+ >NO:{5foo123}
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,535 @@
+From zsh-workers-return-8011-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Sep 23 07:27:46 1999
+Return-Path: <zsh-workers-return-8011-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15563 invoked from network); 23 Sep 1999 07:27:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Sep 1999 07:27:44 -0000
+Received: (qmail 2587 invoked by alias); 23 Sep 1999 07:27:30 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8011
+Received: (qmail 2579 invoked from network); 23 Sep 1999 07:27:29 -0000
+Date: Thu, 23 Sep 1999 09:27:28 +0200 (MET DST)
+Message-Id: <199909230727.JAA23089@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Mon, 20 Sep 1999 11:56:14 +0200
+	(MET DST)
+Subject: Re: PATCH: was: Re: Inserting all completions
+
+
+I wrote:
+
+> ...
+>
+> This also made me notice a uglyness which also happens when using
+> menu-completion and accept-and-menu-completed in braces. If you have a 
+> match spec like `m:{a-z}={A-Z}' and to `z{<TAB>' in the Src directory, 
+> you get `Zle' as one possible match. But if you accept that and then
+> continue selecting other matches the character before the `{' has the
+> wrong case for at least one of the matches. Since the `all' value
+> basically uses the same code, it has the same problem. I have no idea
+> how to solve this. Any suggestions. (The obvious solution would be to
+> not use any matches that don't have the same prefix any more, but that 
+> might be hard to implement. I'll have to think some more about this.)
+
+The patch tries to fix this by comparing the prefix/suffix
+before/after the brace with every would-be-match before
+mennu-completing to it. Without menu-select, it even tries to
+redisplay the list of matches if it was already displayed and inside a 
+menu-selection, the list actually changes (play with
+`accept-and-menu-complete' and `undo' to see this).
+
+This also contains some small fixes in the listing code (at one place
+a closing brace slipped too far up, it seems).
+
+Bye
+ Sven
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Wed Sep 22 17:12:39 1999
++++ Src/Zle/comp.h	Thu Sep 23 09:00:33 1999
+@@ -239,13 +239,14 @@
+     int gnum;			/* global number */
+ };
+ 
+-#define CMF_FILE      1		/* this is a file */
+-#define CMF_REMOVE    2		/* remove the suffix */
+-#define CMF_ISPAR     4		/* is paramter expansion */
+-#define CMF_PARBR     8		/* paramter expansion with a brace */
+-#define CMF_PARNEST  16		/* nested paramter expansion */
+-#define CMF_NOLIST   32		/* should not be listed */
+-#define CMF_DISPLINE 64		/* display strings one per line */
++#define CMF_FILE       1	/* this is a file */
++#define CMF_REMOVE     2	/* remove the suffix */
++#define CMF_ISPAR      4	/* is paramter expansion */
++#define CMF_PARBR      8	/* paramter expansion with a brace */
++#define CMF_PARNEST   16	/* nested paramter expansion */
++#define CMF_NOLIST    32	/* should not be listed */
++#define CMF_DISPLINE  64	/* display strings one per line */
++#define CMF_HIDE     128	/* temporarily hide this one */
+ 
+ /* Stuff for completion matcher control. */
+ 
+@@ -297,6 +298,8 @@
+     int we;			/* non-zero if the cursor was at the end */
+     int insc;			/* length of suffix inserted */
+     int asked;			/* we asked if the list should be shown */
++    char *prebr;		/* prefix before a brace, if any */
++    char *postbr;		/* suffix after a brace */
+ };
+ 
+ /* Flags for compadd and addmatches(). */
+@@ -342,6 +345,7 @@
+ struct cldata {
+     int columns;		/* screen width */
+     int lines;			/* screen height */
++    int menuacc;		/* value of global menuacc */
+     int valid;			/* no need to calculate anew */
+     int nlist;			/* number of matches to list */
+     int nlines;			/* number of lines needed */
+diff -u os/Zle/complist.c Src/Zle/complist.c
+--- os/Zle/complist.c	Wed Sep 22 17:12:40 1999
++++ Src/Zle/complist.c	Thu Sep 23 09:12:09 1999
+@@ -346,11 +346,12 @@
+ 
+ 	    mtab[mm] = mp;
+ 	    mgtab[mm] = g;
+-	    mmtabp = mtab + mm;
+-	    mgtabp = mgtab + mm;
+ 	}
+ 	if (m->gnum == mselect) {
++	    int mm = (mcols * ml) + (mcols >> 1);
+ 	    mline = ml;
++	    mmtabp = mtab + mm;
++	    mgtabp = mgtab + mm;
+ 	    cc = COL_MA;
+ 	} else
+ 	    cc = COL_NO;
+@@ -377,12 +378,14 @@
+ 
+ 	    mtab[mx + mm] = mp;
+ 	    mgtab[mx + mm] = g;
+-	    mmtabp = mtab + mx + mm;
+-	    mgtabp = mgtab + mx + mm;
+ 	}
+ 	if (m->gnum == mselect) {
++	    int mm = mcols * ml;
++
+ 	    mcol = mx;
+ 	    mline = ml;
++	    mmtabp = mtab + mx + mm;
++	    mgtabp = mgtab + mx + mm;
+ 	    zcputs(&mcolors, COL_MA);
+ 	} else if (buf)
+ 	    putcolstr(&mcolors, path, buf->st_mode);
+@@ -514,6 +517,8 @@
+ struct menustack {
+     Menustack prev;
+     char *line;
++    char *brbeg;
++    char *brend;
+     int cs, acc;
+     struct menuinfo info;
+     Cmgroup amatches, pmatches, lmatches;
+@@ -559,6 +564,7 @@
+ 	}
+ 	p = mmtabp;
+ 	pg = mgtabp;
++	minfo.cur = *p;
+ 
+     getk:
+ 
+@@ -579,6 +585,8 @@
+ 	    s->pmatches = pmatches;
+ 	    s->lmatches = lmatches;
+ 	    s->acc = menuacc;
++	    s->brbeg = dupstring(brbeg);
++	    s->brend = dupstring(brend);
+ 	    menucmp = menuacc = 0;
+ 	    fixsuffix();
+ 	    validlist = 0;
+@@ -604,6 +612,8 @@
+ 	    memcpy(&(s->info), &minfo, sizeof(struct menuinfo));
+ 	    s->amatches = s->pmatches = s->lmatches = NULL;
+ 	    s->acc = menuacc;
++	    s->brbeg = dupstring(brbeg);
++	    s->brend = dupstring(brend);
+ 	    acceptlast();
+ 	    do_menucmp(0);
+ 	    mselect = (*(minfo.cur))->gnum;
+@@ -629,6 +639,10 @@
+ 		lmatches = u->lmatches;
+ 		hasperm = 1;
+ 	    }
++	    zsfree(brbeg);
++	    zsfree(brend);
++	    brbeg = ztrdup(u->brbeg);
++	    brend = ztrdup(u->brend);
+ 	    u = u->prev;
+ 	    clearlist = 1;
+ 	} else if (cmd == Th(z_redisplay)) {
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Wed Sep 22 17:12:41 1999
++++ Src/Zle/zle_tricky.c	Thu Sep 23 09:00:34 1999
+@@ -112,6 +112,9 @@
+ /**/
+ int menucmp, menuacc;
+ 
++/**/
++static char *lastprebr, *lastpostbr;
++
+ /* Information about menucompletion. */
+ 
+ /**/
+@@ -123,7 +126,9 @@
+  * brpcs and brscs hold the positions of the re-inserted string in the    *
+  * line.                                                                  */
+ 
+-static char *brbeg = NULL, *brend = NULL;
++/**/
++char *brbeg = NULL, *brend = NULL;
++
+ static int brpl, brsl, brpcs, brscs, qbrpl, qbrsl, hasunqu;
+ 
+ /* The list of matches.  fmatches contains the matches we first ignore *
+@@ -540,14 +545,17 @@
+ 	return menucomplete(args);
+ 
+     HEAPALLOC {
+-	if (minfo.cur == (minfo.group)->matches) {
+-	    do {
+-		if (!(minfo.group = (minfo.group)->prev))
+-		    minfo.group = lmatches;
+-	    } while (!(minfo.group)->mcount);
+-	    minfo.cur = (minfo.group)->matches + (minfo.group)->mcount - 1;
+-	} else
+-	    minfo.cur--;
++	do {
++	    if (minfo.cur == (minfo.group)->matches) {
++		do {
++		    if (!(minfo.group = (minfo.group)->prev))
++			minfo.group = lmatches;
++		} while (!(minfo.group)->mcount);
++		minfo.cur = (minfo.group)->matches + (minfo.group)->mcount - 1;
++	    } else
++		minfo.cur--;
++	} while (menuacc &&
++		 !hasbrpsfx(*(minfo.cur), minfo.prebr, minfo.postbr));
+ 	metafy_line();
+ 	do_single(*(minfo.cur));
+ 	unmetafy_line();
+@@ -563,6 +571,15 @@
+ void
+ acceptlast(void)
+ {
++    if (!menuacc) {
++	zsfree(minfo.prebr);
++	minfo.prebr = ztrdup(lastprebr);
++	zsfree(minfo.postbr);
++	minfo.postbr = ztrdup(lastpostbr);
++
++	if (listshown)
++	    showinglist = -2;
++    }
+     menuacc++;
+ 
+     if (brbeg && *brbeg) {
+@@ -1140,13 +1157,16 @@
+     }
+     /* Otherwise go to the next match in the array... */
+     HEAPALLOC {
+-	if (!*++(minfo.cur)) {
+-	    do {
+-		if (!(minfo.group = (minfo.group)->next))
+-		    minfo.group = amatches;
+-	    } while (!(minfo.group)->mcount);
+-	    minfo.cur = minfo.group->matches;
+-	}
++	do {
++	    if (!*++(minfo.cur)) {
++		do {
++		    if (!(minfo.group = (minfo.group)->next))
++			minfo.group = amatches;
++		} while (!(minfo.group)->mcount);
++		minfo.cur = minfo.group->matches;
++	    }
++	} while (menuacc &&
++		 !hasbrpsfx(*(minfo.cur), minfo.prebr, minfo.postbr));
+ 	/* ... and insert it into the command line. */
+ 	metafy_line();
+ 	do_single(*(minfo.cur));
+@@ -7097,6 +7117,9 @@
+ 	listshown = 0;
+     minfo.cur = NULL;
+     minfo.asked = 0;
++    zsfree(minfo.prebr);
++    zsfree(minfo.postbr);
++    minfo.postbr = minfo.prebr = NULL;
+     compwidget = NULL;
+ }
+ 
+@@ -7954,7 +7977,11 @@
+ static int
+ instmatch(Cmatch m, int *scs)
+ {
+-    int l, r = 0, ocs, a = cs;
++    int l, r = 0, ocs, a = cs, brb = 0;
++
++    zsfree(lastprebr);
++    zsfree(lastpostbr);
++    lastprebr = lastpostbr = NULL;
+ 
+     /* Ignored prefix. */
+     if (m->ipre) {
+@@ -7980,6 +8007,9 @@
+     /* Re-insert the brace beginning, if any. */
+     if (brbeg && *brbeg) {
+ 	cs = a + m->brpl + (m->pre ? strlen(m->pre) : 0);
++	lastprebr = (char *) zalloc(cs - a + 1);
++	memcpy(lastprebr, (char *) line + a, cs - a);
++	lastprebr[cs - a] = '\0';
+ 	l = strlen(brbeg);
+ 	brpcs = cs;
+ 	inststrlen(brbeg, 1, l);
+@@ -7999,12 +8029,14 @@
+ 	ocs = brscs = cs;
+ 	l = strlen(brend);
+ 	inststrlen(brend, 1, l);
++	brb = cs;
+ 	r += l;
+ 	cs = a + l;
+     } else
+ 	brscs = -1;
+     /* -S suffix */
+-    *scs = cs;
++    if (scs)
++	*scs = cs;
+     if (m->suf) {
+ 	inststrlen(m->suf, 1, (l = strlen(m->suf)));
+ 	r += l;
+@@ -8014,12 +8046,56 @@
+ 	inststrlen(m->isuf, 1, (l = strlen(m->isuf)));
+ 	r += l;
+     }
++    if (brend && *brend) {
++	lastpostbr = (char *) zalloc(cs - brb + 1);
++	memcpy(lastpostbr, (char *) line + brb, cs - brb);
++	lastpostbr[cs - brb] = '\0';
++    }
+     lastend = cs;
+     cs = ocs;
+ 
+     return r;
+ }
+ 
++/* Check if the match has the given prefix/suffix before/after the
++ * braces. */
++
++/**/
++int
++hasbrpsfx(Cmatch m, char *pre, char *suf)
++{
++    char *op = lastprebr, *os = lastpostbr;
++    VARARR(char, oline, ll);
++    int oll = ll, ocs = cs, ole = lastend, opcs = brpcs, oscs = brscs, ret;
++
++    memcpy(oline, line, ll);
++
++    lastprebr = lastpostbr = NULL;
++
++    instmatch(m, NULL);
++
++    cs = 0;
++    foredel(ll);
++    spaceinline(oll);
++    memcpy(line, oline, oll);
++    cs = ocs;
++    lastend = ole;
++    brpcs = opcs;
++    brscs = oscs;
++
++    ret = (((!op && !lastprebr) ||
++	    (op && lastprebr && !strcmp(op, lastprebr))) &&
++	   ((!os && !lastpostbr) ||
++	    (os && lastpostbr && !strcmp(os, lastpostbr))));
++
++    zsfree(lastprebr);
++    zsfree(lastpostbr);
++    lastprebr = op;
++    lastpostbr = os;
++
++    return ret;
++}
++
+ /* Handle the case were we found more than one match. */
+ 
+ /**/
+@@ -8539,8 +8615,8 @@
+ Cmatch *
+ skipnolist(Cmatch *p)
+ {
+-    while (*p && (((*p)->flags & CMF_NOLIST) ||
+-		  ((*p)->disp && ((*p)->flags & CMF_DISPLINE))))
++    while (*p && (((*p)->flags & (CMF_NOLIST | CMF_HIDE)) ||
++		  ((*p)->disp && ((*p)->flags & (CMF_DISPLINE | CMF_HIDE)))))
+ 	p++;
+ 
+     return p;
+@@ -8579,7 +8655,8 @@
+     int max = 0, i;
+     VARARR(int, mlens, nmatches + 1);
+ 
+-    if (listdat.valid && lines == listdat.lines && columns == listdat.columns)
++    if (listdat.valid && menuacc == listdat.menuacc &&
++	lines == listdat.lines && columns == listdat.columns)
+ 	return;
+ 
+     for (g = amatches; g; g = g->next) {
+@@ -8625,6 +8702,12 @@
+ 	    }
+ 	} else {
+ 	    for (p = g->matches; (m = *p); p++) {
++		if (menuacc && !hasbrpsfx(m, minfo.prebr, minfo.postbr)) {
++		    m->flags |= CMF_HIDE;
++		    continue;
++		}
++		m->flags &= ~CMF_HIDE;
++
+ 		if (m->disp) {
+ 		    if (m->flags & CMF_DISPLINE) {
+ 			nlines += 1 + printfmt(m->disp, 0, 0, 0);
+@@ -8704,11 +8787,12 @@
+ 		g->width = 0;
+ 
+ 		for (p = g->matches; (m = *p); p++)
+-		    if (m->disp) {
+-			if (!(m->flags & CMF_DISPLINE))
+-			    glines += 1 + (mlens[m->gnum] / columns);
+-		    } else if (!(m->flags & CMF_NOLIST))
+-			glines += 1 + ((1 + mlens[m->gnum]) / columns);
++		    if (!(m->flags & CMF_HIDE))
++			if (m->disp) {
++			    if (!(m->flags & CMF_DISPLINE))
++				glines += 1 + (mlens[m->gnum] / columns);
++			} else if (!(m->flags & CMF_NOLIST))
++			    glines += 1 + ((1 + mlens[m->gnum]) / columns);
+ 	    }
+ 	}
+ 	g->lins = glines;
+@@ -8737,7 +8821,8 @@
+ 			int x, l = 0, v;
+ 
+ 			for (mm = columns / g->shortest; mm > g->cols; mm--) {
+-			    for (j = i = ml = cl = l = v = x = 0,  k = g->dcount;
++			    for (j = i = ml = cl = l = v = x = 0,
++				     k = g->dcount;
+ 				 k > 0; k--) {
+ 				if (ylens[j] > ml)
+ 				    ml = ylens[j];
+@@ -8754,7 +8839,7 @@
+ 				    v = 0;
+ 				}
+ 			    }
+-			    if (j < g->dcount) {
++			    if (j < yl) {
+ 				ws[x++] = ml;
+ 				cl += ml;
+ 			    }
+@@ -8789,31 +8874,34 @@
+ 	    } else if (g->width) {
+ 		if (isset(LISTROWSFIRST)) {
+ 		    int x, l = 0, v, al;
++		    Cmatch *q;
+ 
+ 		    for (mm = columns / g->shortest; mm > g->cols; mm--) {
+-			for (j = i = ml = cl = l = v = x = 0,  k = g->dcount;
++			p = q = skipnolist(g->matches);
++			for (i = ml = cl = l = v = x = 0,  k = g->dcount;
+ 			     k > 0; k--) {
+-			    m = g->matches[j];
+-			    if (!(m->flags & (m->disp ? CMF_DISPLINE :
+-					      CMF_NOLIST))) {
+-				al = mlens[m->gnum] + add;
+-				if (al > ml)
+-				    ml = al;
+-				j += mm;
+-				v++;
+-				if (j >= g->dcount) {
+-				    if ((cl += ml) >= columns)
+-					break;
+-				    ws[x++] = ml;
+-				    ml = 0;
+-				    j = ++i;
+-				    if (v > l)
+-					l = v;
+-				    v = 0;
+-				}
++			    m = *p;
++			    al = mlens[m->gnum] + add;
++			    if (al > ml)
++				ml = al;
++			    for (j = mm; j && *p; j--)
++				p = skipnolist(p + 1);
++
++			    v++;
++			    if (!*p) {
++				if (v > l)
++				    l = v;
++				v = 0;
++
++				if ((cl += ml) >= columns)
++				    break;
++				ws[x++] = ml;
++				ml = 0;
++
++				p = q = skipnolist(q + 1);
+ 			    }
+ 			}
+-			if (j < g->dcount) {
++			if (v) {
+ 			    ws[x++] = ml;
+ 			    cl += ml;
+ 			}
+@@ -8829,8 +8917,9 @@
+ 			 i < g->lins; i++) {
+ 			for (p = g->matches, j = k = cl = ml = mm = 0;
+ 			     (m = *p); p++, j++) {
+-			    if (!(m->flags & (m->disp ? CMF_DISPLINE :
+-					      CMF_NOLIST))) {
++			    if (!(m->flags &
++				  (m->disp ? (CMF_DISPLINE | CMF_HIDE) :
++				   (CMF_NOLIST | CMF_HIDE)))) {
+ 				al = mlens[m->gnum] + add;
+ 				if (al > ml)
+ 				    ml = al;
+@@ -8858,11 +8947,11 @@
+ 		nlines += i - g->lins;
+ 		g->lins = i;
+ 		g->cols = mm;
++		g->totl = cl;
++		cl -= add;
++		if (cl > max)
++		    max = cl;
+ 	    }
+-	    g->totl = cl;
+-	    cl -= add;
+-	    if (cl > max)
+-		max = cl;
+ 	}
+ 	for (g = amatches; g; g = g->next) {
+ 	    if (g->widths) {
+@@ -8878,6 +8967,7 @@
+     listdat.hidden = hidden;
+     listdat.nlist = nlist;
+     listdat.nlines = nlines;
++    listdat.menuacc = menuacc;
+ }
+ 
+ /**/
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

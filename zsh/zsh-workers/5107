@@ -1,0 +1,235 @@
+Delivered-To: mason-zsh@primenet.com.au
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+Date: Fri, 29 Jan 1999 14:37:40 +0100 (MET)
+Message-Id: <199901291337.OAA15219@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Wed, 27 Jan 1999 21:35:29 -0800
+Subject: PATCH: Re: Btw.: glob-qualifier
+X-Mailing-List: <zsh-workers@sunsite.auc.dk> 5107
+
+
+Bart Schaefer wrote:
+
+> Oof.  If you're going to make it usable, then REALLY make it usable.
+> At the risk of further abusing the already over-used parentheses, how
+> about (o(ug=w,o+r)) for "user and group must have exactly the write
+> bit set, and other must have at least r" and (o(u+x,go-w)) for "user
+> must have at least the execute bit set, and group and other must not
+> have write" and so on.
+
+The patch below implements this (with a few extras). The patch
+contains a hunk for the docs and I dont' want to write it again here,
+at least, Bart's examples work (with a different separator than the
+parenthese, of course).
+
+Of course, many of the things you can specify with this can also be
+achieved by using the already existing qualifiers. Because of this,
+I'm not sure, if this is important enough to be included. However,
+some of the things you can do with `(o...)' can not be achieved with
+the existing modifiers and for others it may be easier to remember.
+
+Bye
+ Sven
+
+--- os/glob.c	Fri Jan 29 10:04:57 1999
++++ Src/glob.c	Fri Jan 29 14:11:56 1999
+@@ -1006,21 +1006,96 @@
+     return v;
+ }
+ 
+-/* get octal number after qualifier */
++/* get mode spec after qualifier */
+ 
+ /**/
+ static long
+-qgetoctnum(char **s)
++qgetmodespec(char **s)
+ {
+-    long v = 0;
++    long yes = 0, no = 0, val, mask, t;
++    char *p = *s, c, how, end;
+ 
+-    if (!idigit(**s)) {
+-	zerr("octal number expected", NULL, 0);
+-	return 0;
+-    }
+-    while (**s >= '0' && **s <= '7')
+-	v = v * 010 + *(*s)++ - '0';
+-    return v;
++    if ((c = *p) == '=' || c == Equals || c == '+' || c == '-' ||
++	c == '?' || c == Quest || (c >= '0' && c <= '7')) {
++	end = 0;
++	c = 0;
++    } else {
++	end = (c == '<' ? '>' :
++	       (c == '[' ? ']' :
++		(c == '{' ? '}' :
++		 (c == Inang ? Outang :
++		  (c == Inbrack ? Outbrack :
++		   (c == Inbrace ? Outbrace : c))))));
++	p++;
++    }
++    do {
++	mask = 0;
++	while (((c = *p) == 'u' || c == 'g' || c == 'o' || c == 'a') && end) {
++	    switch (c) {
++	    case 'o': mask |= 01007; break;
++	    case 'g': mask |= 02070; break;
++	    case 'u': mask |= 04700; break;
++	    case 'a': mask |= 07777; break;
++	    }
++	    p++;
++	}
++	how = ((c == '+' || c == '-') ? c : '=');
++	if (c == '+' || c == '-' || c == '=' || c == Equals)
++	    p++;
++	val = 0;
++	if (mask) {
++	    while ((c = *p++) != ',' && c != end) {
++		switch (c) {
++		case 'x': val |= 00111; break;
++		case 'w': val |= 00222; break;
++		case 'r': val |= 00444; break;
++		case 's': val |= 06000; break;
++		case 't': val |= 01000; break;
++		case '0': case '1': case '2': case '3':
++		case '4': case '5': case '6': case '7':
++		    t = ((long) c - '0');
++		    val |= t | (t << 3) | (t << 6);
++		    break;
++		default:
++		    zerr("invalid mode specification", NULL, 0);
++		    return 0;
++		}
++	    }
++	    if (how == '=' || how == '+') {
++		yes |= val & mask;
++		val = ~val;
++	    }
++	    if (how == '=' || how == '-')
++		no |= val & mask;
++	} else {
++	    t = 07777;
++	    while ((c = *p) == '?' || c == Quest ||
++		   (c >= '0' && c <= '7')) {
++		if (c == '?' || c == Quest) {
++		    t = (t << 3) | 7;
++		    val <<= 3;
++		} else {
++		    t <<= 3;
++		    val = (val << 3) | ((long) c - '0');
++		}
++		p++;
++	    }
++	    if (end && c != end && c != ',') {
++		zerr("invalid mode specification", NULL, 0);
++		return 0;
++	    }
++	    if (how == '=') {
++		yes = (yes & ~t) | val;
++		no = (no & ~t) | (~val & ~t);
++	    } else if (how == '+')
++		yes |= val;
++	    else
++		no |= val;
++	}
++    } while (end && c != end);
++
++    *s = p;
++    return ((yes & 07777) | ((no & 07777) << 12));
+ }
+ 
+ static int
+@@ -1358,10 +1433,9 @@
+ 			}
+ 			break;
+ 		    case 'o':
+-			/* Match octal mode of file exactly. *
+-			 * Currently undocumented.           */
+-			func = qualeqflags;
+-			data = qgetoctnum(&s);
++			/* Match modes with chmod-spec. */
++			func = qualmodeflags;
++			data = qgetmodespec(&s);
+ 			break;
+ 		    case 'M':
+ 			/* Mark directories with a / */
+@@ -3093,13 +3167,15 @@
+     return mode_to_octal(buf->st_mode) & mod;
+ }
+ 
+-/* mode matches number supplied exactly  */
++/* mode matches specification */
+ 
+ /**/
+ static int
+-qualeqflags(struct stat *buf, long mod)
++qualmodeflags(struct stat *buf, long mod)
+ {
+-    return mode_to_octal(buf->st_mode) == mod;
++    long v = mode_to_octal(buf->st_mode), y = mod & 07777, n = mod >> 12;
++
++    return ((v & y) == y && !(v & n));
+ }
+ 
+ /* regular executable file? */
+--- od/Zsh/expn.yo	Fri Jan 29 10:05:09 1999
++++ Doc/Zsh/expn.yo	Fri Jan 29 14:28:21 1999
+@@ -1088,6 +1088,49 @@
+ item(tt(t))(
+ files with the sticky bit (01000)
+ )
++item(tt(o)var(spec))(
++files with access rights matching var(spec). This var(spec) may be a
++octal number optionally preceded by a `tt(=)', a `tt(PLUS())', or a
++`tt(-)'. If none of these characters is given, the behavior is the
++same as for `tt(=)'. The octal number decribes the mode bits to be
++expected, if combined with a `tt(=)', the value given must match the
++file-modes exactly, with a `tt(PLUS())', at least the bits in the
++given number must be set in the file-modes, and with a `tt(-)', the
++bits in the number must not be set. Giving a `tt(?)' instead of a
++octal digit anywhere in the number ensures that the corresponding bits 
++inthe file-modes are not checked, this is only useful in combination
++with `tt(=)'.
++
++If the qualifier `tt(o)' is followed by any other character anything
++up to the next matching character (`tt([)', `tt({)', and `tt(<)' match 
++`tt(])', `tt(})', and `tt(>)' respectively, any other character
++matches itself) is taken as a list of comma-separated
++var(sub-spec)s. Each var(sub-spec) may be either a octal number as
++described above or a list of any of the characters `tt(u)', `tt(g)',
++`tt(o)', and `tt(a)', followed by a `tt(=)', a `tt(PLUS())', or a
++`tt(-)', followed by a list of any of the characters `tt(r)', `tt(w)', 
++`tt(x)', `tt(s)', and `tt(t)', or a octal digit. The first list of
++characters specify which acess rights are to be checked. If a `tt(u)'
++is given, those for the owner of the file are used, if a `tt(g)' is
++given, those of the group are checked, a `tt(o)' means to test those
++of other users, and the `tt(a)' says to test all three groups. The
++`tt(=)', `tt(PLUS())', and `tt(-)' again says how the modes are to be
++checked and have the same meaning as described for the first form
++above. The second list of characters finally says which access rights
++are to be expected: `tt(r)' for read access, `tt(w)' for write access, 
++`tt(x)' for the right to execute the file (or to search a directory),
++`tt(s)' for the setuid and setgid bits, and `tt(t)' for the sticky
++bit.
++
++Thus, `tt(*(o70?))' gives the files for which the owner has read,
++write, and execute permission, and for which other group members have
++no rights, independent of the permissions for other user. The pattern
++`tt(*(o-100))' gives all files for which the owner does not have
++execute permission, and `tt(*(o:gu+w,o-rx))' gives the files for which 
++the owner and the other members of the group have at least write
++permission, and fo which other users don't have read or execute
++permission.
++)
+ item(tt(d)var(dev))(
+ files on the device var(dev)
+ )
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

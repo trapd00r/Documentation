@@ -1,0 +1,606 @@
+From zsh-workers-request@math.gatech.edu Tue Jan 20 12:42:37 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 18279 invoked from network); 20 Jan 1998 12:42:31 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 20 Jan 1998 12:42:31 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id HAA14630;
+	Tue, 20 Jan 1998 07:29:24 -0500 (EST)
+Resent-Date: Tue, 20 Jan 1998 07:29:24 -0500 (EST)
+From: pws@ibmth.difi.unipi.it (Peter Stephenson)
+Message-Id: <9801201152.AA43922@ibmth.difi.unipi.it>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: PATCH: 3.1.2-zefram3: completion widgets
+Date: Tue, 20 Jan 98 12:52:36 +0100
+Resent-Message-ID: <"32cRf1.0.Xa3.aY9nq"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3733
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I couldn't resist implementing this, which is the general version of
+the history completion patch in 3718, which should be backed off
+first.  You can now create widgets with arbitrary completion behaviour
+using zle.  (I picked this since compctl is already festooned with
+options.)  The history completion example now becomes,
+
+zle -C history-complete-word -H 0 ''
+bindkey "\e/" history-complete-word
+
+The options after the widget name can be anything recognised by
+compctl, except that you can't define ordinary completions (i.e. for
+command names, -D, etc.) at the same time.  Four other options are
+allowed before the widget name: -m/-M force on/off menu completion and
+-g/-G do the same for glob completion.  The default is to use the
+corresponding option setting.  To make this more useful, you can omit
+the compctl options altogether, in which case the completion behaviour
+is just the normal one, so
+
+zle -C -M non-menu-complete
+
+will do ordinary completion without menus even if you have menu
+completion on by default.
+
+Another of my favourites is
+
+mostrecent() {
+    if [[ -n $1 ]]; then =ls -1dt $1*$2; else =ls -1t; fi | read -A reply;
+}
+zle -C most-recent-file -K mostrecent
+
+which inserts the most recent file matching the word.
+
+A note about different sorts of completion:  Once you have started
+completion with a widget, the list of completions remains in effect
+(for ^D or <TAB>, for example) until you either type a non-completion
+key, or start a completion with a different widget.  This is just the
+way completion usually behaves, except in the last point and then only
+because there was only one sort of completion before.
+
+The next step in programmability might be to allow the widget to
+return the list of completions in $reply rather than insert them
+directly.  Another simple possibility is having an option to call the
+compctl immediately (equivalent to `zle -C tmp ...; zle tmp; zle -D
+tmp' in one go).
+
+The code is essentially straigtforward.  The messiest part is simply
+arranging for the compctl module to be called from the zle module.
+
+*** Doc/Zsh/mod_zle.yo.zcomp	Mon Jan 19 16:47:58 1998
+--- Doc/Zsh/mod_zle.yo	Tue Jan 20 10:28:16 1998
+***************
+*** 157,162 ****
+--- 157,163 ----
+  xitem(tt(zle) tt(-D) var(widget) ...)
+  xitem(tt(zle) tt(-A) var(old-widget) var(new-widget))
+  xitem(tt(zle) tt(-N) var(widget) [ var(function) ])
++ xitem(tt(zle) tt(-C) [ tt(-mMgG) ] var(widget) [ var(compctl-options) ])
+  item(tt(zle) var(widget))(
+  The tt(zle) builtin performs a number of different actions concerning
+  ZLE.  Which operation it performs depends on its options:
+***************
+*** 183,188 ****
+--- 184,206 ----
+  widget is invoked from within the editor, the specified shell var(function)
+  is called.  If no function name is specified, it defaults to
+  the same name as the widget.
++ )
++ item(tt(-C) [ tt(-mMgG) ] var(widget) [ var(compctl-options) ])(
++ Create a user-defined widget which will perform completion according
++ to var(compctl-options).  These are passed directly to the
++ tt(compctl) command, see
++ ifzman(zmanref(zshcompctl))\
++ ifnzman(noderef(Programmable Completion))\
++ ; no command names or special options (tt(-LDCT)) may be used.  If the
++ var(compctl-options) are missing the widget will have normal
++ completion behaviour as modified by the tt(zle) options.
++ 
++ There are four additional tt(zle) options, which must precede the
++ widget name: tt(-m) and tt(-M) force the widget to use or not to use
++ menu completion, respectively, while tt(-g) and tt(-G) likewise force
++ the widget to use or not to use glob completion.  The defaults are to
++ use the current settings of tt(MENU_COMPLETE) and tt(GLOB_COMPLETE)
++ as with normal completion.
+  )
+  item(var(widget))(
+  Invoke the specified widget.  This can only be done when ZLE is
+*** Src/Zle/comp1.c.zcomp	Mon Jan 19 14:01:34 1998
+--- Src/Zle/comp1.c	Mon Jan 19 14:12:41 1998
+***************
+*** 38,43 ****
+--- 38,51 ----
+  /**/
+  struct compctl cc_compos, cc_default, cc_first, cc_dummy;
+   
++ /* pointers to functions required by zle */
++ 
++ /**/
++ void (*printcompctlptr) _((char *, Compctl, int));
++ 
++ /**/
++ Compctl (*compctl_widgetptr) _((char *, char **));
++ 
+  /* hash table for completion info for commands */
+   
+  /**/
+*** Src/Zle/compctl.c.zcomp	Mon Jan 19 12:24:36 1998
+--- Src/Zle/compctl.c	Mon Jan 19 14:31:03 1998
+***************
+*** 830,835 ****
+--- 830,841 ----
+      unsigned long flags = cc->mask;
+      unsigned long oldshowmask;
+  
++     /* Printflags is used outside the standard compctl commands*/
++     if (printflags & PRINT_LIST)
++ 	cclist |= COMP_LIST;
++     else if (printflags & PRINT_TYPE)
++ 	cclist &= ~COMP_LIST;
++ 
+      if ((flags & CC_EXCMDS) && !(flags & CC_DISCMDS))
+  	flags &= ~CC_EXCMDS;
+  
+***************
+*** 1060,1065 ****
+--- 1066,1103 ----
+      return ret;
+  }
+  
++ /* Externally callable version of get_compctl.  Used for completion widgets */
++ 
++ /**/
++ static Compctl
++ compctl_widget(char *name, char **argv)
++ {
++   Compctl cc = (Compctl) zcalloc(sizeof(*cc));
++   cclist = 0;
++   showmask = 0;
++ 
++   if (get_compctl(name, &argv, cc, 1, 0)) {
++       freecompctl(cc);
++       return NULL;
++   }
++ 
++   if (cclist & COMP_REMOVE) {
++       zwarnnam(name, "use -D to delete widget", NULL, 0);
++       return NULL;
++   } else if (cclist) {
++       zwarnnam(name, "special options illegal in widget", NULL, 0);
++       freecompctl(cc);
++       return NULL;
++   } else if (*argv) {
++       zwarnnam(name, "command names illegal in widget", NULL, 0);
++       freecompctl(cc);
++       return NULL;
++   }
++   cc->refc++;
++ 
++   return cc;
++ }
++ 
+  static struct builtin bintab[] = {
+      BUILTIN("compctl", 0, bin_compctl, 0, -1, 0, NULL, NULL),
+  };
+***************
+*** 1071,1076 ****
+--- 1109,1116 ----
+      if(!addbuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab)))
+  	return 1;
+      compctltab->printnode = printcompctlp;
++     printcompctlptr = printcompctl;
++     compctl_widgetptr = compctl_widget;
+      return 0;
+  }
+  
+***************
+*** 1082,1087 ****
+--- 1122,1129 ----
+  {
+      compctltab->printnode = NULL;
+      deletebuiltins(m->nam, bintab, sizeof(bintab)/sizeof(*bintab));
++     printcompctlptr = NULL;
++     compctl_widgetptr = NULL;
+      return 0;
+  }
+  #endif
+*** Src/Zle/zle.h.zcomp	Mon Jan 19 16:18:35 1998
+--- Src/Zle/zle.h	Tue Jan 20 12:22:24 1998
+***************
+*** 48,63 ****
+      union {
+  	ZleIntFunc fn;	/* pointer to internally implemented widget */
+  	char *fnnam;	/* name of the shell function for user-defined widget */
+      } u;
+  };
+  
+  #define WIDGET_INT	(1<<0)    /* widget is internally implemented */
+! #define ZLE_MENUCMP	(1<<1)    /* DON'T invalidate completion list */
+  #define ZLE_YANK	(1<<3)
+  #define ZLE_LINEMOVE	(1<<4)    /* command is a line-oriented movement */
+  #define ZLE_LASTCOL     (1<<5)    /* command maintains lastcol correctly */
+  #define ZLE_KILL	(1<<6)
+  #define ZLE_KEEPSUFFIX	(1<<9)    /* DON'T remove added suffix */
+  
+  /* thingies */
+  
+--- 48,69 ----
+      union {
+  	ZleIntFunc fn;	/* pointer to internally implemented widget */
+  	char *fnnam;	/* name of the shell function for user-defined widget */
++         Compctl cc;     /* for use with a WIDGET_COMP widget */
+      } u;
+  };
+  
+  #define WIDGET_INT	(1<<0)    /* widget is internally implemented */
+! #define WIDGET_COMP	(1<<1)	  /* Special completion widget */
+! #define ZLE_MENUCMP	(1<<2)    /* DON'T invalidate completion list */
+  #define ZLE_YANK	(1<<3)
+  #define ZLE_LINEMOVE	(1<<4)    /* command is a line-oriented movement */
+  #define ZLE_LASTCOL     (1<<5)    /* command maintains lastcol correctly */
+  #define ZLE_KILL	(1<<6)
+  #define ZLE_KEEPSUFFIX	(1<<9)    /* DON'T remove added suffix */
++ #define ZLE_USEMENU	(1<<10)   /* Do    ) use menu completion for   */
++ #define ZLE_NOMENU	(1<<11)   /* Don't )  widget, else use default */
++ #define ZLE_USEGLOB	(1<<12)   /* Do    ) use glob completion for   */
++ #define ZLE_NOGLOB	(1<<13)   /* Don't )  widget, else use default */
+  
+  /* thingies */
+  
+*** Src/Zle/zle_main.c.zcomp	Mon Jan 19 12:24:34 1998
+--- Src/Zle/zle_main.c	Tue Jan 20 12:23:23 1998
+***************
+*** 71,76 ****
+--- 71,79 ----
+  /**/
+  int lastcmd;
+  
++ /**/
++ Widget compwidget;
++ 
+  /* the status line, and its length */
+  
+  /**/
+***************
+*** 565,576 ****
+  	showmsg(msg);
+  	zsfree(msg);
+  	feep();
+!     } else if((w = func->widget)->flags & WIDGET_INT) {
+  	int wflags = w->flags;
+  
+  	if(!(wflags & ZLE_KEEPSUFFIX))
+  	    removesuffix();
+! 	if(!(wflags & ZLE_MENUCMP)) {
+  	    fixsuffix();
+  	    invalidatelist();
+  	}
+--- 568,584 ----
+  	showmsg(msg);
+  	zsfree(msg);
+  	feep();
+!     } else if((w = func->widget)->flags & (WIDGET_INT|WIDGET_COMP)) {
+  	int wflags = w->flags;
+  
+  	if(!(wflags & ZLE_KEEPSUFFIX))
+  	    removesuffix();
+! 	if(!(wflags & ZLE_MENUCMP) ||
+! 	   ((wflags & WIDGET_COMP) && compwidget != w)) {
+! 	    /* If we are doing a special completion, and the widget
+! 	     * is not the one currently in use for special completion,
+! 	     * we are starting a new completion.
+! 	     */
+  	    fixsuffix();
+  	    invalidatelist();
+  	}
+***************
+*** 578,584 ****
+  	    vilinerange = 1;
+  	if(!(wflags & ZLE_LASTCOL))
+  	    lastcol = -1;
+! 	w->u.fn();
+  	lastcmd = wflags;
+      } else {
+  	List l = getshfunc(w->u.fnnam);
+--- 586,596 ----
+  	    vilinerange = 1;
+  	if(!(wflags & ZLE_LASTCOL))
+  	    lastcol = -1;
+! 	if (wflags & WIDGET_COMP) {
+! 	    compwidget = w;
+! 	    completespecial();
+! 	} else
+! 	    w->u.fn();
+  	lastcmd = wflags;
+      } else {
+  	List l = getshfunc(w->u.fnnam);
+***************
+*** 841,847 ****
+  static struct builtin bintab[] = {
+      BUILTIN("bindkey", 0, bin_bindkey, 0, -1, 0, "evaMldDANmrsLR", NULL),
+      BUILTIN("vared",   0, bin_vared,   1,  7, 0, NULL,             NULL),
+!     BUILTIN("zle",     0, bin_zle,     0, -1, 0, "lDANL",          NULL),
+  };
+  
+  /**/
+--- 853,859 ----
+  static struct builtin bintab[] = {
+      BUILTIN("bindkey", 0, bin_bindkey, 0, -1, 0, "evaMldDANmrsLR", NULL),
+      BUILTIN("vared",   0, bin_vared,   1,  7, 0, NULL,             NULL),
+!     BUILTIN("zle",     0, bin_zle,     0, -1, 0, "lDANCLmMgG",     NULL),
+  };
+  
+  /**/
+*** Src/Zle/zle_thingy.c.zcomp	Mon Jan 19 12:24:35 1998
+--- Src/Zle/zle_thingy.c	Tue Jan 20 12:24:33 1998
+***************
+*** 246,252 ****
+  static void
+  freewidget(Widget w)
+  {
+!     if(!(w->flags & WIDGET_INT))
+  	zsfree(w->u.fnnam);
+      zfree(w, sizeof(*w));
+  }
+--- 246,254 ----
+  static void
+  freewidget(Widget w)
+  {
+!     if ((w->flags & WIDGET_COMP) && w->u.cc)
+! 	freecompctl(w->u.cc);
+!     else if(!(w->flags & WIDGET_INT))
+  	zsfree(w->u.fnnam);
+      zfree(w, sizeof(*w));
+  }
+***************
+*** 336,341 ****
+--- 338,344 ----
+  	{ 'D', bin_zle_del,  1, -1 },
+  	{ 'A', bin_zle_link, 2,  2 },
+  	{ 'N', bin_zle_new,  1,  2 },
++ 	{ 'C', bin_zle_compctl, 1, -1},
+  	{ 0,   bin_zle_call, 0, -1 },
+      };
+      struct opn const *op, *opp;
+***************
+*** 387,403 ****
+      if(w->flags & WIDGET_INT)
+  	return;
+      if(list) {
+! 	fputs("zle -N ", stdout);
+  	if(t->nam[0] == '-')
+  	    fputs("-- ", stdout);
+  	quotedzputs(t->nam, stdout);
+! 	if(strcmp(t->nam, w->u.fnnam)) {
+  	    fputc(' ', stdout);
+  	    quotedzputs(w->u.fnnam, stdout);
+  	}
+      } else {
+  	nicezputs(t->nam, stdout);
+! 	if(strcmp(t->nam, w->u.fnnam)) {
+  	    fputs(" (", stdout);
+  	    nicezputs(w->u.fnnam, stdout);
+  	    fputc(')', stdout);
+--- 390,413 ----
+      if(w->flags & WIDGET_INT)
+  	return;
+      if(list) {
+! 	fputs((w->flags & WIDGET_COMP) ? "zle -C " : "zle -N ", stdout);
+  	if(t->nam[0] == '-')
+  	    fputs("-- ", stdout);
+  	quotedzputs(t->nam, stdout);
+! 	if (w->flags & WIDGET_COMP) {
+! 	    if (printcompctlptr && w->u.cc)
+! 		printcompctlptr(NULL, w->u.cc, PRINT_LIST);
+! 	} else if(strcmp(t->nam, w->u.fnnam)) {
+  	    fputc(' ', stdout);
+  	    quotedzputs(w->u.fnnam, stdout);
+  	}
+      } else {
+  	nicezputs(t->nam, stdout);
+! 	if (w->flags & WIDGET_COMP) {
+! 	    fputs(" -C", stdout);
+! 	    if (printcompctlptr && w->u.cc)
+! 		printcompctlptr(NULL, w->u.cc, PRINT_TYPE);
+! 	} else if(strcmp(t->nam, w->u.fnnam)) {
+  	    fputs(" (", stdout);
+  	    nicezputs(w->u.fnnam, stdout);
+  	    fputc(')', stdout);
+***************
+*** 456,461 ****
+--- 466,509 ----
+      freewidget(w);
+      zerrnam(name, "widget name `%s' is protected", args[0], 0);
+      return 1;
++ }
++ 
++ /**/
++ static int
++ bin_zle_compctl(char *name, char **args, char *ops, char func)
++ {
++     Compctl cc = NULL;
++     Widget w;
++     char *wname = args[0];
++ 
++     if (!compctl_widgetptr) {
++ 	zwarnnam(name, "compctl module is not loaded", NULL, 0);
++ 	return 1;
++     }
++ 
++     args++;
++ 
++     if (*args && !(cc = compctl_widgetptr(name, args)))
++ 	return 1;
++ 
++     w = zalloc(sizeof(*w));
++     w->flags = WIDGET_COMP|ZLE_MENUCMP|ZLE_KEEPSUFFIX;
++     w->first = NULL;
++     w->u.cc = cc;
++     if(bindwidget(w, rthingy(wname))) {
++ 	freewidget(w);
++ 	zerrnam(name, "widget name `%s' is protected", wname, 0);
++ 	return 1;
++     }
++     if (ops['m'])
++ 	w->flags |= ZLE_USEMENU;
++     else if (ops['M'])
++ 	w->flags |= ZLE_NOMENU;
++     if (ops['g'])
++ 	w->flags |= ZLE_USEGLOB;
++     else if (ops['G'])
++ 	w->flags |= ZLE_NOGLOB;
++     return 0;
+  }
+  
+  /**/
+*** Src/Zle/zle_tricky.c.zcomp	Mon Jan 19 16:25:01 1998
+--- Src/Zle/zle_tricky.c	Tue Jan 20 10:04:14 1998
+***************
+*** 215,230 ****
+      return 1;
+  }
+  
+! #define COMP_COMPLETE 0
+! #define COMP_LIST_COMPLETE 1
+! #define COMP_SPELL 2
+! #define COMP_EXPAND 3
+! #define COMP_EXPAND_COMPLETE 4
+! #define COMP_LIST_EXPAND 5
+  #define COMP_ISEXPAND(X) ((X) >= COMP_EXPAND)
+  
+  /**/
+  void
+  completeword(void)
+  {
+      usemenu = isset(MENUCOMPLETE);
+--- 215,243 ----
+      return 1;
+  }
+  
+! enum { COMP_COMPLETE,
+!        COMP_WIDGET,
+!        COMP_LIST_COMPLETE,
+!        COMP_SPELL,
+!        COMP_EXPAND,
+!        COMP_EXPAND_COMPLETE,
+!        COMP_LIST_EXPAND };
+  #define COMP_ISEXPAND(X) ((X) >= COMP_EXPAND)
+  
+  /**/
+  void
++ completespecial(void)
++ {
++     int flags = compwidget->flags;
++     usemenu = (flags & ZLE_USEMENU) ? 1 : (flags & ZLE_NOMENU) ? 0
++ 	: isset(MENUCOMPLETE);
++     useglob = (flags & ZLE_USEGLOB) ? 1 : (flags & ZLE_NOGLOB) ? 0
++ 	: isset(GLOBCOMPLETE);
++     docomplete(compwidget->u.cc ? COMP_WIDGET : COMP_COMPLETE);
++ }
++ 
++ /**/
++ void
+  completeword(void)
+  {
+      usemenu = isset(MENUCOMPLETE);
+***************
+*** 2171,2177 ****
+  	pushheap();
+  
+  	/* Make sure we have the completion list and compctl. */
+! 	if(makecomplist(s, incmd, &delit, &compadd, untokenized)) {
+  	    /* Error condition: feeeeeeeeeeeeep(). */
+  	    feep();
+  	    goto compend;
+--- 2184,2190 ----
+  	pushheap();
+  
+  	/* Make sure we have the completion list and compctl. */
+! 	if(makecomplist(s, incmd, &delit, &compadd, untokenized, lst)) {
+  	    /* Error condition: feeeeeeeeeeeeep(). */
+  	    feep();
+  	    goto compend;
+***************
+*** 2239,2245 ****
+  
+  /**/
+  static int
+! makecomplist(char *s, int incmd, int *delit, int *compadd, int untokenized)
+  {
+      Compctl cc = NULL;
+      int oloffs = offs, owe = we, owb = wb, ocs = cs, oll = ll, isf = 1;
+--- 2252,2259 ----
+  
+  /**/
+  static int
+! makecomplist(char *s, int incmd, int *delit, int *compadd,
+! 	     int untokenized, int lst)
+  {
+      Compctl cc = NULL;
+      int oloffs = offs, owe = we, owb = wb, ocs = cs, oll = ll, isf = 1;
+***************
+*** 2255,2260 ****
+--- 2269,2279 ----
+      os = dupstring(s);
+      ol = (unsigned char *)dupstring((char *)line);
+  
++     if (lst == COMP_WIDGET) {
++ 	cc = ccmain = compwidget->u.cc;
++ 	cc->refc++;
++     }
++ 
+    xorrec:
+  
+      DPUTS(ll != strlen((char *) line), "BUG: xorrec: ll != strlen(line)");
+***************
+*** 2277,2283 ****
+  
+      /* If we don't have a compctl definition yet or we have a compctl *
+       * with extended completion, get it (or the next one, resp.).     */
+!     if (!cc || cc->ext)
+  	cc = get_ccompctl(cc, compadd, incmd);
+  
+      /* *compadd is the number of characters we have to ignore at the *
+--- 2296,2302 ----
+  
+      /* If we don't have a compctl definition yet or we have a compctl *
+       * with extended completion, get it (or the next one, resp.).     */
+!     if (!cc || (!isf && cc->ext))
+  	cc = get_ccompctl(cc, compadd, incmd);
+  
+      /* *compadd is the number of characters we have to ignore at the *
+***************
+*** 3033,3039 ****
+      if (nmatches && !errflag)
+  	return 0;
+  
+!     if ((isf || cc->xor) && !parampre) {
+  	/* We found no matches, but there is a xor'ed completion: *
+  	 * fine, so go back and continue with that compctl.       */
+  	errflag = 0;
+--- 3052,3058 ----
+      if (nmatches && !errflag)
+  	return 0;
+  
+!     if (((isf && lst != COMP_WIDGET) || cc->xor) && !parampre) {
+  	/* We found no matches, but there is a xor'ed completion: *
+  	 * fine, so go back and continue with that compctl.       */
+  	errflag = 0;
+***************
+*** 3108,3113 ****
+--- 3127,3133 ----
+      }
+      lastambig = menucmp = showinglist = validlist = 0;
+      menucur = NULL;
++     compwidget = NULL;
+  }
+  
+  /* Get the words from a variable or a compctl -k list. */
+
+-- 
+Peter Stephenson <pws@ibmth.difi.unipi.it>       Tel: +39 50 911239
+WWW:  http://www.ifh.de/~pws/
+Gruppo Teorico, Dipartimento di Fisica
+Piazza Torricelli 2, 56100 Pisa, Italy
+

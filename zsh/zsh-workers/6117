@@ -1,0 +1,239 @@
+From zsh-workers-return-6117-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Apr 27 09:03:49 1999
+Return-Path: <zsh-workers-return-6117-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9762 invoked from network); 27 Apr 1999 09:03:46 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 27 Apr 1999 09:03:46 -0000
+Received: (qmail 26657 invoked by alias); 27 Apr 1999 09:03:24 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6117
+Received: (qmail 26650 invoked from network); 27 Apr 1999 09:03:16 -0000
+Date: Tue, 27 Apr 1999 11:03:14 +0200 (MET DST)
+Message-Id: <199904270903.LAA09306@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Mon, 26 Apr 1999 14:52:31 +0200
+Subject: PATCH: was Re: Closing quotes in completion
+
+
+Peter Stephenson wrote:
+
+> I wrote the following completer called _closequotes to stick before
+> _complete; if it finds the completion is in quotes, it adds the appropriate
+> closing quote as an ignored suffix.  It works fine for simple cases, but
+> for anything more complicated (such as file paths with a slash) the closing
+> quote appears too far back in the string (and in that case you want to get
+> rid of it anyway).  Any ideas?  I suppose using a `compctl -M' doesn't work
+> because it doesn't match against $ISUFFIX anyway.
+
+[ Sorry for the late response... ]
+
+Well, I hadn't envisioned this kind of usage, but let's have a look...
+
+First, this showed a problem in the code, where the automatically
+inserted suffixes (e.g. a slash for directories) were inserted after
+the ignored suffix, which was wrong.
+
+Then, I would change the test to:
+
+  if [[ -n $compstate[quote] && $RBUFFER != *${compstate[quote]}* ]]; then
+
+so that we don't insert another quote if there already is one.
+
+Also, in your mail (above) you said `too far back', while in the
+function you say `too early'. Playing a bit with this, I haven't found 
+an example for either of these, could you tell me... (but then again,
+you probably just meant the bug fixed by the patch).
+
+I have, however, found another problem. Without menucompletion, but
+automenu, if you do:
+
+  ls '/f/b<TAB>
+
+(with multiple possible completions for the `f'), the cursor is moved
+after the `f', and a closing quote is inserted. Immediatly tabbing
+again, to start automenu will remove the quotes. The problem is the
+fix from message 5483. The code remembers that the first completion
+attempt started with the cursor after the word. Because of that it
+moves the cursor back to the end again (after the inserted quote),
+before starting menucompletion. Then the code in `get_comp_string()'
+removes the quotes because it thinks both quotes are `in the word'.
+
+Currently I have no idea, how to solve this. When an unambiguous
+string is inserted, we can't easily get the position where the ignored 
+suffix starts which would be needed to make the code move the cursor
+before it when starting automenu. Also, this would be the right thing
+in this case, but I have the impression that it would be wrong in
+other cases (without being able to come up with examples just now).
+
+Well, otherwise I haven't found any problems with this, apart from the
+fact that we can't easily make it auto-removable. For that we would
+have to use the same trick _approximate uses: temporarily define wrapper
+functions for compgen and compadd and there fiddle with the argument
+list (it would be more complicated than in _approximate if you want to 
+append the quote to the suffix given by the user, if any, and if none
+was given, just use the quote as an auto-removable suffix -- we would
+need quite a bit os argument list parsing here).
+
+But since this isn't the first place where such a wrapper would be
+useful, we might want to think about some extension to the C-code to
+simplify such things. Any suggestions? (Some kind of associative array 
+that holds default values? Hm, for some of the above this wouldn't be
+enough. An associative array that holds values that are to be added to 
+those given to comp{add,gen}? This may look weird to some users,
+though.)
+
+This also reminds me of the last thing I'm still thinking about for
+the new style completion stuff: a way to access and probably modify
+the completions added.
+Currently I think about a builtin, say `compdata', that gets the name
+of a parameter and the number of a match or group as arguments and
+then stores information about the match/group in a associative array
+with the given name. Options would say if we want to access the old
+list (if any) or the new one, and if we want to access a group or a
+match. Then we could either add an option that allows to modify the
+existing completions from such an associative array or we allow
+options a la compadd to modify the various components directly.
+
+There are several problems, though. For example: the numbering of the
+matches, which is really done after the sorting, not while other
+matches can still be added. Then we have the problem that some of the
+matches may have went into the alternate set instead of the normal set 
+(the fignore-thing). Finally, some of the strings stored with the
+matches can't easily be changed, including the -P-prefix and ISUFFIX,
+but not including the -S-suffix, because the first two are also
+contained in the unambiguous string build while adding completions
+(which would then become invalid if we allow to modify them).
+
+Because of these problems I haven't implemented anything of this yet,
+so I'd like to hear comments/suggestions about all this.
+
+Bye
+ Sven
+
+P.S.: What has become of the `re-use-old-list'-completer/patch?
+
+
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Mon Apr 26 15:41:27 1999
++++ Src/Zle/compctl.c	Tue Apr 27 09:02:12 1999
+@@ -1692,7 +1692,7 @@
+ bin_compadd(char *name, char **argv, char *ops, int func)
+ {
+     struct cadata dat;
+-    char *p, **sp, *e, *m;
++    char *p, **sp, *e, *m = NULL;
+     int dm;
+     Cmatcher match = NULL;
+ 
+@@ -1839,7 +1839,7 @@
+     if (!*argv)
+ 	return 1;
+ 
+-    match = cpcmatcher(match);
++    dat.match = match = cpcmatcher(match);
+     dm = addmatchesptr(&dat, argv);
+     freecmatcher(match);
+ 
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Mon Apr 26 15:41:29 1999
++++ Src/Zle/zle_tricky.c	Tue Apr 27 09:51:02 1999
+@@ -6730,11 +6730,13 @@
+     return scache;
+ }
+ 
+-/* Insert the given match. This returns the number of characters inserted.*/
++/* Insert the given match. This returns the number of characters inserted.
++ * scs is used to return the position where a automatically created suffix
++ * has to be inserted. */
+ 
+ /**/
+ static int
+-instmatch(Cmatch m)
++instmatch(Cmatch m, int *scs)
+ {
+     int l, r = 0, ocs, a = cs;
+ 
+@@ -6784,6 +6786,7 @@
+     } else
+ 	brscs = -1;
+     /* -S suffix */
++    *scs = cs;
+     if (m->suf) {
+ 	inststrlen(m->suf, 1, (l = strlen(m->suf)));
+ 	r += l;
+@@ -6855,13 +6858,13 @@
+ 
+ 	/* If REC_EXACT and AUTO_MENU are set and what we inserted is an  *
+ 	 * exact match, we want menu completion the next time round       *
+-	 * so we set fromcomp,to ensure that the word on the line is not  *
++	 * so we set fromcomp, to ensure that the word on the line is not *
+ 	 * taken as an exact match. Also we remember if we just moved the *
+ 	 * cursor into the word.                                          */
+ 	fromcomp = ((isset(AUTOMENU) ? FC_LINE : 0) |
+ 		    ((atend && cs != lastend) ? FC_INWORD : 0));
+ 
+-	/* Probably move the cursor to then end. */
++	/* Probably move the cursor to the end. */
+ 	if (movetoend == 3)
+ 	    cs = lastend;
+ 
+@@ -6920,7 +6923,7 @@
+ static void
+ do_single(Cmatch m)
+ {
+-    int l, sr = 0;
++    int l, sr = 0, scs;
+     int havesuff = 0;
+     char *str = m->str, *ppre = m->ppre, *psuf = m->psuf, *prpre = m->prpre;
+ 
+@@ -6950,7 +6953,7 @@
+     foredel(l);
+ 
+     /* And then we insert the new string. */
+-    menulen = instmatch(m);
++    menulen = instmatch(m, &scs);
+     menuend = cs;
+     cs = menupos + menulen;
+ 
+@@ -6969,6 +6972,7 @@
+     } else {
+ 	/* There is no user-specified suffix, *
+ 	 * so generate one automagically.     */
++	cs = scs;
+ 	if (m->ripre && (m->flags & CMF_PARBR)) {
+ 	    /*{{*/
+ 	    /* Completing a parameter in braces.  Add a removable `}' suffix. */
+@@ -7019,6 +7023,8 @@
+ 		}
+ 	    }
+ 	}
++	if (!menuinsc)
++	    cs = menupos + menulen;
+     }
+     /* If completing in a brace expansion... */
+     if (brbeg) {
+@@ -7031,7 +7037,7 @@
+ 	} else if (!menucmp) {
+ 	    /*{{*/
+ 	    /* Otherwise, add a `,' suffix, and let `}' remove it. */
+-	    cs = menuend;
++	    cs = scs;
+ 	    havesuff = 1;
+ 	    inststrlen(",", 1, 1);
+ 	    menuinsc++;
+@@ -7043,6 +7049,7 @@
+ 	/* If we didn't add a suffix, add a space, unless we are *
+ 	 * doing menu completion or we are completing files and  *
+ 	 * the string doesn't name an existing file.             */
++	cs = scs;
+ 	inststrlen(" ", 1, 1);
+ 	menuinsc++;
+ 	if (menuwe)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

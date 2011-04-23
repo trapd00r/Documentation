@@ -1,0 +1,148 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Fri Nov  1 17:25:44 1996
+Return-Path: zsh-workers-request@euclid.skiles.gatech.edu
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id RAA12800 for <mason@primenet.com.au>; Fri, 1 Nov 1996 17:25:40 +1100 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id BAA06835; Fri, 1 Nov 1996 01:22:02 -0500 (EST)
+Resent-Date: Fri, 1 Nov 1996 01:22:02 -0500 (EST)
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <961031222522.ZM14232@candle.brasslantern.com>
+Date: Thu, 31 Oct 1996 22:25:22 -0800
+In-Reply-To: Hideki ONO <ono@tamaru.kuee.kyoto-u.ac.jp>
+        "Re: Strange behavior of autocd under IRIX 6.2" (Nov  1,  1:59pm)
+References: <961031084419.ZM5796@candle.brasslantern.com> 
+	<ttybgmbecg.fsf@saba.kuee.kyoto-u.ac.jp>
+Reply-To: schaefer@nbn.com
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: Hideki ONO <ono@tamaru.kuee.kyoto-u.ac.jp>
+Subject: Re: Strange behavior of autocd under IRIX 6.2
+Cc: zsh-workers@math.gatech.edu
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"YVy143.0.jg1.ASPUo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2309
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+On Nov 1,  1:59pm, Hideki ONO wrote:
+} Subject: Re: Strange behavior of autocd under IRIX 6.2
+}
+} I have a same problem under IRIX6.2. It is because command ".." is
+} hashed in cmdnamtab.
+} 
+} When I execute opendir() with directory "/usr/bsd" in hashdir(),
+} 1st readdir() returns "."
+} 2nd readdir() returns "w"
+} 3rd readdir() returns ".."
+} And, ".." is hashed in cmdnamtab.
+
+It's really bad form for zsh to assume without looking that the first
+two directory entries are always "." and "..".  As evidenced here, this
+is not always a valid assumption.  There appear to be four places in the
+source (two in one function alone!) that blindly readdir(); readdir();
+after first opening the directory, without even looking at the results.
+However, gen_matches_files() and scanner() do it the right way, so here's
+a patch that changes everything else to do as those do.
+
+Index: Src/compat.c
+--- Src/compat.c.0	Sat Jul 27 13:24:36 1996
++++ Src/compat.c	Thu Oct 31 22:08:02 1996
+@@ -153,20 +153,29 @@
+ 	    return ztrdup(".");
+ 	}
+ 	chdir("..");
+-	readdir(dir);
+-	readdir(dir);
+-	while ((de = readdir(dir)))
++	while ((de = readdir(dir))) {
++	    char *fn = de->d_name;
++	    /* Ignore `.' and `..'. */
++	    if (fn[0] == '.' &&
++		(fn[1] == '\0' ||
++		 (fn[1] == '.' && fn[2] == '\0')))
++		continue;
+ 	    if ((ino_t) de->d_ino == ino) {
+-		lstat(de->d_name, &sbuf);
++		lstat(fn, &sbuf);
+ 		if (sbuf.st_dev == dev)
+ 		    goto match;
+ 	    }
++	}
+ 	closedir(dir);
+ 	dir = opendir(".");
+-	readdir(dir);
+-	readdir(dir);
+ 	while ((de = readdir(dir))) {
+-	    lstat(de->d_name, &sbuf);
++	    char *fn = de->d_name;
++	    /* Ignore `.' and `..'. */
++	    if (fn[0] == '.' &&
++		(fn[1] == '\0' ||
++		 (fn[1] == '.' && fn[2] == '\0')))
++		continue;
++	    lstat(fn, &sbuf);
+ 	    if (sbuf.st_dev == dev)
+ 		goto match;
+ 	}
+Index: Src/hashtable.c
+--- Src/hashtable.c.0	Fri Jul 26 05:09:46 1996
++++ Src/hashtable.c	Thu Oct 31 22:22:12 1996
+@@ -546,14 +546,18 @@
+     if (isrelative(*dirp) || !(dir = opendir(unmeta(*dirp))))
+ 	return;
+ 
+-    readdir(dir);
+-    readdir(dir);
+     while ((de = zreaddir(dir))) {
+-	if (!cmdnamtab->getnode(cmdnamtab, de->d_name)) {
++	char *fn = de->d_name;
++	/* Ignore `.' and `..'. */
++	if (fn[0] == '.' &&
++	    (fn[1] == '\0' ||
++	     (fn[1] == '.' && fn[2] == '\0')))
++	    continue;
++	if (!cmdnamtab->getnode(cmdnamtab, fn)) {
+ 	    cn = (Cmdnam) zcalloc(sizeof *cn);
+ 	    cn->flags = 0;
+ 	    cn->u.name = dirp;
+-	    cmdnamtab->addnode(cmdnamtab, ztrdup(de->d_name), cn);
++	    cmdnamtab->addnode(cmdnamtab, ztrdup(fn), cn);
+ 	}
+     }
+     closedir(dir);
+Index: Src/utils.c
+--- Src/utils.c.0	Thu Oct 10 04:05:11 1996
++++ Src/utils.c	Thu Oct 31 22:14:00 1996
+@@ -662,18 +662,23 @@
+ 	    int ct = 1;
+ 
+ 	    if (lock) {
++		char *fn;
+ 		HEAPALLOC {
+ 		    pushheap();
+ 		    l = newlinklist();
+-		    readdir(lock);
+-		    readdir(lock);
+ 		    while ((de = zreaddir(lock))) {
+ 			if (errflag)
+ 			    break;
++			fn = de->d_name;
++			/* Ignore `.' and `..'. */
++			if (fn[0] == '.' &&
++			    (fn[1] == '\0' ||
++			     (fn[1] == '.' && fn[2] == '\0')))
++			    continue;
+ 			if (u)
+-			    sprintf(buf, "%s/%s?%s", *s, de->d_name, u);
++			    sprintf(buf, "%s/%s?%s", *s, fn, u);
+ 			else
+-			    sprintf(buf, "%s/%s", *s, de->d_name);
++			    sprintf(buf, "%s/%s", *s, fn);
+ 			addlinknode(l, dupstring(buf));
+ 			ct++;
+ 		    }
+
+-- 
+Bart Schaefer                             Brass Lantern Enterprises
+http://www.well.com/user/barts            http://www.nbn.com/people/lantern
+

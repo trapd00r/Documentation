@@ -1,0 +1,1082 @@
+From zsh-workers-return-23118-mason-zsh=primenet.com.au@sunsite.dk Sun Jan 21 22:40:22 2007
+Return-Path: <zsh-workers-return-23118-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11567 invoked from network); 21 Jan 2007 22:40:14 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.7 (2006-10-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.0 required=5.0 tests=AWL,BAYES_00,
+	FORGED_RCVD_HELO,NO_OBLIGATION autolearn=no version=3.1.7
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 21 Jan 2007 22:40:14 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 19980 invoked from network); 21 Jan 2007 22:40:07 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 21 Jan 2007 22:40:07 -0000
+Received: (qmail 14039 invoked by alias); 21 Jan 2007 22:40:05 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23118
+Received: (qmail 14029 invoked from network); 21 Jan 2007 22:40:04 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 21 Jan 2007 22:40:04 -0000
+Received: (qmail 19544 invoked from network); 21 Jan 2007 22:40:04 -0000
+Received: from mtaout01-winn.ispmail.ntl.com (81.103.221.47)
+  by a.mx.sunsite.dk with SMTP; 21 Jan 2007 22:39:56 -0000
+Received: from aamtaout03-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout01-winn.ispmail.ntl.com with ESMTP
+          id <20070121223951.WISS9447.mtaout01-winn.ispmail.ntl.com@aamtaout03-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Sun, 21 Jan 2007 22:39:51 +0000
+Received: from pwslaptop.csr.com ([81.107.46.48])
+          by aamtaout03-winn.ispmail.ntl.com with ESMTP
+          id <20070121223949.DYE26699.aamtaout03-winn.ispmail.ntl.com@pwslaptop.csr.com>
+          for <zsh-workers@sunsite.dk>; Sun, 21 Jan 2007 22:39:49 +0000
+Received: from pwslaptop.csr.com (pwslaptop.csr.com [127.0.0.1])
+	by pwslaptop.csr.com (8.13.8/8.13.7) with ESMTP id l0LMdbEE015773
+	for <zsh-workers@sunsite.dk>; Sun, 21 Jan 2007 22:39:39 GMT
+Message-Id: <200701212239.l0LMdbEE015773@pwslaptop.csr.com>
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: sorting
+Date: Sun, 21 Jan 2007 22:39:37 +0000
+
+I made a note a few weeks ago that "sort -o" and "sort -O" didn't handle
+metafied characters properly.
+
+This led me on to the fact that sorting didn't handle multibyte
+characters at all.  The strings passed to strcmp() or strcoll() didn't
+have the Meta characters removed.  (strcmp() won't handle metabyte
+characters as such, but should at least behave logically with strings.
+I would guess all the systems where we support multibyte characters have
+strcoll() and that this handles multibyte characters if the locale is
+set appropriately.)
+
+This patch fixes that.  The one difficult case is where the unmetafied
+strings have embedded ASCII NULs.  I've tested for that in all the
+places I could think of.   There are also some optimisations:  instead
+of skipping backslashes or lower-casing characters each time two strings
+were compared, we now do this once for each string when we set up the
+array for comparison.
+
+There are still some direct uses of zstrcmp() and zstrbcmp() in the
+code, all in functions which are themselves called from qsort().
+Ideally these should be fixed to use the new sort code but with an
+additional special comparison function.
+
+I've improved the use of the parameter flags so that ${(i)...} and
+${(n)...} work on their own; before, you needed ${(io)...} or ${(no}...}
+else the i or n were ignored.  This will only cause compatibility
+problems in cases where someone was supplying a useless i or n (with no
+o or O).  You still need the O for sorting in reverse order and
+${(io)...} etc. still work as before.
+
+Supplying ${(a)...} or even ${(ao)...} was always useless; only
+${(aO)...} made sense to reverse the array order.  It would now make
+sense for ${(a)...} on its own to indicate a reversed array order, but
+that would be incompatible.
+
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.75
+diff -u -r1.75 expn.yo
+--- Doc/Zsh/expn.yo	12 Dec 2006 10:55:36 -0000	1.75
++++ Doc/Zsh/expn.yo	21 Jan 2007 22:37:10 -0000
+@@ -723,9 +723,10 @@
+ field splitting, when creating an associative array.
+ )
+ item(tt(a))(
+-With tt(o) or tt(O), sort in array index order. Note that `tt(oa)' is
+-therefore equivalent to the default but `tt(Oa)' is useful for
+-obtaining an array's elements in reverse order.
++Sort in array index order; when combined with `tt(O)' sort in reverse
++array index order.  Note that `tt(a)' is therefore equivalent to the
++default but `tt(Oa)' is useful for obtaining an array's elements in reverse
++order.
+ )
+ item(tt(c))(
+ With tt(${#)var(name)tt(}), count the total number of characters in an array,
+@@ -750,7 +751,7 @@
+ This is a shorthand for `tt(pj:\n:)'.
+ )
+ item(tt(i))(
+-With tt(o) or tt(O), sort case-independently.
++Sort case-insensitively.  May be combined with `tt(n)' or `tt(O)'.
+ )
+ item(tt(k))(
+ If var(name) refers to an associative array, substitute the em(keys)
+@@ -763,13 +764,25 @@
+ Convert all letters in the result to lower case.
+ )
+ item(tt(n))(
+-With tt(o) or tt(O), sort numerically.
++Sort decimal numbers numerically; if the first differing
++characters of two test strings are not digits, sorting
++is lexical.   Numbers with initial zeroes
++are sorted before those without.  Hence the array `tt(foo1 foo02
++foo2 foo3 foo20 foo23)' is sorted into the order shown.  Trailing
++non-digits are not sorted; the order of `tt(2foo)' and `tt(2bar)'
++is not defined.  May be combined with `tt(i)' or `tt(O)'.
+ )
+ item(tt(o))(
+-Sort the resulting words in ascending order.
++Sort the resulting words in ascending order; if this appears on its
++own the sorting is lexical and case-sensitive (unless the locale
++renders it case-insensitive).  Sorting in ascending order is the
++default for other forms of sorting, so this is ignored if combined
++with `tt(a)', `tt(i)' or `tt(n)'.
+ )
+ item(tt(O))(
+-Sort the resulting words in descending order.
++Sort the resulting words in descending order; `tt(O)' without `tt(a)',
++`tt(i)' or `tt(n)' sorts in reverse lexical order.  May be combined
++with `tt(a)', `tt(i)' or `tt(n)' to reverse the order of sorting.
+ )
+ item(tt(P))(
+ This forces the value of the parameter var(name) to be interpreted as a
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.173
+diff -u -r1.173 builtin.c
+--- Src/builtin.c	9 Jan 2007 21:45:45 -0000	1.173
++++ Src/builtin.c	21 Jan 2007 22:37:12 -0000
+@@ -617,8 +617,7 @@
+ 	}
+     }
+     if (sort)
+-	qsort(args, arrlen(args), sizeof(char *),
+-	      sort > 0 ? strpcmp : invstrpcmp);
++	strmetasort(args, sort < 0 ? SORTIT_BACKWARDS : 0, NULL);
+     if (array) {
+ 	/* create an array with the specified elements */
+ 	char **a = NULL, **y;
+@@ -3603,30 +3602,16 @@
+     }
+ 
+     /* -o and -O -- sort the arguments */
+-    /*
+-     * TODO: this appears to be yet another of the endless
+-     * chunks of code that didn't get fixed up properly
+-     * to reflect the fact that args contains unmetafied
+-     * strings that may contain NULs with the lengths in
+-     * len.
+-     */
+-    if (OPT_ISSET(ops,'o')) {
+-	if (fmt && !*args) return 0;
+-	if (OPT_ISSET(ops,'i'))
+-	    qsort(args, arrlen(args), sizeof(char *), cstrpcmp);
+-	else
+-	    qsort(args, arrlen(args), sizeof(char *), strpcmp);
+-    } else if (OPT_ISSET(ops,'O')) {
+-	if (fmt && !*args) return 0;
+-	if (OPT_ISSET(ops,'i'))
+-	    qsort(args, arrlen(args), sizeof(char *), invcstrpcmp);
+-	else
+-	    qsort(args, arrlen(args), sizeof(char *), invstrpcmp);
++    if (OPT_ISSET(ops,'o') || OPT_ISSET(ops,'O')) {
++	int flags;
++
++	if (fmt && !*args)
++	    return 0;
++	flags = OPT_ISSET(ops,'i') ? SORTIT_IGNORING_CASE : 0;
++	if (OPT_ISSET(ops,'O'))
++	    flags |= SORTIT_BACKWARDS;
++	strmetasort(args, flags, len);
+     }
+-    /* after sorting arguments, recalculate lengths */
+-    if(OPT_ISSET(ops,'o') || OPT_ISSET(ops,'O'))
+-	for(n = 0; n < argc; n++)
+-	    len[n] = strlen(args[n]);
+ 
+     /* -c -- output in columns */
+     if (!fmt && (OPT_ISSET(ops,'c') || OPT_ISSET(ops,'C'))) {
+Index: Src/glob.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/glob.c,v
+retrieving revision 1.57
+diff -u -r1.57 glob.c
+--- Src/glob.c	8 Nov 2006 10:38:06 -0000	1.57
++++ Src/glob.c	21 Jan 2007 22:37:13 -0000
+@@ -855,10 +855,7 @@
+     for (i = gf_nsorts, s = gf_sortlist; i; i--, s++) {
+ 	switch (*s & ~GS_DESC) {
+ 	case GS_NAME:
+-	    if (gf_numsort)
+-	    	r = nstrpcmp(&b->name, &a->name);
+-	    else
+-	    	r = strpcmp(&b->name, &a->name);
++	    r = zstrcmp(b->name, a->name, gf_numsort ? SORTIT_NUMERICALLY : 0);
+ 	    break;
+ 	case GS_DEPTH:
+ 	    {
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.52
+diff -u -r1.52 jobs.c
+--- Src/jobs.c	19 Dec 2006 10:35:55 -0000	1.52
++++ Src/jobs.c	21 Jan 2007 22:37:13 -0000
+@@ -1967,13 +1967,13 @@
+ 			    if (!strncmp(signame, "SIG", 3))
+ 				signame += 3;
+ 			    for (sig = 1; sig <= SIGCOUNT; sig++)
+-				if (!cstrpcmp(sigs + sig, &signame))
++				if (!strcasecmp(sigs[sig], signame))
+ 				    break;
+ 			    if (sig > SIGCOUNT) {
+ 				int i;
+ 
+ 				for (i = 0; alt_sigs[i].name; i++)
+-				    if (!cstrpcmp(&alt_sigs[i].name, &signame))
++				    if (!strcasecmp(alt_sigs[i].name, signame))
+ 				    {
+ 					sig = alt_sigs[i].num;
+ 					break;
+Index: Src/sort.c
+===================================================================
+RCS file: Src/sort.c
+diff -N Src/sort.c
+--- /dev/null	1 Jan 1970 00:00:00 -0000
++++ Src/sort.c	21 Jan 2007 22:37:15 -0000
+@@ -0,0 +1,332 @@
++/*
++ * sort.c - comparison and sorting of strings
++ *
++ * This file is part of zsh, the Z shell.
++ *
++ * Copyright (c) 1992-2007 Paul Falstad
++ * All rights reserved.
++ *
++ * Permission is hereby granted, without written agreement and without
++ * license or royalty fees, to use, copy, modify, and distribute this
++ * software and to distribute modified versions of this software for any
++ * purpose, provided that the above copyright notice and the following
++ * two paragraphs appear in all copies of this software.
++ *
++ * In no event shall Paul Falstad or the Zsh Development Group be liable
++ * to any party for direct, indirect, special, incidental, or consequential
++ * damages arising out of the use of this software and its documentation,
++ * even if Paul Falstad and the Zsh Development Group have been advised of
++ * the possibility of such damage.
++ *
++ * Paul Falstad and the Zsh Development Group specifically disclaim any
++ * warranties, including, but not limited to, the implied warranties of
++ * merchantability and fitness for a particular purpose.  The software
++ * provided hereunder is on an "as is" basis, and Paul Falstad and the
++ * Zsh Development Group have no obligation to provide maintenance,
++ * support, updates, enhancements, or modifications.
++ *
++ */
++
++#include "zsh.mdh"
++#include "sort.pro"
++
++/* Flag for direction of sort: 1 forwards, -1 reverse */
++static int sortdir;
++
++/* Flag that sort is numeric */
++static int sortnumeric;
++
++/**/
++static int
++eltpcmp(const void *a, const void *b)
++{
++    const SortElt ae = *(const SortElt *)a;
++    const SortElt be = *(const SortElt *)b;
++    const char *as = ae->cmp;
++    const char *bs = be->cmp;
++    int cmp;
++
++    if (ae->len != -1 || be->len != -1) {
++	/*
++	 * Length recorded.  We only do that if there are embedded
++	 * nulls we need to treat as regular characters.
++	 *
++	 * Since we don't know where multibyte characters start,
++	 * but do know that a null character can't occur inside
++	 * one (we are relying on multibyte characters being extensions
++	 * of ASCII), we can compare starting from after the last
++	 * null character that occurred in both strings.
++	 */
++	const char *cmpa, *cmpb;
++	const char *laststarta = as;
++	int len;
++	if (ae->len != -1) {
++	    len = ae->len;
++	    if (be->len != -1 && len > be->len)
++		len = be->len;
++	}
++	else
++	    len = be->len;
++
++	for (cmpa = as, cmpb = bs; *cmpa == *cmpb && len--; cmpa++, cmpb++)
++	    if (!*cmpa)
++		laststarta = cmpa + 1;
++	if (*cmpa == *cmpb && ae->len != be->len) {
++	    /*
++	     * Special case: one of the strings has finished, but
++	     * another one continues after the NULL.  The string
++	     * that's finished sorts below the other.  We need
++	     * to handle this here since stroll() or strcmp()
++	     * will just compare the strings as equal.
++	     */
++	    if (ae->len != -1) {
++		if (be->len != -1) {
++		    /*
++		     * if a is shorter it's earlier, so return -1 and
++		     * vice versa 
++		     */
++		    return (ae->len - be->len) * sortdir;
++		} else {
++		    /*
++		     * a has a length and so continues, hence
++		     * b sorts lower.
++		     */
++		    return sortdir;
++		}
++	    } else {
++		/*
++		 * b must continue because it has a recorded length,
++		 * so a sorts lower.
++		 */
++		return - sortdir;
++	    }
++	}
++
++	bs += (laststarta - as);
++	as += (laststarta - as);
++    }
++#ifdef HAVE_STRCOLL
++    cmp = strcoll(as, bs);
++#endif
++    if (sortnumeric) {
++	for (; *as == *bs && *as; as++, bs++);
++#ifndef HAVE_STRCOLL
++	cmp = (int)STOUC(*as) - (int)STOUC(*bs);
++#endif
++	if (idigit(*as) || idigit(*bs)) {
++	    for (; as > *(char **)a && idigit(as[-1]); as--, bs--);
++	    if (idigit(*as) && idigit(*bs)) {
++		while (*as == '0')
++		    as++;
++		while (*bs == '0')
++		    bs++;
++		for (; idigit(*as) && *as == *bs; as++, bs++);
++		if (idigit(*as) || idigit(*bs)) {
++		    cmp = (int)STOUC(*as) - (int)STOUC(*bs);
++		    while (idigit(*as) && idigit(*bs))
++			as++, bs++;
++		    if (idigit(*as) && !idigit(*bs))
++			return 1;
++		    if (idigit(*bs) && !idigit(*as))
++			return -1;
++		}
++	    }
++	}
++    }
++#ifndef HAVE_STRCOLL
++    else
++	cmp = strcmp(as, bs);
++#endif	
++
++    return sortdir * cmp;
++}
++
++
++/*
++ * Front-end to eltpcmp() to compare strings.
++ * TODO: it would be better to eliminate this altogether by
++ * making the calling function call into the sort code
++ * at a higher level.
++ */
++
++/**/
++mod_export int
++zstrcmp(const char *as, const char *bs, int sortflags)
++{
++    struct sortelt ae, be, *aeptr, *beptr;
++    int oldsortdir = sortdir, oldsortnumeric = sortnumeric, ret;
++
++    ae.cmp = as;
++    be.cmp = bs;
++    ae.len = -1;
++    be.len = -1;
++
++    aeptr = &ae;
++    beptr = &be;
++
++    sortdir = 1;
++    sortnumeric = (sortflags & SORTIT_NUMERICALLY) ? 1 : 0;
++
++    ret = eltpcmp(&aeptr, &beptr);
++
++    /* Paranoia: I don't think we ever need to restore these. */
++    sortnumeric = oldsortnumeric;
++    sortdir = oldsortdir;
++
++    return ret;
++}
++
++
++/*
++ * Sort an array of metafied strings.  Use an "or" of bit flags
++ * to decide how to sort.  See the SORTIT_* flags in zsh.h.
++ *
++ * If unmetalenp is not NULL, the strings in array are already
++ * unmetafied and unmetalenp is an array containing the corresponding
++ * lengths.
++ */
++
++/**/
++void
++strmetasort(char **array, int sortwhat, int *unmetalenp)
++{
++    char **arrptr;
++    /*
++     * Array of elements containing stuff to sort.  Note sortptrarr
++     * is an array of pointers, since that's more efficient
++     * for qsort() to manipulate.  sortarr is the array of
++     * structures.
++     */
++    SortElt *sortptrarr, *sortptrarrptr;
++    SortElt sortarr, sortarrptr;
++    int oldsortdir, oldsortnumeric, nsort;
++
++    nsort = arrlen(array);
++    if (nsort < 2)
++	return;
++
++    pushheap();
++
++    sortptrarr = (SortElt *) zhalloc(nsort * sizeof(SortElt));
++    sortarr = (SortElt) zhalloc(nsort * sizeof(struct sortelt));
++    for (arrptr = array, sortptrarrptr = sortptrarr, sortarrptr = sortarr;
++	 *arrptr; arrptr++, sortptrarrptr++, sortarrptr++) {
++	char *metaptr;
++	int needlen, needalloc;
++	*sortptrarrptr = sortarrptr;
++	sortarrptr->orig = *arrptr;
++
++	if (unmetalenp) {
++	    /*
++	     * Already unmetafied.  We just need to check for
++	     * embededded nulls.
++	     */
++	    int count = unmetalenp[arrptr-array];
++	    /* Remember this length for sorted array */
++	    sortarrptr->origlen = count;
++	    for (metaptr = *arrptr; *metaptr != '\0' && count--; metaptr++)
++		;
++	    /* *metaptr must now be \0, even if we reached the end */
++	    needlen = (count != 0);
++	} else {
++	    /*
++	     * Not yet unmetafied.  See if it needs unmetafying.
++	     * If it doesn't, there can't be any embedded nulls,
++	     * since these are metafied.
++	     */
++	    needlen = 0;
++	    for (metaptr = *arrptr; *metaptr && *metaptr != Meta;
++		 metaptr++);
++	}
++	/*
++	 * See if we need to do some special checking.
++	 * Either we're going to need to copy it to transform it,
++	 * or we need to unmetafy it.
++	 */
++	if ((needalloc = (sortwhat &
++			  (SORTIT_IGNORING_CASE|SORTIT_IGNORING_BACKSLASHES)))
++	    || *metaptr == Meta) {
++	    char *s, *t, *src = *arrptr, *dst;
++	    int len;
++	    sortarrptr->cmp = dst = (char *)zhalloc(strlen(src) + 1);
++
++	    if (unmetalenp) {
++		/* Already unmetafied and we have the length. */
++		len = unmetalenp[arrptr-array];
++	    } else if (*metaptr != '\0') {
++		/*
++		 * Needs unmetafying.  We need to check for
++		 * embedded nulls while we do this.
++		 */
++		char *t = dst + (metaptr - src);
++
++		if (metaptr != src)
++		    memcpy(dst, src, metaptr - src);
++		while ((*t = *metaptr++)) {
++		    if (*t++ == Meta) {
++			if ((t[-1] = *metaptr++ ^ 32) == '\0')
++			    needlen = 1;
++		    }
++		}
++		len = t - dst;
++		src = dst;
++	    } else {
++		/*
++		 * Doesn't need unmetafying.
++		 * This means metaptr is the NULL at the
++		 * end of the string, so we have the length, and
++		 * there are no embedded nulls, so we don't
++		 * need the length later.
++		 * We're only copying the string to transform it
++		 * below.
++		 */
++		len = metaptr - src;
++	    }
++	    if (sortwhat & SORTIT_IGNORING_CASE) {
++		for (s = src, t = dst; s - src != len; )
++		    *t++ = tulower(*s++);
++		src = dst;
++	    }
++	    if (sortwhat & SORTIT_IGNORING_BACKSLASHES) {
++		/* copy null byte, so increment length */
++		for (s = src, t = dst; s - src != len+1; ) {
++		    if (*s == '\\') {
++			s++;
++			len--;
++		    }
++		    *t++ = *s++;
++		}
++	    }
++	    /* Do we need to store the length (embedded null)? */
++	    sortarrptr->len = needlen ? len : -1;
++	} else {
++	    /*
++	     * We can use the string as is, although it's possible
++	     * we still need to take account of an embedded null.
++	     */
++	    sortarrptr->cmp = *arrptr;
++	    sortarrptr->len = needlen ? unmetalenp[arrptr-array] : -1;
++	}
++    }
++    /*
++     * We need to restore sortdir so that calls to
++     * [n]strcmp work when 
++     */
++    oldsortdir = sortdir;
++    oldsortnumeric = sortnumeric;
++
++    sortdir = (sortwhat & SORTIT_BACKWARDS) ? -1 : 1;
++    sortnumeric = (sortwhat & SORTIT_NUMERICALLY) ? 1 : 0;
++
++    qsort(sortptrarr, nsort, sizeof(SortElt *), eltpcmp);
++
++    sortnumeric = oldsortnumeric;
++    sortdir = oldsortdir;
++    for (arrptr = array, sortptrarrptr = sortptrarr; nsort--; ) {
++	if (unmetalenp)
++	    unmetalenp[arrptr-array] = (*sortptrarrptr)->origlen;
++	*arrptr++ = (*sortptrarrptr++)->orig;
++    }
++
++    popheap();
++}
+Index: Src/subst.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/subst.c,v
+retrieving revision 1.71
+diff -u -r1.71 subst.c
+--- Src/subst.c	18 Jan 2007 17:27:10 -0000	1.71
++++ Src/subst.c	21 Jan 2007 22:37:16 -0000
+@@ -618,146 +618,6 @@
+     return dest;
+ }
+ 
+-typedef int (*CompareFn) _((const void *, const void *));
+-
+-/**/
+-mod_export int
+-strpcmp(const void *a, const void *b)
+-{
+-#ifdef HAVE_STRCOLL
+-    return strcoll(*(char **)a, *(char **)b);
+-#else
+-    return strcmp(*(char **)a, *(char **)b);
+-#endif
+-}
+-
+-/**/
+-int
+-invstrpcmp(const void *a, const void *b)
+-{
+-#ifdef HAVE_STRCOLL
+-    return -strcoll(*(char **)a, *(char **)b);
+-#else
+-    return -strcmp(*(char **)a, *(char **)b);
+-#endif
+-}
+-
+-/**/
+-int
+-cstrpcmp(const void *a, const void *b)
+-{
+-#ifdef HAVE_STRCOLL
+-    VARARR(char, c, strlen(*(char **) a) + 1);
+-    VARARR(char, d, strlen(*(char **) b) + 1);
+-    char *s, *t;
+-    int   cmp;
+-
+-    for (s = *(char **) a, t = c; (*t++ = tulower(*s++)););
+-    for (s = *(char **) b, t = d; (*t++ = tulower(*s++)););
+-
+-    cmp = strcoll(c, d);
+-
+-    return cmp;
+-#else
+-    char *c = *(char **)a, *d = *(char **)b;
+-
+-    for (; *c && tulower(*c) == tulower(*d); c++, d++);
+-
+-    return (int)STOUC(tulower(*c)) - (int)STOUC(tulower(*d));
+-#endif
+-}
+-
+-/**/
+-int
+-invcstrpcmp(const void *a, const void *b)
+-{
+-#ifdef HAVE_STRCOLL
+-    VARARR(char, c, strlen(*(char **) a) + 1);
+-    VARARR(char, d, strlen(*(char **) b) + 1);
+-    char *s, *t;
+-    int   cmp;
+-
+-    for (s = *(char **) a, t = c; (*t++ = tulower(*s++)););
+-    for (s = *(char **) b, t = d; (*t++ = tulower(*s++)););
+-
+-    cmp = strcoll(c, d);
+-
+-    return -cmp;
+-#else
+-    char *c = *(char **)a, *d = *(char **)b;
+-
+-    for (; *c && tulower(*c) == tulower(*d); c++, d++);
+-
+-    return (int)STOUC(tulower(*d)) - (int)STOUC(tulower(*c));
+-#endif
+-}
+-
+-/**/
+-int
+-nstrpcmp(const void *a, const void *b)
+-{
+-    char *c = *(char **)a, *d = *(char **)b;
+-    int cmp;
+-
+-#ifdef HAVE_STRCOLL
+-    cmp = strcoll(c, d);
+-#endif
+-    for (; *c == *d && *c; c++, d++);
+-#ifndef HAVE_STRCOLL
+-    cmp = (int)STOUC(*c) - (int)STOUC(*d);
+-#endif
+-    if (idigit(*c) || idigit(*d)) {
+-	for (; c > *(char **)a && idigit(c[-1]); c--, d--);
+-	if (idigit(*c) && idigit(*d)) {
+-	    while (*c == '0')
+-		c++;
+-	    while (*d == '0')
+-		d++;
+-	    for (; idigit(*c) && *c == *d; c++, d++);
+-	    if (idigit(*c) || idigit(*d)) {
+-		cmp = (int)STOUC(*c) - (int)STOUC(*d);
+-		while (idigit(*c) && idigit(*d))
+-		    c++, d++;
+-		if (idigit(*c) && !idigit(*d))
+-		    return 1;
+-		if (idigit(*d) && !idigit(*c))
+-		    return -1;
+-	    }
+-	}
+-    }
+-    return cmp;
+-}
+-
+-/**/
+-int
+-invnstrpcmp(const void *a, const void *b)
+-{
+-    return -nstrpcmp(a, b);
+-}
+-
+-/**/
+-int
+-instrpcmp(const void *a, const void *b)
+-{
+-    VARARR(char, c, strlen(*(char **) a) + 1);
+-    VARARR(char, d, strlen(*(char **) b) + 1);
+-    char **e = (char **)&c;
+-    char **f = (char **)&d;
+-    char *s, *t;
+-
+-    for (s = *(char **) a, t = c; (*t++ = tulower(*s++)););
+-    for (s = *(char **) b, t = d; (*t++ = tulower(*s++)););
+-
+-    return nstrpcmp(&e, &f);
+-}
+-
+-/**/
+-int
+-invinstrpcmp(const void *a, const void *b)
+-{
+-    return -instrpcmp(a, b);
+-}
+-
+ /*
+  * Pad the string str, returning a result from the heap (or str itself,
+  * if it didn't need padding).  If str is too large, it will be truncated.
+@@ -1470,13 +1330,11 @@
+     /* Value from (I) flag, used for ditto. */
+     int flnum = 0;
+     /*
+-     * sortit is an obscure combination of the settings for (o), (O),
+-     * (i) and (n). casind is (i) and numord is (n); these are
+-     * separate so we can have fun doing the obscure combinatorics later.
++     * sortit is to be passed to strmetasort().
+      * indord is the (a) flag, which for consistency doesn't get
+      * combined into sortit.
+      */
+-    int sortit = 0, casind = 0, numord = 0, indord = 0;
++    int sortit = SORTIT_ANYOLDHOW, indord = 0;
+     /* (u): straightforward. */
+     int unique = 0;
+     /* combination of (L), (U) and (C) flags. */
+@@ -1693,18 +1551,20 @@
+ 		    break;
+ 
+ 		case 'o':
+-		    sortit = 1;
++		    if (!sortit)
++			sortit |= SORTIT_SOMEHOW; /* sort, no modifiers */
+ 		    break;
+ 		case 'O':
+-		    sortit = 2;
++		    sortit |= SORTIT_BACKWARDS;
+ 		    break;
+ 		case 'i':
+-		    casind = 1;
++		    sortit |= SORTIT_IGNORING_CASE;
+ 		    break;
+ 		case 'n':
+-		    numord = 1;
++		    sortit |= SORTIT_NUMERICALLY;
+ 		    break;
+ 		case 'a':
++		    sortit |= SORTIT_SOMEHOW;
+ 		    indord = 1;
+ 		    break;
+ 
+@@ -1870,15 +1730,6 @@
+ 	    s++;
+ 	}
+     }
+-    /* Sort is done by indexing on sortit-1:
+-     *   bit 1: ascending (o)/descending (O)
+-     *   bit 2: case sensitive/independent (i)
+-     *   bit 3: strict order/numeric (n)
+-     * unless indord (a) is set set, in which case only test for
+-     * descending by assuming only (O) is possible (not verified).
+-     */
+-    if (sortit)
+-	sortit += (casind << 1) + (numord << 2);
+ 
+     /*
+      * premul, postmul specify the padding character to be used
+@@ -3171,11 +3022,11 @@
+ 	    return n;
+ 	}
+ 	/* Handle (o) and (O) and their variants */
+-	if (sortit) {
++	if (sortit != SORTIT_ANYOLDHOW) {
+ 	    if (!copied)
+ 		aval = arrdup(aval);
+ 	    if (indord) {
+-		if (sortit & 2) {
++		if (sortit & SORTIT_BACKWARDS) {
+ 		    char *copy;
+ 		    char **end = aval + arrlen(aval) - 1, **start = aval;
+ 
+@@ -3187,14 +3038,14 @@
+ 		    }
+ 		}
+ 	    } else {
+-		static CompareFn sortfn[] = {
+-		    strpcmp, invstrpcmp, cstrpcmp, invcstrpcmp,
+-		    nstrpcmp, invnstrpcmp, instrpcmp, invinstrpcmp
+-		};
+-
+-		i = arrlen(aval);
+-		if (i && (*aval[i-1] || --i))
+-		    qsort(aval, i, sizeof(char *), sortfn[sortit-1]);
++		/*
++		 * HERE: we tested if the last element of the array
++		 * was not a NULL string.  Why the last element?
++		 * Why didn't we expect NULL strings to work?
++		 * Was it just a clumsy way of testing whether there
++		 * was enough in the array to sort?
++		 */
++		strmetasort(aval, sortit, NULL);
+ 	    }
+ 	}
+ 	if (plan9) {
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.149
+diff -u -r1.149 utils.c
+--- Src/utils.c	8 Jan 2007 22:05:55 -0000	1.149
++++ Src/utils.c	21 Jan 2007 22:37:18 -0000
+@@ -3625,6 +3625,17 @@
+     return buf;
+ }
+ 
++
++/*
++ * Take a null-terminated, metafied string in s into a literal
++ * representation by converting in place.  The length is in *len
++ * len is non-NULL; if len is NULL, you don't know the length of
++ * the final string, but if it's to be supplied to some system
++ * routine that always uses NULL termination, such as a filename
++ * interpreter, that doesn't matter.  Note the NULL termination
++ * is always copied for purposes of that kind.
++ */
++
+ /**/
+ mod_export char *
+ unmetafy(char *s, int *len)
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.109
+diff -u -r1.109 zsh.h
+--- Src/zsh.h	19 Jan 2007 21:36:03 -0000	1.109
++++ Src/zsh.h	21 Jan 2007 22:37:19 -0000
+@@ -1944,6 +1944,51 @@
+ #define ZSIG_ALIAS	(1<<3)  /* Trap is stored under an alias */
+ #define ZSIG_SHIFT	4
+ 
++/***********/
++/* Sorting */
++/***********/
++
++typedef int (*CompareFn) _((const void *, const void *));
++
++enum {
++    SORTIT_ANYOLDHOW = 0,	/* Defaults */
++    SORTIT_IGNORING_CASE = 1,
++    SORTIT_NUMERICALLY = 2,
++    SORTIT_BACKWARDS = 4,
++    /*
++     * Ignore backslashes that quote another character---which may
++     * be another backslash; the second backslash is active.
++     */
++    SORTIT_IGNORING_BACKSLASHES = 8,
++    /*
++     * Ignored by strmetasort(); used by paramsubst() to indicate
++     * there is some sorting to do.
++     */
++    SORTIT_SOMEHOW = 16,
++};
++
++/*
++ * Element of array passed to qsort().
++ */
++struct sortelt {
++    /* The original string. */
++    char *orig;
++    /* The string used for comparison. */
++    const char *cmp;
++    /*
++     * The length of the string if passed down to the sort algorithm.
++     * Used to sort the lengths together with the strings.
++     */
++    int origlen;
++    /*
++     * The length of the string, if needed, else -1.
++     * The length is only needed if there are embededded nulls.
++     */
++    int len;
++};
++
++typedef struct sortelt *SortElt;
++
+ /************************/
+ /* Flags to casemodifiy */
+ /************************/
+Index: Src/zsh.mdd
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.mdd,v
+retrieving revision 1.14
+diff -u -r1.14 zsh.mdd
+--- Src/zsh.mdd	26 Jul 2005 15:01:48 -0000	1.14
++++ Src/zsh.mdd	21 Jan 2007 22:37:19 -0000
+@@ -12,7 +12,7 @@
+ objects="builtin.o compat.o cond.o exec.o glob.o hashtable.o \
+ hist.o init.o input.o jobs.o lex.o linklist.o loop.o math.o \
+ mem.o module.o options.o params.o parse.o pattern.o prompt.o signals.o \
+-signames.o string.o subst.o text.o utils.o watch.o"
++signames.o sort.o string.o subst.o text.o utils.o watch.o"
+ 
+ headers="../config.h system.h zsh.h sigcount.h signals.h \
+ prototypes.h hashtable.h ztype.h"
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.89
+diff -u -r1.89 compcore.c
+--- Src/Zle/compcore.c	8 Jan 2007 22:05:55 -0000	1.89
++++ Src/Zle/compcore.c	21 Jan 2007 22:37:20 -0000
+@@ -3028,7 +3028,7 @@
+     if ((*b)->disp && !((*b)->flags & CMF_MORDER))
+ 	return 1;
+ 
+-    return strbpcmp(&((*a)->str), &((*b)->str));
++    return zstrbcmp((*a)->str, (*b)->str);
+ }
+ 
+ /* This tests whether two matches are equal (would produce the same
+@@ -3077,8 +3077,9 @@
+ 	    char **ap, **bp, **cp;
+ 
+ 	    /* Now sort the array (it contains strings). */
+-	    qsort((void *) rp, n, sizeof(char *),
+-		  (int (*) _((const void *, const void *)))strbpcmp);
++	    strmetasort((char **)rp, SORTIT_IGNORING_BACKSLASHES |
++			(isset(NUMERICGLOBSORT) ? SORTIT_NUMERICALLY : 0),
++			NULL);
+ 
+ 	    /* And delete the ones that occur more than once. */
+ 	    for (ap = cp = (char **) rp; *ap; ap++) {
+Index: Src/Zle/computil.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/computil.c,v
+retrieving revision 1.99
+diff -u -r1.99 computil.c
+--- Src/Zle/computil.c	7 Oct 2006 08:05:03 -0000	1.99
++++ Src/Zle/computil.c	21 Jan 2007 22:37:21 -0000
+@@ -213,7 +213,7 @@
+ static int
+ cd_sort(const void *a, const void *b)
+ {
+-    return strpcmp(&(*((Cdstr *) a))->sortstr, &(*((Cdstr *) b))->sortstr);
++    return zstrpcmp((*((Cdstr *) a))->sortstr, (*((Cdstr *) b))->sortstr, 0);
+ }
+ 
+ static int
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_tricky.c,v
+retrieving revision 1.81
+diff -u -r1.81 zle_tricky.c
+--- Src/Zle/zle_tricky.c	8 Dec 2006 18:52:05 -0000	1.81
++++ Src/Zle/zle_tricky.c	21 Jan 2007 22:37:22 -0000
+@@ -2100,28 +2100,26 @@
+ }
+ #endif
+ 
+-/* This is strcmp with ignoring backslashes. */
++/* This is zstrcmp with ignoring backslashes. */
+ 
+ /**/
+ mod_export int
+-strbpcmp(char **aa, char **bb)
++zstrbcmp(const char *a, const char *b)
+ {
+-    char *a = *aa, *b = *bb;
++    const char *astart = a;
+ 
+     while (*a && *b) {
+ 	if (*a == '\\')
+ 	    a++;
+ 	if (*b == '\\')
+ 	    b++;
+-	if (*a != *b)
++	if (*a != *b || !*a)
+ 	    break;
+-	if (*a)
+-	    a++;
+-	if (*b)
+-	    b++;
++	a++;
++	b++;
+     }
+     if (isset(NUMERICGLOBSORT) && (idigit(*a) || idigit(*b))) {
+-	for (; a > *aa && idigit(a[-1]); a--, b--);
++	for (; a > astart && idigit(a[-1]); a--, b--);
+ 	if (idigit(*a) && idigit(*b)) {
+ 	    while (*a == '0')
+ 		a++;
+@@ -2310,8 +2308,8 @@
+ 	*p = (char *) getdata(node);
+     *p = NULL;
+ 
+-    qsort((void *) data, num, sizeof(char *),
+-	  (int (*) _((const void *, const void *))) strbpcmp);
++    strmetasort((char **)data, SORTIT_IGNORING_BACKSLASHES |
++		(isset(NUMERICGLOBSORT) ? SORTIT_NUMERICALLY : 0), NULL);
+ 
+     for (p = data, lenp = lens; *p; p++, lenp++) {
+ 	len = *lenp = ZMB_nicewidth(*p) + 2;
+Index: Test/B03print.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/B03print.ztst,v
+retrieving revision 1.17
+diff -u -r1.17 B03print.ztst
+--- Test/B03print.ztst	4 Jan 2007 15:41:24 -0000	1.17
++++ Test/B03print.ztst	21 Jan 2007 22:37:22 -0000
+@@ -263,3 +263,20 @@
+  printf '%b\n' '\0123'
+ 0:printf handles \0... octal escapes in replacement text
+ >S
++
++ print -lO $'a' $'a\0' $'a\0b' $'a\0b\0' $'a\0b\0a' $'a\0b\0b' $'a\0c' |
++ while read -r line; do
++    for (( i = 1; i <= ${#line}; i++ )); do
++      foo=$line[i]
++      printf "%02x" $(( #foo ))
++    done
++    print
++ done
++0:sorting with embedded nulls
++>610063
++>6100620062
++>6100620061
++>61006200
++>610062
++>6100
++>61
+Index: Test/D04parameter.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D04parameter.ztst,v
+retrieving revision 1.23
+diff -u -r1.23 D04parameter.ztst
+--- Test/D04parameter.ztst	7 Nov 2006 22:47:07 -0000	1.23
++++ Test/D04parameter.ztst	21 Jan 2007 22:37:22 -0000
+@@ -886,3 +886,20 @@
+ >/one
+ >/
+ >/
++
++  nully=($'a\0c' $'a\0b\0b' $'a\0b\0a' $'a\0b\0' $'a\0b' $'a\0' $'a')
++  for string in ${(o)nully}; do
++    for (( i = 1; i <= ${#string}; i++ )); do
++      foo=$string[i]
++      printf "%02x" $(( #foo ))
++    done
++    print
++  done
++0:Sorting arrays with embedded nulls
++>61
++>6100
++>610062
++>61006200
++>6100620061
++>6100620062
++>610063
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

@@ -1,0 +1,141 @@
+From zsh-workers-return-28897-mason-zsh=primenet.com.au@zsh.org Thu Mar 17 03:44:45 2011
+Return-Path: <zsh-workers-return-28897-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6027 invoked by alias); 17 Mar 2011 03:44:45 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28897
+Received: (qmail 10043 invoked from network); 17 Mar 2011 03:44:41 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at closedmail.com does not designate permitted sender hosts)
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-id: <110316204410.ZM25376@torch.brasslantern.com>
+Date: Wed, 16 Mar 2011 20:44:09 -0700
+In-reply-to: <AANLkTinxHDY9OL2iuprUepu1zpGbqSamppyOMZXtruRG@mail.gmail.com>
+Comments: In reply to Mikael Magnusson <mikachu@gmail.com>
+ "Re: funny subshell effect" (Mar 10,  4:11pm)
+References: <AANLkTi=VUkvqOxo+OANG2AVYko-Zbq7LwLQoF68fbLev@mail.gmail.com>
+	<110310065653.ZM15150@torch.brasslantern.com>
+	<AANLkTinxHDY9OL2iuprUepu1zpGbqSamppyOMZXtruRG@mail.gmail.com>
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+To: zsh workers <zsh-workers@zsh.org>
+Subject: Re: funny subshell effect
+MIME-version: 1.0
+Content-type: text/plain; charset=us-ascii
+
+On Mar 10,  4:11pm, Mikael Magnusson wrote:
+} Subject: Re: funny subshell effect
+}
+} On 10 March 2011 15:56, Bart Schaefer <schaefer@brasslantern.com> wrote:
+} > On Mar 10, 12:18am, Mikael Magnusson wrote:
+} > } Subject: funny subshell effect
+} > }
+} > } % repeat 3; do command echo .(e:REPLY=\$RANDOM:); done
+} > } 5801
+} > } 5801
+} > } 5801
+} >
+} ... what confused me was that I wasn't starting
+} any subshells. But it seems that globbing is performed after forking
+} to run an external command, and of course zsh doesn't bother to fork
+} if the command is builtin. Is there some reason I'm not thinking of
+} why it's like that?
+
+It bothered me that I couldn't come up with a reason for this.  The one
+that comes to mind is that if a glob goes runaway (you use ***/ with
+a path that contains a cyclic symlink, for example) with a builtin you
+may not be able to interrupt it; whereas with an external command where
+the glob is running post-fork, you are able to interrupt.  Or that may
+be a former bug and now it would be OK ... I wasn't willing to try to
+lock up my shell to find out.
+
+In fact zsh globs the word in command position separately before the
+fork, and then globs the rest of the list afterward.  This leads to
+strange bits like this:
+
+% touch noglob
+% n*b echo x*
+x*
+%
+
+It also leads to this:
+
+% repeat 3 do command echo x*  
+repeat> done
+zsh: no match
+zsh: no match
+zsh: no match
+% repeat 3 do builtin echo x*
+done
+zsh: no match
+% 
+
+With the fork, the globbing error applies only to the forked process,
+before the exec has occurred.  I tried wholesale moving the globlist()
+up to before any decision about forking is made (sample patch below),
+and all the "make check" tests pass; the only obvious difference is
+that the two examples shown above become identical -- both run the
+loop exactly once.
+
+Compare this to discussion "exec -a and parameter expansion" from the
+zsh-workers archive back in January.  That sort of died out without a
+resolution.  I suspect that the patch below has some similar obscure
+problems.  For example certain files in /proc will point to different
+places, or possibly not exist at all, if globbing precedes forking;
+that could in turn affect redirection, etc.
+
+
+--- 8< --- EXAMPLE ONLY - NOT FOR ACTUAL USE --- 8< ---
+Index: Src/exec.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-4.0/Src/exec.c,v
+retrieving revision 1.40
+diff -c -r1.40 exec.c
+--- exec.c	21 Dec 2010 16:41:16 -0000	1.40
++++ exec.c	17 Mar 2011 03:10:42 -0000
+@@ -2735,6 +2744,16 @@
+ 	}
+     }
+ 
++    if ((esglob = !(cflags & BINF_NOGLOB)) && args && htok) {
++	LinkList oargs = args;
++	globlist(args, 0);
++	args = oargs;
++    }
++    if (errflag) {
++	lastval = 1;
++	goto err;
++    }
++
+     /* This is nonzero if the command is a current shell procedure? */
+     is_cursh = (is_builtin || is_shfunc || nullexec || type >= WC_CURSH);
+ 
+@@ -2844,16 +2863,6 @@
+ 	is_exec = 1;
+     }
+ 
+-    if ((esglob = !(cflags & BINF_NOGLOB)) && args && htok) {
+-	LinkList oargs = args;
+-	globlist(args, 0);
+-	args = oargs;
+-    }
+-    if (errflag) {
+-	lastval = 1;
+-	goto err;
+-    }
+-
+     /* Make a copy of stderr for xtrace output before redirecting */
+     fflush(xtrerr);
+     if (isset(XTRACE) && xtrerr == stderr &&
+
+
+-- 
+

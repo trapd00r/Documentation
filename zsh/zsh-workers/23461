@@ -1,0 +1,133 @@
+From zsh-workers-return-23461-mason-zsh=primenet.com.au@sunsite.dk Wed May 23 11:25:43 2007
+Return-Path: <zsh-workers-return-23461-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25559 invoked from network); 23 May 2007 11:25:37 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.0 (2007-05-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00 autolearn=no
+	version=3.2.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 23 May 2007 11:25:37 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 84480 invoked from network); 23 May 2007 11:25:32 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 23 May 2007 11:25:32 -0000
+Received: (qmail 10588 invoked by alias); 23 May 2007 11:25:28 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23461
+Received: (qmail 10578 invoked from network); 23 May 2007 11:25:28 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 23 May 2007 11:25:28 -0000
+Received: (qmail 84167 invoked from network); 23 May 2007 11:25:28 -0000
+Received: from gate.uk.cyberscience.com (81.2.73.194)
+  by a.mx.sunsite.dk with SMTP; 23 May 2007 11:25:22 -0000
+Received: from elva.uk.cyberscience.com ([172.16.2.59]:53771)
+	by gate.uk.cyberscience.com with esmtp (Exim 4.66)
+	(envelope-from <jvb@cyberscience.com>)
+	id 1Hqoy1-00020f-0p; Wed, 23 May 2007 12:25:21 +0100
+Received: from aston.uk.cyberscience.com ([172.16.2.31]:59782)
+	by elva.uk.cyberscience.com with esmtp (Exim 4.63)
+	(envelope-from <jvb@cyberscience.com>)
+	id 1Hqoxt-0003fK-CM; Wed, 23 May 2007 12:25:20 +0100
+Subject: Re: Subshell with multios causes hang
+From: John Buddery <jvb@cyberscience.com>
+Reply-To: jvb@cyberscience.com
+To: Peter Stephenson <pws@csr.com>
+Cc: Zsh-Workers <zsh-workers@sunsite.dk>
+In-Reply-To: <20070523111203.299233ec@news01.csr.com>
+References: <1179832903.3015.505.camel@aston.uk.cyberscience.com>
+	 <20070522182925.4c43a67e@news01.csr.com>
+	 <20070523111203.299233ec@news01.csr.com>
+Content-Type: text/plain
+Organization: Cyberscience Corporation
+Date: Wed, 23 May 2007 12:25:13 +0100
+Message-Id: <1179919513.3015.569.camel@aston.uk.cyberscience.com>
+Mime-Version: 1.0
+X-Mailer: Evolution 2.6.2 (2.6.2-1.fc5.5) 
+Content-Transfer-Encoding: 7bit
+
+On Wed, 2007-05-23 at 11:12 +0100, Peter Stephenson wrote:
+> On Tue, 22 May 2007 18:29:25 +0100
+> Peter Stephenson <pws@csr.com> wrote:
+> > On Tue, 22 May 2007 12:21:43 +0100
+> > John Buddery <jvb@cyberscience.com> wrote:
+> > > Essentially I run the equivalent of:
+> > > 
+> > >    ( echo hello ) >| /tmp/out >| /tmp/out2
+> > > 
+> > > and in an interactive shell (or any with job control) this hangs.
+> >...
+> > Wossgoingon?
+> >...
+> > I'll carry on looking at this when I get a chance, but for now I'm
+> > confused enough to go to the beer festival.
+> 
+> Success, I think.  The answer started to come to me in the queue.  John
+> sent me another email; the basic problem seems to be the obscure
+> interaction between forking, job control and multios in this case.
+> 
+
+Excellent, works for me - thanks very much!
+
+If you're interested while you're dealing with multios, there was one
+other fault I noticed when digging around: with an input multios, there
+is a race condition after the fork in closemn() between the addproc()
+and the child process exiting. If the child multios exits (having sent
+it's output to the buffered pipe) before the addproc(), the shell hangs
+later when it tries to wait for the already-exited pid.
+
+This can be reproduced fairly reliably with the example you posted last
+year:
+
+% echo This is the file >file
+% fn() { cat; }
+% fn <$(echo file file)
+This is the file
+This is the file
+(hang at this point)
+
+One way to fix it would be to block the child signal until the child pid was registered (patch below).
+Admittedly it's a bit obscure, though - not that my last example wasn't...
+
+Thanks,
+
+John
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.111
+diff -u -r1.111 exec.c
+--- Src/exec.c  8 May 2007 10:02:59 -0000       1.111
++++ Src/exec.c  23 May 2007 11:09:53 -0000
+@@ -1549,20 +1549,24 @@
+        pid_t pid;
+        struct timeval bgtime;
+ 
++        child_block();
+        if ((pid = zfork(&bgtime))) {
+            for (i = 0; i < mn->ct; i++)
+                zclose(mn->fds[i]);
+            zclose(mn->pipe);
+            if (pid == -1) { 
+                mfds[fd] = NULL;
++                child_unblock();
+                return;
+            }
+            mn->ct = 1;
+            mn->fds[0] = fd;
+            addproc(pid, NULL, 1, &bgtime);
++            child_unblock();
+            return;
+        }
+        /* pid == 0 */
++        child_unblock();
+        closeallelse(mn);
+        if (mn->rflag) {
+            /* tee process */
+
+
+

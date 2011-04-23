@@ -1,0 +1,709 @@
+From zsh-workers-return-12561-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Aug 07 22:13:17 2000
+Return-Path: <zsh-workers-return-12561-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29800 invoked from network); 7 Aug 2000 22:13:13 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 7 Aug 2000 22:13:13 -0000
+Received: (qmail 12085 invoked by alias); 7 Aug 2000 22:13:04 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12561
+Received: (qmail 12078 invoked from network); 7 Aug 2000 22:13:03 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: module aliases done the other way
+Date: Mon, 07 Aug 2000 23:13:04 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E13Lv8k-00039A-00.2000-08-07-23-12-58@mail6.svr.pol.co.uk>
+
+There seems to have been an increase in dissatisfaction with the way
+aliases for modules are done.  I've made no secret of the fact I would have
+preferred it to be done via an internal means, rather than by listing dummy
+modules as dependencies.  Here is an implemenation of what I had in mind:
+`zmodload -A alias=module' (e.g. `zmodload -A cap=zsh/cap') adds an alias
+for a module, while `zmodload -R alias' removes it.  I used the normal
+alias syntax because I find it more memorable than the zle version.
+`alias' can be used as a synonym for `module' in all contexts, but is only
+explicitly output if you specify `zmodload -A' or `zmodload -eA'.
+
+The changes here are
+- all the dummy modules and the Aliases subdirectory disappear
+  completely, to be replaced (if required) by predefined internal aliases,
+- these would be under user control:  you can add more or remove the
+  existing ones,
+- aliases are clearly marked as aliases both in completion (see _zmodload
+  changes) and lists,
+- aliasing and loading/unloading are logically completely separated:
+  you can load and unload under any existing name without changing the
+  relationship between the alias and the target module.
+
+I shall leave this for further discussion, but if it is used I would be
+somewhat agnostic about the necessity for building the existing aliases
+into the shell, since they could be easily recreated in a startup file:
+
+for m in cap complist files rlimits zle clone computil mapfile sched \
+  zleparameter compctl deltochar mathfunc stat complete example parameter \
+  zftp zutil; do
+    zmodload -A ${m}=zsh/${m}
+done
+
+None of the changes below affects the existing aliases, which would have to
+be removed separately.
+
+I've noted some possible updgrades in comments, but none of them strikes me
+as anything to implement immediately.
+
+Index: Completion/Builtins/_zmodload
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Completion/Builtins/_zmodload,v
+retrieving revision 1.2
+diff -u -r1.2 _zmodload
+--- Completion/Builtins/_zmodload	2000/05/31 09:38:26	1.2
++++ Completion/Builtins/_zmodload	2000/08/07 22:07:29
+@@ -1,11 +1,18 @@
+ #compdef zmodload
+ 
+-local fl="$words[2]" expl
++local fl="$words[2]" expl ret=1
+ 
+ if [[ "$fl" = -*(a*u|u*a)* || "$fl" = -*a* && CURRENT -ge 4 ]]; then
+   _wanted builtins expl 'builtin command' compadd "$@" -k builtins
+ elif [[ "$fl" = -*u* ]]; then
+   _wanted modules expl module compadd -k modules
+ else
+-  _wanted files expl 'module file' _files -W module_path -/g '*.s[ol](:r)'
++  _tags files aliases
++  while _tags; do
++    _requested files expl 'module file' \
++      _files -W module_path -/g '*.s[ol](:r)' && ret=0
++    _requested aliases expl 'module alias' \
++      compadd -- ${${(f)"$(zmodload -A)"}%% *} && ret=0
++    (( ret )) || break
++  done
+ fi
+Index: Doc/Zsh/builtins.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/builtins.yo,v
+retrieving revision 1.15
+diff -u -r1.15 builtins.yo
+--- Doc/Zsh/builtins.yo	2000/08/03 11:34:01	1.15
++++ Doc/Zsh/builtins.yo	2000/08/07 22:07:43
+@@ -1479,9 +1479,11 @@
+ cindex(modules, loading)
+ cindex(loading modules)
+ xitem(tt(zmodload) [ tt(-dL) ] [ ... ])
+-xitem(tt(zmodload -e) [ ... ])
++xitem(tt(zmodload -e) [ tt(-A) ] [ ... ])
+ xitem(tt(zmodload) [ tt(-a) [ tt(-bcpf) [ tt(-I) ] ] ] [ tt(-iL) ] ...)
+-item(tt(zmodload) tt(-u) [ tt(-abcdpf) [ tt(-I) ] ] [ tt(-iL) ] ...)(
++xitem(tt(zmodload) tt(-u) [ tt(-abcdpf) [ tt(-I) ] ] [ tt(-iL) ] ...)
++xitem(tt(zmodload) tt(-A) [ tt(-L) ] [ var(modalias)[tt(=)var(module)] ... ])
++item(tt(zmodload) tt(-R) var(modalias) ... )(
+ Performs operations relating to zsh's loadable modules.
+ Loading of modules while the shell is running (`dynamical loading') is not
+ available on all operating systems, or on all installations on a particular
+@@ -1583,13 +1585,50 @@
+ item(tt(zmodload) tt(-ua) [ tt(-i) ] var(builtin) ...)(
+ Equivalent to tt(-ab) and tt(-ub).
+ )
+-item(tt(zmodload -e) [ var(string) ... ])(
+-The tt(-e) option without arguments lists all loaded modules.
+-With arguments only the return status is set to zero
++item(tt(zmodload -e) [ tt(-A) ] [ var(string) ... ])(
++The tt(-e) option without arguments lists all loaded modules; if the tt(-A)
++option is also given, module aliases corresponding to loaded modules are
++also shown.  With arguments only the return status is set to zero
+ if all var(string)s given as arguments are names of loaded modules
+ and to one if at least on var(string) is not the name of a
+-loaded module. This can be used to test for the availability 
+-of things implemented by modules.
++loaded module.  This can be used to test for the availability 
++of things implemented by modules.  In this case, any aliases are
++automatically resolved and the tt(-A) flag is not used.
++)
++item(tt(zmodload) tt(-A) [ tt(-L) ] [ var(modalias)[tt(=)var(module)] ... ])(
++For each argument, if both var(modlias) and var(module) are given,
++define var(modalias) to be an alias for the module var(module).
++If the module var(modalias) is ever subsequently requested, either via a
++call to tt(zmodload) or implicitly, the shell will attempt to load
++var(module) instead.  If var(module) is not given, show the definition of
++var(modalias).  If no arguments are given, list all defined module aliases.
++When listing, if the tt(-L) flag was also given, list the definition as a
++tt(zmodload) command to recreate the alias.
++
++The existence of aliases for modules is completely independent of whether
++the name resolved is actually loaded as a module: while the alias exists,
++loading and unloading the module under any alias has exactly the same
++effect as using the resolved name, and does not affect the connection
++between the alias and the resolved name which can be removed either by
++tt(zmodload -R) or by redefining the alias.  Chains of aliases (i.e. where
++the first resolved name is itself an alias) are valid so long as these are
++not circular.
++
++Dependencies added to aliased modules are actually added to the resolved
++module; these remain if the alias is removed.  It is valid to create an
++alias whose name is one of the standard shell modules and which resolves to
++a different module.  However, if a module has dependencies, it
++will not be possible to use the module name as an alias as the module will
++already be marked as a loadable module in its own right.
++
++Apart from the above, aliases can be used in the tt(zmodload) command
++anywhere module names are required.  However, aliases will not be
++shown in lists of loaded modules with a bare `tt(zmodload)'.
++)
++item(tt(zmodload) tt(-R) var(modalias) ... )(
++For each var(modalias) argument that was previously defined as a module
++alias via tt(zmodload -A), delete the alias.  If none was defined, an error
++is caused and the remainder of the line is ignored.
+ )
+ enditem()
+ 
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.30
+diff -u -r1.30 builtin.c
+--- Src/builtin.c	2000/07/28 09:10:37	1.30
++++ Src/builtin.c	2000/08/07 22:07:54
+@@ -123,7 +123,7 @@
+     BUILTIN("whence", 0, bin_whence, 0, -1, 0, "acmpvfsw", NULL),
+     BUILTIN("where", 0, bin_whence, 0, -1, 0, "pmsw", "ca"),
+     BUILTIN("which", 0, bin_whence, 0, -1, 0, "ampsw", "c"),
+-    BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "ILabcfdipue", NULL),
++    BUILTIN("zmodload", 0, bin_zmodload, 0, -1, 0, "ARILabcfdipue", NULL),
+     BUILTIN("zcompile", 0, bin_zcompile, 0, -1, 0, "tUMRcmzka", NULL),
+ };
+ 
+Index: Src/module.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/module.c,v
+retrieving revision 1.5
+diff -u -r1.5 module.c
+--- Src/module.c	2000/08/04 07:53:25	1.5
++++ Src/module.c	2000/08/07 22:07:59
+@@ -88,6 +88,27 @@
+     zaddlinknode(linkedmodules, m);
+ }
+ 
++/* Print an alias. */
++
++/**/
++static void
++printmodalias(Module m, char *ops)
++{
++    if (ops['L']) {
++	printf("zmodload -A ");
++	if (m->nam[0] == '-')
++	    fputs("-- ", stdout);
++	quotedzputs(m->nam, stdout);
++	putchar('=');
++	quotedzputs(m->u.alias, stdout);
++    } else {
++	nicezputs(m->nam, stdout);
++	fputs(" -> ", stdout);
++	nicezputs(m->u.alias, stdout);
++    }
++    putchar('\n');
++}
++
+ /* Check if a module is linked in. */
+ 
+ /**/
+@@ -164,6 +185,15 @@
+ {
+     FuncWrap p, q;
+ 
++    /*
++     * We can't add a wrapper to an alias, since it's supposed
++     * to behave identically to the resolved module.  This shouldn't
++     * happen since we usually add wrappers when a real module is
++     * loaded.
++     */
++    if (m->flags & MOD_ALIAS)
++	return 1;
++
+     if (w->flags & WRAPF_ADDED)
+ 	return 1;
+     for (p = wrappers, q = NULL; p; q = p, p = p->next);
+@@ -256,6 +286,9 @@
+ {
+     FuncWrap p, q;
+ 
++    if (m->flags & MOD_ALIAS)
++	return 1;
++
+     if (w->flags & WRAPF_ADDED) {
+ 	for (p = wrappers, q = NULL; p && p != w; q = p, p = p->next);
+ 
+@@ -292,7 +325,8 @@
+ 	int err = loadbind(0, (void *) addbuiltin, ret);
+ 	for (node = firstnode(modules); !err && node; incnode(node)) {
+ 	    Module m = (Module) getdata(node);
+-	    if (m->u.handle && !(m->flags & MOD_LINKED))
++	    if (!(m->flags & MOD_ALIAS) &&
++		m->u.handle && !(m->flags & MOD_LINKED))
+ 		err |= loadbind(0, m->u.handle, ret);
+ 	}
+ 
+@@ -431,33 +465,78 @@
+ /**/
+ #endif /* !DYNAMIC */
+ 
++/*
++ * Find a module in the list.
++ * If aliasp is non-zero, resolve any aliases to the underlying module.
++ * If namep is set, this is set to point to the last alias value resolved,
++ *   even if that module was not loaded. or the module name if no aliases.
++ *   Hence this is always the physical module to load in a chain of aliases.
++ * Return NULL if the module named is not stored as a structure, or if we were
++ * resolving aliases and the final module named is not stored as a
++ * structure.
++ *
++ * TODO: now we have aliases, there may be some merit in using a hash
++ * table instead of a linked list.
++ */
+ /**/
+ static LinkNode
+-find_module(const char *name)
++find_module(const char *name, int aliasp, const char **namep)
+ {
+     Module m;
+     LinkNode node;
+ 
+     for (node = firstnode(modules); node; incnode(node)) {
+ 	m = (Module) getdata(node);
+-	if (!strcmp(m->nam, name))
++	if (!strcmp(m->nam, name)) {
++	    if (aliasp && (m->flags & MOD_ALIAS)) {
++		if (namep)
++		    *namep = m->u.alias;
++		return find_module(m->u.alias, 1, namep);
++	    }
++	    if (namep)
++		*namep = m->nam;
+ 	    return node;
++	}
+     }
+     return NULL;
+ }
+ 
++/*
++ * Unlink and free a module node from the linked list.
++ */
++
+ /**/
++static void
++delete_module(LinkNode node)
++{
++    Module m = (Module) remnode(modules, node);
++
++    if (m->flags & MOD_ALIAS)
++	zsfree(m->u.alias);
++    zsfree(m->nam);
++    if (m->deps)
++	freelinklist(m->deps, freestr);
++    zfree(m, sizeof(*m));
++}
++
++/**/
+ mod_export int
+ module_loaded(const char *name)
+ {
+     LinkNode node;
+     Module m;
+ 
+-    return ((node = find_module(name)) &&
++    return ((node = find_module(name, 1, NULL)) &&
+ 	    (m = ((Module) getdata(node)))->u.handle &&
+ 	    !(m->flags & MOD_UNLOAD));
+ }
+ 
++/*
++ * Setup and cleanup functions:  we don't search for aliases here,
++ * since they should have been resolved before we try to load or unload
++ * the module.
++ */
++
+ /**/
+ #ifdef DYNAMIC
+ 
+@@ -679,7 +758,12 @@
+ 	zerr("invalid module name `%s'", name, 0);
+ 	return 0;
+     }
+-    if (!(node = find_module(name))) {
++    /*
++     * The following function call may alter name to the final name in a
++     * chain of aliases.  This makes sure the actual module loaded
++     * is the right one.
++     */
++    if (!(node = find_module(name, 1, &name))) {
+ 	if (!(linked = module_linked(name)) &&
+ 	    !(handle = do_load_module(name)))
+ 	    return 0;
+@@ -697,10 +781,7 @@
+ 	if ((set = setup_module(m)) || boot_module(m)) {
+ 	    if (!set)
+ 		finish_module(m);
+-	    remnode(modules, node);
+-	    zsfree(m->nam);
+-	    zfree(m, sizeof(*m));
+-	    m->flags &= ~MOD_SETUP;
++	    delete_module(node);
+ 	    return 0;
+ 	}
+ 	m->flags |= MOD_INIT_S | MOD_INIT_B;
+@@ -773,12 +854,13 @@
+ 
+ /**/
+ mod_export int
+-require_module(char *nam, char *module, int res, int test)
++require_module(char *nam, const char *module, int res, int test)
+ {
+     Module m = NULL;
+     LinkNode node;
+ 
+-    node = find_module(module);
++    /* Resolve aliases and actual loadable module as for load_module */
++    node = find_module(module, 1, &module);
+     if (node && (m = ((Module) getdata(node)))->u.handle &&
+ 	!(m->flags & MOD_UNLOAD)) {
+ 	if (test) {
+@@ -793,12 +875,24 @@
+ 
+ /**/
+ void
+-add_dep(char *name, char *from)
++add_dep(const char *name, char *from)
+ {
+     LinkNode node;
+     Module m;
+ 
+-    if (!(node = find_module(name))) {
++    /*
++     * If we were passed an alias, we must resolve it to a final
++     * module name (and maybe add the corresponding struct), since otherwise
++     * we would need to check all modules to see if they happen
++     * to be aliased to the same thing to implement depencies properly.
++     *
++     * This should mean that an attempt to add an alias which would
++     * have the same name as a module which has dependencies is correctly
++     * rejected, because then the module named already exists as a non-alias.
++     * Better make sure.  (There's no problem making a an alias which
++     * *points* to a module with dependencies, of course.)
++     */
++    if (!(node = find_module(name, 1, &name))) {
+ 	m = zcalloc(sizeof(*m));
+ 	m->nam = ztrdup(name);
+ 	zaddlinknode(modules, m);
+@@ -845,12 +939,21 @@
+ int
+ bin_zmodload(char *nam, char **args, char *ops, int func)
+ {
+-    if ((ops['b'] || ops['c'] || ops['p'] || ops['f']) &&
+-	!(ops['a'] || ops['u'])) {
++    int ops_bcpf = ops['b'] || ops['c'] || ops['p'] || ops['f'];
++    int ops_au = ops['a'] || ops['u'];
++    if (ops_bcpf && !ops_au) {
+ 	zwarnnam(nam, "-b, -c, -f, and -p must be combined with -a or -u",
+ 		 NULL, 0);
+ 	return 1;
+     }
++    if (ops['A'] || ops['R']) {
++	if (ops_bcpf || ops_au || ops['d'] || (ops['R'] && ops['e'])) {
++	    zwarnnam(nam, "illegal flags combined with -A or -R", NULL, 0);
++	    return 1;
++	}
++	if (!ops['e'])
++	    return bin_zmodload_alias(nam, args, ops);
++    }
+     if (ops['d'] && ops['a']) {
+ 	zwarnnam(nam, "-d cannot be combined with -a", NULL, 0);
+ 	return 1;
+@@ -886,32 +989,148 @@
+ 
+ /**/
+ static int
++bin_zmodload_alias(char *nam, char **args, char *ops)
++{
++    /*
++     * TODO: while it would be too nasty to have aliases, as opposed
++     * to real loadable modules, with dependencies --- just what would
++     * we need to load when, exactly? --- there is in principle no objection
++     * to making it possible to force an alias onto an existing unloaded
++     * module which has dependencies.  This would simply transfer
++     * the dependencies down the line to the aliased-to module name.
++     * This is actually useful, since then you can alias zsh/zle=mytestzle
++     * to load another version of zle.  But then what happens when the
++     * alias is removed?  Do you transfer the dependencies back? And
++     * suppose other names are aliased to the same file?  It might be
++     * kettle of fish best left unwormed.
++     */
++    LinkNode node;
++    Module m;
++    int ret = 0;
++
++    if (!*args) {
++	if (ops['R']) {
++	    zwarnnam(nam, "no module alias to remove", NULL, 0);
++	    return 1;
++	}
++	for (node = firstnode(modules); node; incnode(node)) {
++	    m = (Module) getdata(node);
++	    if (m->flags & MOD_ALIAS)
++		printmodalias(m, ops);
++	}
++	return 0;
++    }
++
++    for (; !ret && *args; args++) {
++	char *eqpos = strchr(*args, '=');
++	char *aliasname = eqpos ? eqpos+1 : NULL;
++	if (eqpos)
++	    *eqpos = '\0';
++	if (!modname_ok(*args)) {
++	    zwarnnam(nam, "invalid module name `%s'", *args, 0);
++	    return 1;
++	}
++	if (ops['R']) {
++	    if (aliasname) {
++		zwarnnam(nam, "bad syntax for removing module alias: %s",
++			 *args, 0);
++		return 1;
++	    }
++	    node = find_module(*args, 0, NULL);
++	    if (node) {
++		m = (Module) getdata(node);
++		if (!(m->flags & MOD_ALIAS)) {
++		    zwarnnam(nam, "module is not an alias: %s", *args, 0);
++		    ret = 1;
++		    break;
++		}
++		delete_module(node);
++	    } else {
++		zwarnnam(nam, "no such module alias: %s", *args, 0);
++		return 1;
++	    }
++	} else {
++	    if (aliasname) {
++		const char *mname = aliasname;
++		if (!modname_ok(aliasname)) {
++		    zwarnnam(nam, "invalid module name `%s'", aliasname, 0);
++		    return 1;
++		}
++		find_module(aliasname, 1, &mname);
++		if (!strcmp(mname, *args)) {
++		    zwarnnam(nam, "module alias would refer to itself: %s",
++			     *args, 0);
++		    return 1;
++		}
++		node = find_module(*args, 0, NULL);
++		if (node) {
++		    m = (Module) getdata(node);
++		    if (!(m->flags & MOD_ALIAS)) {
++			zwarnnam(nam, "module is not an alias: %s", *args, 0);
++			return 1;
++		    }
++		    zsfree(m->u.alias);
++		} else {
++		    m = (Module) zcalloc(sizeof(*m));
++		    m->nam = ztrdup(*args);
++		    m->flags = MOD_ALIAS;
++		    zaddlinknode(modules, m);
++		}
++		m->u.alias = ztrdup(aliasname);
++	    } else {
++		if ((node = find_module(*args, 0, NULL))) {
++		    m = (Module) getdata(node);
++		    if (m->flags & MOD_ALIAS)
++			printmodalias(m, ops);
++		    else {
++			zwarnnam(nam, "module is not an alias: %s",
++				 *args, 0);
++			return 1;
++		    }
++		} else {
++		    zwarnnam(nam, "no such module alias: %s", *args, 0);
++		    return 1;
++		}
++	    }
++	}
++    }
++
++    return 0;
++}
++
++/**/
++static int
+ bin_zmodload_exist(char *nam, char **args, char *ops)
+ {
+     LinkNode node;
+     Module m;
++    char *modname;
+ 
+     if (!*args) {
+ 	for (node = firstnode(modules); node; incnode(node)) {
+ 	    m = (Module) getdata(node);
++	    modname = m->nam;
++	    if (m->flags & MOD_ALIAS) {
++		LinkNode node2;
++		if (ops['A'] && (node2 = find_module(m->u.alias, 1, NULL)))
++		    m = (Module) getdata(node2);
++		else
++		    continue;
++	    } 
+ 	    if (m->u.handle && !(m->flags & MOD_UNLOAD)) {
+-		nicezputs(m->nam, stdout);
++		nicezputs(modname, stdout);
+ 		putchar('\n');
+ 	    }
+ 	}
+ 	return 0;
+     } else {
+-	int ret = 0, f;
++	int ret = 0;
+ 
+ 	for (; !ret && *args; args++) {
+-	    f = 0;
+-	    for (node = firstnode(modules);
+-		 !f && node; incnode(node)) {
+-		m = (Module) getdata(node);
+-		if (m->u.handle && !(m->flags & MOD_UNLOAD))
+-		    f = !strcmp(*args, m->nam);
+-	    }
+-	    ret = !f;
++	    if (!(node = find_module(*args, 1, NULL))
++		|| !(m = (Module) getdata(node))->u.handle
++		|| (m->flags & MOD_UNLOAD))
++		ret = 1;
+ 	}
+ 	return ret;
+     }
+@@ -924,9 +1143,9 @@
+     LinkNode node;
+     Module m;
+     if(ops['u']) {
+-	/* remove dependencies */
+-	char *tnam = *args++;
+-	node = find_module(tnam);
++	/* remove dependencies, which can't pertain to aliases */
++	const char *tnam = *args++;
++	node = find_module(tnam, 1, &tnam);
+ 	if (!node)
+ 	    return 0;
+ 	m = (Module) getdata(node);
+@@ -948,12 +1167,9 @@
+ 		freelinklist(m->deps, freestr);
+ 		m->deps = NULL;
+ 	    }
+-	}
+-	if (!m->deps && !m->u.handle) {
+-	    remnode(modules, node);
+-	    zsfree(m->nam);
+-	    zfree(m, sizeof(*m));
+ 	}
++	if (!m->deps && !m->u.handle)
++	    delete_module(node);
+ 	return 0;
+     } else if(!args[0] || !args[1]) {
+ 	/* list dependencies */
+@@ -1216,6 +1432,15 @@
+ int
+ unload_module(Module m, LinkNode node)
+ {
++    /*
++     * Only unload the real module, so resolve aliases.
++     */
++    if (m->flags & MOD_ALIAS) {
++	LinkNode node = find_module(m->u.alias, 1, NULL);
++	if (!node)
++	    return 1;
++	m = (Module) getdata(node);
++    }
+     if ((m->flags & MOD_INIT_S) &&
+ 	!(m->flags & MOD_UNLOAD) &&
+ 	((m->flags & MOD_LINKED) ?
+@@ -1249,7 +1474,7 @@
+ 	    LinkNode n;
+ 
+ 	    for (n = firstnode(m->deps); n; incnode(n)) {
+-		LinkNode dn = find_module((char *) getdata(n));
++		LinkNode dn = find_module((char *) getdata(n), 1, NULL);
+ 		Module dm;
+ 
+ 		if (dn && (dm = (Module) getdata(dn)) &&
+@@ -1287,9 +1512,7 @@
+ 		if (!node)
+ 		    return 1;
+ 	    }
+-	    remnode(modules, node);
+-	    zsfree(m->nam);
+-	    zfree(m, sizeof(*m));
++	    delete_module(node);
+ 	}
+     }
+     return 0;
+@@ -1304,8 +1527,9 @@
+     int ret = 0;
+     if(ops['u']) {
+ 	/* unload modules */
++	const char *mname = *args;
+ 	for(; *args; args++) {
+-	    node = find_module(*args);
++	    node = find_module(*args, 1, &mname);
+ 	    if (node) {
+ 		LinkNode mn, dn;
+ 		int del = 0;
+@@ -1314,11 +1538,11 @@
+ 		    m = (Module) getdata(mn);
+ 		    if (m->deps && m->u.handle)
+ 			for (dn = firstnode(m->deps); dn; incnode(dn))
+-			    if (!strcmp((char *) getdata(dn), *args)) {
++			    if (!strcmp((char *) getdata(dn), mname)) {
+ 				if (m->flags & MOD_UNLOAD)
+ 				    del = 1;
+ 				else {
+-				    zwarnnam(nam, "module %s is in use by another module and cannot be unloaded", *args, 0);
++				    zwarnnam(nam, "module %s is in use by another module and cannot be unloaded", mname, 0);
+ 				    ret = 1;
+ 				    goto cont;
+ 				}
+@@ -1342,7 +1566,7 @@
+ 	/* list modules */
+ 	for (node = firstnode(modules); node; incnode(node)) {
+ 	    m = (Module) getdata(node);
+-	    if (m->u.handle && !(m->flags & MOD_UNLOAD)) {
++	    if (m->u.handle && !(m->flags & (MOD_UNLOAD|MOD_ALIAS))) {
+ 		if(ops['L']) {
+ 		    printf("zmodload ");
+ 		    if(m->nam[0] == '-')
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.19
+diff -u -r1.19 zsh.h
+--- Src/zsh.h	2000/08/07 17:17:05	1.19
++++ Src/zsh.h	2000/08/07 22:08:07
+@@ -957,6 +957,7 @@
+     union {
+ 	void *handle;
+ 	Linkedmod linked;
++	char *alias;
+     } u;
+     LinkList deps;
+     int wrapper;
+@@ -968,6 +969,7 @@
+ #define MOD_LINKED  (1<<3)
+ #define MOD_INIT_S  (1<<4)
+ #define MOD_INIT_B  (1<<5)
++#define MOD_ALIAS   (1<<6)
+ 
+ typedef int (*Module_func) _((Module));
+ 
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

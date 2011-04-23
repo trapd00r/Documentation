@@ -1,0 +1,189 @@
+From zsh-workers-return-28326-mason-zsh=primenet.com.au@zsh.org Thu Oct 07 16:45:26 2010
+Return-Path: <zsh-workers-return-28326-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18525 invoked by alias); 7 Oct 2010 16:45:26 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28326
+Received: (qmail 17403 invoked from network); 7 Oct 2010 16:45:23 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Message-Id: <201010071645.o97GjCIq004112@pwslap01u.europe.root.pri>
+X-Authentication-Warning: pwslap01u.europe.root.pri: pws owned process doing -bs
+To: zsh-workers@zsh.org (Zsh hackers list)
+Subject: PATCH: HIST_LEX_WORDS fixes
+X-Mailer: MH-E 8.2; nmh 1.3; GNU Emacs 23.1.1
+Date: Thu, 07 Oct 2010 17:45:12 +0100
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 07 Oct 2010 16:45:15.0248 (UTC) FILETIME=[045EB700:01CB663F]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A-10-90-03 (www.mailcontrol.com) on 10.71.0.134
+
+(Assuming the list is back, if this is delayed it's presumably because
+it needs retrying.)
+
+I already committed this patch while the list was down, since the memory
+problems could be nasty.
+
+- Count the words at the end, not the start, since owing to oddities
+we might skip a word.  This was the most serious problem as it could
+cause memory to be corrupted.
+
+- Take account of the fact that when RC_QUOTES is set lines get
+changed in an unhelpful way.  Actually, there's a simple fix for
+the underlying problem that I'll send next so the fix here is going to
+be rather transient.
+
+- Use a special heap for the linked lists containing the words and free
+it after each line to avoid using nutty amounts of heap storage for a
+large history file.
+
+- If we hit a problem with lexically splitting the words, fall back
+to non-lexical splitting rather than just giving up.
+
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.102
+diff -p -u -r1.102 hist.c
+--- Src/hist.c	6 Oct 2010 08:27:09 -0000	1.102
++++ Src/hist.c	6 Oct 2010 13:04:53 -0000
+@@ -2231,8 +2231,8 @@ readhistfile(char *fn, int err, int read
+     short *words;
+     struct stat sb;
+     int nwordpos, nwords, bufsiz;
+-    int searching, newflags, l, ret;
+-   
++    int searching, newflags, l, ret, uselex;
++
+     if (!fn && !(fn = getsparam("HISTFILE")))
+ 	return;
+     if (readflags & HFILE_FAST) {
+@@ -2256,6 +2256,7 @@ readhistfile(char *fn, int err, int read
+ 	bufsiz = 1024;
+ 	buf = zalloc(bufsiz);
+ 
++	pushheap();
+ 	if (readflags & HFILE_FAST && lasthist.text) {
+ 	    if (lasthist.fpos < lasthist.fsiz) {
+ 		fseek(in, lasthist.fpos, 0);
+@@ -2339,19 +2340,24 @@ readhistfile(char *fn, int err, int read
+ 	     */
+ 	    nwordpos = 0;
+ 	    start = pt;
+-	    if (isset(HISTLEXWORDS) && !(readflags & HFILE_FAST)) {
++	    uselex = isset(HISTLEXWORDS) && !(readflags & HFILE_FAST);
++	    if (uselex) {
+ 		/*
+ 		 * Attempt to do this using the lexer.
+ 		 */
+ 		LinkList wordlist = bufferwords(NULL, pt, NULL);
+-		he->nwords = countlinknodes(wordlist);
+-		if (2*he->nwords > nwords) {
+-		    nwords = 2*he->nwords;
++		LinkNode wordnode;
++		int nwords_max;
++		nwords_max = 2 * countlinknodes(wordlist);
++		if (nwords_max > nwords) {
++		    nwords = nwords_max;
+ 		    words = (short *)realloc(words, nwords*sizeof(short));
+ 		}
+-		while (firstnode(wordlist)) {
+-		    char *word = uremnode(wordlist, firstnode(wordlist));
+-		
++		for (wordnode = firstnode(wordlist);
++		     wordnode;
++		     incnode(wordnode)) {
++		    char *word = getdata(wordnode);
++
+ 		    while (inblank(*pt))
+ 			pt++;
+ 		    if (!strpfx(word, pt)) {
+@@ -2361,14 +2367,23 @@ readhistfile(char *fn, int err, int read
+ 			 */
+ 			if (!strcmp(word, ";"))
+ 			    continue;
+-			/*
+-			 * Oddity 2: !'s turn into |'s.
+-			 */
+ 			while (*pt) {
++			    /*
++			     * Oddity 3: "'"s can turn out differently
++			     * if RC_QUOTES is in use.
++			     */
++			    if (*pt == '\'' && pt > start &&
++				pt[-1] == '\'' && word[-1] == '\'') {
++				pt++;
++				continue;
++			    }
+ 			    if (!*word) {
+ 				bad = 1;
+ 				break;
+ 			    }
++			    /*
++			     * Oddity 2: !'s turn into |'s.
++			     */
+ 			    if (*pt == *word ||
+ 				(*pt == '!' && *word == '|')) {
+ 				pt++;
+@@ -2384,9 +2399,9 @@ readhistfile(char *fn, int err, int read
+ 					 "%s\nat: %s\nword: %s"),
+ 				  start, pt, word);
+ #endif
+-			    words[nwordpos++] = pt - start;
+-			    pt += strlen(pt);
+-			    words[nwordpos++] = pt - start;
++			    pt = start;
++			    nwordpos = 0;
++			    uselex = 0;
+ 			    break;
+ 			}
+ 		    }
+@@ -2394,7 +2409,9 @@ readhistfile(char *fn, int err, int read
+ 		    pt += strlen(word);
+ 		    words[nwordpos++] = pt - start;
+ 		}
+-	    } else {
++		freeheap();
++	    }
++	    if (!uselex) {
+ 		do {
+ 		    while (inblank(*pt))
+ 			pt++;
+@@ -2409,9 +2426,9 @@ readhistfile(char *fn, int err, int read
+ 		    }
+ 		} while (*pt);
+ 
+-		he->nwords = nwordpos/2;
+ 	    }
+ 
++	    he->nwords = nwordpos/2;
+ 	    if (he->nwords) {
+ 		he->words = (short *)zalloc(nwordpos*sizeof(short));
+ 		memcpy(he->words, words, nwordpos*sizeof(short));
+@@ -2430,6 +2447,7 @@ readhistfile(char *fn, int err, int read
+ 	zfree(words, nwords*sizeof(short));
+ 	zfree(buf, bufsiz);
+ 
++	popheap();
+ 	fclose(in);
+     } else if (err)
+ 	zerr("can't read history file %s", fn);
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

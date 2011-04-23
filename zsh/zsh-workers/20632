@@ -1,0 +1,147 @@
+From zsh-workers-return-20632-mason-zsh=primenet.com.au@sunsite.dk Tue Dec 21 11:31:00 2004
+Return-Path: <zsh-workers-return-20632-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14578 invoked from network); 21 Dec 2004 11:30:59 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 21 Dec 2004 11:30:59 -0000
+Received: (qmail 78673 invoked from network); 21 Dec 2004 11:30:52 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 21 Dec 2004 11:30:52 -0000
+Received: (qmail 21855 invoked by alias); 21 Dec 2004 11:30:37 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 20632
+Received: (qmail 21831 invoked from network); 21 Dec 2004 11:30:35 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 21 Dec 2004 11:30:35 -0000
+Received: (qmail 78157 invoked from network); 21 Dec 2004 11:30:35 -0000
+Received: from mailhost1.csr.com (HELO MAILSWEEPER01.csr.com) (81.105.217.43)
+  by a.mx.sunsite.dk with SMTP; 21 Dec 2004 11:30:34 -0000
+Received: from exchange03.csr.com (unverified [10.100.137.60]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T6e01cc1f450a6c8d0183c@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Tue, 21 Dec 2004 11:29:17 +0000
+Received: from news01.csr.com ([10.103.143.38]) by exchange03.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Tue, 21 Dec 2004 11:31:50 +0000
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.13.1/8.12.11) with ESMTP id iBLBUV3K011816
+	for <zsh-workers@sunsite.dk>; Tue, 21 Dec 2004 11:30:32 GMT
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.13.1/8.13.1/Submit) with ESMTP id iBLBUV9D011813
+	for <zsh-workers@sunsite.dk>; Tue, 21 Dec 2004 11:30:31 GMT
+Message-Id: <200412211130.iBLBUV9D011813@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk
+Subject: Re: Zsh killed when autoloaded function calls mislinked program 
+In-reply-to: <20041220202059.GE11940@alan.cs.pdx.edu> 
+References: <20041220202059.GE11940@alan.cs.pdx.edu>
+Date: Tue, 21 Dec 2004 11:30:30 +0000
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 21 Dec 2004 11:31:50.0501 (UTC) FILETIME=[A9C70950:01C4E750]
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.0 required=6.0 tests=none autolearn=no version=2.63
+X-Spam-Hits: 0.0
+
+Travis Spencer wrote:
+> I've found that invoking an autoloaded function that calls a program
+> that isn't linked correctly kills zsh.
+
+I get this, too, actually from Solaris 2.6 since I have lots of
+conveniently unloadable Solaris 8 binaries lying around.  I've
+simplified it to this:
+
+% fn() { if ~/solaris8/bin/touch /dev/null 2>/dev/null; then true; fi }
+% echo | fn
+zsh: killed     TEST_MODULES=1 ./zsh
+
+The "if" and the function are both crucial.
+
+You can get the same effect on Linux (and therefore presumably more
+generally) with the following code:
+
+% fn() { if sh -c 'kill -9 $$'; then true; fi }
+% echo | fn
+zsh: killed     zsh
+
+so this is quite bad.
+
+Good news... I think I've found out what's doing it.
+
+Bad news... it's in Sven's hacks for being clever with jobs when stuff
+is running in the last part of a pipeline and I've only a vague idea
+what's going on.
+
+The culprit appears to be this chunk in execpline, around line 1236 of
+exec.c:
+
+	    if (list_pipe && (lastval & 0200) && pj >= 0 &&
+		(!(jn->stat & STAT_INUSE) || (jn->stat & STAT_DONE))) {
+		deletejob(jn);
+		jn = jobtab + pj;
+		killjb(jn, lastval & ~0200);
+	    }
+
+pj is the old value of "thisjob" at the start of execpline(). jn refers
+to the job created with the new process.  list_pipe is the extra special
+Sven flag indicating we are doing something extra special with the
+current process.
+
+In that call to killjb, we send the signal which killed the failed
+process (touch in my case, grep in Travis's) to the process group
+including that process (the PID of the group leader).  This is
+presumably some hack to pass the signal to a group when the shell
+assumes it should get it.  I don't know why it assumes that here.
+
+In this case the group leader is PID 0.  This is presumably the current
+process group (the killpg documentation for Solaris isn't explicit but
+this is normal) including the shell.  The signal is 9 (SIGKILL).  From
+this point on it's all easy to understand.
+
+This seems to fix the immediate problem, but I don't even know if it's
+in the right target area.  Do we ever want to kill a process group where
+the group leader is marked as 0?  Or is this working because it's not
+killing things that should be killed?  Or is that entire chunk I quoted
+misguided?  What has the old "thisjob", to which jn is being set, got to
+do with the preceeding jn at this point anyway, such that it needs
+killing?
+
+Help.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.79
+diff -u -r1.79 exec.c
+--- Src/exec.c	7 Dec 2004 16:55:03 -0000	1.79
++++ Src/exec.c	21 Dec 2004 11:03:29 -0000
+@@ -1233,7 +1233,8 @@
+ 		(!(jn->stat & STAT_INUSE) || (jn->stat & STAT_DONE))) {
+ 		deletejob(jn);
+ 		jn = jobtab + pj;
+-		killjb(jn, lastval & ~0200);
++		if (jn->gleader)
++		    killjb(jn, lastval & ~0200);
+ 	    }
+ 	    if (list_pipe_child ||
+ 		((jn->stat & STAT_DONE) &&
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

@@ -1,0 +1,317 @@
+From zsh-workers-return-28505-mason-zsh=primenet.com.au@zsh.org Wed Dec 08 17:57:01 2010
+Return-Path: <zsh-workers-return-28505-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4168 invoked by alias); 8 Dec 2010 17:57:01 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28505
+Received: (qmail 22588 invoked from network); 8 Dec 2010 17:56:57 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_LOW,
+	SPF_HELO_PASS autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Wed, 8 Dec 2010 17:51:03 +0000
+From: Peter Stephenson <Peter.Stephenson@csr.com>
+To: zsh-workers@zsh.org
+Subject: Re: Another ${(z)param} buglet
+Message-ID: <20101208175103.40d6cc29@pwslap01u.europe.root.pri>
+In-Reply-To: <101207203441.ZM4340@torch.brasslantern.com>
+References: <101207203441.ZM4340@torch.brasslantern.com>
+Organization: Cambridge Silicon Radio
+X-Mailer: Claws Mail 3.7.6 (GTK+ 2.20.1; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 08 Dec 2010 17:51:04.0367 (UTC) FILETIME=[7BD6F3F0:01CB9700]
+X-Scanned-By: MailControl A_10_80_00 (www.mailcontrol.com) on 10.68.0.115
+
+On Tue, 07 Dec 2010 20:34:36 -0800
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> It doesn't understand about comments, and becomes confused by a
+> comment that contains an unbalance quote character.
+
+I think you can fix this something like the following, although it's not
+particularly elegant.  Could make it strip comments instead of reporting
+them, otherwise you need to remove fields starting with a # by hand (if
+it's an unquoted #, it must be a comment).
+
+If you were doing this to parse history, you'd need separate options for
+handling INTERACTIVE_COMMENTS on and off.  I could make it respect
+the option, but it's far from obvious that's sensible.
+
+(z) is heavily overloaded to do weird things, and underdocumented, so I
+have no idea if this is the right thing to do or not.
+
+I was... confident is not the right word... blatant enough to attempt to
+add some documentation to some of this.
+
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.106
+diff -p -u -r1.106 hist.c
+--- Src/hist.c	10 Oct 2010 17:51:29 -0000	1.106
++++ Src/hist.c	8 Dec 2010 17:46:01 -0000
+@@ -2345,7 +2345,7 @@ readhistfile(char *fn, int err, int read
+ 		/*
+ 		 * Attempt to do this using the lexer.
+ 		 */
+-		LinkList wordlist = bufferwords(NULL, pt, NULL);
++		LinkList wordlist = bufferwords(NULL, pt, NULL, 1);
+ 		LinkNode wordnode;
+ 		int nwords_max;
+ 		nwords_max = 2 * countlinknodes(wordlist);
+@@ -2885,11 +2885,26 @@ histfileIsLocked(void)
+  * which may not even be valid at this point.
+  *
+  * However, I'm so confused it could simply be baking Bakewell tarts.
++ *
++ * list may be an existing linked list (off the heap), in which case
++ * it will be appended to; otherwise it will be created.
++ *
++ * If buf is set we will take input from that string, else we will
++ * attempt to use ZLE directly in a way they tell you not to do on all
++ * programming courses.
++ *
++ * If index is non-NULL, and input is from a string in ZLE, *index
++ * is set to the position of the end of the current editor word.
++ *
++ * If comments is 1, and buf is used for the input (i.e. this is
++ * not a string from ZLE), comments will be retained and reported
++ * as a single word in the output.  Otherwise, comments are not
++ * treated specially (they are analysed as normal words).
+  */
+ 
+ /**/
+ mod_export LinkList
+-bufferwords(LinkList list, char *buf, int *index)
++bufferwords(LinkList list, char *buf, int *index, int comments)
+ {
+     int num = 0, cur = -1, got = 0, ne = noerrs;
+     int owb = wb, owe = we, oadx = addedx, ozp = zleparse, onc = nocomments;
+@@ -2906,13 +2921,13 @@ bufferwords(LinkList list, char *buf, in
+      * string expression, we just turn the option off for this function.
+      */
+     opts[RCQUOTES] = 0;
+-    zleparse = 1;
+     addedx = 0;
+     noerrs = 1;
+     lexsave();
+     if (buf) {
+ 	int l = strlen(buf);
+ 
++	zleparse = 2;
+ 	p = (char *) zhalloc(l + 2);
+ 	memcpy(p, buf, l);
+ 	/*
+@@ -2928,11 +2943,12 @@ bufferwords(LinkList list, char *buf, in
+ 	inpush(p, 0, NULL);
+ 	zlemetall = strlen(p) ;
+ 	zlemetacs = zlemetall + 1;
+-	nocomments = 1;
++	nocomments = !comments;
+     } else {
+ 	int ll, cs;
+ 	char *linein;
+ 
++	zleparse = 1;
+ 	linein = zleentry(ZLE_CMD_GET_LINE, &ll, &cs);
+ 	zlemetall = ll + 1; /* length of line plus space added below */
+ 	zlemetacs = cs;
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.57
+diff -p -u -r1.57 lex.c
+--- Src/lex.c	18 Nov 2010 10:07:56 -0000	1.57
++++ Src/lex.c	8 Dec 2010 17:46:01 -0000
+@@ -116,7 +116,20 @@ mod_export int wb, we;
+ /**/
+ mod_export int noaliases;
+ 
+-/* we are parsing a line sent to use by the editor */
++/*
++ * we are parsing a line sent to use by the editor, or some other string
++ * that's not part of standard command input (e.g. eval is part of
++ * normal command input).
++ *
++ * zleparse = 1 is the normal case.
++ * zleparse = 2 is used for word splitting; the difference is we
++ * preserve comments.
++ *
++ * Note that although it is passed into the lexer as an input, the
++ * lexer can set it to zero after finding the word it's searching for.
++ * This only happens if the line being parsed actually does come from
++ * ZLE.
++ */
+ 
+ /**/
+ mod_export int zleparse;
+@@ -743,26 +756,48 @@ gettok(void)
+ 
+     /* chars in initial position in word */
+ 
++    /*
++     * Handle comments.  There are some special cases when this
++     * is not normal command input: zleparse implies we are examining
++     * a line lexically without it being used for normal command input.
++     * If zleparse is 1 we treat comments as normal for interactive
++     * mode.
++     * If zleparse is 2 (which has actually got nothing to do with zle)
++     * we always handle comments.
++     */
+     if (c == hashchar && !nocomments &&
+ 	(isset(INTERACTIVECOMMENTS) ||
+-	 (!zleparse && !expanding &&
++	 ((zleparse != 1) && !expanding &&
+ 	  (!interact || unset(SHINSTDIN) || strin)))) {
+ 	/* History is handled here to prevent extra  *
+ 	 * newlines being inserted into the history. */
+ 
++	if (zleparse == 2) {
++	    len = 0;
++	    bptr = tokstr = (char *)hcalloc(bsiz = 32);
++	    add(c);
++	}
+ 	while ((c = ingetc()) != '\n' && !lexstop) {
+ 	    hwaddc(c);
+ 	    addtoline(c);
++	    if (zleparse == 2)
++		add(c);
+ 	}
+ 
+ 	if (errflag)
+ 	    peek = LEXERR;
+ 	else {
+-	    hwend();
+-	    hwbegin(0);
+-	    hwaddc('\n');
+-	    addtoline('\n');
+-	    peek = NEWLIN;
++	    if (zleparse == 2) {
++		if (!lexstop)
++		    hungetc(c);
++		peek = STRING;
++	    } else {
++		hwend();
++		hwbegin(0);
++		hwaddc('\n');
++		addtoline('\n');
++		peek = NEWLIN;
++	    }
+ 	}
+ 	return peek;
+     }
+Index: Src/subst.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/subst.c,v
+retrieving revision 1.112
+diff -p -u -r1.112 subst.c
+--- Src/subst.c	25 Nov 2010 10:34:32 -0000	1.112
++++ Src/subst.c	8 Dec 2010 17:46:01 -0000
+@@ -3207,10 +3207,10 @@ paramsubst(LinkList l, LinkNode n, char 
+ 	if (isarr) {
+ 	    char **ap;
+ 	    for (ap = aval; *ap; ap++)
+-		list = bufferwords(list, *ap, NULL);
++		list = bufferwords(list, *ap, NULL, 1);
+ 	    isarr = 0;
+ 	} else
+-	    list = bufferwords(NULL, val, NULL);
++	    list = bufferwords(NULL, val, NULL, 1);
+ 
+ 	if (!list || !firstnode(list))
+ 	    val = dupstring("");
+Index: Src/Modules/parameter.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/parameter.c,v
+retrieving revision 1.51
+diff -p -u -r1.51 parameter.c
+--- Src/Modules/parameter.c	11 Feb 2009 20:42:17 -0000	1.51
++++ Src/Modules/parameter.c	8 Dec 2010 17:46:01 -0000
+@@ -1044,7 +1044,7 @@ histwgetfn(UNUSED(Param pm))
+     int i = addhistnum(curhist, -1, HIST_FOREIGN), iw;
+     Histent he = gethistent(i, GETHIST_UPWARD);
+ 
+-    if ((ll = bufferwords(NULL, NULL, NULL)))
++    if ((ll = bufferwords(NULL, NULL, NULL, 0)))
+         for (n = firstnode(ll); n; incnode(n))
+             pushnode(l, getdata(n));
+ 
+Index: Src/Zle/zle_hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_hist.c,v
+retrieving revision 1.66
+diff -p -u -r1.66 zle_hist.c
+--- Src/Zle/zle_hist.c	6 Oct 2010 08:25:29 -0000	1.66
++++ Src/Zle/zle_hist.c	8 Dec 2010 17:46:01 -0000
+@@ -677,7 +677,7 @@ insertlastword(char **args)
+ 	 * a deleted word, because that can only have come
+ 	 * from a non-empty line.  I think.
+ 	 */
+-	if (!(l = bufferwords(NULL, NULL, NULL))) {
++	if (!(l = bufferwords(NULL, NULL, NULL, 0))) {
+ 	    unmetafy_line();
+ 	    return 1;
+ 	}
+Index: Src/Zle/zle_misc.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_misc.c,v
+retrieving revision 1.58
+diff -p -u -r1.58 zle_misc.c
+--- Src/Zle/zle_misc.c	24 Apr 2009 09:00:38 -0000	1.58
++++ Src/Zle/zle_misc.c	8 Dec 2010 17:46:01 -0000
+@@ -843,7 +843,7 @@ copyprevshellword(UNUSED(char **args))
+     if (zmult <= 0)
+ 	return 1;
+ 
+-    if ((l = bufferwords(NULL, NULL, &i))) {
++    if ((l = bufferwords(NULL, NULL, &i, 0))) {
+ 	i -= (zmult-1);
+ 	if (i < 0)
+ 	    return 1;
+Index: Test/D04parameter.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D04parameter.ztst,v
+retrieving revision 1.47
+diff -p -u -r1.47 D04parameter.ztst
+--- Test/D04parameter.ztst	25 Nov 2010 10:34:32 -0000	1.47
++++ Test/D04parameter.ztst	8 Dec 2010 17:46:02 -0000
+@@ -417,6 +417,21 @@
+ >5:i++ :
+ >6:)):
+ 
++  line=$'A line with # someone\'s comment\nanother line # (1 more\nanother one'
++  print -l ${(z)line}
++0:Comments with (z)
++>A
++>line
++>with
++># someone's comment
++>;
++>another
++>line
++># (1 more
++>;
++>another
++>one
++
+   psvar=(dog)
+   setopt promptsubst
+   foo='It shouldn'\''t $(happen) to a %1v.'
+
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

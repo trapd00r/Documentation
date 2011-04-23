@@ -1,0 +1,94 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Thu Sep 19 21:33:15 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id VAA10481 for <mason@primenet.com.au>; Thu, 19 Sep 1996 21:33:12 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA10406; Thu, 19 Sep 1996 07:18:40 -0400 (EDT)
+Resent-Date: Thu, 19 Sep 1996 07:18:40 -0400 (EDT)
+Message-Id: <199609191116.NAA29576@hydra.ifh.de>
+X-Authentication-Warning: hydra.ifh.de: Host pws@localhost didn't use HELO protocol
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: more on pipe bug
+Date: Thu, 19 Sep 1996 13:16:51 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"JNSl93.0.WY2.FmIGo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2150
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I've made some progress.  The simplest form required to show the bug
+is something like:
+
+% if true; then echo | more; fi
+
+Any shell construct will do, with any builtin piped to anything that
+uses the terminal.  (You only need a builtin on the left of the pipe
+because it finishes faster.)
+
+It seems to localise to what's going on in entersubsh() in exec.c, in
+particular the code calling setpgrp() and attachtty().  With no outer
+construct, i.e. `echo | more' on its own, the first chunk with the
+list_pipe_job stuff (just before the first chunk in the patch below)
+comes into play.  With the construct, it doesn't (I haven't checked
+the logic why not), and since the `echo' job was forked first and
+becomes the process group leader, the last alternative, a simple
+setpgprp(), is chosen.  This falls over if the echo process already
+finished.
+
+So a simple fix (below) is just to check whether the setpgrp() failed
+and in that case make the process a new job leader.  This fixes the
+bug as described and is certainly an improvement on the current code,
+since if setpgrp() does fail, this is the right thing to do about it.
+
+*However* I don't understand the list_pipe stuff and it's quite
+possible there is a bug there, in other words the first chunk should
+be coming into effect here as with the plain `echo | more'.  It's
+there to keep track of pipelines in the current shell, which this
+certainly is.
+
+Anyway, here's the simple fix.
+
+*** Src/exec.c.pgrp	Thu Aug 15 12:38:56 1996
+--- Src/exec.c	Thu Sep 19 11:45:24 1996
+***************
+*** 1872,1878 ****
+  		    attachtty(jobtab[thisjob].gleader);
+  	    }
+  	}
+! 	else if (!jobtab[thisjob].gleader) {
+  	    jobtab[thisjob].gleader = getpid();
+  	    if (list_pipe_job != thisjob &&
+  		!jobtab[list_pipe_job].gleader)
+--- 1872,1879 ----
+  		    attachtty(jobtab[thisjob].gleader);
+  	    }
+  	}
+! 	else if (!jobtab[thisjob].gleader ||
+! 		 (setpgrp(0L, jobtab[thisjob].gleader) == -1)) {
+  	    jobtab[thisjob].gleader = getpid();
+  	    if (list_pipe_job != thisjob &&
+  		!jobtab[list_pipe_job].gleader)
+***************
+*** 1880,1887 ****
+  	    setpgrp(0L, jobtab[thisjob].gleader);
+  	    if (how & Z_SYNC)
+  		attachtty(jobtab[thisjob].gleader);
+! 	} else
+! 	    setpgrp(0L, jobtab[thisjob].gleader);
+      }
+      if (!fake)
+  	subsh = 1;
+--- 1881,1887 ----
+  	    setpgrp(0L, jobtab[thisjob].gleader);
+  	    if (how & Z_SYNC)
+  		attachtty(jobtab[thisjob].gleader);
+! 	}
+      }
+      if (!fake)
+  	subsh = 1;
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

@@ -1,0 +1,154 @@
+From zsh-workers-return-28965-mason-zsh=primenet.com.au@zsh.org Thu Mar 31 18:33:09 2011
+Return-Path: <zsh-workers-return-28965-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2246 invoked by alias); 31 Mar 2011 18:33:09 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28965
+Received: (qmail 4305 invoked from network); 31 Mar 2011 18:33:06 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-4.2 required=5.0 tests=BAYES_00,MIME_QP_LONG_LINE,
+	RCVD_IN_DNSWL_MED autolearn=ham version=3.3.1
+Received-SPF: pass (ns1.primenet.com.au: SPF record at spf.postini.com designates 64.18.3.32 as permitted sender)
+X-MimeOLE: Produced By Microsoft Exchange V6.5
+Content-class: urn:content-classes:message
+MIME-Version: 1.0
+Content-Type: text/plain;
+	charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+Subject: zsh hangs sometimes continued.
+Date: Thu, 31 Mar 2011 20:32:58 +0200
+Message-ID: <1B2B2EF98D55CB41BD16F13B18B9B0080EA2084C@FFBRUE001.cfmu.corp.eurocontrol.int>
+In-Reply-To: <1301593035.6016.ezmlm@zsh.org>
+X-MS-Has-Attach: 
+X-MS-TNEF-Correlator: 
+Thread-Topic: zsh hangs sometimes continued.
+Thread-Index: Acvvykm9FnQFHqT3SGaUubb28dKw/AAAQc2A
+References: <1301593035.6016.ezmlm@zsh.org>
+From: "VAN VLIERBERGHE Stef" <stef.van-vlierberghe@eurocontrol.int>
+To: <zsh-workers@zsh.org>
+Cc: "LORANG Geert" <geert.lorang@eurocontrol.int>
+X-OriginalArrivalTime: 31 Mar 2011 18:32:59.0093 (UTC) FILETIME=[0F697050:01CBEFD2]
+
+ 
+Since about 2 years we are suffering from the same bug that was reported
+in: http://www.zsh.org/mla/users/2008/msg00432.html.
+
+After adding more and more debug info to the zsh-4.3.10 sources I
+figured out that the problem is in the findjob returning the pid of
+a terminated process.
+
+Geert (Cc) then pointed out that this problem matches perfectly with the
+description in the msg00432.html above,
+however the fix made at that time was insufficient in our case.
+
+The previous fix was to stop looking in jobs that were in status
+STAT_DONE, i.e. jobs that do not contain any process in status
+SP_RUNNING :
+
++	/*
++	 * We are only interested in jobs with processes still
++	 * marked as live.  Careful in case there's an identical
++	 * process number in a job we haven't quite got around
++	 * to deleting.
++	 */
++	if (jobtab[i].stat & STAT_DONE)
++	    continue;
++
+ 	for (pn =3D aux ? jobtab[i].auxprocs : jobtab[i].procs;
+ 	     pn; pn =3D pn->next)
+ 	    if (pn->pid =3D=3D pid) {
+
+However, this does not prevent from findjob returning a process that is
+no longer running. In our case there was a job
+containing 2 processes, one of them running and one of them terminated.
+In that case the job is not "STAT_DONE", but the
+for loop above still happily returns the pid of the process that was
+already terminated, leading to the same deadlock
+situation is in the original description.
+
+So I added a condition to check that the returned pid is still running :
+
+	for (pn =3D aux ? jobtab[i].auxprocs : jobtab[i].procs;
+             pn; pn =3D pn->next)
+          if ((pn->pid =3D=3D pid) 
+               && (pn->status =3D=3D SP_RUNNING)
+              /* Additional condition required to avoid INC035 : When a
+job contains two
+                 pids, one terminated pid and one running pid, then the
+condition above
+                 jobtab[i].stat & STAT_DONE will not stop these pids
+from being candidates
+                 for the findproc result (which is supposed to be a
+RUNNING pid), and if
+                 the terminated pid is an identical process number for
+the pid identifying the
+                 running process we are trying to find (after pid number
+wrapping), then we
+                 need to avoid returning the terminated pid, otherwise
+the shell would block
+                 and wait forever for the termination of the process
+which pid we were supposed
+                 to return in a different job.
+               */
+             ) {
+
+We had 2 scripts that suffered from this problem, the simplest one did
+something like :
+
+cat <file> | uniq | while read LINE
+do
+  quite a bit of fork-exec
+done
+
+>From the traces I understood that the cat terminates well before the
+uniq and inside the loop
+(different job) a new process was created that had the same pid as the
+cat, but that job was
+not complete (because of the uniq), and hence the findproc code above
+concluded that the cat
+had died a second time (called from zhander handling SIGCHLD).
+  
+Obviously this problem was not easy to reproduce, because it depended a
+lot on all parallel
+fork activity to make the pid numbers advance. Executing a "while true
+do usleep 100 done"
+significantly increased the frequency of the script getting stuck
+(usually after 1..3 hours)
+but with the fix above the script now ran in a loop over 2 days, so the
+fix looks promising.
+
+We would appreciate if this fix could be improved (if needed) and
+validated/integrated. 
+
+Note : The problem was submitted to RedHat via HP, so you have probably
+received the script and
+the input file before (it is very large to I don't attach it here).
+Anyway, now that you understand
+the problem I guess it is not very difficult to produce it
+systematically, if the cat just
+echos its pid to a file and terminates, then the loop only needs to wait
+until it forked a child
+with the same pid and then break, which should trigger the bug as well.
+
+____
+=C2=A0
+This message and any files transmitted with it are legally privileged and in=
+tended for the sole use of the individual(s) or entity to whom they are addr=
+essed. If you are not the intended recipient, please notify the sender by re=
+ply and delete the message and any attachments from your system. Any unautho=
+rised use or disclosure of the content of this message is strictly prohibite=
+d and may be unlawful.
+=C2=A0
+Nothing in this e-mail message amounts to a contractual or legal commitment =
+on the part of EUROCONTROL, unless it is confirmed by appropriately signed h=
+ard copy.
+=C2=A0
+Any views expressed in this message are those of the sender.
+

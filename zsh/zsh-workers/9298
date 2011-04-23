@@ -1,0 +1,403 @@
+From zsh-workers-return-9298-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jan 12 15:25:32 2000
+Return-Path: <zsh-workers-return-9298-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8909 invoked from network); 12 Jan 2000 15:25:30 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Jan 2000 15:25:30 -0000
+Received: (qmail 27109 invoked by alias); 12 Jan 2000 15:25:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9298
+Received: (qmail 27102 invoked from network); 12 Jan 2000 15:25:21 -0000
+Date: Wed, 12 Jan 2000 16:25:19 +0100 (MET)
+Message-Id: <200001121525.QAA02658@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Tue, 11 Jan 2000 18:34:02 +0000
+Subject: Re: PATCH: _path_files -g
+
+
+Peter Stephenson wrote:
+
+> Sven Wischnowsky wrote:
+> > I'd like to ask again if we should make the completion system *not*
+> > use $fignore any more -- everything it can do can also be done with
+> > the ignored-suffixes style.
+
+Ok.
+
+> No, because it would annoy people, such as me.  I can't see any any real
+> advantage in dispensing with it after so long.  It exists in other shells,
+> too.
+> 
+> > Also, we could think about making this more powerful. E.g. we could
+> > make compadd use the strings it gets with the -F option as patterns so 
+> > that we are not restricted to only suffixes (although the suffix test
+> > is faster, of course, but we could still handle simple patterns of the 
+> > form `*<str>' in the same way we use those strings now). And we could
+> > make those patterns be used for all types of matches and turn the
+> > ignored-suffixes style into a ignored-strings style that is set in
+> > _description. Would be quite simple, actually.
+> 
+> An ignored-patterns (probably better than ignored-strings) style would be
+> useful.  It could sensible replace ignored-suffixes, but we should still
+> maintain $fignore for compatibility, if necessary quoting the suffixes and
+> sticking a `*' in front, which is trivial.
+
+It's actually a '?*' or '*?' because we always tested for real
+suffixes.
+
+The patch below implements this behaviour and replaces
+ignored-suffixes with ignored-patterns.
+
+One note: the patterns are compared with the whole strings, including
+the -[ps] {pre,suf}ixes. I.e. one can exclude only some files from
+some directories and things like that.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Completion/Core/_description Completion/Core/_description
+--- ../z.old/Completion/Core/_description	Wed Jan 12 10:09:05 2000
++++ Completion/Core/_description	Wed Jan 12 15:03:06 2000
+@@ -1,10 +1,11 @@
+ #autoload
+ 
+-local name gropt format gname hidden hide match
++local name gropt format gname hidden hide match ign
+ 
+ gropt=(-J)
+ hide=()
+ match=()
++ign=()
+ 
+ if [[ "$1" = -([12]|)[VJ] ]]; then
+   gropt=("$1")
+@@ -29,21 +30,26 @@
+     [[ -z "$gname" ]] && gname="$1"
+ zstyle -s ":completion${curcontext}:$1" matcher match &&
+     match=(-M "${(q)match}")
++if zstyle -a ":completion${curcontext}:$1" ignored-patterns _comp_ignore; then
++  ign=(-F _comp_ignore)
++else
++  _comp_ignore=()
++fi
+ 
+ shift 2
+ [[ -n "$format" ]] && zformat -f format "$format" "d:$1" "${(@)argv[2,-1]}"
+ 
+ if [[ -n "$gname" ]]; then
+   if [[ -n "$format" ]]; then
+-    eval "${name}=($hide $match $gropt ${(q)gname} -X \"${format}\")"
++    eval "${name}=($hide $match $ign $gropt ${(q)gname} -X \"${format}\")"
+   else
+-    eval "${name}=($hide $match $gropt ${(q)gname})"
++    eval "${name}=($hide $match $ign $gropt ${(q)gname})"
+   fi
+ else
+   if [[ -n "$format" ]]; then
+-    eval "${name}=($hide $match $gropt -default- -X \"${format}\")"
++    eval "${name}=($hide $match $ign $gropt -default- -X \"${format}\")"
+   else
+-    eval "${name}=($hide $match $gropt -default-)"
++    eval "${name}=($hide $match $ign $gropt -default-)"
+   fi
+ fi
+ 
+diff -ru ../z.old/Completion/Core/_main_complete Completion/Core/_main_complete
+--- ../z.old/Completion/Core/_main_complete	Wed Jan 12 10:09:05 2000
++++ Completion/Core/_main_complete	Wed Jan 12 14:33:42 2000
+@@ -19,7 +19,7 @@
+ setopt localoptions nullglob rcexpandparam extendedglob
+ unsetopt markdirs globsubst shwordsplit nounset ksharrays
+ 
+-local comp post ret=1 _compskip _prio_num=1 format \
++local comp post ret=1 _compskip _prio_num=1 format _comp_ignore \
+       context state line opt_args val_args curcontext="$curcontext" \
+       _last_nmatches=-1 _last_menu_style _def_menu_style _menu_style sel \
+       _saved_exact="${compstate[exact]}" \
+diff -ru ../z.old/Completion/Core/_path_files Completion/Core/_path_files
+--- ../z.old/Completion/Core/_path_files	Wed Jan 12 10:09:06 2000
++++ Completion/Core/_path_files	Wed Jan 12 14:44:16 2000
+@@ -55,11 +55,10 @@
+          ;;
+   F)     tmp1="$OPTARG"
+          if [[ "$tmp1[1]" = '(' ]]; then
+-           ignore=( ${^=tmp1[2,-2]}/ )
++           ignore=( ${=tmp1[2,-2]} )
+          else
+-           ignore=( ${(P)${tmp1}} )
++           ignore=( ${(P)tmp1} )
+          fi
+-	 (( $#ignore )) && ignore=(-F "( $ignore )")
+          ;;
+   [JV])  group=("-$opt" "$OPTARG")
+          ;;
+@@ -158,18 +157,13 @@
+    ( $#compstate[pattern_match] -ne 0 &&
+      "${orig#\~}" != "${${orig#\~}:q}" ) ]] && menu=yes
+ 
+-# If given no `-F' option, we want to use the `ignored-suffixes'-style.
++# If given no `-F' option, we may want to use $fignore, turned into patterns.
+ 
+-if [[ $#ignore -eq 0 && -z $gopt ]]; then
+-  if zstyle -a ":completion${curcontext}:files" ignored-suffixes ignore; then
+-    ignore=(-F "( $ignore )")
+-  else
+-
+-    # For now we still use the fignore parameter.
+-    # This may be removed some day.
++[[ $#ignore -eq 0 && -z $gopt ]] && ignore=( "?*${^fignore[@]}" )
+ 
+-    ignore=(-F fignore)
+-  fi
++if (( $#ignore )); then
++  _comp_ignore=( "$_comp_ignore[@]" "$ignore[@]" )
++  (( $expl[(I)-F] )) || expl=( "$expl[@]" -F _comp_ignore )
+ fi
+ 
+ # Now let's have a closer look at the string to complete.
+@@ -298,11 +292,11 @@
+     if [[ -n "$PREFIX$SUFFIX" ]]; then
+       # See which of them match what's on the line.
+ 
+-      builtin compadd -D tmp1 "$ignore[@]" "$matcher[@]" - "${(@)tmp1:t}"
++      builtin compadd -D tmp1 -F _comp_ignore "$matcher[@]" - "${(@)tmp1:t}"
+ 
+       if [[ $#tmp1 -eq 0 && -n "$_comp_correct" ]]; then
+         tmp1=( "$tmp2[@]" )
+-	compadd -D tmp1 "$ignore[@]" "$matcher[@]" - "${(@)tmp2:t}"
++	compadd -D tmp1 -F _comp_ignore "$matcher[@]" - "${(@)tmp2:t}"
+       fi
+ 
+       # If no file matches, save the expanded path and continue with
+@@ -423,13 +417,13 @@
+             compstate[to_end]=''
+         if [[ "$tmp3" = */* ]]; then
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp4" -s "/${tmp3#*/}" \
+-	          -W "$prepath$realpath$testpath" "$ignore[@]" \
++	          -W "$prepath$realpath$testpath" \
+ 		  "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
+                   -M "r:|/=* r:|=* $mspec" "$group[@]" "$expl[@]" \
+ 		  - "${(@)tmp1%%/*}"
+ 	else
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp4" \
+-	          -W "$prepath$realpath$testpath" "$ignore[@]" \
++	          -W "$prepath$realpath$testpath" \
+ 		   "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
+                    -M "r:|/=* r:|=* $mspec" "$group[@]" "$expl[@]" \
+ 		   - "$tmp1[@]"
+@@ -437,7 +431,7 @@
+       else
+         if [[ "$tmp3" = */* ]]; then
+ 	  atmp=( -Qf "$mopts[@]" -p "$linepath$tmp4"
+-	         -W "$prepath$realpath$testpath" "$ignore[@]"
++	         -W "$prepath$realpath$testpath"
+ 	         "$addpfx[@]" "$addsfx[@]" "$remsfx[@]"
+                  -M "r:|/=* r:|=* $mspec" "$group[@]" "$expl[@]" )
+           for i in "$tmp1[@]"; do
+@@ -445,7 +439,7 @@
+ 	  done
+         else
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp4" \
+-		  -W "$prepath$realpath$testpath" "$ignore[@]" \
++		  -W "$prepath$realpath$testpath" \
+ 		  "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
+                   -M "r:|/=* r:|=* $mspec" "$group[@]" "$expl[@]" \
+ 		  - "$tmp1[@]"
+@@ -495,7 +489,7 @@
+     tmp4="$testpath"
+     compquote tmp4 tmp1
+     compadd -Qf "$mopts[@]" -p "$linepath$tmp4" \
+-	    -W "$prepath$realpath$testpath" "$ignore[@]" \
++	    -W "$prepath$realpath$testpath" \
+ 	    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
+             -M "r:|/=* r:|=* $mspec" "$group[@]" "$expl[@]" \
+ 	    - "$tmp1[@]"
+diff -ru ../z.old/Doc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- ../z.old/Doc/Zsh/compsys.yo	Wed Jan 12 10:08:46 2000
++++ Doc/Zsh/compsys.yo	Wed Jan 12 14:52:43 2000
+@@ -835,10 +835,11 @@
+ Like tt(hosts-ports) but used for commands like tt(telnet) and
+ containing strings of the form `var(host)tt(:)var(port)tt(:)var(user)'.
+ )
+-item(tt(ignored-suffixes))(
+-This style is used with the tt(files) tag and gives suffixes of
+-filenames to ignore. The matches ignored will only be completed when
+-there are no other matches.  It it is a more configurable version
++item(tt(ignored-patterns))(
++This style is used with the tags used when adding matches and gives a
++number of patterns. All matches that are matched by any of these
++patterns will be ignored as long as there are other matches not
++matched by any of the patterns.  It is a more configurable version
+ of the shell parameter tt($fignore).
+ )
+ item(tt(insert-unambiguous))(
+diff -ru ../z.old/Doc/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- ../z.old/Doc/Zsh/compwid.yo	Wed Jan 12 10:08:46 2000
++++ Doc/Zsh/compwid.yo	Wed Jan 12 15:52:04 2000
+@@ -532,29 +532,27 @@
+ the tests will not otherwise be performed.
+ )
+ item(tt(-a))(
+-The completion code may
+-build two sets of matches: the normal one where words with one of the 
+-suffixes in the array parameter tt(fignore) are not considered
+-possible matches, and the alternate set where the words excluded
+-from the first set are stored. Normally only the matches in the first
+-set are used, but if this set is empty, the words from the alternate
+-set are used.
++The completion code may build two sets of matches: the normal and the
++alternate set. Normally only the matches in the first set are used,
++but if this set is empty, the words from the alternate set are
++used. The completion code uses this mechanism, for example, to make
++filenames without one of the suffixes defined with the tt(fignore)
++shell parameter be preferred over filenames with one of these
++suffixes.
+ 
+-The tt(compadd) builtin does not use the tt(fignore) parameter and
+-normally stores all words in the first set.  With the tt(-a)-flag
+-given, however, the given var(words) are stored in the alternate set unless
+-this flag is overridden by the tt(-F) option.
++With the tt(-a)-flag given, the var(words) are stored in the alternate
++set unless this flag is overridden by the tt(-F) option.
+ )
+ item(tt(-F) var(array))(
+-Specifies an array containing suffixes in the same form as the
+-tt(fignore) parameter. Words with one of these suffixes are stored in
+-the alternate set of matches and words without one of these suffixes
++Specifies an array containing patterns.
++Words matching one of these patterns are stored in
++the alternate set of matches and words that match none of the patterns
+ are stored in the normal set.
+ 
+ The var(array) may be the name of an array parameter or a list of
+-literal suffixes enclosed in parentheses and quoted, as in `tt(-F "(.o
+-.h)")'. If the name of an array is given, the elements of the array are
+-taken as the suffixes.
++literal patterns enclosed in parentheses and quoted, as in `tt(-F "(*?.o
++*?.h)")'. If the name of an array is given, the elements of the array are
++taken as the patterns.
+ )
+ item(tt(-Q))(
+ This flag instructs the completion 
+diff -ru ../z.old/Src/Zle/compcore.c Src/Zle/compcore.c
+--- ../z.old/Src/Zle/compcore.c	Wed Jan 12 10:08:38 2000
++++ Src/Zle/compcore.c	Wed Jan 12 16:15:33 2000
+@@ -1510,15 +1510,16 @@
+ {
+     char *s, *ms, *lipre = NULL, *lisuf = NULL, *lpre = NULL, *lsuf = NULL;
+     char **aign = NULL, **dparr = NULL, *oaq = autoq, *oppre = dat->ppre;
+-    char *oqp = qipre, *oqs = qisuf, qc, **disp = NULL;
++    char *oqp = qipre, *oqs = qisuf, qc, **disp = NULL, *ibuf = NULL;
+     int lpl, lsl, pl, sl, bcp = 0, bcs = 0, bpadd = 0, bsadd = 0;
++    int ppl = 0, psl = 0;
+     int llpl = 0, llsl = 0, nm = mnum, gflags = 0, ohp = haspattern;
+     int oisalt = 0, isalt, isexact, doadd, ois = instring, oib = inbackt;
+     Cline lc = NULL, pline = NULL, sline = NULL;
+     Cmatch cm;
+     struct cmlist mst;
+     Cmlist oms = mstack;
+-    Patprog cp = NULL;
++    Patprog cp = NULL, *pign = NULL;
+     LinkList aparl = NULL, oparl = NULL, dparl = NULL;
+     Brinfo bp, bpl = brbeg, obpl, bsl = brend, obsl;
+ 
+@@ -1612,8 +1613,29 @@
+ 		update_bmatchers();
+ 
+ 	    /* Get the suffixes to ignore. */
+-	    if (dat->ign)
+-		aign = get_user_var(dat->ign);
++	    if (dat->ign && (aign = get_user_var(dat->ign))) {
++		char **ap, **sp, *tmp;
++		Patprog *pp, prog;
++
++		pign = (Patprog *) zhalloc((arrlen(aign) + 1) * sizeof(Patprog));
++
++		for (ap = sp = aign, pp = pign; (tmp = *ap); ap++) {
++		    tokenize(tmp);
++		    remnulargs(tmp);
++		    if (((tmp[0] == Quest && tmp[1] == Star) ||
++			 (tmp[1] == Quest && tmp[0] == Star)) &&
++			tmp[2] && !haswilds(tmp + 2))
++			untokenize(*sp++ = tmp + 2);
++		    else if ((prog = patcompile(tmp, 0, NULL)))
++			*pp++ = prog;
++		}
++		*sp = NULL;
++		*pp = NULL;
++		if (!*aign)
++		    aign = NULL;
++		if (!*pign)
++		    pign = NULL;
++	    }
+ 	    /* Get the display strings. */
+ 	    if (dat->disp)
+ 		if ((disp = get_user_var(dat->disp)))
+@@ -1794,6 +1816,17 @@
+ 	    /* Walk through the matches given. */
+ 	    obpl = bpl;
+ 	    obsl = bsl;
++	    if (!oisalt && (aign || pign)) {
++		int max = 0;
++		char **ap = argv;
++
++		ppl = (dat->ppre ? strlen(dat->ppre) : 0);
++		while ((s = *ap++))
++		    if ((sl = strlen(s)) > max)
++			max = sl;
++		psl = (dat->psuf ? strlen(dat->psuf) : 0);
++		ibuf = (char *) zhalloc(1 + ppl + max + psl);
++	    }
+ 	    for (; (s = *argv); argv++) {
+ 		bpl = obpl;
+ 		bsl = obsl;
+@@ -1803,16 +1836,31 @@
+ 		}
+ 		sl = strlen(s);
+ 		isalt = oisalt;
+-		if (doadd && (!dat->psuf || !*(dat->psuf)) && aign) {
+-		    /* Do the suffix-test. If the match has one of the
+-		     * suffixes from ign, we put it in the alternate set. */
+-		    char **pt = aign;
+-		    int filell;
+-
+-		    for (isalt = 0; !isalt && *pt; pt++)
+-			if ((filell = strlen(*pt)) < sl
+-			    && !strcmp(*pt, s + sl - filell))
+-			    isalt = 1;
++		if (!isalt && (aign || pign)) {
++		    int il = ppl + sl + psl;
++
++		    if (ppl)
++			memcpy(ibuf, dat->ppre, ppl);
++		    strcpy(ibuf + ppl, s);
++		    if (psl)
++			strcpy(ibuf + ppl + sl, dat->psuf);
++
++		    if (aign) {
++			/* Do the suffix-test. If the match has one of the
++			 * suffixes from aign, we put it in the alternate set. */
++			char **pt = aign;
++			int filell;
++
++			for (isalt = 0; !isalt && *pt; pt++)
++			    isalt = ((filell = strlen(*pt)) < il &&
++				     !strcmp(*pt, ibuf + il - filell));
++		    }
++		    if (!isalt && pign) {
++			Patprog *pt = pign;
++
++			for (isalt = 0; !isalt && *pt; pt++)
++			    isalt = pattry(*pt, ibuf);
++		    }
+ 		}
+ 		if (!(dat->aflags & CAF_MATCH)) {
+ 		    if (dat->aflags & CAF_QUOTE)
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,361 @@
+From zsh-workers-return-17390-mason-zsh=primenet.com.au@sunsite.dk Mon Jul 01 11:24:23 2002
+Return-Path: <zsh-workers-return-17390-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2490 invoked from network); 1 Jul 2002 11:24:23 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 1 Jul 2002 11:24:23 -0000
+Received: (qmail 516 invoked by alias); 1 Jul 2002 11:24:16 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17390
+Received: (qmail 504 invoked from network); 1 Jul 2002 11:24:15 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: $PREDISPLAY/$POSTDISPLAY
+In-reply-to: "Peter Stephenson"'s message of "Mon, 01 Jul 2002 10:52:09 BST."
+             <23948.1025517129@csr.com> 
+Date: Mon, 01 Jul 2002 12:23:47 +0100
+Message-ID: <29128.1025522627@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+Peter Stephenson wrote:
+> Another thing I thought of which might be useful is a way to protect
+> areas of the display, so for example if you are using a widget like
+> select-list you can't move off the list until you accept something or
+> break.  I think you could do something like this without too much
+> difficulty by using a special parameter like $PREDISPLAY (maybe also
+> $POSTDISPLAY, since this gives you more control than zle -M), which would
+> insert the given lines before (or after) $BUFFER.  This could probably
+> be done within zle_refresh (and zle_parameter, of course).  It would
+> probably have to be line-orientated to avoid weird interactions with the
+> normal buffer, although maybe even that restriction is avoidable.
+
+This is what I had in mind.  zle_refresh is one of the few reasonably
+modular parts of zle, so it turns out having only chunks of a line works
+fine.
+
+Note the way these parameters survive across invocations of zle.  This
+was simply because it was the most natural way of writing it.  We can
+make zleread() reinitialise them if it seems preferable.
+
+Hmm, it would be nice to get bits of these optionally in inverse video.
+In fact, it would be nice to get a lot of other stuff such as the region
+between point and mark in inverse video.
+
+Here's a trivial example of how this works with recursive-edit.
+
+pre-post-example () {
+        PREDISPLAY="*** You can't edit this bit ***
+" POSTDISPLAY="
+*** Nor this bit ***"
+        zle recursive-edit
+        PREDISPLAY= POSTDISPLAY= 
+}
+
+Index: Src/Zle/zle_params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_params.c,v
+retrieving revision 1.4
+diff -u -r1.4 zle_params.c
+--- Src/Zle/zle_params.c	24 Jun 2002 09:52:01 -0000	1.4
++++ Src/Zle/zle_params.c	1 Jul 2002 11:05:24 -0000
+@@ -85,6 +85,10 @@
+ 	unset_cutbuffer, NULL },
+     { "killring", PM_ARRAY, FN(set_killring), FN(get_killring),
+ 	unset_killring, NULL },
++    { "PREDISPLAY", PM_SCALAR, FN(set_predisplay), FN(get_predisplay),
++	zleunsetfn, NULL },
++    { "POSTDISPLAY", PM_SCALAR, FN(set_postdisplay), FN(get_postdisplay),
++	zleunsetfn, NULL },
+     { NULL, 0, NULL, NULL, NULL, NULL }
+ };
+ 
+@@ -461,4 +465,54 @@
+ 	set_killring(pm, NULL);
+ 	stdunsetfn(pm, exp);
+     }
++}
++
++static void
++set_prepost(unsigned char **textvar, int *lenvar, char *x)
++{
++    if (*lenvar) {
++	zfree(*textvar, *lenvar);
++	*textvar = NULL;
++	*lenvar = 0;
++    }
++    if (x) {
++	unmetafy(x, lenvar);
++	*textvar = (unsigned char *)zalloc(*lenvar);
++	memcpy((char *)*textvar, x, *lenvar);
++	free(x);
++    }
++}
++
++static char *
++get_prepost(unsigned char *text, int len)
++{
++    return metafy((char *)text, len, META_HEAPDUP);
++}
++
++/**/
++static void
++set_predisplay(Param pm, char *x)
++{
++    set_prepost(&predisplay, &predisplaylen, x);
++}
++
++/**/
++static char *
++get_predisplay(Param pm)
++{
++    return get_prepost(predisplay, predisplaylen);
++}
++
++/**/
++static void
++set_postdisplay(Param pm, char *x)
++{
++    set_prepost(&postdisplay, &postdisplaylen, x);
++}
++
++/**/
++static char *
++get_postdisplay(Param pm)
++{
++    return get_prepost(postdisplay, postdisplaylen);
+ }
+Index: Src/Zle/zle_refresh.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_refresh.c,v
+retrieving revision 1.6
+diff -u -r1.6 zle_refresh.c
+--- Src/Zle/zle_refresh.c	19 Feb 2002 00:06:54 -0000	1.6
++++ Src/Zle/zle_refresh.c	1 Jul 2002 11:05:24 -0000
+@@ -81,6 +81,16 @@
+ /**/
+ int trashedzle;
+ 
++/*
++ * Information used by PREDISPLAY and POSTDISPLAY parameters which
++ * add non-editable text to that being displayed.
++ */
++/**/
++unsigned char *predisplay, *postdisplay;
++/**/
++int predisplaylen, postdisplaylen;
++
++
+ #ifdef HAVE_SELECT
+ /* cost of last update */
+ /**/
+@@ -278,6 +288,10 @@
+ 	*sen,			/* pointer to end of the video buffer (eol)  */
+ 	*scs;			/* pointer to cursor position in real buffer */
+     char **qbuf;		/* tmp					     */
++    unsigned char *tmpline;	/* line with added pre/post text */
++    int tmpcs, tmpll;		/* ditto cursor position and line length */
++    int tmpalloced;		/* flag to free tmpline when finished */
++	
+ 
+     /* If this is called from listmatches() (indirectly via trashzle()), and *
+      * that was called from the end of zrefresh(), then we don't need to do  *
+@@ -286,6 +300,25 @@
+     if (inlist)
+ 	return;
+ 
++    if (predisplaylen || postdisplaylen) {
++	/* There is extra text to display at the start or end of the line */
++	tmpline = zalloc(ll + predisplaylen + postdisplaylen);
++	if (predisplaylen)
++	    memcpy(tmpline, predisplay, predisplaylen);
++	if (ll)
++	    memcpy(tmpline+predisplaylen, line, ll);
++	if (postdisplaylen)
++	    memcpy(tmpline+predisplaylen+ll, postdisplay, postdisplaylen);
++	tmpcs = cs + predisplaylen;
++	tmpll = predisplaylen + ll + postdisplaylen;
++	tmpalloced = 1;
++    } else {
++	tmpline = line;
++	tmpcs = cs;
++	tmpll = ll;
++	tmpalloced = 0;
++    }
++
+     if (clearlist && listshown > 0) {
+ 	if (tccan(TCCLEAREOD)) {
+ 	    int ovln = vln, ovcs = vcs;
+@@ -392,18 +425,18 @@
+    width comparisons can be made with winw, height comparisons with winh */
+ 
+     if (termflags & TERM_SHORT) {
+-	singlerefresh();
++	singlerefresh(tmpline, tmpll, tmpcs);
+ 	goto singlelineout;
+     }
+ 
+-    if (cs < 0) {
++    if (tmpcs < 0) {
+ #ifdef DEBUG
+ 	fprintf(stderr, "BUG: negative cursor position\n");
+ 	fflush(stderr); 
+ #endif
+-	cs = 0;
++	tmpcs = 0;
+     }
+-    scs = line + cs;
++    scs = tmpline + tmpcs;
+     numscrolls = 0;
+ 
+ /* first, we generate the video line buffers so we know what to put on
+@@ -414,9 +447,9 @@
+ 	*nbuf = (char *)zalloc(winw + 2);
+ 
+     s = (unsigned char *)(nbuf[ln = 0] + lpromptw);
+-    t = line;
++    t = tmpline;
+     sen = (unsigned char *)(*nbuf + winw);
+-    for (; t < line+ll; t++) {
++    for (; t < tmpline+tmpll; t++) {
+ 	if (t == scs)			/* if cursor is here, remember it */
+ 	    nvcs = s - (unsigned char *)(nbuf[nvln = ln]);
+ 
+@@ -459,7 +492,7 @@
+ 	nvln++;
+     }
+ 
+-    if (t != line + ll)
++    if (t != tmpline + tmpll)
+ 	more_end = 1;
+ 
+     if (statusline) {
+@@ -646,6 +679,9 @@
+ singlelineout:
+     fflush(shout);		/* make sure everything is written out */
+ 
++    if (tmpalloced)
++	zfree(tmpline, tmpll);
++
+     /* if we have a new list showing, note it; if part of the list has been
+     overwritten, redisplay it. */
+     if (showinglist == -2 || (showinglist > 0 && showinglist < nlnct)) {
+@@ -1082,7 +1118,7 @@
+ 
+ /**/
+ static void
+-singlerefresh(void)
++singlerefresh(unsigned char *tmpline, int tmpll, int tmpcs)
+ {
+     char *vbuf, *vp,		/* video buffer and pointer    */
+ 	**qbuf,			/* tmp			       */
+@@ -1093,19 +1129,19 @@
+ 
+     nlnct = 1;
+ /* generate the new line buffer completely */
+-    for (vsiz = 1 + lpromptw, t0 = 0; t0 != ll; t0++, vsiz++)
+-	if (line[t0] == '\t')
++    for (vsiz = 1 + lpromptw, t0 = 0; t0 != tmpll; t0++, vsiz++)
++	if (tmpline[t0] == '\t')
+ 	    vsiz = (vsiz | 7) + 1;
+-	else if (icntrl(line[t0]))
++	else if (icntrl(tmpline[t0]))
+ 	    vsiz++;
+     vbuf = (char *)zalloc(vsiz);
+ 
+-    if (cs < 0) {
++    if (tmpcs < 0) {
+ #ifdef DEBUG
+ 	fprintf(stderr, "BUG: negative cursor position\n");
+ 	fflush(stderr); 
+ #endif
+-	cs = 0;
++	tmpcs = 0;
+     }
+ 
+     /* only use last part of prompt */
+@@ -1113,25 +1149,25 @@
+     vbuf[lpromptw] = '\0';
+     vp = vbuf + lpromptw;
+ 
+-    for (t0 = 0; t0 != ll; t0++) {
+-	if (line[t0] == '\t')
++    for (t0 = 0; t0 != tmpll; t0++) {
++	if (tmpline[t0] == '\t')
+ 	    for (*vp++ = ' '; (vp - vbuf) & 7; )
+ 		*vp++ = ' ';
+-	else if (line[t0] == '\n') {
++	else if (tmpline[t0] == '\n') {
+ 	    *vp++ = '\\';
+ 	    *vp++ = 'n';
+-	} else if (line[t0] == 0x7f) {
++	} else if (tmpline[t0] == 0x7f) {
+ 	    *vp++ = '^';
+ 	    *vp++ = '?';
+-	} else if (icntrl(line[t0])) {
++	} else if (icntrl(tmpline[t0])) {
+ 	    *vp++ = '^';
+-	    *vp++ = line[t0] | '@';
++	    *vp++ = tmpline[t0] | '@';
+ 	} else
+-	    *vp++ = line[t0];
+-	if (t0 == cs)
++	    *vp++ = tmpline[t0];
++	if (t0 == tmpcs)
+ 	    nvcs = vp - vbuf - 1;
+     }
+-    if (t0 == cs)
++    if (t0 == tmpcs)
+ 	nvcs = vp - vbuf;
+     *vp = '\0';
+ 
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.23
+diff -u -r1.23 zle.yo
+--- Doc/Zsh/zle.yo	1 Jul 2002 09:54:48 -0000	1.23
++++ Doc/Zsh/zle.yo	1 Jul 2002 11:05:24 -0000
+@@ -662,6 +662,22 @@
+ contains the contents of the lines before the one the cursor is
+ currently in.
+ )
++vindex(PREDISPLAY)
++item(tt(PREDISPLAY) (scalar))(
++Text to be displayed before the start of the editable text buffer.  This
++does not have to be a complete line; to display a complete line, a newline
++must be appended explicitly.  Note that the text survives between calls to zle
++and hence must be removed explicitly by assigning an empty value to the
++parameter.
++)
++vindex(POSTDISPLAY)
++item(tt(POSTDISPLAY) (scalar))(
++Text to be displayed after the end of the editable text buffer.  This
++does not have to be a complete line; to display a complete line, a newline
++must be prepended explicitly.  Note that the text survives between calls to
++zle and hence must be removed explicitly by assigning an empty value to the
++parameter.
++)
+ vindex(RBUFFER)
+ item(tt(RBUFFER) (scalar))(
+ The part of the buffer that lies to the right of the cursor position.
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

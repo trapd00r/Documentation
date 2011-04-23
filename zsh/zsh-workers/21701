@@ -1,0 +1,179 @@
+From zsh-workers-return-21701-mason-zsh=primenet.com.au@sunsite.dk Tue Sep 06 10:17:14 2005
+Return-Path: <zsh-workers-return-21701-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 764 invoked from network); 6 Sep 2005 10:17:11 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 6 Sep 2005 10:17:11 -0000
+Received: (qmail 19601 invoked from network); 6 Sep 2005 10:17:05 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 6 Sep 2005 10:17:05 -0000
+Received: (qmail 24392 invoked by alias); 6 Sep 2005 10:17:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 21701
+Received: (qmail 24377 invoked from network); 6 Sep 2005 10:17:01 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 6 Sep 2005 10:17:01 -0000
+Received: (qmail 19292 invoked from network); 6 Sep 2005 10:17:01 -0000
+Received: from mailhost1.csr.com (HELO MAILSWEEPER01.csr.com) (81.105.217.43)
+  by a.mx.sunsite.dk with SMTP; 6 Sep 2005 10:16:55 -0000
+Received: from exchange03.csr.com (unverified [10.100.137.60]) by 
+    MAILSWEEPER01.csr.com (Content Technologies SMTPRS 4.3.12) with ESMTP id 
+    <T73378dcb520a6c8d012dc@MAILSWEEPER01.csr.com> for 
+    <zsh-workers@sunsite.dk>; Tue, 6 Sep 2005 11:14:38 +0100
+Received: from news01 ([10.103.143.38]) by exchange03.csr.com with Microsoft 
+    SMTPSVC (5.0.2195.6713); Tue, 6 Sep 2005 11:17:52 +0100
+Date: Tue, 6 Sep 2005 11:16:53 +0100
+From: Peter Stephenson <pws@csr.com>
+To: zsh-workers@sunsite.dk
+Subject: Re: Obscure [not UTF-8] bug in parameter expansion?
+Message-Id: <20050906111653.033c88b5.pws@csr.com>
+In-Reply-To: <1050905214256.ZM9173@candle.brasslantern.com>
+References: <1050905192523.ZM8819@candle.brasslantern.com> 
+    <1050905214256.ZM9173@candle.brasslantern.com>
+Organization: Cambridge Silicon Radio
+X-Mailer: Sylpheed version 0.9.12 (GTK+ 1.2.10; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=ISO-8859-1
+Content-Transfer-Encoding: quoted-printable
+X-OriginalArrivalTime: 06 Sep 2005 10:17:52.0031 (UTC) 
+    FILETIME=[3D3B82F0:01C5B2CC]
+X-Spam-Checker-Version: SpamAssassin 3.0.4 (2005-06-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham 
+	version=3.0.4
+
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> On Sep 5,  7:25pm, Bart Schaefer wrote:
+> }=20
+> } [...]
+> } : zargs:233; s=3D20480=20
+> } : zargs:234; l=3D=FF=20
+> } [...]
+>=20
+> I've narrowed this down to a test case:
+>=20
+> foo() { typeset -a l; echo X${${l##*}[-1]}X }
+>=20
+> It looks like some recent change has broken negative indexing on an
+> empty match result (it happens with a match result on either an array
+> or a string, but not on a plain empty string).
+>=20
+> This is broken in 4.2.5 and 4.2.3 as well, but not in 4.2.0.  I don't
+> have 4.2.1, 4.2.2 or 4.2.4 handy to test against.
+
+We usually take account of the length of a value in getstrvalue() and
+siblings, so it may be this chunk in getstrvalue() that needs extending
+somehow (s is the full string, here an empty string):
+
+    if (v->start =3D=3D 0 && v->end =3D=3D -1)
+	return s;
+
+    if (v->start < 0)
+	v->start +=3D strlen(s);
+    if (v->end < 0)
+	v->end +=3D strlen(s) + 1;
+    s =3D (v->start > (int)strlen(s)) ? dupstring("") : dupstring(s + v->st=
+art);
+    if (v->end <=3D v->start)
+	s[0] =3D '\0';
+    else if (v->end - v->start <=3D (int)strlen(s))
+	s[v->end - v->start + (s[v->end - v->start - 1] =3D=3D Meta)] =3D '\0';
+
+(If you wondering why it's a string not an array, ${l##*} is treated as a
+scalar on return when l is empty.  I don't know if this is right or not
+because multsub() is a black box to me.  A strict reading of rule 1 of the
+parameter substitution rules suggests it might be wrong, but on the other
+hand the user shouldn't really see the effect.  However, the bug in this
+chunk of code is present anyway, see below.)
+
+You can see that if strlen(s) is 0 and v->start is -1, which I believe is
+correct up to this point, you can end up with an invalid index.  v->end
+starts as -1 (this is normal) and so gets massaged to 0.
+
+I think the right fix is to sanitise v->start to 0 if it is still negative.
+This affects this example:
+
+l=3D(foo)
+print ${${l}[1][-4,1]}
+
+With this fix, you get "f"; if instead you rejected the whole thing if
+v->start were invalid you would get an empty string.  The version
+here seems to fit better with the usual zsh philosophy of treating
+nonexistent bits as empty.  (The example is different because l is
+returned as an array.)
+
+You can see the underlying bug in the current code with a simple example:
+
+% l=3Dfoo
+% print ${l[-4,1]}
+ f
+
+The stuff before the f was garbage.
+
+There was a flurry of activity on this chunk of code back in 2000, but
+nothing since.  Maybe it previously worked as a side effect of something
+else (possibly a change in multsub()), but as far as I can see this is the
+right place to fix it.
+
+If this looks OK I will patch it 4.2.
+
+Index: Src/params.c
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.101
+diff -u -r1.101 params.c
+--- Src/params.c	22 Aug 2005 11:43:36 -0000	1.101
++++ Src/params.c	6 Sep 2005 10:08:14 -0000
+@@ -1565,8 +1565,11 @@
+     if (v->start =3D=3D 0 && v->end =3D=3D -1)
+ 	return s;
+=20
+-    if (v->start < 0)
++    if (v->start < 0) {
+ 	v->start +=3D strlen(s);
++	if (v->start < 0)
++	    v->start =3D 0;
++    }
+     if (v->end < 0)
+ 	v->end +=3D strlen(s) + 1;
+     s =3D (v->start > (int)strlen(s)) ? dupstring("") : dupstring(s + v->s=
+tart);
+Index: Test/D06subscript.ztst
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D
+RCS file: /cvsroot/zsh/zsh/Test/D06subscript.ztst,v
+retrieving revision 1.8
+diff -u -r1.8 D06subscript.ztst
+--- Test/D06subscript.ztst	13 Aug 2001 17:45:03 -0000	1.8
++++ Test/D06subscript.ztst	6 Sep 2005 10:08:14 -0000
+@@ -178,3 +178,8 @@
+ 0:Keys with double quotes and the (P) expansion flag
+ >lower
+ >upper
++
++  typeset -a empty_array
++  echo X${${l##*}[-1]}X
++0:Negative index applied to substition result from empty array
++>XX
+
+
+--=20
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+**********************************************************************
+

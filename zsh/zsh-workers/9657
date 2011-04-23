@@ -1,0 +1,317 @@
+From zsh-workers-return-9657-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Feb 10 14:03:52 2000
+Return-Path: <zsh-workers-return-9657-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24525 invoked from network); 10 Feb 2000 14:03:49 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 10 Feb 2000 14:03:49 -0000
+Received: (qmail 5153 invoked by alias); 10 Feb 2000 14:03:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9657
+Received: (qmail 5144 invoked from network); 10 Feb 2000 14:03:35 -0000
+Date: Thu, 10 Feb 2000 15:03:11 +0100 (MET)
+Message-Id: <200002101403.PAA25399@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: yet another completer
+
+
+I have been thinking for quite some time how we could get rid of
+$compmatchers... some changes from not-so-long-ago finally gave me
+this idea (it's the thing that compadd now uses all its -M options, at 
+least after this patch, there was a small thinko).
+
+The _matcher completer (sorry for the name, it's similar to _match to
+make me like it either, but it's named after the `matcher' style
+(which already existed)) can be used to set up match specifications
+that are to be used in all following completers. And using some zstyle 
+magic, this allows much finer control over when to use which match
+specs than $compmatchers does.
+
+And with this patch, $compmatchers is probably not that useful
+anymore. Only for compctl and for custom made completion widgets, that 
+is (although those could use their own -M options so maybe it isn't
+that useful there either; and if they use utility functions from the
+completion system, they could probably be made to use _matcher, too). 
+This almost makes me think that we could actually remove $compmatchers 
+and leave only the compctl-with-only-`-M' thing for those who still
+use compctl. That would also allow us to move some more code from the
+complete module into the compctl module, although not much and the
+code doesn't make things much slower as long as $compmatchers is not
+set (or set to only one string). So, I haven't changed anything there
+yet.
+
+
+The hunks in _path_files only remove the mspec local -- something I
+had voellig verpennt before. And the hunks in _prefix make it use
+`prefix-<num>' in the completer field of the context name, too.
+
+
+Bye
+ Sven
+
+diff -ru ../z.old/Completion/Core/_approximate Completion/Core/_approximate
+--- ../z.old/Completion/Core/_approximate	Thu Feb 10 12:55:08 2000
++++ Completion/Core/_approximate	Thu Feb 10 14:28:53 2000
+@@ -6,7 +6,7 @@
+ # or get the corrected prefix.
+ 
+ local _comp_correct _correct_expl comax cfgacc
+-local curcontext="${curcontext}" oldcontext
++local curcontext="${curcontext}" oldcontext opm="$compstate[pattern_match]"
+ 
+ # Only if all global matchers have been tried.
+ 
+@@ -100,6 +100,7 @@
+     fi
+     compstate[matcher]="$compstate[total_matchers]"
+     unfunction compadd
++    compstate[pattern_match]="$opm"
+ 
+     return 0
+   fi
+@@ -110,5 +111,6 @@
+ 
+ compstate[matcher]="$compstate[total_matchers]"
+ unfunction compadd
++compstate[pattern_match]="$opm"
+ 
+ return 1
+diff -ru ../z.old/Completion/Core/_description Completion/Core/_description
+--- ../z.old/Completion/Core/_description	Thu Feb 10 12:55:09 2000
++++ Completion/Core/_description	Thu Feb 10 13:31:02 2000
+@@ -27,6 +27,8 @@
+     [[ -z "$gname" ]] && gname="$1"
+ zstyle -s ":completion:${curcontext}:$1" matcher match &&
+     opts=($opts -M "${(q)match}")
++[[ -n "$_comp_matcher" ]] && opts=($opts -M "${(q)_comp_matcher}")
++
+ if zstyle -a ":completion:${curcontext}:$1" ignored-patterns _comp_ignore; then
+   opts=( $opts -F _comp_ignore)
+ else
+diff -ru ../z.old/Completion/Core/_main_complete Completion/Core/_main_complete
+--- ../z.old/Completion/Core/_main_complete	Thu Feb 10 12:55:09 2000
++++ Completion/Core/_main_complete	Thu Feb 10 14:27:34 2000
+@@ -20,7 +20,7 @@
+ unsetopt markdirs globsubst shwordsplit nounset ksharrays
+ 
+ local comp post ret=1 _compskip _prio_num=1 format _comp_ignore \
+-      _completers _completers_left \
++      _completers _completers_left _comp_matcher \
+       context state line opt_args val_args curcontext="$curcontext" \
+       _last_nmatches=-1 _last_menu_style _def_menu_style _menu_style sel \
+       _saved_exact="${compstate[exact]}" \
+diff -ru ../z.old/Completion/Core/_matcher Completion/Core/_matcher
+--- ../z.old/Completion/Core/_matcher	Thu Feb 10 13:47:29 2000
++++ Completion/Core/_matcher	Thu Feb 10 14:13:43 2000
+@@ -0,0 +1,5 @@
++#autoload
++
++zstyle -s ":completion:${curcontext%%:*}:matcher-${(M)#${(@)_completers[1,-$#_completers_left]}:#_matcher}:${curcontext#[^:]#:[^:]#:}:" matcher _comp_matcher || _comp_matcher=''
++
++return 1
+diff -ru ../z.old/Completion/Core/_path_files Completion/Core/_path_files
+--- ../z.old/Completion/Core/_path_files	Thu Feb 10 12:55:10 2000
++++ Completion/Core/_path_files	Thu Feb 10 13:41:25 2000
+@@ -6,7 +6,7 @@
+ local linepath realpath donepath prepath testpath exppath skips skipped
+ local tmp1 tmp2 tmp3 tmp4 i orig eorig pre suf tpre tsuf opre osuf cpre
+ local pats haspats=no ignore pfxsfx rem remt sopt gopt opt
+-local nm=$compstate[nmatches] menu mspec matcher mopts atmp sort match
++local nm=$compstate[nmatches] menu matcher mopts atmp sort match
+ 
+ typeset -U prepaths exppaths
+ 
+@@ -54,8 +54,6 @@
+   fi
+ fi  
+ 
+-(( $#matcher )) && mspec="${matcher[2]}"
+-
+ if [[ -z "$_file_pat_checked" ]] &&
+    zstyle -s ":completion:${curcontext}:files" file-patterns tmp1 &&
+    [[ -n "$tmp1" ]]; then
+@@ -92,7 +90,6 @@
+   fi
+   tmp1=$expl[(I)-M*]
+   if (( tmp1 )); then
+-    mspec="$mspec $expl[1+tmp1]"
+     if (( $#matcher )); then
+       matcher[2]="$matcher[2] $expl[1+tmp1]"
+     else
+@@ -452,30 +449,26 @@
+         if [[ "$tmp3" = */* ]]; then
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" -s "/${tmp3#*/}" \
+ 	          -W "$prepath$realpath$testpath" \
+-		  "$pfxsfx[@]" \
+-                  -M "r:|/=* r:|=* $mspec" \
++		  "$pfxsfx[@]" -M "r:|/=* r:|=*" \
+ 		  - "${(@)tmp1%%/*}"
+ 	else
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" \
+ 	          -W "$prepath$realpath$testpath" \
+-		   "$pfxsfx[@]" \
+-                   -M "r:|/=* r:|=* $mspec" \
++		   "$pfxsfx[@]" -M "r:|/=* r:|=*" \
+ 		   - "$tmp1[@]"
+ 	fi
+       else
+         if [[ "$tmp3" = */* ]]; then
+ 	  atmp=( -Qf "$mopts[@]" -p "$linepath$tmp2"
+ 	         -W "$prepath$realpath$testpath"
+-	         "$pfxsfx[@]" \
+-                 -M "r:|/=* r:|=* $mspec" )
++	         "$pfxsfx[@]" -M "r:|/=* r:|=*" )
+           for i in "$tmp1[@]"; do
+ 	    compadd "$atmp[@]" -s "/${i#*/}" - "${i%%/*}"
+ 	  done
+         else
+ 	  compadd -Qf "$mopts[@]" -p "$linepath$tmp2" \
+-		  -W "$prepath$realpath$testpath" \
+-		  "$pfxsfx[@]" \
+-                  -M "r:|/=* r:|=* $mspec" \
++                  -W "$prepath$realpath$testpath" \
++		  "$pfxsfx[@]" -M "r:|/=* r:|=*" \
+ 		  - "$tmp1[@]"
+         fi
+       fi
+@@ -522,11 +515,8 @@
+     fi
+     tmp4="$testpath"
+     compquote tmp4 tmp1
+-    compadd -Qf "$mopts[@]" -p "$linepath$tmp4" \
+-	    -W "$prepath$realpath$testpath" \
+-	    "$pfxsfx[@]" \
+-            -M "r:|/=* r:|=* $mspec" \
+-	    - "$tmp1[@]"
++    compadd -Qf "$mopts[@]" -p "$linepath$tmp4" -W "$prepath$realpath$testpath" \
++	    "$pfxsfx[@]" -M "r:|/=* r:|=*" - "$tmp1[@]"
+   fi
+ done
+ 
+@@ -542,8 +532,7 @@
+   if (( $#exppaths )); then
+     PREFIX="${opre}"
+     SUFFIX="${osuf}"
+-    compadd -Q "$mopts[@]" -S '' \
+-            -M "r:|/=* r:|=* $mspec" -p "$linepath" - "$exppaths[@]"
++    compadd -Q "$mopts[@]" -S '' -M "r:|/=* r:|=*" -p "$linepath" - "$exppaths[@]"
+   fi
+ fi
+ 
+diff -ru ../z.old/Completion/Core/_prefix Completion/Core/_prefix
+--- ../z.old/Completion/Core/_prefix	Thu Feb 10 12:55:11 2000
++++ Completion/Core/_prefix	Thu Feb 10 14:23:35 2000
+@@ -4,7 +4,7 @@
+ 
+ [[ -n "$SUFFIX" ]] || return 1
+ 
+-local curcontext="${curcontext/:[^:]#:/:prefix:}" comp i
++local curcontext="${curcontext/:[^:]#:/:prefix-${(M)#${(@)_completers[1,-$#_completers_left]}:#_prefix}:}" comp i
+ 
+ zstyle -a ":completion:${curcontext}:" completer comp ||
+   comp=( "${(@)_completers[1,-${#_completers_left}-1][(R)_prefix,-1]}" )
+@@ -16,8 +16,14 @@
+ fi
+ SUFFIX=''
+ 
++local _completers _completer_left
++
++_completers=( "$comp[@]" )
++_completers_left=( "$comp[@]" )
++
+ for i in "$comp[@]"; do
+   [[ "$i" != _prefix ]] && "$i" && return 0
++  shift 1 _completers_left
+ done
+ 
+ return 1
+diff -ru ../z.old/Doc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- ../z.old/Doc/Zsh/compsys.yo	Thu Feb 10 12:54:49 2000
++++ Doc/Zsh/compsys.yo	Thu Feb 10 14:48:48 2000
+@@ -1097,6 +1097,11 @@
+ ifzman(the section `Matching Control' in zmanref(zshcompwid))\
+ ifnzman(noderef(Matching Control))\
+ .
++
++This style is also used by the tt(_matcher) completer, see
++ifzman(the section `Control Functions' below)\
++ifnzman(noderef(Control Functions)) 
++for more information.
+ )
+ item(tt(max-errors))(
+ This is used by the tt(_approximate) and tt(_correct) completer functions
+@@ -1583,6 +1588,35 @@
+ Note that the matcher specifications defined globally or used by the
+ completion functions will not be used.
+ )
++findex(_matcher)
++item(tt(_matcher))(
++This completer allows to define a match specification (see
++ifzman(the section `Matching Control' in zmanref(zshcompwid))\
++ifnzman(noderef(Matching Control))\
++) that is to be used by all following completers. This is comparable
++to the tt(compmatchers) special array, but gives finer control. The match
++specification to use is looked up using the tt(matcher) style. For
++this, the completer field of the context name will contain the string
++`tt(matcher-)var(n)', where `var(n)' is the number of the call to
++tt(_matcher). For example:
++
++example(zstyle ':completion:::::' completer _matcher _complete _matcher _complete
++zstyle ':completion:*:matcher-1:::' matcher 'm:{a-z-}={A-Z_}'
++zstyle ':completion:*:matcher-2:::' matcher 'm:{a-z-}={A-Z_}' 'r:|[-_./]=* r:|=*')
++
++Since tt(_matcher) is called as the first completer, the tt(_complete) 
++completer called after it will first use the match specification
++`tt(m:{a-z-}={A-Z_})'. If that doesn't generate any matches, the next
++call to tt(_matcher) will make the second call to tt(_complete) use
++the specification `tt(r:|[-_./]=* r:|=*)' in addition to the one
++already used by the first attempt (but note that the specification has 
++to be given again).
++
++If the tt(matcher) style is not set for one of the invocations of
++tt(_matcher), this has the same effect as setting it to the empty
++string: it makes the following completion function not use any match
++specifications besides those used by the functions themselves.
++)
+ findex(_expand)
+ item(tt(_expand))(
+ This completer function does not really do completion, but instead
+@@ -1639,7 +1673,10 @@
+ currently used by the whole completion are used -- except, of course,
+ the tt(_prefix) completer itself. Also, if this completer appears more
+ than once in the list of completers to use only those completers not
+-already tried by the last invocation of tt(_prefix) will be called.
++already tried by the last invocation of tt(_prefix) will be
++called. The completer field used to look up styles contains the string 
++`tt(prefix-)var(n)', where `var(n)' is the number of the call to
++tt(_prefix).
+ 
+ For example, consider this global tt(completer) style:
+ 
+@@ -1653,7 +1690,7 @@
+ want it to try only normal completion, you need to do:
+ 
+ example(zstyle ':completion:::::' completer _complete ... _prefix
+-zstyle ':completion::prefix:::' completer _complete)
++zstyle ':completion::prefix-1:::' completer _complete)
+ 
+ The tt(add-space) style is used, too. If it is set to `true' then
+ tt(_prefix) will insert a space between the matches generated (if any) 
+diff -ru ../z.old/Src/Zle/complete.c Src/Zle/complete.c
+--- ../z.old/Src/Zle/complete.c	Thu Feb 10 12:54:42 2000
++++ Src/Zle/complete.c	Thu Feb 10 13:38:35 2000
+@@ -595,6 +595,7 @@
+ 			mstr = tricat(mstr, " ", m);
+ 		    else
+ 			mstr = ztrdup(m);
++		    m = NULL;
+ 		}
+ 	    }
+ 	}
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

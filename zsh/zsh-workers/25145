@@ -1,0 +1,194 @@
+From zsh-workers-return-25145-mason-zsh=primenet.com.au@sunsite.dk Tue Jun 10 10:08:18 2008
+Return-Path: <zsh-workers-return-25145-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10095 invoked from network); 10 Jun 2008 10:08:05 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.4 (2008-01-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00,WEIRD_PORT
+	autolearn=no version=3.2.4
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 10 Jun 2008 10:08:05 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 36142 invoked from network); 10 Jun 2008 10:07:57 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 10 Jun 2008 10:07:57 -0000
+Received: (qmail 26797 invoked by alias); 10 Jun 2008 10:07:52 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 25145
+Received: (qmail 26780 invoked from network); 10 Jun 2008 10:07:51 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 10 Jun 2008 10:07:51 -0000
+Received: from cluster-d.mailcontrol.com (cluster-d.mailcontrol.com [217.69.20.190])
+	by bifrost.dotsrc.org (Postfix) with ESMTPS id 4B8FD8028AC3
+	for <zsh-workers@sunsite.dk>; Tue, 10 Jun 2008 12:07:36 +0200 (CEST)
+Received: from cameurexb01.EUROPE.ROOT.PRI ([193.128.72.68])
+	by rly19d.srv.mailcontrol.com (MailControl) with ESMTP id m5AA7Zww010838
+	for <zsh-workers@sunsite.dk>; Tue, 10 Jun 2008 11:07:35 +0100
+Received: from news01 ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.3959);
+	 Tue, 10 Jun 2008 11:07:34 +0100
+Date: Tue, 10 Jun 2008 11:07:34 +0100
+From: Peter Stephenson <pws@csr.com>
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Subject: Re: set -x in functions
+Message-ID: <20080610110734.22d4c1cc@news01>
+In-Reply-To: <20080609113222.GD5048@sc.homeunix.net>
+References: <20080609113222.GD5048@sc.homeunix.net>
+Organization: CSR
+X-Mailer: Claws Mail 3.4.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 10 Jun 2008 10:07:34.0474 (UTC) FILETIME=[CD87CAA0:01C8CAE1]
+X-Scanned-By: MailControl A-08-50-03 (www.mailcontrol.com) on 10.68.0.129
+X-Virus-Scanned: ClamAV 0.92.1/7417/Tue Jun 10 03:14:29 2008 on bifrost
+X-Virus-Status: Clean
+
+On Mon, 9 Jun 2008 12:32:22 +0100
+Stephane Chazelas <Stephane_Chazelas@yahoo.fr> wrote:
+> $ zsh -xc 'f() { { echo a; } 2> /dev/null; }; f'
+> + f
+> + echo a
+> a
+> Why is "+ echo a" displayed ...?
+
+It's related to this code in exec.c:execcmd().
+
+    /* Make a copy of stderr for xtrace output before redirecting */
+    fflush(xtrerr);
+    if (isset(XTRACE) && xtrerr == stderr &&
+	(type < WC_SUBSH || type == WC_TIMED)) {
+	if (!(xtrerr = fdopen(movefd(dup(fileno(stderr))), "w")))
+	    xtrerr = stderr;
+	else
+	    fdtable[fileno(xtrerr)] = FDT_XTRACE;
+    }
+
+I eventually traced this to a patch from Bart, zsh-workers/9792
+(http://www.zsh.org/cgi-bin/mla/redirect?WORKERNUMBER=9792).
+There's a comment there:
+
+  There is still one problem with this:  The xtrace output of ( ... ) and
+  { ... } constructs is NOT redirected with stderr, which it should be. I
+  suspect that's a matter of restoring xtrerr = stderr in entersubsh(), but
+  I wasn't sure exactly where.
+
+See also test "xtrace with and without redirection" in E02xtrace.ztst.
+This actually shows the odd behaviour, things not being redirected when
+they should.
+
+Shouldn't we be able to do something like the following?  It
+unconditionally sets xtrerr to stderr after redirection, but also remembers
+if there was a temporary copy of xtrerr and restores xtrerr if there was.
+
+In fact, I don't really understand why saving and restoring stderr (with no
+special variables apart from those used locally for saving and restoring)
+properly shouldn't automatically do the correct thing.  Why does this
+need to be different from any other use of stderr?
+
+The changes to the test look plausible---some stuff that wasn't redirected
+to xtrerr.log now is.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.131
+diff -u -r1.131 exec.c
+--- Src/exec.c	11 May 2008 19:55:21 -0000	1.131
++++ Src/exec.c	10 Jun 2008 09:55:03 -0000
+@@ -2165,7 +2165,7 @@
+     LinkList redir;
+     wordcode code;
+     Wordcode beg = state->pc, varspc;
+-    FILE *oxtrerr = xtrerr;
++    FILE *oxtrerr = xtrerr, *newxtrerr = NULL;
+ 
+     doneps4 = 0;
+     redir = (wc_code(*state->pc) == WC_REDIR ? ecgetredirs(state) : NULL);
+@@ -2675,10 +2675,10 @@
+     fflush(xtrerr);
+     if (isset(XTRACE) && xtrerr == stderr &&
+ 	(type < WC_SUBSH || type == WC_TIMED)) {
+-	if (!(xtrerr = fdopen(movefd(dup(fileno(stderr))), "w")))
+-	    xtrerr = stderr;
+-	else
++	if ((newxtrerr = fdopen(movefd(dup(fileno(stderr))), "w"))) {
++	    xtrerr = newxtrerr;
+ 	    fdtable[fileno(xtrerr)] = FDT_XTRACE;
++	}
+     }
+ 
+     /* Add pipeline input/output to mnodes */
+@@ -2885,6 +2885,7 @@
+ 	if (mfds[i] && mfds[i]->ct >= 2)
+ 	    closemn(mfds, i);
+ 
++    xtrerr = stderr;
+     if (nullexec) {
+ 	if (nullexec == 1) {
+ 	    /*
+@@ -3099,9 +3100,9 @@
+     fixfds(save);
+ 
+  done:
+-    if (xtrerr != oxtrerr) {
+-	fil = fileno(xtrerr);
+-	fclose(xtrerr);
++    if (newxtrerr) {
++	fil = fileno(newxtrerr);
++	fclose(newxtrerr);
+ 	xtrerr = oxtrerr;
+ 	zclose(fil);
+     }
+Index: Test/E02xtrace.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/E02xtrace.ztst,v
+retrieving revision 1.5
+diff -u -r1.5 E02xtrace.ztst
+--- Test/E02xtrace.ztst	5 Aug 2002 13:10:03 -0000	1.5
++++ Test/E02xtrace.ztst	10 Jun 2008 09:55:03 -0000
+@@ -55,16 +55,21 @@
+ >Tracing: function 2>file
+ >Tracing: source
+ >Tracing: source 2>file
++>+(eval):3> print 'Tracing: builtin 2>file'
++>+(eval):5> cat
+ >+(eval):7> print 'Tracing: ( builtin ) 2>file'
+ >+(eval):9> cat
+ >+(eval):11> print 'Tracing: { builtin } 2>file'
+ >+(eval):13> cat
+ >+(eval):15> print 'Tracing: do builtin done 2>file'
+ >+(eval):17> cat
++>+(eval):19> xtf 'Tracing: function 2>file'
++>+xtf:1> local regression_test_dummy_variable
++>+xtf:2> print 'Tracing: function 2>file'
++>+(eval):21> . ./xt.in 'Tracing: source 2>file'
++>+./xt.in:1> print 'Tracing: source 2>file'
+ ?+(eval):2> print 'Tracing: builtin'
+-?+(eval):3> print 'Tracing: builtin 2>file'
+ ?+(eval):4> cat
+-?+(eval):5> cat
+ ?+(eval):6> print 'Tracing: ( builtin )'
+ ?+(eval):8> cat
+ ?+(eval):10> print 'Tracing: { builtin }'
+@@ -74,13 +79,8 @@
+ ?+(eval):18> xtf 'Tracing: function'
+ ?+xtf:1> local regression_test_dummy_variable
+ ?+xtf:2> print 'Tracing: function'
+-?+(eval):19> xtf 'Tracing: function 2>file'
+-?+xtf:1> local regression_test_dummy_variable
+-?+xtf:2> print 'Tracing: function 2>file'
+ ?+(eval):20> . ./xt.in 'Tracing: source'
+ ?+./xt.in:1> print 'Tracing: source'
+-?+(eval):21> . ./xt.in 'Tracing: source 2>file'
+-?+./xt.in:1> print 'Tracing: source 2>file'
+ ?+(eval):22> set +x
+ 
+  typeset -ft xtf
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+

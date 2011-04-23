@@ -1,0 +1,121 @@
+From hzoli@cs.elte.hu Tue Jun 25 05:27:32 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id FAA08354 for <mason@werple.mira.net.au>; Tue, 25 Jun 1996 05:27:29 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id PAA09027; Mon, 24 Jun 1996 15:12:17 -0400 (EDT)
+Resent-Date: Mon, 24 Jun 1996 15:12:17 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199606241911.VAA05764@bolyai.cs.elte.hu>
+Subject: Re: BUG: useheap in doexpandhist()
+To: schaefer@z-code.ncd.com
+Date: Mon, 24 Jun 1996 21:11:47 +0200 (MET DST)
+Cc: zsh-workers@math.gatech.edu
+In-Reply-To: <960624112616.ZM1735@zyrcon.z-code.com> from "Barton E. Schaefer" at "Jun 24, 96 11:26:15 am"
+Organization: Dept. of Comp. Sci., Eotvos University, Budapest, Hungary
+Phone: (36 1)2669833 ext: 2667, home phone: (36 1) 2752368
+X-Mailer: ELM [version 2.4ME+ PL16 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"8RaI81.0.wC2.GYkpn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1438
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 3350
+Status: O
+
+> On Jun 22,  1:12pm, Bart Schaefer wrote:
+> } Subject: BUG: useheap in doexpandhist()
+> }
+> } I just got (in beta21):
+> } 
+> } 	BUG: useheap in doexpandhist()
+> } 
+> } in the middle of completing the name of a zsh function.  It happened only
+> } once, and I can't seem to make it happen again.
+> 
+> I've gotten it several more times now, always in completion but not always
+> in the name of a function.  I can't yet isolate any preceding usages that
+> trigger it.  It may have something to do with that TMOUT=10 TRAPALRM that
+> I posted a few days ago.
+
+Unfortunately there are some zsh functions which are not reentrant which
+cause problems when a signal comes.  There are two solutions.  The best
+would be make evry function which might be used when executing a trap
+(which is practically all functions) reentrant.  This whould be a big and
+difficult change.  The other solution is to queue signals in most cases and
+process them in some well-defined cases.  The problem with this approach is
+clearly that in some cases the shell will not respond immediately to the
+signal.
+
+But for your problem the patch below may help.  It does not solve the
+problem with signals unfortunately (just try
+trap 'echo interrupt' INT ; while true ; do ; done and hit ^C a few times
+quickly and BUG's will come).
+
+About the patch below: Peter suggested a stack for permalloc()/lastalloc().
+This is not a bad idea but maybe it's not the best.  In most places of the
+code either only permanent or only heap allocation is valid.  Also almost
+always ncalloc, alloc, dupstrig are used to get space from the heap.  The
+most important exeptions are the various dup*** routines and the routines
+for creating new structures.  Perhaps a better solution is to use
+halloc()/hcalloc() where the heap should be used and define a new function
+as a replacement for dupstring() which always uses the heap.  An other
+solution is using heapalloc()/permalloc() in all cases where the state of
+the allocation is unknown or know to be wrong.
+
+And does anyone know the historical reason why ncalloc refers to
+halloc/zalloc and alloc refers to hcalloc/zcalloc?  This is exactly the
+opposite of the logical behaviour.
+
+Zoltan
+
+*** Src/signals.c	1996/05/02 23:41:23	2.3
+--- Src/signals.c	1996/06/24 15:26:36
+***************
+*** 684,689 ****
+--- 684,690 ----
+      LinkList args;
+      char *name, num[4];
+      int sav = sigtrapped[sig];
++     int luh;
+   
+      /* if signal is being ignored or the trap function		      *
+       * is NULL, then return					      *
+***************
+*** 699,704 ****
+--- 700,706 ----
+      sigtrapped[sig] = 2;
+  
+      lexsave();
++     luh = useheap;
+      permalloc();
+      args = newlinklist();
+      name = (char *) zalloc(5 + strlen(sigs[sig]));
+***************
+*** 707,713 ****
+--- 709,718 ----
+      sprintf(num, "%d", sig);
+      addlinknode(args, num);
+      trapreturn = -1;
++     heapalloc();
+      doshfunc(sigfuncs[sig], args, 0, 1);
++     if (!luh)
++ 	permalloc();
+      lexrestore();
+      freelinklist(args, (FreeFunc) NULL);
+      zsfree(name);
+*** Src/exec.c	1996/06/21 10:12:47	2.43
+--- Src/exec.c	1996/06/24 15:22:55
+***************
+*** 2364,2369 ****
+--- 2364,2370 ----
+      List xexitfn;
+      char saveopts[OPT_SIZE];
+  
++     MUSTUSEHEAP("doshfunc");
+      pushheap();
+      oldlastval = lastval;
+      xexittr = sigtrapped[SIGEXIT];
+
+

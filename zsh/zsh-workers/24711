@@ -1,0 +1,260 @@
+From zsh-workers-return-24711-mason-zsh=primenet.com.au@sunsite.dk Fri Mar 14 11:37:36 2008
+Return-Path: <zsh-workers-return-24711-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28163 invoked from network); 14 Mar 2008 11:37:22 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.4 (2008-01-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.4
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 14 Mar 2008 11:37:22 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 10713 invoked from network); 14 Mar 2008 11:37:14 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 14 Mar 2008 11:37:14 -0000
+Received: (qmail 21610 invoked by alias); 14 Mar 2008 11:37:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 24711
+Received: (qmail 21593 invoked from network); 14 Mar 2008 11:37:10 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 14 Mar 2008 11:37:10 -0000
+Received: from cluster-g.mailcontrol.com (cluster-g.mailcontrol.com [85.115.41.190])
+	by bifrost.dotsrc.org (Postfix) with ESMTP id 948FE80307F7
+	for <zsh-workers@sunsite.dk>; Fri, 14 Mar 2008 12:37:06 +0100 (CET)
+Received: from cameurexb01.EUROPE.ROOT.PRI ([62.189.241.200])
+	by rly07g.srv.mailcontrol.com (MailControl) with ESMTP id m2EBaTp1024579
+	for <zsh-workers@sunsite.dk>; Fri, 14 Mar 2008 11:36:58 GMT
+Received: from news01 ([10.103.143.38]) by cameurexb01.EUROPE.ROOT.PRI with Microsoft SMTPSVC(6.0.3790.3959);
+	 Fri, 14 Mar 2008 11:36:41 +0000
+Date: Fri, 14 Mar 2008 11:36:41 +0000
+From: Peter Stephenson <pws@csr.com>
+To: zsh-workers@sunsite.dk
+Subject: Re: Here-documents borked in "functions" output
+Message-ID: <20080314113641.10398594@news01>
+In-Reply-To: <080313195243.ZM21930@torch.brasslantern.com>
+References: <080313195243.ZM21930@torch.brasslantern.com>
+Organization: CSR
+X-Mailer: Claws Mail 3.3.1 (GTK+ 2.12.5; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 14 Mar 2008 11:36:41.0617 (UTC) FILETIME=[AC531010:01C885C7]
+X-Scanned-By: MailControl A-08-00-05 (www.mailcontrol.com) on 10.71.0.117
+X-Virus-Scanned: ClamAV 0.91.2/6228/Fri Mar 14 05:45:15 2008 on bifrost
+X-Virus-Status: Clean
+
+On Thu, 13 Mar 2008 19:52:41 -0700
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> hello() { cat <<EOF
+> Anything can be here
+> Hi there $LOGNAME
+> EOF
+> }
+> 
+> Becomes this:
+> 
+> schaefer<544> functions hello
+> hello () {
+>         cat <<< Anything can be here
+> Hi there $LOGNAME
+> }
+
+There has always been a bit of a hack here, so it's not surprising things
+go a little wonky.  We turn HERE-documents into HERE-strings immediately;
+the code in text.c that re-presents them doesn't currently know whether the
+code came from a HERE-document, in which case it needs extra quoting, for
+which it simply guesses.  The sensible fix is to tell it.
+
+There are two stages involved: parsing, where we just need a bit flag
+for the new state, and execution, where the redirection is expanded
+out at the last minute to make it easier to handle.  For the second case it
+seems sensible to add an extra flags field.  That means the code in exec.c
+doesn't have to change at all.
+
+The new tests should catch most likely glitches.
+
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.68
+diff -u -r1.68 parse.c
+--- Src/parse.c	10 Jan 2008 18:53:50 -0000	1.68
++++ Src/parse.c	14 Mar 2008 11:32:21 -0000
+@@ -1861,7 +1861,7 @@
+ void
+ setheredoc(int pc, int type, char *str)
+ {
+-    ecbuf[pc] = WCB_REDIR(type);
++    ecbuf[pc] = WCB_REDIR(type | REDIR_FROM_HEREDOC_MASK);
+     ecbuf[pc + 2] = ecstrcode(str);
+ }
+ 
+@@ -2409,6 +2409,10 @@
+ 	r->type = WC_REDIR_TYPE(code);
+ 	r->fd1 = *s->pc++;
+ 	r->name = ecgetstr(s, EC_DUP, NULL);
++	if (WC_REDIR_FROM_HEREDOC(code))
++	    r->flags = REDIRF_FROM_HEREDOC;
++	else
++	    r->flags = 0;
+ 	if (WC_REDIR_VARID(code))
+ 	    r->varid = ecgetstr(s, EC_DUP, NULL);
+ 	else
+Index: Src/text.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/text.c,v
+retrieving revision 1.21
+diff -u -r1.21 text.c
+--- Src/text.c	4 Jan 2008 14:45:40 -0000	1.21
++++ Src/text.c	14 Mar 2008 11:32:22 -0000
+@@ -831,17 +831,22 @@
+ 	    taddstr(fstr[f->type]);
+ 	    if (f->type != REDIR_MERGEIN && f->type != REDIR_MERGEOUT)
+ 		taddchr(' ');
+-	    if (f->type == REDIR_HERESTR && !has_token(f->name)) {
++	    if (f->type == REDIR_HERESTR &&
++		(f->flags & REDIRF_FROM_HEREDOC)) {
+ 		/*
+ 		 * Strings that came from here-documents are converted
+ 		 * to here strings without quotation, so add that
+-		 * now.  If tokens are already present taddstr()
+-		 * will do the right thing (anyway, adding more
+-		 * quotes certainly isn't right in that case).
++		 * now.  If tokens are present we need to do double quoting.
+ 		 */
+-		taddchr('\'');
+-		taddstr(quotestring(f->name, NULL, QT_SINGLE));
+-		taddchr('\'');
++		if (!has_token(f->name)) {
++		    taddchr('\'');
++		    taddstr(quotestring(f->name, NULL, QT_SINGLE));
++		    taddchr('\'');
++		} else {
++		    taddchr('"');
++		    taddstr(quotestring(f->name, NULL, QT_DOUBLE));
++		    taddchr('"');
++		}
+ 	    } else
+ 		taddstr(f->name);
+ 	    taddchr(' ');
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.118
+diff -u -r1.118 zsh.h
+--- Src/zsh.h	16 Dec 2007 14:05:16 -0000	1.118
++++ Src/zsh.h	14 Mar 2008 11:32:22 -0000
+@@ -309,7 +309,10 @@
+     REDIR_OUTPIPE		/* > >(...) */
+ };
+ #define REDIR_TYPE_MASK	(0x1f)
++/* Redir using {var} syntax */
+ #define REDIR_VARID_MASK (0x20)
++/* Mark here-string that came from a here-document */
++#define REDIR_FROM_HEREDOC_MASK (0x40)
+ 
+ #define IS_WRITE_FILE(X)      ((X)>=REDIR_WRITE && (X)<=REDIR_READWRITE)
+ #define IS_APPEND_REDIR(X)    (IS_WRITE_FILE(X) && ((X) & 2))
+@@ -550,10 +553,18 @@
+ #define CONDDEF(name, flags, handler, min, max, condid) \
+     { NULL, name, flags, handler, min, max, condid, NULL }
+ 
++/* Flags for redirections */
++
++enum {
++    /* Mark a here-string that came from a here-document */
++    REDIRF_FROM_HEREDOC = 1
++};
++
+ /* tree element for redirection lists */
+ 
+ struct redir {
+     int type;
++    int flags;
+     int fd1, fd2;
+     char *name;
+     char *varid;
+@@ -744,6 +755,7 @@
+ 
+ #define WC_REDIR_TYPE(C)    ((int)(wc_data(C) & REDIR_TYPE_MASK))
+ #define WC_REDIR_VARID(C)   ((int)(wc_data(C) & REDIR_VARID_MASK))
++#define WC_REDIR_FROM_HEREDOC(C) ((int)(wc_data(C) & REDIR_FROM_HEREDOC_MASK))
+ #define WCB_REDIR(T)        wc_bld(WC_REDIR, (T))
+ /* Size of redir is 4 words if REDIR_VARID_MASK is set, else 3 */
+ #define WC_REDIR_WORDS(C)   (WC_REDIR_VARID(C) ? 4 : 3)
+Index: Test/A04redirect.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/A04redirect.ztst,v
+retrieving revision 1.12
+diff -u -r1.12 A04redirect.ztst
+--- Test/A04redirect.ztst	12 Jul 2006 12:02:51 -0000	1.12
++++ Test/A04redirect.ztst	14 Mar 2008 11:32:22 -0000
+@@ -82,6 +82,58 @@
+ >b
+ >c
+ 
++# The following tests check that output of parsed here-documents works.
++# This isn't completely trivial because we convert the here-documents
++# internally to here-strings.  So we check again that we can output
++# the reevaluated here-strings correctly.  Hence there are three slightly
++# different stages.  We don't care how the output actually looks, so
++# we don't test that.
++  heretest() {
++    print First line
++    cat <<-HERE
++	$foo$foo met celeste  'but with extra'  "stuff to test quoting"
++	HERE
++    print Last line
++  }
++  heretest
++  eval "$(functions heretest)"
++  heretest
++  eval "$(functions heretest)"
++  heretest
++0:Re-evaluation of function output with here document, unquoted
++>First line
++>barbar met celeste  'but with extra'  "stuff to test quoting"
++>Last line
++>First line
++>barbar met celeste  'but with extra'  "stuff to test quoting"
++>Last line
++>First line
++>barbar met celeste  'but with extra'  "stuff to test quoting"
++>Last line
++
++  heretest() {
++    print First line
++    cat <<'    HERE'
++    $foo$foo met celeste  'but with extra'  "stuff to test quoting"
++    HERE
++    print Last line
++  }
++  heretest
++  eval "$(functions heretest)"
++  heretest
++  eval "$(functions heretest)"
++  heretest
++0:Re-evaluation of function output with here document, quoted
++>First line
++>    $foo$foo met celeste  'but with extra'  "stuff to test quoting"
++>Last line
++>First line
++>    $foo$foo met celeste  'but with extra'  "stuff to test quoting"
++>Last line
++>First line
++>    $foo$foo met celeste  'but with extra'  "stuff to test quoting"
++>Last line
++
+   #
+   # exec tests: perform these in subshells so if they fail the
+   # shell won't exit.
+
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+

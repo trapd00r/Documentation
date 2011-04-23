@@ -1,0 +1,416 @@
+From zsh-workers-return-7945-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Sep 20 13:38:51 1999
+Return-Path: <zsh-workers-return-7945-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7528 invoked from network); 20 Sep 1999 11:34:05 -0000
+Received: from mail2.primenet.com.au (HELO primenet.com.au) (?Eu6gNITU8Qmfphxj8UhsEMGMqfHmw4vn?@203.24.36.6)
+  by ns1.primenet.com.au with SMTP; 20 Sep 1999 11:34:05 -0000
+Received: (qmail 2169 invoked from network); 20 Sep 1999 09:47:21 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by mail2.primenet.com.au with SMTP; 20 Sep 1999 09:47:21 -0000
+Received: (qmail 28740 invoked by alias); 20 Sep 1999 09:46:55 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7945
+Received: (qmail 28732 invoked from network); 20 Sep 1999 09:46:53 -0000
+Date: Mon, 20 Sep 1999 11:46:51 +0200 (MET DST)
+Message-Id: <199909200946.LAA06629@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: braces in prefixes/suffixes
+
+
+Some time ago someone asked about this, but I can't find that message
+now, so:
+
+Completion inside braces didn't work together with `_path_files' and
+the like when the braces where in the prefix or suffix. That was
+because the code used a simplified matching (direct `str[ps]fx()') and 
+hence couldn't calculate the changed positions for the braces. This
+patch makes the code use real matching for the prefixes and suffixes
+(funnily this means that the code now better matches what's described
+in the manual (ahem)). With that the braces should be reinserted at
+the right places even then.
+
+One thing I need to point out: if I remember correctly, the example in 
+the message I wanted to reply to was `Sr{/z<TAB>' or something like
+that and the poster wanted to get `Src{/z'. This will still not
+happen because braces stick to the left. I'm not sure how we could
+decide when exactly we to move the brace or not. Also, changing the
+current behaviour wouldn't be trivial to implement.
+
+
+Due to the improved prefix/suffix matching I also had to change some
+completion functions again.
+
+Bye
+ Sven
+
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Sun Sep 19 12:23:34 1999
++++ Src/Zle/zle_tricky.c	Sun Sep 19 16:27:10 1999
+@@ -2339,10 +2339,12 @@
+  * matched prefix or suffix, not including the stuff before or after
+  * the last anchor is given. When sfx is non-zero matching is done from
+  * the ends of the strings backward, if test is zero, the global variables
+- * above are used to build the string for the match and the cline. */
++ * above are used to build the string for the match and the cline. If
++ * part is non-zero, we are satisfied if only a part of the line-string
++ * is used (and return the length used). */
+ 
+ static int
+-match_str(char *l, char *w, int *bp, int *rwlp, int sfx, int test)
++match_str(char *l, char *w, int *bp, int *rwlp, int sfx, int test, int part)
+ {
+     int ll = strlen(l), lw = strlen(w), oll = ll, olw = lw;
+     int il = 0, iw = 0, t, ind, add, bc = (bp ? *bp : 0), he = 0;
+@@ -2423,7 +2425,8 @@
+ 		    if (ap) {
+ 			if (!pattern_match(ap, l + aoff, NULL, NULL) ||
+ 			    (both && (!pattern_match(ap, w + aoff, NULL, NULL) ||
+-				      !match_parts(l + aoff, w + aoff, alen))))
++				      !match_parts(l + aoff, w + aoff, alen,
++						   part))))
+ 				continue;
+ 		    } else if (!both || il || iw)
+ 			continue;
+@@ -2442,16 +2445,16 @@
+ 			      !pattern_match(ap, tp + aoff, NULL, NULL))) ||
+ 			    (!both &&
+ 			     pattern_match(ap, tp - moff, NULL, NULL) &&
+-			     match_parts(l + aoff , tp - moff, alen))) {
++			     match_parts(l + aoff , tp - moff, alen, part))) {
+ 			    if (sfx) {
+ 				savw = tp[-zoff];
+ 				tp[-zoff] = '\0';
+ 				t = match_str(l - ll, w - lw,
+-					      NULL, NULL, 1, 2);
++					      NULL, NULL, 1, 2, part);
+ 				tp[-zoff] = savw;
+ 			    } else
+ 				t = match_str(l + llen + moff, tp + moff,
+-					      NULL, NULL, 0, 1);
++					      NULL, NULL, 0, 1, part);
+ 			    if (t || !both)
+ 				break;
+ 			}
+@@ -2527,7 +2530,7 @@
+ 		    lw -= alen; iw += alen;
+ 		    bc -= llen;
+ 
+-		    if (!test && bc <= 0 && bp) {
++		    if (!test && bp && bc <= 0) {
+ 			*bp = matchbufadded + bc;
+ 			bp = NULL;
+ 		    }
+@@ -2624,7 +2627,7 @@
+ 		    ll -= mp->llen; lw -= mp->wlen;
+ 		    bc -= mp->llen;
+ 
+-		    if (!test && bc <= 0 && bp) {
++		    if (!test && bp && bc <= 0) {
+ 			*bp = matchbufadded + bc;
+ 			bp = NULL;
+ 		    }
+@@ -2663,7 +2666,10 @@
+     }
+     /* If this is a recursive call, we just return if l matched w or not. */
+     if (test)
+-	return !ll;
++	return (part || !ll);
++
++    if (part)
++	return il;
+ 
+     /* In top-level calls, if ll is non-zero (unmatched portion in l),
+      * we have to free the collected clines. */
+@@ -2708,13 +2714,13 @@
+ 
+ /**/
+ static int
+-match_parts(char *l, char *w, int n)
++match_parts(char *l, char *w, int n, int part)
+ {
+     char lsav = l[n], wsav = w[n];
+     int ret;
+ 
+     l[n] = w[n] = '\0';
+-    ret = match_str(l, w, NULL, NULL, 0, 1);
++    ret = match_str(l, w, NULL, NULL, 0, 1, part);
+     l[n] = lsav;
+     w[n] = wsav;
+ 
+@@ -2769,7 +2775,7 @@
+ 	/* Always try to match the prefix. */
+ 
+ 	*bpl = (qu ? qbrpl : brpl);
+-	if ((mpl = match_str(pfx, w, bpl, &rpl, 0, 0)) < 0)
++	if ((mpl = match_str(pfx, w, bpl, &rpl, 0, 0, 0)) < 0)
+ 	    return NULL;
+ 
+ 	if (sfx && *sfx) {
+@@ -2794,7 +2800,7 @@
+ 
+ 	    /* The try to match the suffix. */
+ 	    *bsl = (qu ? qbrsl : brsl);
+-	    if ((msl = match_str(sfx, w + mpl, bsl, &rsl, 1, 0)) < 0) {
++	    if ((msl = match_str(sfx, w + mpl, bsl, &rsl, 1, 0, 0)) < 0) {
+ 		free_cline(pli);
+ 
+ 		return NULL;
+@@ -3951,7 +3957,8 @@
+     char *s, *ms, *lipre = NULL, *lisuf = NULL, *lpre = NULL, *lsuf = NULL;
+     char **aign = NULL, **dparr = NULL, oaq = autoq, *oppre = dat->ppre;
+     char *oqp = qipre, *oqs = qisuf, qc, **disp = NULL;
+-    int lpl, lsl, pl, sl, bpl, bsl, llpl = 0, llsl = 0, nm = mnum;
++    int lpl, lsl, pl, sl, bpl, bsl, bppl = -1, bssl = -1;
++    int llpl = 0, llsl = 0, nm = mnum;
+     int oisalt = 0, isalt, isexact, doadd, ois = instring, oib = inbackt;
+     Cline lc = NULL;
+     Cmatch cm;
+@@ -4092,20 +4099,35 @@
+ 	    } else
+ 		lsl = 0;
+ 	    if (dat->aflags & CAF_MATCH) {
++		int ml;
++
+ 		s = dat->ppre ? dat->ppre : "";
+-		if (llpl <= lpl && strpfx(lpre, s))
+-		    lpre = "";
+-		else if (llpl > lpl && strpfx(s, lpre))
+-		    lpre += lpl;
+-		else
+-		    *argv = NULL;
++		bppl = brpl;
++		if ((ml = match_str(lpre, s, &bppl, NULL, 0, 0, 1)) >= 0)
++		    lpre += ml;
++		else {
++		    bppl = -1;
++		    if (llpl <= lpl && strpfx(lpre, s))
++			lpre = "";
++		    else if (llpl > lpl && strpfx(s, lpre))
++			lpre += lpl;
++		    else
++			*argv = NULL;
++		}
++
+ 		s = dat->psuf ? dat->psuf : "";
+-		if (llsl <= lsl && strsfx(lsuf, s))
+-		    lsuf = "";
+-		else if (llsl > lsl && strsfx(s, lsuf))
+-		    lsuf[llsl - lsl] = '\0';
+-		else
+-		    *argv = NULL;
++		bssl = brsl;
++		if ((ml = match_str(lsuf, s, &bssl, NULL, 0, 0, 1)) >= 0)
++		    lsuf[llsl - ml] = '\0';
++		else {
++		    bssl = -1;
++		    if (llsl <= lsl && strsfx(lsuf, s))
++			lsuf = "";
++		    else if (llsl > lsl && strsfx(s, lsuf))
++			lsuf[llsl - lsl] = '\0';
++		    else
++			*argv = NULL;
++		}
+ 	    }
+ 	    if (*argv) {
+ 		if (dat->pre)
+@@ -4189,7 +4211,9 @@
+ 		    cm = add_match_data(isalt, ms, lc, dat->ipre, NULL,
+ 					dat->isuf, dat->pre, dat->prpre,
+ 					dat->ppre, dat->psuf, dat->suf,
+-					bpl, bsl, dat->flags, isexact);
++					(bppl >= 0 ? bppl : bpl),
++					(bssl >= 0 ? bssl : bsl),
++					dat->flags, isexact);
+ 		    cm->rems = dat->rems;
+ 		    cm->remf = dat->remf;
+ 		    if (disp)
+diff -u -r oldcompletion/Core/_multi_parts Completion/Core/_multi_parts
+--- oldcompletion/Core/_multi_parts	Sun Sep 19 12:23:48 1999
++++ Completion/Core/_multi_parts	Sun Sep 19 15:58:37 1999
+@@ -7,7 +7,7 @@
+ # The parts of words from the array that are separated by the
+ # separator character are then completed independently.
+ 
+-local sep matches pref npref i tmp1 group expl menu pre suf
++local sep matches pref npref i tmp1 group expl menu pre suf opre osuf cpre
+ typeset -U tmp2
+ 
+ # Get the options.
+@@ -40,6 +40,8 @@
+ 
+ pre="$PREFIX"
+ suf="$SUFFIX"
++opre="$PREFIX"
++osuf="$SUFFIX"
+ orig="$PREFIX$SUFFIX"
+ 
+ # Special handling for menucompletion?
+@@ -100,7 +102,8 @@
+         matches=( "${(@M)matches:#${tmp1[1]}*}" )
+ 	tmp2=( "${(@M)matches:#${tmp1[1]}${sep}*}" )
+ 
+-        PREFIX="$pref$PREFIX"
++	PREFIX="${cpre}${pre}"
++	SUFFIX="$suf"
+ 
+ 	if (( $#tmp2 )); then
+ 	  compadd "$group[@]" "$expl[@]" -p "$pref" -qS "$sep" \
+@@ -120,7 +123,13 @@
+       SUFFIX="$suf"
+       compadd -O matches -M "r:|${sep}=* r:|=*" - "$matches[@]"
+ 
+-      PREFIX="$pref"
++      if [[ "$pre" = *${sep}* ]]; then
++ 	PREFIX="${cpre}${pre%%${sep}*}"
++	SUFFIX="${sep}${pre#*${sep}}${suf}"
++      else
++        PREFIX="${cpre}${pre}"
++	SUFFIX="$suf"
++      fi
+ 
+       if [[ -n "$menu" ]]; then
+         # With menucompletion we just add matches for the matching
+@@ -129,7 +138,6 @@
+ 
+         tmp2="$pre$suf"
+         if [[ "$tmp2" = *${sep}* ]]; then
+-          SUFFIX="${sep}${tmp2#*${sep}}$SUFFIX"
+           compadd "$group[@]" "$expl[@]" \
+                   -p "$pref" -s "${sep}${tmp2#*${sep}}" \
+                   -M "r:|${sep}=* r:|=*" - "$tmp1[@]"
+@@ -144,12 +152,10 @@
+ 
+         for i in "${(@M)matches:#(${(j:|:)~tmp1})*}"; do
+ 	  if [[ "$i" = *${sep}* ]]; then
+-	    SUFFIX="${i#*${sep}}$suf"
+             compadd "$group[@]" "$expl[@]" -S '' \
+ 	            -p "$pref" -s "${i#*${sep}}" \
+                     -M "r:|${sep}=* r:|=*" - "${i%%${sep}*}${sep}"
+           else
+-	    SUFFIX="$suf"
+             compadd "$group[@]" "$expl[@]" -S '' -p "$pref" \
+                     -M "r:|${sep}=* r:|=*" - "$i"
+           fi
+@@ -163,7 +169,7 @@
+ 
+       [[ "$orig" = "$pref$pre$suf" ]] && return 1
+ 
+-      PREFIX="$pref$pre"
++      PREFIX="${cpre}${pre}"
+       SUFFIX="$suf"
+ 
+       if [[ -n "$suf" ]]; then
+@@ -171,7 +177,7 @@
+                 -M "r:|${sep}=* r:|=*" - "$pref$pre"
+       else
+         compadd "$group[@]" "$expl[@]" -S '' \
+-                -M "r:|${sep}=* r:|=*" - "$pref$pre$suf"
++                -M "r:|${sep}=* r:|=*" - "$pref$pre"
+       fi
+       return 0
+     fi
+@@ -187,8 +193,10 @@
+   # Now we set `pre' and `suf' to their new values.
+ 
+   if [[ "$pre" = *${sep}* ]]; then
++    cpre="${cpre}${pre%%${sep}*}${sep}"
+     pre="${pre#*${sep}}"
+   elif [[ "$suf" = *${sep}* ]]; then
++    cpre="${cpre}${pre}${suf%%${sep}*}${sep}"
+     pre="${suf#*${sep}}"
+     suf=""
+   else
+@@ -196,7 +204,7 @@
+     # unambiguous prefix and that differs from the original string,
+     # we insert it.
+ 
+-    PREFIX="$pref"
++    PREFIX="${opre}${osuf}"
+     SUFFIX=""
+ 
+     [[ -n "$pref" && "$orig" != "$pref" ]] &&
+diff -u -r oldcompletion/Core/_path_files Completion/Core/_path_files
+--- oldcompletion/Core/_path_files	Sun Sep 19 12:23:48 1999
++++ Completion/Core/_path_files	Sun Sep 19 16:55:05 1999
+@@ -24,7 +24,7 @@
+ #    menucompletion.
+ 
+ local linepath realpath donepath prepath testpath exppath
+-local tmp1 tmp2 tmp3 tmp4 i orig pre suf tpre tsuf opre osuf
++local tmp1 tmp2 tmp3 tmp4 i orig pre suf tpre tsuf opre osuf cpre
+ local pats haspats=no ignore group expl addpfx addsfx remsfx
+ local nm=$compstate[nmatches] menu
+ 
+@@ -293,8 +293,8 @@
+ 
+       if [[ "$haspats" = no && -z "$tpre$tsuf" &&
+ 	"$pre" = */ && -z "$suf" ]]; then
+-	PREFIX="$opre"
+-	SUFFIX="$osuf"
++	PREFIX="${opre}${osuf}"
++	SUFFIX=""
+         compadd -nQS '' - "$linepath$donepath$orig"
+         tmp4=-
+       fi
+@@ -353,12 +353,17 @@
+       # collected as the suffixes to make the completion code expand
+       # it as far as possible.
+ 
+-      PREFIX="$linepath${testpath:q}$PREFIX"
++      if [[ "$tmp3" = */* ]]; then
++        PREFIX="${linepath}${cpre}${tmp3%%/*}"
++	SUFFIX="/${tmp3#*/}"
++      else
++        PREFIX="${linepath}${cpre}${tmp3}"
++	SUFFIX=""
++      fi
+ 
+       if [[ -n $menu ]]; then
+         [[ -n "$compconfig[path_cursor]" ]] && compstate[to_end]=''
+         if [[ "$tmp3" = */* ]]; then
+-	  SUFFIX="${SUFFIX}/${tmp3#*/}"
+ 	  compadd -Qf -p "$linepath${testpath:q}" -s "/${tmp3#*/}" \
+ 	          -W "$prepath$realpath$testpath" "$ignore[@]" \
+ 		  "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" -M 'r:|/=* r:|=*' \
+@@ -373,9 +378,7 @@
+ 	fi
+       else
+         if [[ "$tmp3" = */* ]]; then
+-          tmp4="$SUFFIX"
+           for i in "$tmp1[@]"; do
+-	    SUFFIX="${tmp4}/${${i#*/}:q}"
+ 	    compadd -Qf -p "$linepath${testpath:q}" -s "/${${i#*/}:q}" \
+ 		    -W "$prepath$realpath$testpath" "$ignore[@]" \
+ 		    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" -M 'r:|/=* r:|=*' \
+@@ -408,11 +411,13 @@
+     testpath="${testpath}${tmp1[1]%%/*}/"
+     tmp1=( "${(@)tmp1#*/}" )
+ 
++    cpre="${cpre}${tmp3%%/*}/"
+     tmp3="${tmp3#*/}"
+   done
+ 
+   if [[ -z "$tmp4" ]]; then
+-    PREFIX="$linepath${testpath:q}$PREFIX"
++    PREFIX="${opre}${osuf}"
++    SUFFIX=""
+     compadd -Qf -p "$linepath${testpath:q}" \
+ 	    -W "$prepath$realpath$testpath" "$ignore[@]" \
+ 	    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" -M 'r:|/=* r:|=*' \
+@@ -429,7 +434,7 @@
+ 
+ if [[ -n "$compconfig[path_expand]" &&
+       $#exppaths -gt 0 && nm -eq compstate[nmatches] ]]; then
+-  PREFIX="$linepath"
++  PREFIX="${opre}${osuf}"
+   SUFFIX=""
+   compadd -Q -S '' "$group[@]" "$expl[@]" \
+           -M 'r:|/=* r:|=*' -p "$linepath" - "$exppaths[@]"
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

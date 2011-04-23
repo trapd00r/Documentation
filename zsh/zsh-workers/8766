@@ -1,0 +1,168 @@
+From zsh-workers-return-8766-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Nov 24 08:38:50 1999
+Return-Path: <zsh-workers-return-8766-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17583 invoked from network); 24 Nov 1999 08:38:49 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 24 Nov 1999 08:38:49 -0000
+Received: (qmail 15369 invoked by alias); 24 Nov 1999 08:38:41 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8766
+Received: (qmail 15360 invoked from network); 24 Nov 1999 08:38:41 -0000
+Date: Wed, 24 Nov 1999 09:38:23 +0100 (MET)
+Message-Id: <199911240838.JAA14683@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Ollivier Robert's message of Tue, 23 Nov 1999 17:29:01 +0100
+Subject: Re: Can't load module (when the module is static)
+
+
+Ollivier Robert wrote:
+
+> Has anyone seen this in very recent zsh (taken from anoncvs):
+> 
+> 402 [17:23] roberto@sidhe:/build/zsh> Src/zsh
+> compinit: failed to load module: parameter [109]
+> 401 [17:23] roberto@sidhe:/build/zsh> echo $ZSH_VERSION 
+> 3.1.6-pws-9
+> 402 [17:24] roberto@sidhe:/build/zsh> cat Src/mymods.conf 
+> rlimits
+> zle
+> complete
+> compctl
+> stat
+> complist
+> computil
+> parameter
+> zleparameter
+> 403 [17:24] roberto@sidhe:/build/zsh> ldd Src/zsh
+> Src/zsh:
+>         libtermcap.so.2 => /usr/lib/libtermcap.so.2 (0x280e4000)
+>         libm.so.2 => /usr/lib/libm.so.2 (0x280e9000)
+>         libc.so.3 => /usr/lib/libc.so.3 (0x28104000)
+> 
+> FreeBSD sidhe 3.3-STABLE FreeBSD 3.3-STABLE #0: Thu Nov 11 16:32:24 CET 1999     roberto@sidhe:/src/src/sys/compile/SIDHE  i386
+> 
+> I also got another problem (when I leave out the two *parameter) modules: I 
+> get a read-only variable with the same numer [109]...
+
+Did you all know that it is possible to try to load a linked-in
+module? That's what's causing these bugs.
+
+The patch below changed load_module() to test if the requested module
+is linked-in.
+
+This is almost certainly not the final solution, though, and it
+reminded me of Bart's request for handling linked-in modules a bit
+more like loaded ones (at least that's how I understood it). Well,
+here is one more reason to do that. I.e. we could build module structs
+and hash table entries for the linked-in modules, too. Then we could
+maybe get rid of the -e option to zmodload. Maybe? I mean that
+zmodload without arguments would just report linked-in modules, too.
+
+But the really hard question is how we should get at the delayed
+initialization Bart asked for. Hm. Create all the autoload-structs for 
+builtins/parameters/etc, not make the linked-in modules visible as
+described above immediatly, but store them only in the bltin-list we
+have now and make load_module() only call the init funcs. We would
+then need to change the shell scripts to generate the autoload-stuff
+for bltinmods.list even for linked-in modules.
+
+And what happens to all this in a shell without dynamic loading?
+
+Bye
+ Sven
+
+diff -u oldsrc/module.c Src/module.c
+--- oldsrc/module.c	Wed Nov 24 09:03:37 1999
++++ Src/module.c	Wed Nov 24 09:24:40 1999
+@@ -550,13 +550,16 @@
+ #endif /* !AIXDYNAMIC */
+ 
+ /**/
+-Module
++int
+ load_module(char const *name)
+ {
+     Module m;
+     void *handle;
+     LinkNode node, n;
+ 
++    if (module_linked(name))
++	return 1;
++
+     if (!(node = find_module(name))) {
+ 	if (!(handle = do_load_module(name)))
+ 	    return NULL;
+@@ -576,36 +579,36 @@
+ 	    return NULL;
+ 	}
+ 	m->flags &= ~MOD_SETUP;
+-	return m;
++	return 1;
+     } 
+     m = (Module) getdata(node);
+     if (m->flags & MOD_SETUP)
+-	return m;
++	return 1;
+     if (m->flags & MOD_UNLOAD)
+ 	m->flags &= ~MOD_UNLOAD;
+     else if (m->handle)
+-	return m;
++	return 1;
+     if (m->flags & MOD_BUSY) {
+ 	zerr("circular dependencies for module %s", name, 0);
+-	return NULL;
++	return 0;
+     }
+     m->flags |= MOD_BUSY;
+     if (m->deps)
+ 	for (n = firstnode(m->deps); n; incnode(n))
+ 	    if (!load_module((char *) getdata(n))) {
+ 		m->flags &= ~MOD_BUSY;
+-		return NULL;
++		return 0;
+ 	    }
+     m->flags &= ~MOD_BUSY;
+     if (!m->handle) {
+ 	if (!(m->handle = do_load_module(name)))
+-	    return NULL;
++	    return 0;
+ 	m->flags |= MOD_SETUP;
+ 	if (setup_module(m)) {
+ 	    finish_module(m->handle);
+ 	    m->handle = NULL;
+ 	    m->flags &= ~MOD_SETUP;
+-	    return NULL;
++	    return 0;
+ 	}
+     }
+     m->flags |= MOD_SETUP;
+@@ -613,10 +616,10 @@
+ 	finish_module(m->handle);
+ 	m->handle = NULL;
+ 	m->flags &= ~MOD_SETUP;
+-	return NULL;
++	return 0;
+     }
+     m->flags &= ~MOD_SETUP;
+-    return m;
++    return 1;
+ }
+ 
+ /* This ensures that the module with the name given as the second argument
+@@ -650,7 +653,7 @@
+ 	zwarnnam(nam, "%s: restricted", module, 0);
+ 	return 0;
+     } else
+-	return !!load_module(module);
++	return load_module(module);
+ 
+     return 1;
+ }
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

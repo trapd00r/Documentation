@@ -1,0 +1,138 @@
+From zsh-workers-return-16618-mason-zsh=primenet.com.au@sunsite.dk Wed Feb 13 02:01:10 2002
+Return-Path: <zsh-workers-return-16618-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 18589 invoked from network); 13 Feb 2002 02:01:09 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 13 Feb 2002 02:01:09 -0000
+Received: (qmail 23669 invoked by alias); 13 Feb 2002 02:01:04 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16618
+Received: (qmail 23656 invoked from network); 13 Feb 2002 02:01:03 -0000
+Date: Tue, 12 Feb 2002 18:00:34 -0800 (PST)
+From: Wayne Davison <wayned@users.sourceforge.net>
+X-X-Sender:  <wayne@phong.blorf.net>
+To: Zsh Workers <zsh-workers@sunsite.dk>
+Subject: Improving resizehistents()
+Message-ID: <Pine.LNX.4.33L2.0202121732240.17676-100000@phong.blorf.net>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+While I was looking at the HISTSIZE stuff, I noticed that the
+resizehistents() function does not respect the HIST_EXPIRE_DUPS_FIRST
+option.  I decided to break out the code that deals with this into a
+separate function that could be used by both prepnexthistent() and
+resizehistents().  Here's the result.
+
+Optimization note: when the new putoldhistentryontop() function is
+called in a loop with the HIST_EXPIRE_DUPS_FIRST option set, it is
+possible that we could scan the start of the history list once for
+every line we remove.  While I could complicate the function and
+make it possible for the scan to continue where it left off, I
+decided to leave it simple (and inefficient).  I think this is the
+right choice since resizehistents() doesn't get called a lot.  If
+anyone disagrees, let me know.
+
+..wayne..
+
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/hist.c
+--- Src/hist.c	6 Feb 2002 16:48:28 -0000	1.37
++++ Src/hist.c	12 Feb 2002 22:55:46 -0000
+@@ -913,11 +913,34 @@
+     return he;
+ }
+
++static void
++putoldhistentryontop(void)
++{
++    Histent he = hist_ring->down;
++    if (isset(HISTEXPIREDUPSFIRST) && !(he->flags & HIST_DUP)) {
++	int max_unique_ct = getiparam("SAVEHIST");
++	do {
++	    if (max_unique_ct-- <= 0) {
++		he = hist_ring->down;
++		break;
++	    }
++	    he = he->down;
++	} while (he != hist_ring->down && !(he->flags & HIST_DUP));
++	if (he != hist_ring->down) {
++	    he->up->down = he->down;
++	    he->down->up = he->up;
++	    he->up = hist_ring;
++	    he->down = hist_ring->down;
++	    hist_ring->down = he->down->up = he;
++	}
++    }
++    hist_ring = he;
++}
++
+ /**/
+ Histent
+ prepnexthistent(void)
+ {
+-    Histent he;
+     int curline_in_ring = hist_ring == &curline;
+
+     if (curline_in_ring)
+@@ -928,7 +951,7 @@
+     }
+
+     if (histlinect < histsiz) {
+-	he = (Histent)zcalloc(sizeof *he);
++	Histent he = (Histent)zcalloc(sizeof *he);
+ 	if (!hist_ring)
+ 	    hist_ring = he->up = he->down = he;
+ 	else {
+@@ -940,30 +963,13 @@
+ 	histlinect++;
+     }
+     else {
+-	he = hist_ring->down;
+-	if (isset(HISTEXPIREDUPSFIRST) && !(he->flags & HIST_DUP)) {
+-	    int max_unique_ct = getiparam("SAVEHIST");
+-	    do {
+-		if (max_unique_ct-- <= 0) {
+-		    he = hist_ring->down;
+-		    break;
+-		}
+-		he = he->down;
+-	    } while (he != hist_ring->down && !(he->flags & HIST_DUP));
+-	    if (he != hist_ring->down) {
+-		he->up->down = he->down;
+-		he->down->up = he->up;
+-		he->up = hist_ring;
+-		he->down = hist_ring->down;
+-		hist_ring->down = he->down->up = he;
+-	    }
+-	}
+-	freehistdata(hist_ring = he, 0);
++	putoldhistentryontop();
++	freehistdata(hist_ring, 0);
+     }
+-    he->histnum = ++curhist;
++    hist_ring->histnum = ++curhist;
+     if (curline_in_ring)
+ 	linkcurline();
+-    return he;
++    return hist_ring;
+ }
+
+ /* A helper function for hend() */
+@@ -1756,8 +1762,10 @@
+ void
+ resizehistents(void)
+ {
+-    while (histlinect > histsiz)
+-	freehistnode((HashNode)hist_ring->down);
++    while (histlinect > histsiz) {
++	putoldhistentryontop();
++	freehistnode((HashNode)hist_ring);
++    }
+ }
+
+ /* Remember the last line in the history file so we can find it again. */
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

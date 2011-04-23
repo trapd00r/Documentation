@@ -1,0 +1,1583 @@
+From zsh-workers-request@math.gatech.edu Wed May 06 06:59:12 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7166 invoked from network); 6 May 1998 06:58:58 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 6 May 1998 06:58:58 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id CAA10157;
+	Wed, 6 May 1998 02:46:05 -0400 (EDT)
+Resent-Date: Wed, 6 May 1998 02:46:05 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199805060646.BAA02655@hzoli.home>
+Subject: PATCH: dynamic loading on AIX
+To: zsh-workers@math.gatech.edu (Zsh hacking and development)
+Date: Wed, 6 May 1998 01:46:14 -0500 (CDT)
+X-Mailer: ELM [version 2.4ME+ PL31 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"YF1bs.0.eU2.iS0Kr"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3933
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+The patch below implements dynamic loading on AIX.  AIX 4.1 and older
+versions do not support the dlopen/dlsym interface.  Instead each object
+has an export and an import list.  The export list contains the list of
+symbols which is provided by the object for use by subsequently loaded
+dynamic modules.
+
+AIX 4.2 has dlopen/dlsym, the patch below adds wupport for that too,
+however it may still be desirable and more efficient to use the old
+dynamic loading even on 4.2, since looking at the manual the 4.2 dlopen
+support looks like a hack on the top of the 4.1 mechanism.  You can
+achieve that by exporting ac_cv_lib_dl_dlopen=no before running
+configure.
+
+Remenber that due to a bug in 3.1.3, you must run configure with
+ARGV0=sh zsh configure
+
+The setterm, refresh and cs external symbols had a conflict with the AIX
+C library or with the curses library so they were renamed to zsetterm,
+zrefresh and zshcs respectively.  `cs' was not changes in the source
+files, instead cs is #defined to zshcs in system.h.  It also #defined ll
+just for consistency, since cs and ll are usually used together.  I chose
+the #define solution since cs is used too many places.
+
+Each module which is listed as a dependency for an other module must have
+an export file called modulename.export in the same directory where the
+.mdd file is.  Such modules must set hasexport on the .mdd file.  The
+export file is not generated automatically.  It is possible to
+autogenerate export files from the .pro files, and I do have a script
+which does that, but that creates an export file with 636 symbols for zsh
+and 282 symbols for zle, which the current modules use only 233 symbols
+from zsh.export and 8 symbols from zle.export.  Making the export list
+smaller speeds up loading, reduces memory usage and reduces the risk or
+name collisions.
+
+An other way to automatically create export files is to parse the linker
+output.  The linker lists the undefined symbols, which then can be added
+to the appropriate export list.  This whould only create the minimally
+needed export list, but this is much harder to automate.  I got the
+provided export files by manually editing the linker output of undefined
+symbols.
+
+The zsh.export file contains tgoto anf tputs, which are coming from
+curses.  These are the only curses functions used by zle, and this way it
+is not necessary to link zle.so with -lcurses
+
+There is a new little C file in the Src directory called modentry.c which
+is used to create modentry..o which is then linked to every dynamic zsh
+module created on AIX.  modentry..o contains the entry point for the
+module modentry(int, Module).  Since we do not have dlsym, modentry is
+used to call the boot_/cleanup_ function.  The first argument is nonzero
+for boot and zero for cleanup.  Each module is linked with -emodentry.
+When the module loads, the load subroutine returns a function pointer to
+modentry.  modentry is not exported by any module so there is no name
+collision.
+
+Zoli
+
+*** Config/defs.mk.orig	Sat May  2 03:45:36 1998
+--- Config/defs.mk	Sun May  3 19:22:45 1998
+***************
+*** 60,65 ****
+--- 60,67 ----
+  LIBS            = @LIBS@
+  DL_EXT          = @DL_EXT@
+  DLLD            = @DLLD@
++ EXPOPT          = @EXPOPT@
++ IMPOPT          = @IMPOPT@
+  
+  # utilities
+  AWK             = @AWK@
+*** Src/Makefile.in.orig	Sat May  2 03:45:37 1998
+--- Src/Makefile.in	Tue May  5 01:40:43 1998
+***************
+*** 54,65 ****
+  LIBZSH = libzsh-$(VERSION).so
+  NIBZSH =
+  
+  LDRUNPATH = LD_RUN_PATH=$(libdir)/zsh
+  NDRUNPATH =
+  
+  zsh: $(@L@IBZSH) $(@L@STMP) $(MAIN_OBJS)
+  	rm -f $@
+! 	$(@L@DRUNPATH) $(LINK) $(MAIN_OBJS) $(@L@LIST) $(@L@IBZSH) $(LIBS)
+  
+  $(LIBZSH): $(LIBOBJS) $(NSTMP)
+  	rm -f $@
+--- 54,70 ----
+  LIBZSH = libzsh-$(VERSION).so
+  NIBZSH =
+  
++ ZSH_EXPORT = $(EXPOPT)$(sdir)/zsh.export
++ ZSH_NXPORT =
++ ENTRYOBJ   = modentry..o
++ NNTRYOBJ   =
++ 
+  LDRUNPATH = LD_RUN_PATH=$(libdir)/zsh
+  NDRUNPATH =
+  
+  zsh: $(@L@IBZSH) $(@L@STMP) $(MAIN_OBJS)
+  	rm -f $@
+! 	$(@L@DRUNPATH) $(LINK) $(MAIN_OBJS) $(@L@LIST) $(ZSH_@E@XPORT) $(@L@IBZSH) $(LIBS)
+  
+  $(LIBZSH): $(LIBOBJS) $(NSTMP)
+  	rm -f $@
+***************
+*** 112,117 ****
+--- 117,127 ----
+  	else \
+  	    echo > $@; \
+  	fi
++ 
++ modules: $(@E@NTRYOBJ)
++ 
++ $(ENTRYOBJ): FORCE
++ 	@$(MAKE) -f Makemod $(MAKEDEFS) $@
+  
+  # ========== ANSI TO K&R CONVERSION ==========
+  
+*** Src/Zle/comp1.c.orig	Sat May  2 03:45:37 1998
+--- Src/Zle/comp1.c	Sun May  3 03:53:02 1998
+***************
+*** 167,173 ****
+  }
+  
+  /**/
+! int
+  compctlread(char *name, char **args, char *ops, char *reply)
+  {
+      char *buf, *bptr;
+--- 167,173 ----
+  }
+  
+  /**/
+! static int
+  compctlread(char *name, char **args, char *ops, char *reply)
+  {
+      char *buf, *bptr;
+*** Src/Zle/comp1.export.orig	Sun May  3 20:09:42 1998
+--- Src/Zle/comp1.export	Tue May  5 01:40:43 1998
+***************
+*** 0 ****
+--- 1,13 ----
++ #!
++ cc_compos
++ cc_default
++ cc_dummy
++ cc_first
++ clwnum
++ clwords
++ clwpos
++ clwsize
++ compctltab
++ freecompcond
++ freecompctl
++ incompctlfunc
+*** Src/Zle/comp1.mdd.orig	Sat May  2 03:40:55 1998
+--- Src/Zle/comp1.mdd	Sun May  3 20:02:57 1998
+***************
+*** 1,3 ****
+--- 1,5 ----
++ hasexport=1
++ 
+  objects="comp1.o"
+  
+  headers="comp.h"
+*** Src/Zle/zle.export.orig	Sun May  3 20:10:03 1998
+--- Src/Zle/zle.export	Tue May  5 01:40:43 1998
+***************
+*** 0 ****
+--- 1,8 ----
++ #!
++ addzlefunction
++ backdel
++ deletezlefunction
++ feep
++ foredel
++ getkey
++ zmod
+*** Src/Zle/zle.h.orig	Sat May  2 03:45:37 1998
+--- Src/Zle/zle.h	Sat May  2 03:47:05 1998
+***************
+*** 31,37 ****
+  #undef zleread
+  #undef spaceinline
+  #undef gotword
+! #undef refresh
+  
+  typedef struct widget *Widget;
+  typedef struct thingy *Thingy;
+--- 31,37 ----
+  #undef zleread
+  #undef spaceinline
+  #undef gotword
+! #undef zrefresh
+  
+  typedef struct widget *Widget;
+  typedef struct thingy *Thingy;
+*** Src/Zle/zle.mdd.orig	Sat May  2 03:40:55 1998
+--- Src/Zle/zle.mdd	Sun May  3 20:02:35 1998
+***************
+*** 1,3 ****
+--- 1,5 ----
++ hasexport=1
++ 
+  moddeps="comp1"
+  
+  autobins="bindkey vared zle"
+*** Src/Zle/zle_hist.c.orig	Sat May  2 03:45:37 1998
+--- Src/Zle/zle_hist.c	Sat May  2 03:47:05 1998
+***************
+*** 781,787 ****
+  	sbuf[sbptr] = '_';
+  	statusll = sbuf - statusline + sbptr + 1;
+      ref:
+! 	refresh();
+  	if (!(cmd = getkeycmd()) || cmd == Th(z_sendbreak)) {
+  	    int i;
+  	    get_isrch_spot(0, &hl, &pos, &i, &sbptr, &dir, &nomatch);
+--- 781,787 ----
+  	sbuf[sbptr] = '_';
+  	statusll = sbuf - statusline + sbptr + 1;
+      ref:
+! 	zrefresh();
+  	if (!(cmd = getkeycmd()) || cmd == Th(z_sendbreak)) {
+  	    int i;
+  	    get_isrch_spot(0, &hl, &pos, &i, &sbptr, &dir, &nomatch);
+***************
+*** 869,875 ****
+  	    	cmd == Th(z_quotedinsert)) {
+  	    if(cmd == Th(z_viquotedinsert)) {
+  		sbuf[sbptr] = '^';
+! 		refresh();
+  	    }
+  	    if ((c = getkey(0)) == EOF)
+  		feep();
+--- 869,875 ----
+  	    	cmd == Th(z_quotedinsert)) {
+  	    if(cmd == Th(z_viquotedinsert)) {
+  		sbuf[sbptr] = '^';
+! 		zrefresh();
+  	    }
+  	    if ((c = getkey(0)) == EOF)
+  		feep();
+***************
+*** 996,1002 ****
+      while (sptr) {
+  	sbuf[sptr] = '_';
+  	statusll = sptr + 1;
+! 	refresh();
+  	if (!(cmd = getkeycmd()) || cmd == Th(z_sendbreak)) {
+  	    ret = 0;
+  	    break;
+--- 996,1002 ----
+      while (sptr) {
+  	sbuf[sptr] = '_';
+  	statusll = sptr + 1;
+! 	zrefresh();
+  	if (!(cmd = getkeycmd()) || cmd == Th(z_sendbreak)) {
+  	    ret = 0;
+  	    break;
+***************
+*** 1031,1037 ****
+  	} else if(cmd == Th(z_viquotedinsert) || cmd == Th(z_quotedinsert)) {
+  	    if(cmd == Th(z_viquotedinsert)) {
+  		sbuf[sptr] = '^';
+! 		refresh();
+  	    }
+  	    if ((c = getkey(0)) == EOF)
+  		feep();
+--- 1031,1037 ----
+  	} else if(cmd == Th(z_viquotedinsert) || cmd == Th(z_quotedinsert)) {
+  	    if(cmd == Th(z_viquotedinsert)) {
+  		sbuf[sptr] = '^';
+! 		zrefresh();
+  	    }
+  	    if ((c = getkey(0)) == EOF)
+  		feep();
+*** Src/Zle/zle_main.c.orig	Sat May  2 03:45:37 1998
+--- Src/Zle/zle_main.c	Sat May  2 03:47:05 1998
+***************
+*** 112,118 ****
+  
+  /**/
+  void
+! setterm(void)
+  {
+      struct ttyinfo ti;
+  
+--- 112,118 ----
+  
+  /**/
+  void
+! zsetterm(void)
+  {
+      struct ttyinfo ti;
+  
+***************
+*** 363,369 ****
+  		ret = opts[MONITOR];
+  		opts[MONITOR] = 1;
+  		attachtty(mypgrp);
+! 		refresh();	/* kludge! */
+  		opts[MONITOR] = ret;
+  		die = 1;
+  	    } else if (errno != 0) {
+--- 363,369 ----
+  		ret = opts[MONITOR];
+  		opts[MONITOR] = 1;
+  		attachtty(mypgrp);
+! 		zrefresh();	/* kludge! */
+  		opts[MONITOR] = ret;
+  		die = 1;
+  	    } else if (errno != 0) {
+***************
+*** 373,379 ****
+  	    }
+  	}
+  	if (cc == '\r')		/* undo the exchange of \n and \r determined by */
+! 	    cc = '\n';		/* setterm() */
+  	else if (cc == '\n')
+  	    cc = '\r';
+  
+--- 373,379 ----
+  	    }
+  	}
+  	if (cc == '\r')		/* undo the exchange of \n and \r determined by */
+! 	    cc = '\n';		/* zsetterm() */
+  	else if (cc == '\n')
+  	    cc = '\r';
+  
+***************
+*** 486,492 ****
+  	initmodifier(&zmod);
+  	prefixflag = 0;
+  	feepflag = 0;
+! 	refresh();
+  	while (!done && !errflag) {
+  
+  	    statusline = NULL;
+--- 486,492 ----
+  	initmodifier(&zmod);
+  	prefixflag = 0;
+  	feepflag = 0;
+! 	zrefresh();
+  	while (!done && !errflag) {
+  
+  	    statusline = NULL;
+***************
+*** 517,527 ****
+  		    tv.tv_usec = 500000;
+  		if (!kungetct && select(SHTTY+1, (SELECT_ARG_2_T) & foofd,
+  					NULL, NULL, &tv) <= 0)
+! 		    refresh();
+  	    } else
+  #endif
+  		if (!kungetct)
+! 		    refresh();
+  	    handlefeep();
+  	}
+  	statusline = NULL;
+--- 517,527 ----
+  		    tv.tv_usec = 500000;
+  		if (!kungetct && select(SHTTY+1, (SELECT_ARG_2_T) & foofd,
+  					NULL, NULL, &tv) <= 0)
+! 		    zrefresh();
+  	    } else
+  #endif
+  		if (!kungetct)
+! 		    zrefresh();
+  	    handlefeep();
+  	}
+  	statusline = NULL;
+***************
+*** 744,750 ****
+  	return;
+      statusline = "Describe key briefly: _";
+      statusll = strlen(statusline);
+!     refresh();
+      seq = getkeymapcmd(curkeymap, &func, &str);
+      statusline = NULL;
+      if(!*seq)
+--- 744,750 ----
+  	return;
+      statusline = "Describe key briefly: _";
+      statusll = strlen(statusline);
+!     zrefresh();
+      seq = getkeymapcmd(curkeymap, &func, &str);
+      statusline = NULL;
+      if(!*seq)
+***************
+*** 812,825 ****
+  trashzle(void)
+  {
+      if (zleactive) {
+! 	/* This refresh() is just to get the main editor display right and *
+! 	 * get the cursor in the right place.  For that reason, we disable *
+! 	 * list display (which would otherwise result in infinite          *
+! 	 * recursion [at least, it would if refresh() didn't have its      *
+! 	 * extra `inlist' check]).                                         */
+  	int sl = showinglist;
+  	showinglist = 0;
+! 	refresh();
+  	showinglist = sl;
+  	moveto(nlnct, 0);
+  	if (clearflag && tccan(TCCLEAREOD)) {
+--- 812,825 ----
+  trashzle(void)
+  {
+      if (zleactive) {
+! 	/* This zrefresh() is just to get the main editor display right and *
+! 	 * get the cursor in the right place.  For that reason, we disable  *
+! 	 * list display (which would otherwise result in infinite           *
+! 	 * recursion [at least, it would if zrefresh() didn't have its      *
+! 	 * extra `inlist' check]).                                          */
+  	int sl = showinglist;
+  	showinglist = 0;
+! 	zrefresh();
+  	showinglist = sl;
+  	moveto(nlnct, 0);
+  	if (clearflag && tccan(TCCLEAREOD)) {
+***************
+*** 849,855 ****
+      /* Set up editor entry points */
+      trashzleptr = trashzle;
+      gotwordptr = gotword;
+!     refreshptr = refresh;
+      spaceinlineptr = spaceinline;
+      zlereadptr = zleread;
+  
+--- 849,855 ----
+      /* Set up editor entry points */
+      trashzleptr = trashzle;
+      gotwordptr = gotword;
+!     refreshptr = zrefresh;
+      spaceinlineptr = spaceinline;
+      zlereadptr = zleread;
+  
+*** Src/Zle/zle_misc.c.orig	Sat May  2 03:45:37 1998
+--- Src/Zle/zle_misc.c	Sat May  2 03:47:05 1998
+***************
+*** 426,432 ****
+  #endif
+      c = getkey(0);
+  #ifndef HAS_TIO
+!     setterm();
+  #endif
+      if (c < 0)
+  	feep();
+--- 426,432 ----
+  #endif
+      c = getkey(0);
+  #ifndef HAS_TIO
+!     zsetterm();
+  #endif
+      if (c < 0)
+  	feep();
+***************
+*** 599,605 ****
+      for (;;) {
+  	*ptr = '_';
+  	statusll = l + len + 1;
+! 	refresh();
+  	if (!(cmd = getkeycmd()) || cmd == Th(z_sendbreak)) {
+  	    statusline = NULL;
+  	    selectkeymap(okeymap, 1);
+--- 599,605 ----
+      for (;;) {
+  	*ptr = '_';
+  	statusll = l + len + 1;
+! 	zrefresh();
+  	if (!(cmd = getkeycmd()) || cmd == Th(z_sendbreak)) {
+  	    statusline = NULL;
+  	    selectkeymap(okeymap, 1);
+***************
+*** 611,617 ****
+  	    redisplay();
+  	} else if(cmd == Th(z_viquotedinsert)) {
+  	    *ptr = '^';
+! 	    refresh();
+  	    c = getkey(0);
+  	    if(c == EOF || !c || len == NAMLEN)
+  		feep();
+--- 611,617 ----
+  	    redisplay();
+  	} else if(cmd == Th(z_viquotedinsert)) {
+  	    *ptr = '^';
+! 	    zrefresh();
+  	    c = getkey(0);
+  	    if(c == EOF || !c || len == NAMLEN)
+  		feep();
+*** Src/Zle/zle_refresh.c.orig	Sat May  2 03:45:37 1998
+--- Src/Zle/zle_refresh.c	Sat May  2 03:47:05 1998
+***************
+*** 47,53 ****
+  
+  /* Most lines of the buffer we've shown at once with the current list *
+   * showing.  == 0 if there is no list.  == -1 if a new list has just  *
+!  * been put on the screen.  == -2 if refresh() needs to put up a new  *
+   * list.                                                              */
+  
+  /**/
+--- 47,53 ----
+  
+  /* Most lines of the buffer we've shown at once with the current list *
+   * showing.  == 0 if there is no list.  == -1 if a new list has just  *
+!  * been put on the screen.  == -2 if zrefresh() needs to put up a new *
+   * list.                                                              */
+  
+  /**/
+***************
+*** 55,61 ****
+  
+  /* Non-zero if ALWAYS_LAST_PROMPT has been used, meaning that the *
+   * screen below the buffer display should not be cleared by       *
+!  * refresh(), but should be by trashzle().                        */
+  
+  /**/
+  int clearflag;
+--- 55,61 ----
+  
+  /* Non-zero if ALWAYS_LAST_PROMPT has been used, meaning that the *
+   * screen below the buffer display should not be cleared by       *
+!  * zrefresh(), but should be by trashzle().                       */
+  
+  /**/
+  int clearflag;
+***************
+*** 75,81 ****
+  #endif
+  
+  /* Oct/Nov 94: <mason> some code savagely redesigned to fix several bugs -
+!    refreshline() & tc_rightcurs() majorly rewritten; refresh() fixed -
+     I've put my fingers into just about every routine in here -
+     any queries about updates to mason@werple.net.au */
+  
+--- 75,81 ----
+  #endif
+  
+  /* Oct/Nov 94: <mason> some code savagely redesigned to fix several bugs -
+!    refreshline() & tc_rightcurs() majorly rewritten; zrefresh() fixed -
+     I've put my fingers into just about every routine in here -
+     any queries about updates to mason@werple.net.au */
+  
+***************
+*** 224,230 ****
+  
+  /**/
+  void
+! refresh(void)
+  {
+      static int inlist;		/* avoiding recursion                        */
+      int canscroll = 0,		/* number of lines we are allowed to scroll  */
+--- 224,230 ----
+  
+  /**/
+  void
+! zrefresh(void)
+  {
+      static int inlist;		/* avoiding recursion                        */
+      int canscroll = 0,		/* number of lines we are allowed to scroll  */
+***************
+*** 240,246 ****
+      char **qbuf;		/* tmp					     */
+  
+      /* If this is called from listmatches() (indirectly via trashzle()), and *
+!      * that was called from the end of refresh(), then we don't need to do   *
+       * anything.  All this `inlist' code is actually unnecessary, but it     *
+       * improves speed a little in a common case.                             */
+      if (inlist)
+--- 240,246 ----
+      char **qbuf;		/* tmp					     */
+  
+      /* If this is called from listmatches() (indirectly via trashzle()), and *
+!      * that was called from the end of zrefresh(), then we don't need to do  *
+       * anything.  All this `inlist' code is actually unnecessary, but it     *
+       * improves speed a little in a common case.                             */
+      if (inlist)
+***************
+*** 263,269 ****
+  	termflags &= ~TERM_SHORT;
+      if (resetneeded) {
+  	onumscrolls = 0;
+! 	setterm();
+  #ifdef TIOCGWINSZ
+  	if (winchanged) {
+  	    moveto(0, 0);
+--- 263,269 ----
+  	termflags &= ~TERM_SHORT;
+      if (resetneeded) {
+  	onumscrolls = 0;
+! 	zsetterm();
+  #ifdef TIOCGWINSZ
+  	if (winchanged) {
+  	    moveto(0, 0);
+***************
+*** 547,553 ****
+  	inlist = 1;
+  	listmatches();
+  	inlist = 0;
+! 	refresh();
+      }
+      if (showinglist == -1)
+  	showinglist = nlnct;
+--- 547,553 ----
+  	inlist = 1;
+  	listmatches();
+  	inlist = 0;
+! 	zrefresh();
+      }
+      if (showinglist == -1)
+  	showinglist = nlnct;
+*** Src/Zle/zle_tricky.c.orig	Sat May  2 03:45:37 1998
+--- Src/Zle/zle_tricky.c	Sat May  2 03:47:05 1998
+***************
+*** 3676,3682 ****
+      /* Maybe we have to ask if the user wants to see the list. */
+      if ((listmax && ct > listmax) || (!listmax && up >= lines)) {
+  	int qup;
+! 	setterm();
+  	qup = printfmt("zsh: do you wish to see all %n possibilities? ", ct, 1);
+  	fflush(shout);
+  	if (getzlequery() != 'y') {
+--- 3676,3682 ----
+      /* Maybe we have to ask if the user wants to see the list. */
+      if ((listmax && ct > listmax) || (!listmax && up >= lines)) {
+  	int qup;
+! 	zsetterm();
+  	qup = printfmt("zsh: do you wish to see all %n possibilities? ", ct, 1);
+  	fflush(shout);
+  	if (getzlequery() != 'y') {
+*** Src/Zle/zle_vi.c.orig	Sat May  2 03:45:37 1998
+--- Src/Zle/zle_vi.c	Sat May  2 03:47:05 1998
+***************
+*** 126,132 ****
+  	char sav = line[cs];
+  
+  	line[cs] = '^';
+! 	refresh();
+  	c = getkey(0);
+  	line[cs] = sav;
+  	if(c == EOF) {
+--- 126,132 ----
+  	char sav = line[cs];
+  
+  	line[cs] = '^';
+! 	zrefresh();
+  	c = getkey(0);
+  	line[cs] = sav;
+  	if(c == EOF) {
+***************
+*** 817,823 ****
+      beep();
+      statusline = "press a lowercase key to continue";
+      statusll = strlen(statusline);
+!     refresh();
+      while (!islower(getkey(0)));
+      statusline = NULL;
+  }
+--- 817,823 ----
+      beep();
+      statusline = "press a lowercase key to continue";
+      statusll = strlen(statusline);
+!     zrefresh();
+      while (!islower(getkey(0)));
+      statusline = NULL;
+  }
+***************
+*** 891,897 ****
+  
+      spaceinline(1);
+      line[cs] = '^';
+!     refresh();
+  #ifndef HAS_TIO
+      sob = shttyinfo.sgttyb;
+      sob.sg_flags = (sob.sg_flags | RAW) & ~ECHO;
+--- 891,897 ----
+  
+      spaceinline(1);
+      line[cs] = '^';
+!     zrefresh();
+  #ifndef HAS_TIO
+      sob = shttyinfo.sgttyb;
+      sob.sg_flags = (sob.sg_flags | RAW) & ~ECHO;
+***************
+*** 899,905 ****
+  #endif
+      c = getkey(0);
+  #ifndef HAS_TIO
+!     setterm();
+  #endif
+      foredel(1);
+      if(c < 0)
+--- 899,905 ----
+  #endif
+      c = getkey(0);
+  #ifndef HAS_TIO
+!     zsetterm();
+  #endif
+      foredel(1);
+      if(c < 0)
+*** Src/jobs.c.orig	Sat May  2 03:45:37 1998
+--- Src/jobs.c	Sat May  2 03:47:05 1998
+***************
+*** 214,220 ****
+      if ((isset(NOTIFY) || job == thisjob) && (jn->stat & STAT_LOCKED)) {
+  	printjob(jn, !!isset(LONGLISTJOBS), 0);
+  	if (zleactive)
+! 	    refresh();
+      }
+      if (sigtrapped[SIGCHLD] && job != thisjob)
+  	dotrap(SIGCHLD);
+--- 214,220 ----
+      if ((isset(NOTIFY) || job == thisjob) && (jn->stat & STAT_LOCKED)) {
+  	printjob(jn, !!isset(LONGLISTJOBS), 0);
+  	if (zleactive)
+! 	    zrefresh();
+      }
+      if (sigtrapped[SIGCHLD] && job != thisjob)
+  	dotrap(SIGCHLD);
+*** Src/mkmakemod.sh.orig	Sun May  3 19:12:57 1998
+--- Src/mkmakemod.sh	Sun May  3 23:17:17 1998
+***************
+*** 145,150 ****
+--- 145,155 ----
+      echo "PROTOS  =$all_proto"
+      echo "SUBDIRS =$all_subdirs"
+      echo
++     echo "ENTRYOBJ = \$(dir_src)/modentry..o"
++     echo "NNTRYOBJ ="
++     echo "ENTRYOPT = -emodentry"
++     echo "NNTRYOPT ="
++     echo
+  
+      echo "##### ===== INCLUDING Makemod.in.in ===== #####"
+      echo
+***************
+*** 161,167 ****
+      remote_mdhs=
+      for module in $here_modules; do
+  
+! 	unset moddeps nozshdep alwayslink
+  	unset autobins
+  	unset objects proto headers hdrdeps otherincs
+  	. $top_srcdir/$the_subdir/${module}.mdd
+--- 166,172 ----
+      remote_mdhs=
+      for module in $here_modules; do
+  
+! 	unset moddeps nozshdep alwayslink hasexport
+  	unset autobins
+  	unset objects proto headers hdrdeps otherincs
+  	. $top_srcdir/$the_subdir/${module}.mdd
+***************
+*** 172,179 ****
+--- 177,186 ----
+  
+  	dobjects=`echo $objects '' | sed 's,\.o ,..o ,g'`
+  	modhdeps=
++ 	imports=
+  	for dep in $moddeps; do
+  	    eval "loc=\$loc_$dep"
++ 	    imports="$imports \$(IMPOPT)\$(sdir_top)/$loc/$dep.export"
+  	    case $the_subdir in
+  		$loc)
+  		    mdh="${dep}.mdh"
+***************
+*** 199,207 ****
+  	echo "##### ===== DEPENDENCIES GENERATED FROM ${module}.mdd ===== #####"
+  	echo
+  	echo "MODOBJS_${module} = $objects"
+! 	echo "MODDOBJS_${module} = $dobjects"
+  	echo "PROTO_${module} = $proto"
+  	echo "INCS_${module} = \$(PROTO_${module}) $otherincs"
+  	echo
+  	echo "proto.${module}: \$(PROTO_${module})"
+  	echo "\$(PROTO_${module}): \$(PROTODEPS)"
+--- 206,216 ----
+  	echo "##### ===== DEPENDENCIES GENERATED FROM ${module}.mdd ===== #####"
+  	echo
+  	echo "MODOBJS_${module} = $objects"
+! 	echo "MODDOBJS_${module} = $dobjects \$(@E@NTRYOBJ)"
+  	echo "PROTO_${module} = $proto"
+  	echo "INCS_${module} = \$(PROTO_${module}) $otherincs"
++ 	echo "EXPIMP_${module} = $imports ${hasexport+\$(EXPOPT)\$(sdir)/$module.export}"
++ 	echo "NXPIMP_${module} ="
+  	echo
+  	echo "proto.${module}: \$(PROTO_${module})"
+  	echo "\$(PROTO_${module}): \$(PROTODEPS)"
+***************
+*** 212,218 ****
+  	if test -z "$alwayslink"; then
+  	    echo "${module}.\$(DL_EXT): \$(MODDOBJS_${module})"
+  	    echo '	rm -f $@'
+! 	    echo "	\$(DLLINK) \$(MODDOBJS_${module})"
+  	    echo
+  	fi
+  	echo "${module}.mdhi: ${module}.mdhs \$(INCS_${module})"
+--- 221,227 ----
+  	if test -z "$alwayslink"; then
+  	    echo "${module}.\$(DL_EXT): \$(MODDOBJS_${module})"
+  	    echo '	rm -f $@'
+! 	    echo "	\$(DLLINK) \$(@E@XPIMP_$module) \$(@E@NTRYOPT) \$(MODDOBJS_${module})"
+  	    echo
+  	fi
+  	echo "${module}.mdhi: ${module}.mdhs \$(INCS_${module})"
+*** Src/modentry.c.orig	Mon May  4 01:34:39 1998
+--- Src/modentry.c	Sun May  3 22:58:53 1998
+***************
+*** 0 ****
+--- 1,15 ----
++ #include "zsh.mdh"
++ 
++ int boot_ _((Module));
++ int cleanup_ _((Module));
++ int modentry _((int boot, Module m));
++ 
++ /**/
++ int
++ modentry(int boot, Module m)
++ {
++     if (boot)
++ 	return boot_(m);
++     else
++ 	return cleanup_(m);
++ }
+*** Src/module.c.orig	Sat May  2 03:45:37 1998
+--- Src/module.c	Wed May  6 01:40:26 1998
+***************
+*** 161,166 ****
+--- 161,204 ----
+      return hadf ? hads : 1;
+  }
+  
++ #ifdef AIXDYNAMIC
++ 
++ #include <sys/ldr.h>
++ 
++ static char *dlerrstr[256];
++ 
++ /**/
++ static void *
++ load_and_bind(const char *fn)
++ {
++     void *ret = (void *) load((char *) fn, L_NOAUTODEFER, NULL);
++ 
++     if (ret) {
++ 	LinkNode node;
++ 	int err = loadbind(0, (void *) addbuiltin, ret);
++ 	for (node = firstnode(modules); !err && node; incnode(node)) {
++ 	    Module m = (Module) getdata(node);
++ 	    if (m->handle)
++ 		err |= loadbind(0, m->handle, ret);
++ 	}
++ 
++ 	if (err) {
++ 	    loadquery(L_GETMESSAGES, dlerrstr, sizeof(dlerrstr));
++ 	    unload(ret);
++ 	    ret = NULL;
++ 	}
++     } else
++ 	loadquery(L_GETMESSAGES, dlerrstr, sizeof(dlerrstr));
++ 
++     return ret;
++ }
++ 
++ #define dlopen(X,Y) load_and_bind(X)
++ #define dlclose(X)  unload(X)
++ #define dlerror()   (dlerrstr[0])
++ 
++ #else
++ 
+  #ifdef HAVE_DLFCN_H
+  # include <dlfcn.h>
+  #else
+***************
+*** 168,179 ****
+  # include <nlist.h>
+  # include <link.h>
+  #endif
+- #ifndef RTLD_LAZY
+- # define RTLD_LAZY 1
+- #endif
+- #ifndef RTLD_GLOBAL
+- # define RTLD_GLOBAL 0
+- #endif
+  #ifndef HAVE_DLCLOSE
+  # define dlclose(X) ((X), 0)
+  #endif
+--- 206,211 ----
+***************
+*** 189,194 ****
+--- 221,236 ----
+  # define STR_CLEANUP   "cleanup_"
+  # define STR_CLEANUP_S "cleanup_%s"
+  #endif /* !DLSYM_NEEDS_UNDERSCORE */
++ 
++ #endif /* !AIXDYNAMIC */
++ 
++ #ifndef RTLD_LAZY
++ # define RTLD_LAZY 1
++ #endif
++ #ifndef RTLD_GLOBAL
++ # define RTLD_GLOBAL 0
++ #endif
++ 
+  typedef int (*Module_func) _((Module));
+  
+  /**/
+***************
+*** 257,262 ****
+--- 299,322 ----
+      return NULL;
+  }
+  
++ #ifdef AIXDYNAMIC
++ 
++ /**/
++ static int
++ init_module(Module m)
++ {
++     return ((int (*)_((int,Module))) m->handle)(1, m);
++ }
++ 
++ /**/
++ static int
++ cleanup_module(Module m)
++ {
++     return ((int (*)_((int,Module))) m->handle)(0, m);
++ }
++ 
++ #else
++ 
+  /**/
+  static int
+  init_module(Module m)
+***************
+*** 289,294 ****
+--- 349,387 ----
+  }
+  
+  /**/
++ static int
++ cleanup_module(Module m)
++ {
++     char *s, *t;
++ #ifndef DYNAMIC_NAME_CLASH_OK
++     char buf[PATH_MAX + 1];
++ #endif
++     Module_func fn;
++ 
++     s = strrchr(m->nam, '/');
++     if (s)
++ 	s = dupstring(++s);
++     else
++ 	s = m->nam;
++     if ((t = strrchr(s, '.')))
++ 	*t = '\0';
++ #ifdef DYNAMIC_NAME_CLASH_OK
++     fn = (Module_func) dlsym(m->handle, STR_CLEANUP);
++ #else /* !DYNAMIC_NAME_CLASH_OK */
++     if (strlen(s) + 9 > PATH_MAX)
++ 	return 1;
++     sprintf(buf, STR_CLEANUP_S, s);
++     fn = (Module_func) dlsym(m->handle, buf);
++ #endif /* !DYNAMIC_NAME_CLASH_OK */
++     if(fn)
++ 	return fn(m);
++     zwarnnam(m->nam, "no cleanup function", NULL, 0);
++     return 1;
++ }
++ 
++ #endif /* !AIXDYNAMIC */
++ 
++ /**/
+  Module
+  load_module(char const *name)
+  {
+***************
+*** 335,371 ****
+  	return NULL;
+      }
+      return m;
+- }
+- 
+- /**/
+- static int
+- cleanup_module(Module m)
+- {
+-     char *s, *t;
+- #ifndef DYNAMIC_NAME_CLASH_OK
+-     char buf[PATH_MAX + 1];
+- #endif
+-     Module_func fn;
+- 
+-     s = strrchr(m->nam, '/');
+-     if (s)
+- 	s = dupstring(++s);
+-     else
+- 	s = m->nam;
+-     if ((t = strrchr(s, '.')))
+- 	*t = '\0';
+- #ifdef DYNAMIC_NAME_CLASH_OK
+-     fn = (Module_func) dlsym(m->handle, STR_CLEANUP);
+- #else /* !DYNAMIC_NAME_CLASH_OK */
+-     if (strlen(s) + 9 > PATH_MAX)
+- 	return 1;
+-     sprintf(buf, STR_CLEANUP_S, s);
+-     fn = (Module_func) dlsym(m->handle, buf);
+- #endif /* !DYNAMIC_NAME_CLASH_OK */
+-     if(fn)
+- 	return fn(m);
+-     zwarnnam(m->nam, "no cleanup function", NULL, 0);
+-     return 1;
+  }
+  
+  /**/
+--- 428,433 ----
+*** Src/system.h.orig	Sat May  2 03:45:37 1998
+--- Src/system.h	Sat May  2 03:47:05 1998
+***************
+*** 609,611 ****
+--- 609,617 ----
+  extern char PC, *BC, *UP;
+  extern short ospeed;
+  #endif
++ 
++ /* Rename some global zsh variables to avoid *
++  * possible name clashes with libc           */
++ 
++ #define cs zshcs
++ #define ll zshll
+*** Src/utils.c.orig	Sat May  2 03:45:37 1998
+--- Src/utils.c	Sat May  2 03:47:05 1998
+***************
+*** 846,852 ****
+      setiparam("LINES", shttyinfo.winsize.ws_row);
+      if (zleactive && (oldcols != columns || oldrows != lines)) {
+  	resetneeded = winchanged = 1;
+! 	refresh();
+      }
+  #endif   /* TIOCGWINSZ */
+  }
+--- 846,852 ----
+      setiparam("LINES", shttyinfo.winsize.ws_row);
+      if (zleactive && (oldcols != columns || oldrows != lines)) {
+  	resetneeded = winchanged = 1;
+! 	zrefresh();
+      }
+  #endif   /* TIOCGWINSZ */
+  }
+*** Src/zsh.export.orig	Tue May  5 00:48:56 1998
+--- Src/zsh.export	Tue May  5 01:40:43 1998
+***************
+*** 0 ****
+--- 1,234 ----
++ #!
++ SHTTY
++ addbuiltins
++ addedx
++ addhashnode
++ aliastab
++ alloc_stackp
++ appstr
++ arrdup
++ arrlen
++ attachtty
++ bangchar
++ beep
++ bin_notavail
++ breaks
++ bufstack
++ builtintab
++ chline
++ chuck
++ clearjobtab
++ closem
++ cmdnamtab
++ columns
++ compctlreadptr
++ coprocin
++ coprocout
++ countlinknodes
++ countprompt
++ createparam
++ ctxtlex
++ curhist
++ current_limits
++ deletebuiltins
++ deletehashtable
++ domatch
++ doshfunc
++ dputs
++ dquotedztrdup
++ dummy_list
++ dupstring
++ dupstrpfx
++ dyncat
++ emptyhashtable
++ endparamscope
++ errflag
++ excs
++ execstring
++ exlast
++ expanding
++ fallback_compctlread
++ fallback_zleread
++ fignore
++ file_type
++ filesub
++ filesubstr
++ findcmd
++ firsthist
++ freearray
++ freeheap
++ getaparam
++ gethashnode
++ gethashnode2
++ getiparam
++ getkeystring
++ getlinknode
++ getshfunc
++ getsparam
++ glob_pre
++ glob_suf
++ global_heapalloc
++ global_permalloc
++ globlist
++ gotwordptr
++ halloc
++ hasam
++ hashcmd
++ hasher
++ hasspecial
++ hcalloc
++ hgetc
++ hgetline
++ histentarr
++ histentct
++ hptr
++ hrealloc
++ inbufct
++ incmdpos
++ incond
++ init_io
++ init_shout
++ init_term
++ inpop
++ inpush
++ inredir
++ insertlinknode
++ intr
++ inwhat
++ isfirstln
++ jobtab
++ lastpid
++ lastval
++ lchdir
++ lexrestore
++ lexsave
++ lexstop
++ limits
++ line
++ lines
++ locallevel
++ metadiffer
++ metafy
++ metalen
++ mode_to_octal
++ mypgrp
++ mypid
++ nameddirtab
++ ncalloc
++ newhashtable
++ newlinklist
++ nicechar
++ nicezputs
++ niceztrdup
++ niceztrlen
++ noaliases
++ noerrs
++ noop_function
++ noop_function_int
++ optiontab
++ opts
++ paramtab
++ parbegin
++ parend
++ parsereg
++ parsestr
++ path
++ pathchecked
++ popheap
++ postedit
++ ppid
++ prefork
++ prepromptfns
++ printif
++ printqt
++ promptexpand
++ pushheap
++ putshout
++ pwd
++ quietgetevent
++ quietgethist
++ quotedzputs
++ refreshptr
++ remlpaths
++ remnulargs
++ removehashnode
++ resetneeded
++ restoredir
++ reswdtab
++ retflag
++ scanhashtable
++ setaparam
++ setlimits
++ setsparam
++ settyinfo
++ shfunctab
++ shingetline
++ shout
++ shttyinfo
++ singsub
++ skipparens
++ spaceinlineptr
++ spacesplit
++ spckword
++ startparamscope
++ stdunsetfn
++ stophist
++ stopmsg
++ strinbeg
++ strinend
++ strpfx
++ strsfx
++ strucpy
++ struncpy
++ tclen
++ tcstr
++ termflags
++ tgoto
++ tok
++ tokenize
++ tokstr
++ tputs
++ trashzleptr
++ tricat
++ tsetcap
++ ttystrname
++ tulower
++ tuupper
++ txtchange
++ typtab
++ ugetnode
++ uinsertlinknode
++ unmeta
++ unmetafy
++ untokenize
++ uremnode
++ useheap
++ winchanged
++ wordbeg
++ zalloc
++ zcalloc
++ zchdir
++ zerr
++ zerrnam
++ zexit
++ zfree
++ zgetdir
++ zgetenv
++ zjoin
++ zleactive
++ zleparse
++ zlereadptr
++ zputs
++ zreaddir
++ zsetlimit
++ zsfree
++ zshcs
++ zshll
++ zstrtol
++ ztokens
++ ztrdup
++ ztrduppfx
++ ztrftime
++ ztrlen
++ ztrsub
++ zwarnnam
+*** Src/zsh.h.orig	Sat May  2 03:45:37 1998
+--- Src/zsh.h	Sat May  2 03:47:05 1998
+***************
+*** 31,37 ****
+  #define zleread(X,Y,H)  zlereadptr(X,Y,H)
+  #define spaceinline(X)  spaceinlineptr(X)
+  #define gotword()       gotwordptr()
+! #define refresh()       refreshptr()
+  
+  #define compctlread(N,A,O,R) compctlreadptr(N,A,O,R)
+  
+--- 31,37 ----
+  #define zleread(X,Y,H)  zlereadptr(X,Y,H)
+  #define spaceinline(X)  spaceinlineptr(X)
+  #define gotword()       gotwordptr()
+! #define zrefresh()      refreshptr()
+  
+  #define compctlread(N,A,O,R) compctlreadptr(N,A,O,R)
+  
+*** acconfig.h.orig	Wed Apr 30 01:11:45 1997
+--- acconfig.h	Sun May  3 20:12:34 1998
+***************
+*** 191,193 ****
+--- 191,196 ----
+  
+  /* Define to 1 if you want to use dynamically loaded modules */
+  #undef DYNAMIC
++ 
++ /* Define to 1 if you want to use dynamically loaded modules on AIX */
++ #undef AIXDYNAMIC
+*** aczsh.m4.orig	Sat May  2 03:45:37 1998
+--- aczsh.m4	Sat May  2 03:47:05 1998
+***************
+*** 93,98 ****
+--- 93,100 ----
+  $DLLD -o conftest1.$DL_EXT $LDFLAGS $DLLDFLAGS conftest1.o 1>&5 2>&5 &&
+  $CC -c $CFLAGS $CPPFLAGS $DLCFLAGS conftest2.c 1>&5 2>&5 &&
+  $DLLD -o conftest2.$DL_EXT $LDFLAGS $DLLDFLAGS conftest2.o 1>&5 2>&5; then
++     save_ldflags=$LDFLAGS
++     LDFLAGS="$LDFLAGS $EXTRA_LDFLAGS"
+      AC_TRY_RUN([
+  #ifdef HAVE_DLFCN_H
+  #include <dlfcn.h>
+***************
+*** 124,129 ****
+--- 126,132 ----
+  [zsh_cv_sys_dynamic_rtld_global=no],
+  [zsh_cv_sys_dynamic_rtld_global=no]
+  )
++     LDFLAGS=$save_ldflags
+  else
+      zsh_cv_sys_dynamic_rtld_global=no
+  fi
+*** configure.in.orig	Sat May  2 03:45:37 1998
+--- configure.in	Tue May  5 01:40:43 1998
+***************
+*** 211,221 ****
+    fi
+  fi
+  if test -n "$auto_ldflags"; then
+!   if test "${enable_zsh_debug}" = yes; then
+!     LDFLAGS=-g
+!   else
+!     LDFLAGS=-s
+!   fi
+  fi
+  
+  dnl ----------
+--- 211,221 ----
+    fi
+  fi
+  if test -n "$auto_ldflags"; then
+!   case "${enable_zsh_debug}$host_os" in
+!     yesaix*) ;;  # AIX ld does not accept -g
+!     yes*)    LDFLAGS=-g ;;
+!     *)       LDFLAGS=-s ;;
+!   esac
+  fi
+  
+  dnl ----------
+***************
+*** 416,427 ****
+  dnl -------------------
+  dnl Prefer BSD termcap library to SysV curses library, except on certain
+  dnl versions of AIX and HP-UX.
+! if test `echo $host_os | sed 's/^.*\(aix\)[[1-9]]\.[[0-9]].*$/\1/'` = aix ||
+!     test `echo $host_os | sed 's/^.*\(hpux\)10\..*$/\1/'` = hpux; then
+!   termcap_curses_order="curses ncurses termcap"
+! else
+!   termcap_curses_order="termcap curses ncurses"
+! fi
+  
+  for lib in $termcap_curses_order; do
+    AC_CHECK_LIB(${lib}, tgetent, [LIBS="$LIBS -l$lib"; break])
+--- 416,425 ----
+  dnl -------------------
+  dnl Prefer BSD termcap library to SysV curses library, except on certain
+  dnl versions of AIX and HP-UX.
+! case "$host_os" in
+!   aix*|hpux10.*) termcap_curses_order="curses ncurses termcap" ;;
+!   *)             termcap_curses_order="termcap curses ncurses" ;;
+! esac
+  
+  for lib in $termcap_curses_order; do
+    AC_CHECK_LIB(${lib}, tgetent, [LIBS="$LIBS -l$lib"; break])
+***************
+*** 534,541 ****
+                sigblock sigsetmask sigrelse sighold killpg sigaction getrlimit \
+                sigprocmask setuid seteuid setreuid setresuid setsid strerror \
+                nis_list initgroups fchdir cap_init readlink)
+  if test $dynamic = yes; then
+!   AC_CHECK_FUNCS(dlopen dlerror dlsym dlclose)
+  fi
+  
+  
+--- 532,540 ----
+                sigblock sigsetmask sigrelse sighold killpg sigaction getrlimit \
+                sigprocmask setuid seteuid setreuid setresuid setsid strerror \
+                nis_list initgroups fchdir cap_init readlink)
++ 
+  if test $dynamic = yes; then
+!   AC_CHECK_FUNCS(dlopen dlerror dlsym dlclose load loadquery loadbind unload)
+  fi
+  
+  
+***************
+*** 843,856 ****
+  dnl dynamic loading
+  dnl ---------------
+  L=N
+! if test "$ac_cv_func_dlopen" != yes; then
+!   dynamic=no
+! elif test "$ac_cv_func_dlsym" != yes; then
+!   dynamic=no
+! elif test "$ac_cv_func_dlerror" != yes; then
+!   dynamic=no
+  fi
+! if test "x$dynamic" = xyes; then
+    AC_CACHE_CHECK(if your system use ELF binaries,
+     zsh_cv_sys_elf,
+     [AC_TRY_RUN([/* Test for whether ELF binaries are produced */
+--- 842,877 ----
+  dnl dynamic loading
+  dnl ---------------
+  L=N
+! aixdynamic=no
+! if test "$ac_cv_func_dlopen"  != yes ||
+!    test "$ac_cv_func_dlsym"   != yes ||
+!    test "$ac_cv_func_dlerror" != yes; then
+!   if test "$ac_cv_func_load"      != yes ||
+!      test "$ac_cv_func_unload"    != yes ||
+!      test "$ac_cv_func_loadbind"  != yes ||
+!      test "$ac_cv_func_loadquery" != yes; then
+!     dynamic=no
+!   elif test "x$dynamic" = xyes; then
+!     aixdynamic=yes
+!   fi
+  fi
+! 
+! test -n "$GCC" && LDARG=-Wl,
+! 
+! if test "x$aixdynamic" = xyes; then
+!   DL_EXT="${DL_EXT=so}"
+!   DLLD="${DLLD=$CC}"
+!   zsh_cv_func_dlsym_needs_underscore=no
+!   DLLDFLAGS=${DLLDFLAGS=}
+!   EXTRA_LDFLAGS=${EXTRA_LDFLAGS=}
+!   EXPOPT=${LDARG}-bE:
+!   IMPOPT=${LDARG}-bI:
+!   zsh_cv_sys_dynamic_clash_ok="${zsh_cv_sys_dynamic_clash_ok=yes}"
+!   zsh_cv_sys_dynamic_rtld_global="${zsh_cv_sys_dynamic_rtld_global=yes}"
+!   zsh_cv_sys_dynamic_execsyms="${zsh_cv_sys_dynamic_execsyms=yes}"
+!   zsh_cv_sys_dynamic_strip_exe="${zsh_cv_sys_dynamic_strip_exe=yes}"
+!   zsh_cv_sys_dynamic_strip_lib="${zsh_cv_sys_dynamic_strip_lib=yes}"
+! elif test "x$dynamic" = xyes; then
+    AC_CACHE_CHECK(if your system use ELF binaries,
+     zsh_cv_sys_elf,
+     [AC_TRY_RUN([/* Test for whether ELF binaries are produced */
+***************
+*** 890,899 ****
+    case "$host_os" in
+      hpux*)        DLLDFLAGS="${DLLDFLAGS=-b}" ;;
+      linux*|irix*) DLLDFLAGS="${DLLDFLAGS=-shared}" ;;
+-     solaris*)     DLLDFLAGS="${DLLDFLAGS=-G}" ;;
+      sunos*)       DLLDFLAGS="${DLLDFLAGS=-assert nodefinitions}" ;;
+-     sysv4*|esix*) DLLDFLAGS="${DLLDFLAGS=-G $ldflags}" ;;
+      netbsd*)      DLLDFLAGS="${DLLDFLAGS=-x -shared --whole-archive}" ;;
+    esac
+    case "$host_os" in
+      hpux*)  EXTRA_LDFLAGS="${EXTRA_LDFLAGS=-Wl,-E}" ;;
+--- 911,920 ----
+    case "$host_os" in
+      hpux*)        DLLDFLAGS="${DLLDFLAGS=-b}" ;;
+      linux*|irix*) DLLDFLAGS="${DLLDFLAGS=-shared}" ;;
+      sunos*)       DLLDFLAGS="${DLLDFLAGS=-assert nodefinitions}" ;;
+      netbsd*)      DLLDFLAGS="${DLLDFLAGS=-x -shared --whole-archive}" ;;
++     aix*)         DLLDFLAGS="${DLLDFLAGS=-G -bexpall -lc}" ;;
++     solaris*|sysv4*|esix*) DLLDFLAGS="${DLLDFLAGS=-G}" ;;
+    esac
+    case "$host_os" in
+      hpux*)  EXTRA_LDFLAGS="${EXTRA_LDFLAGS=-Wl,-E}" ;;
+***************
+*** 901,907 ****
+    esac
+    AC_CACHE_CHECK(if your dlsym() needs a leading underscore,
+     zsh_cv_func_dlsym_needs_underscore,
+!    [cat >conftest.c <<EOM
+  fred () { }
+  EOM
+      $CC -c $CFLAGS $CPPFLAGS $DLCFLAGS conftest.c 1>&5 2>&5 &&
+--- 922,928 ----
+    esac
+    AC_CACHE_CHECK(if your dlsym() needs a leading underscore,
+     zsh_cv_func_dlsym_needs_underscore,
+!    [echo failed >conftestval && cat >conftest.c <<EOM
+  fred () { }
+  EOM
+      $CC -c $CFLAGS $CPPFLAGS $DLCFLAGS conftest.c 1>&5 2>&5 &&
+***************
+*** 949,956 ****
+      zsh_cv_func_dlsym_needs_underscore=failed
+      dynamic=no,
+      zsh_cv_func_dlsym_needs_underscore=no)])
+!   if test "$zsh_cv_func_dlsym_needs_underscore" = yes; then
+      AC_DEFINE(DLSYM_NEEDS_UNDERSCORE)
+    fi
+  fi
+  
+--- 970,981 ----
+      zsh_cv_func_dlsym_needs_underscore=failed
+      dynamic=no,
+      zsh_cv_func_dlsym_needs_underscore=no)])
+!   if test "x$zsh_cv_func_dlsym_needs_underscore" = xyes; then
+      AC_DEFINE(DLSYM_NEEDS_UNDERSCORE)
++   elif test "x$zsh_cv_func_dlsym_needs_underscore" != xno; then
++     dnl Do not cache failed value
++     unset zsh_cv_func_dlsym_needs_underscore
++     dynamic=no
+    fi
+  fi
+  
+***************
+*** 983,995 ****
+--- 1008,1030 ----
+    D=N
+  fi
+  
++ if test "x$aixdynamic" = xyes; then
++   E=E
++   AC_DEFINE(AIXDYNAMIC)dnl
++ else
++   E=N
++ fi
++ 
+  AC_DEFINE_UNQUOTED(DL_EXT, "$DL_EXT")dnl
+  AC_SUBST(D)dnl
+  AC_SUBST(DL_EXT)dnl
+  AC_SUBST(DLLD)dnl
+  AC_SUBST(DLCFLAGS)dnl
+  AC_SUBST(DLLDFLAGS)dnl
++ AC_SUBST(E)dnl
+  AC_SUBST(EXTRA_LDFLAGS)dnl
++ AC_SUBST(EXPOPT)dnl
++ AC_SUBST(IMPOPT)dnl
+  AC_SUBST(L)dnl
+  AC_SUBST(RTLD_GLOBAL_OK)dnl
+  
+

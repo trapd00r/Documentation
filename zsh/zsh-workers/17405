@@ -1,0 +1,176 @@
+From zsh-workers-return-17405-mason-zsh=primenet.com.au@sunsite.dk Thu Jul 04 10:02:52 2002
+Return-Path: <zsh-workers-return-17405-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4250 invoked from network); 4 Jul 2002 10:02:47 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 4 Jul 2002 10:02:47 -0000
+Received: (qmail 7929 invoked by alias); 4 Jul 2002 10:02:41 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17405
+Received: (qmail 7916 invoked from network); 4 Jul 2002 10:02:40 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: PATCH: $PREDISPLAY/$POSTDISPLAY 
+In-reply-to: "Sven Wischnowsky"'s message of "Thu, 04 Jul 2002 09:57:09 +0200."
+             <15651.65493.979771.882185@wischnow.berkom.de> 
+Date: Thu, 04 Jul 2002 10:57:11 +0100
+Message-ID: <10302.1025776631@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+Sven Wischnowsky wrote:
+> Peter Stephenson wrote:
+> > Note the way these parameters survive across invocations of zle.  This
+> > was simply because it was the most natural way of writing it.  We can
+> > make zleread() reinitialise them if it seems preferable.
+> 
+> I can see that it's more powerful, but it's really rather irritating,
+> isn't it? Especially since you can't make them go away from the
+> (normal) command line. Although with well-behaved widgets...
+
+Yes, I came to that conclusion, too.
+
+> It could also be nice if we could restrict
+> the allowed movement-range in recursive edits (kind of like
+> narrow-to-region in emacs).
+
+You can already do this bit, with the same limitation as the Emacs
+function, i.e. the editable region is always the bit in the middle.
+
+narrow-to-region() {
+  # Restrict the start of the editable line to the position
+  # between MARK and CURSOR
+
+  local lbuffer rbuffer
+  integer start=$MARK end=$CURSOR swap
+
+  if (( start == end )); then
+    return 1
+  elif (( start > end )); then
+    swap=start
+    start=end
+    end=swap
+  fi
+
+  (( end++ ))
+
+  PREDISPLAY=${BUFFER[1,start]}
+  lbuffer=$PREDISPLAY
+  POSTDISPLAY=${BUFFER[end,-1]}
+  rbuffer=$POSTDISPLAY
+  BUFFER=${BUFFER[start+1,end-1]}
+  if (( swap )); then 
+    CURSOR=0 
+    MARK=${#BUFFER}
+  else
+    MARK=0
+    CURSOR=${#BUFFER}
+  fi
+
+  zle recursive-edit
+
+  PREDISPLAY=
+  POSTDISPLAY=
+  LBUFFER="$lbuffer$LBUFFER"
+  RBUFFER="$RBUFFER$rbuffer"
+}
+
+Obviously, you can easily modify this to make the text outside the
+region display as "...", and so on.  You might want to make accept-line
+a dummy during this and define a widget `widen' which calls
+.accept-line, or make the normal accept-line set a flag that
+restrict-start will propagate the accept-line upwards, or something.
+
+To be consistent, it would be better not to assume PREDISPLAY and
+POSTDISPLAY are empty, i.e. we should really set predisplay=$PREDISPLAY,
+PREDISPLAY+=... before and PREDISPLAY=$predisplay after, but I got bored
+at that point.
+
+There could be lurking off-by-one errors, but it seemed to do roughly
+what I expected.
+
+Index: Doc/Zsh/zle.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/zle.yo,v
+retrieving revision 1.24
+diff -u -r1.24 zle.yo
+--- Doc/Zsh/zle.yo	1 Jul 2002 16:50:43 -0000	1.24
++++ Doc/Zsh/zle.yo	4 Jul 2002 09:28:36 -0000
+@@ -666,17 +666,15 @@
+ item(tt(PREDISPLAY) (scalar))(
+ Text to be displayed before the start of the editable text buffer.  This
+ does not have to be a complete line; to display a complete line, a newline
+-must be appended explicitly.  Note that the text survives between calls to zle
+-and hence must be removed explicitly by assigning an empty value to the
+-parameter.
++must be appended explicitly.    The text is reset on each new invocation
++(but not recursive invocation) of zle.
+ )
+ vindex(POSTDISPLAY)
+ item(tt(POSTDISPLAY) (scalar))(
+ Text to be displayed after the end of the editable text buffer.  This
+ does not have to be a complete line; to display a complete line, a newline
+-must be prepended explicitly.  Note that the text survives between calls to
+-zle and hence must be removed explicitly by assigning an empty value to the
+-parameter.
++must be prepended explicitly.  The text is reset on each new invocation
++(but not recursive invocation) of zle.
+ )
+ vindex(RBUFFER)
+ item(tt(RBUFFER) (scalar))(
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.25
+diff -u -r1.25 zle_main.c
+--- Src/Zle/zle_main.c	1 Jul 2002 09:54:48 -0000	1.25
++++ Src/Zle/zle_main.c	4 Jul 2002 09:28:36 -0000
+@@ -752,6 +752,7 @@
+     pmpt_attr = txtchange;
+     rpromptbuf = promptexpand(rp, 1, NULL, NULL);
+     rpmpt_attr = txtchange;
++    free_prepostdisplay();
+ 
+     zlereadflags = flags;
+     histline = curhist;
+Index: Src/Zle/zle_params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_params.c,v
+retrieving revision 1.5
+diff -u -r1.5 zle_params.c
+--- Src/Zle/zle_params.c	1 Jul 2002 16:50:43 -0000	1.5
++++ Src/Zle/zle_params.c	4 Jul 2002 09:28:36 -0000
+@@ -516,3 +516,13 @@
+ {
+     return get_prepost(postdisplay, postdisplaylen);
+ }
++
++/**/
++void
++free_prepostdisplay(void)
++{
++    if (predisplaylen)
++	set_prepost(&predisplay, &predisplaylen, NULL);
++    if (postdisplaylen)
++	set_prepost(&postdisplay, &postdisplaylen, NULL);
++}
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

@@ -1,0 +1,306 @@
+From zsh-workers-return-11691-mason-zsh=primenet.com.au@sunsite.auc.dk Wed May 31 14:24:51 2000
+Return-Path: <zsh-workers-return-11691-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24536 invoked from network); 31 May 2000 14:24:49 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 May 2000 14:24:49 -0000
+Received: (qmail 18787 invoked by alias); 31 May 2000 14:23:16 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11691
+Received: (qmail 18732 invoked from network); 31 May 2000 14:23:08 -0000
+Date: Wed, 31 May 2000 16:22:14 +0200 (MET DST)
+Message-Id: <200005311422.QAA26355@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: evaluated styles
+
+
+Just found an old patch I wanted to show you after 3.1.7...
+
+We were discussing ways to make style-lookup evaluate some
+user-defined code instead of just using the constant values. This
+is as far as I got in terms of cleanness -- but, of course, no special 
+syntax thing.
+
+The patch adds the -e option to zstyle, to be used when defining
+styles. The values of such styles will then be evaluated when looked
+up and the value to return will be taken from $value (should that use
+$reply instead?).
+
+I don't plan to commit it (unless enough people get really excited
+about it or we get suggestions for improvement).
+
+Bye
+ Sven
+
+diff -u -r ../oz/Doc/Zsh/mod_zutil.yo ./Doc/Zsh/mod_zutil.yo
+--- ../oz/Doc/Zsh/mod_zutil.yo	Mon May 29 19:04:34 2000
++++ ./Doc/Zsh/mod_zutil.yo	Tue May 30 19:49:33 2000
+@@ -8,7 +8,7 @@
+ startitem()
+ findex(zstyle)
+ xitem(tt(zstyle) [ tt(-L) ])
+-xitem(tt(zstyle) [ tt(-) | tt(-)tt(-) ] var(pattern) var(style) var(strings) ...)
++xitem(tt(zstyle) [ tt(-e) | tt(-) | tt(-)tt(-) ] var(pattern) var(style) var(strings) ...)
+ xitem(tt(zstyle -d) [ var(pattern) [ var(styles) ... ] ])
+ xitem(tt(zstyle -g) var(name) [ var(pattern) [ var(style) ] ])
+ xitem(tt(zstyle -abs) var(context) var(style) var(name) [ var(sep) ])
+@@ -33,9 +33,14 @@
+ done in the form of calls to tt(zstyle).  Forms with arguments:
+ 
+ startitem()
+-item(tt(zstyle) [ tt(-) | tt(-)tt(-) ] var(pattern) var(style) var(strings) ...)(
++item(tt(zstyle) [ tt(-e) | tt(-) | tt(-)tt(-) ] var(pattern) var(style) var(strings) ...)(
+ Defines the given var(style) for the var(pattern) with the var(strings) as
+-the value.
++the value.  If the tt(-e) option is given, the var(strings) will be
++concatenated (separated by spaces) and the resulting string will be
++evaluated when the style is looked up.  In this case the parameter
++tt(value) will be used to get the strings to return after the
++evaluation.  If tt(value) is not set, this will be treated as if the
++style were not set.
+ )
+ item(tt(zstyle -d) [ var(pattern) [ var(styles) ... ] ])(
+ Delete style definitions. Without arguments all definitions are deleted,
+diff -u -r ../oz/Src/Modules/zutil.c ./Src/Modules/zutil.c
+--- ../oz/Src/Modules/zutil.c	Mon May 29 19:04:39 2000
++++ ./Src/Modules/zutil.c	Tue May 30 19:53:07 2000
+@@ -48,6 +48,7 @@
+     char *pat;			/* pattern string */
+     Patprog prog;		/* compiled pattern */
+     int weight;			/* how specific is the pattern? */
++    int eval;			/* eval-on-retrieve? */
+     char **vals;
+ };
+     
+@@ -102,7 +103,7 @@
+ /* Store a value for a style. */
+ 
+ static void
+-setstypat(Style s, char *pat, Patprog prog, char **vals)
++setstypat(Style s, char *pat, Patprog prog, char **vals, int eval)
+ {
+     int weight, tmp, first;
+     char *str;
+@@ -116,6 +117,7 @@
+ 	    if (p->vals)
+ 		freearray(p->vals);
+ 	    p->vals = zarrdup(vals);
++	    p->eval = eval;
+ 
+ 	    return;
+ 	}
+@@ -126,6 +128,7 @@
+     p->pat = ztrdup(pat);
+     p->prog = prog;
+     p->vals = zarrdup(vals);
++    p->eval = eval;
+     p->next = NULL;
+ 
+     /* Calculate the weight. */
+@@ -184,9 +187,36 @@
+     return s;
+ }
+ 
++static char **
++evalstyle(Stypat p)
++{
++    int ef = errflag;
++    Eprog prog = parse_string(sepjoin(p->vals, " ", 0), 0);
++    char **ret;
++
++    if (!prog) {
++	errflag = ef;
++	return NULL;
++    }
++    unsetparam("value");
++    execode(prog, 1, 0);
++    if (errflag) {
++	errflag = ef;
++	return NULL;
++    }
++    errflag = ef;
++
++    ret = getaparam("value");
++    if (ret)
++	ret = arrdup(ret);
++    unsetparam("value");
++
++    return ret;
++}
++
+ /* Look up a style for a context pattern. This does the matching. */
+ 
+-static Stypat
++static char **
+ lookupstyle(char *ctxt, char *style)
+ {
+     Style s;
+@@ -196,7 +226,7 @@
+ 	if (!strcmp(s->name, style))
+ 	    for (p = s->pats; p; p = p->next)
+ 		if (pattry(p->prog, ctxt))
+-		    return p;
++		    return (p->eval ? evalstyle(p) : p->vals);
+ 
+     return NULL;
+ }
+@@ -204,7 +234,7 @@
+ static int
+ bin_zstyle(char *nam, char **args, char *ops, int func)
+ {
+-    int min, max, n, add = 0, list = 0;
++    int min, max, n, add = 0, list = 0, eval = 0;
+ 
+     if (!args[0])
+ 	list = 1;
+@@ -218,6 +248,10 @@
+ 	    }
+ 	    if (oc == 'L')
+ 		list = 2;
++	    else if (oc == 'e') {
++		eval = add = 1;
++		args++;
++	    }
+ 	} else {
+ 	    add = 1;
+ 	    args++;
+@@ -243,7 +277,7 @@
+ 	}
+ 	if (!(s = getstyle(args[1])))
+ 	    s = addstyle(args[1]);
+-	setstypat(s, args[0], prog, args + 2);
++	setstypat(s, args[0], prog, args + 2, eval);
+ 
+ 	return 0;
+     }
+@@ -259,9 +293,9 @@
+ 	    }
+ 	    for (p = s->pats; p; p = p->next) {
+ 		if (list == 1)
+-		    printf("    %s", p->pat);
++		    printf("%s  %s", (p->eval ? "(eval)" : "      "), p->pat);
+ 		else {
+-		    printf("zstyle ");
++		    printf("zstyle %s", (p->eval ? "-e " : ""));
+ 		    quotedzputs(p->pat, stdout);
+ 		    printf(" %s", s->name);
+ 		}
+@@ -343,12 +377,11 @@
+ 	break;
+     case 's':
+ 	{
+-	    Stypat s;
+-	    char *ret;
++	    char **vals, *ret;
+ 	    int val;
+ 
+-	    if ((s = lookupstyle(args[1], args[2])) && s->vals[0]) {
+-		ret = sepjoin(s->vals, (args[4] ? args[4] : " "), 0);
++	    if ((vals = lookupstyle(args[1], args[2])) && vals[0]) {
++		ret = sepjoin(vals, (args[4] ? args[4] : " "), 0);
+ 		val = 0;
+ 	    } else {
+ 		ret = ztrdup("");
+@@ -361,16 +394,15 @@
+ 	break;
+     case 'b':
+ 	{
+-	    Stypat s;
+-	    char *ret;
++	    char **vals, *ret;
+ 	    int val;
+ 
+-	    if ((s = lookupstyle(args[1], args[2])) &&
+-		s->vals[0] && !s->vals[1] &&
+-		(!strcmp(s->vals[0], "yes") ||
+-		 !strcmp(s->vals[0], "true") ||
+-		 !strcmp(s->vals[0], "on") ||
+-		 !strcmp(s->vals[0], "1"))) {
++	    if ((vals = lookupstyle(args[1], args[2])) &&
++		vals[0] && !vals[1] &&
++		(!strcmp(vals[0], "yes") ||
++		 !strcmp(vals[0], "true") ||
++		 !strcmp(vals[0], "on") ||
++		 !strcmp(vals[0], "1"))) {
+ 		ret = "yes";
+ 		val = 0;
+ 	    } else {
+@@ -384,12 +416,11 @@
+ 	break;
+     case 'a':
+ 	{
+-	    Stypat s;
+-	    char **ret;
++	    char **vals, **ret;
+ 	    int val;
+ 
+-	    if ((s = lookupstyle(args[1], args[2]))) {
+-		ret = zarrdup(s->vals);
++	    if ((vals = lookupstyle(args[1], args[2]))) {
++		ret = zarrdup(vals);
+ 		val = 0;
+ 	    } else {
+ 		char *dummy = NULL;
+@@ -405,14 +436,14 @@
+     case 't':
+     case 'T':
+ 	{
+-	    Stypat s;
++	    char **vals;
+ 
+-	    if ((s = lookupstyle(args[1], args[2])) && s->vals[0]) {
++	    if ((vals = lookupstyle(args[1], args[2])) && vals[0]) {
+ 		if (args[3]) {
+ 		    char **ap = args + 3, **p;
+ 
+ 		    while (*ap) {
+-			p = s->vals;
++			p = vals;
+ 			while (*p)
+ 			    if (!strcmp(*ap, *p++))
+ 				return 0;
+@@ -420,27 +451,25 @@
+ 		    }
+ 		    return 1;
+ 		} else
+-		    return !(!strcmp(s->vals[0], "true") ||
+-			     !strcmp(s->vals[0], "yes") ||
+-			     !strcmp(s->vals[0], "on") ||
+-			     !strcmp(s->vals[0], "1"));
++		    return !(!strcmp(vals[0], "true") ||
++			     !strcmp(vals[0], "yes") ||
++			     !strcmp(vals[0], "on") ||
++			     !strcmp(vals[0], "1"));
+ 	    }
+-	    return (args[0][1] == 't' ? (s ? 1 : 2) : 0);
++	    return (args[0][1] == 't' ? (vals ? 1 : 2) : 0);
+ 	}
+ 	break;
+     case 'm':
+ 	{
+-	    Stypat s;
++	    char **vals;
+ 	    Patprog prog;
+ 
+ 	    tokenize(args[3]);
+ 
+-	    if ((s = lookupstyle(args[1], args[2])) &&
++	    if ((vals = lookupstyle(args[1], args[2])) &&
+ 		(prog = patcompile(args[3], PAT_STATIC, NULL))) {
+-		char **p = s->vals;
+-
+-		while (*p)
+-		    if (pattry(prog, *p++))
++		while (*vals)
++		    if (pattry(prog, *vals++))
+ 			return 0;
+ 	    }
+ 	    return 1;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

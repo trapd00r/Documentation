@@ -1,0 +1,168 @@
+From zsh-workers-return-27722-mason-zsh=primenet.com.au@zsh.org Fri Feb 19 12:05:02 2010
+Return-Path: <zsh-workers-return-27722-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28090 invoked by alias); 19 Feb 2010 12:05:02 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27722
+Received: (qmail 19205 invoked from network); 19 Feb 2010 12:04:52 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,SPF_HELO_PASS
+	autolearn=ham version=3.2.5
+Received-SPF: none (ns2.melb.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@zsh.org (Zsh hackers list)
+Subject: PATCH: minor condition fixes
+X-Mailer: MH-E 8.0.3; nmh 1.3; GNU Emacs 22.1.1
+Date: Fri, 19 Feb 2010 12:02:37 +0000
+Message-ID: <22045.1266580957@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 19 Feb 2010 12:02:38.0262 (UTC) FILETIME=[6E357D60:01CAB15B]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A-09-22-10 (www.mailcontrol.com) on 10.68.0.116
+
+I noticed the condition code is output too many "-"s when it doesn't
+recognised a test.  Bizarrely, I copied this error into the test code
+without noticing:  it's complaining about a non-existent "-foo" when
+the failure was on "-fail foo".
+
+Looking further, it's doing a bad job of guessing what the condition it
+doesn't know is (even ignoring the misplaced '-'):
+
+% [[ -fail badly ]]
+zsh: unknown condition: -badly
+% [[ really -fail badly ]]
+zsh: unknown condition: -really
+
+There's no point trying too hard if it couldn't parse it properly
+anyway, but it would be sensible to guess that something with a "-" is
+the unknown condition, and it might as well be the first one we come
+across.
+
+While looking I noticed that that first getconddef() you can see is
+checking name + 1 without ever looking at name[0]; presumably it should be
+ensuring name[0] is a '-'?
+
+Then there's a problem I haven't fixed, which is for some reason in the
+test code the status is returning as 1 for an unrecognised condition
+whereas it should return 2 (and does at the command line).  This shows
+up with:
+
+% eval '[[ -fail badly ]]'
+zsh: unknown condition: -fail
+% print $?
+1
+
+Index: Src/cond.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/cond.c,v
+retrieving revision 1.15
+diff -p -u -r1.15 cond.c
+--- Src/cond.c	11 May 2008 19:55:21 -0000	1.15
++++ Src/cond.c	19 Feb 2010 11:56:20 -0000
+@@ -104,7 +104,7 @@ evalcond(Estate state, char *fromtest)
+     case COND_MODI:
+ 	{
+ 	    Conddef cd;
+-	    char *name = overridename;
++	    char *name = overridename, *errname;
+ 	    char **strs;
+ 	    int l = WC_COND_SKIP(code);
+ 
+@@ -122,10 +122,17 @@ evalcond(Estate state, char *fromtest)
+ 		strs = arrdup(sbuf);
+ 		l = 2;
+ 	    }
+-	    if ((cd = getconddef((ctype == COND_MODI), name + 1, 1))) {
++	    if (name && name[0] == '-')
++		errname = name;
++	    else if (strs[0] && *strs[0] == '-')
++		errname = strs[0];
++	    else
++		errname = "<null>";
++	    if (name && name[0] == '-' &&
++		(cd = getconddef((ctype == COND_MODI), name + 1, 1))) {
+ 		if (ctype == COND_MOD &&
+ 		    (l < cd->min || (cd->max >= 0 && l > cd->max))) {
+-		    zwarnnam(fromtest, "unknown condition: -%s", name);
++		    zwarnnam(fromtest, "unknown condition: %s", name);
+ 		    return 2;
+ 		}
+ 		if (tracingcond)
+@@ -151,8 +158,8 @@ evalcond(Estate state, char *fromtest)
+ 		if (name && name[0] == '-' &&
+ 		    (cd = getconddef(0, name + 1, 1))) {
+ 		    if (l < cd->min || (cd->max >= 0 && l > cd->max)) {
+-			zwarnnam(fromtest, "unknown condition: -%s",
+-				 name);
++			zwarnnam(fromtest, "unknown condition: %s",
++				 errname);
+ 			return 2;
+ 		    }
+ 		    if (tracingcond)
+@@ -160,8 +167,8 @@ evalcond(Estate state, char *fromtest)
+ 		    return !cd->handler(strs, cd->condid);
+ 		} else {
+ 		    zwarnnam(fromtest,
+-			     "unknown condition: -%s",
+-			     name ? name : "<null>");
++			     "unknown condition: %s",
++			     errname);
+ 		}
+ 	    }
+ 	    /* module not found, error */
+Index: Test/C02cond.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/C02cond.ztst,v
+retrieving revision 1.25
+diff -p -u -r1.25 C02cond.ztst
+--- Test/C02cond.ztst	20 Jan 2010 11:17:13 -0000	1.25
++++ Test/C02cond.ztst	19 Feb 2010 11:56:20 -0000
+@@ -285,6 +285,14 @@ F:Failures in these cases do not indicat
+ 0:MATCH, MBEGIN, MEND, match, mbegin, mend
+ >OK
+ 
++  [[ -fail badly ]]
++1:Error message for unknown prefix condition
++?(eval):1: unknown condition: -fail
++
++  [[ really -fail badly ]]
++1:Error message for unknown infix condition
++?(eval):1: unknown condition: -fail
++
+ %clean
+   # This works around a bug in rm -f in some versions of Cygwin
+   chmod 644 unmodish
+Index: Test/V01zmodload.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/V01zmodload.ztst,v
+retrieving revision 1.13
+diff -p -u -r1.13 V01zmodload.ztst
+--- Test/V01zmodload.ztst	13 Aug 2008 21:07:03 -0000	1.13
++++ Test/V01zmodload.ztst	19 Feb 2010 11:56:20 -0000
+@@ -151,7 +151,7 @@
+   print "Shouldn't get here.")
+ 2:Failed condition autoload
+ ?(eval):3: module `zsh/parameter' has no such feature: `c:fail': autoload cancelled
+-?(eval):3: unknown condition: -foo
++?(eval):3: unknown condition: -fail
+ 
+   (zmodload -u zsh/parameter
+   zmodload -aF zsh/parameter f:fail
+
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

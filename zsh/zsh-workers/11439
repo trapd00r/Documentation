@@ -1,0 +1,818 @@
+From zsh-workers-return-11439-mason-zsh=primenet.com.au@sunsite.auc.dk Wed May 17 11:57:59 2000
+Return-Path: <zsh-workers-return-11439-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1548 invoked from network); 17 May 2000 11:57:56 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 May 2000 11:57:56 -0000
+Received: (qmail 4927 invoked by alias); 17 May 2000 11:57:49 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 11439
+Received: (qmail 4896 invoked from network); 17 May 2000 11:57:36 -0000
+Date: Wed, 17 May 2000 13:57:11 +0200 (MET DST)
+Message-Id: <200005171157.NAA15527@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Tue, 16 May 2000 17:23:11 +0000
+Subject: Re: PATCH: Completion matching control test. (Try 2)
+
+
+Bart Schaefer wrote:
+
+> ...
+> 
+> The failure included below looks like a bug in the matcher code, because
+> the L spec should cause the string on the line to be retained.  Several
+> more tests fail for the same reason (I commented out the cleanup/exit in
+> ZTST_testfailed to force it to run them all).
+
+Right, caused by 11364. Sorry.
+
+> I suspect the other failed tests are confusion over `*' vs. `**' in the
+> matcher patterns, but I'm not sure.  For example, the test
+> 
+> Documentation example using "r:|[A-Z0-9]=* r:|=*", input H
+> 
+> works if I change the * to **, and the "input 2" test after it also gives
+> the right output with ** but fails based on the ending cursor position.
+> 
+> (Does that mean the examples in the doc are out of date?  I haven't looked
+> yet.)
+
+Yes, they were, due to the fixed `*'s-don't-match-the-anchor behaviour.
+
+
+I've now committed the test and fixed it to contain what I think is
+the correct behaviour (which, coincidentally, is what the code does
+now, at least after this patch).
+
+The `__N_o_<TAB>' thing is a pity, yes, but see my last reply for this 
+(11346).
+
+
+The patch contain the whole Test/54...
+
+Bye
+ Sven
+
+Index: Doc/Zsh/compwid.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/compwid.yo,v
+retrieving revision 1.13
+diff -u -r1.13 compwid.yo
+--- Doc/Zsh/compwid.yo	2000/05/14 22:08:41	1.13
++++ Doc/Zsh/compwid.yo	2000/05/17 11:56:19
+@@ -958,17 +958,21 @@
+ complete strings with trailing numbers. Here one could use the simple
+ form with only one anchor as in:
+ 
+-example(compadd -M 'r:|[A-Z0-9]=* r:|=*' LikeTHIS FooHoo foo123 bar234)
++example(compadd -M 'r:|[A-Z0-9]=* r:|=*' LikeTHIS FooHoo 5foo123 5bar234)
+ 
+-But with this, the string `tt(H)' would be completed to `tt(FooHoo)'
+-em(and) `tt(LikeTHIS)' and `tt(2)' would be completed to the other two
++But with this, the string `tt(H)' would neither complete to `tt(FooHoo)'
++nor to `tt(LikeTHIS)' because in each case there is an uppercase
++letter before the `tt(H)' and that is matched by the anchor. Likewise, 
++a `tt(2)' would not be completed. In both cases this could be changed
++by using `tt(r:|[A-Z0-9]=**)', but then `tt(H)' completes to both
++`tt(LikeTHIS)' and `tt(FooHoo)' and a `tt(2)' matches the other
+ strings because characters can be inserted before every uppercase
+ letter and digit. To avoid this one would use:
+ 
+-example(compadd -M 'r:[^A-Z0-9]||[A-Z0-9]=* r:|=*' \ 
++example(compadd -M 'r:[^A-Z0-9]||[A-Z0-9]=** r:|=*' \ 
+     LikeTHIS FooHoo foo123 bar234)
+ 
+-By using these two anchors, a `tt(H)' matches only uppercase `H's that 
++By using these two anchors, a `tt(H)' matches only uppercase `tt(H)'s that 
+ are immediately preceded by something matching the left anchor
+ `tt([^A-Z0-9])'. The effect is, of course, that `tt(H)' matches only
+ the string `tt(FooHoo)', a `tt(2)' matches only `tt(bar234)' and so on.
+Index: Src/Zle/comp.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/comp.h,v
+retrieving revision 1.4
+diff -u -r1.4 comp.h
+--- Src/Zle/comp.h	2000/05/05 12:06:21	1.4
++++ Src/Zle/comp.h	2000/05/17 11:56:19
+@@ -196,6 +196,7 @@
+ #define CLF_LINE     32
+ #define CLF_JOIN     64
+ #define CLF_MATCHED 128
++#define CLF_SKIP    256
+ 
+ /* Information for ambiguous completions. One for fignore ignored and   *
+  * one for normal completion. */
+Index: Src/Zle/compcore.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compcore.c,v
+retrieving revision 1.21
+diff -u -r1.21 compcore.c
+--- Src/Zle/compcore.c	2000/05/16 10:45:26	1.21
++++ Src/Zle/compcore.c	2000/05/17 11:56:19
+@@ -1740,55 +1740,57 @@
+ 		    llpl -= gfl;
+ 		}
+ 	    }
+-	    s = dat->ppre ? dat->ppre : dupstring("");
+-	    if ((ml = match_str(lpre, s, &bpl, 0, NULL, 0, 0, 1)) >= 0) {
+-		if (matchsubs) {
+-		    Cline tmp = get_cline(NULL, 0, NULL, 0, NULL, 0, 0);
++	    if ((s = dat->ppre)) {
++		if ((ml = match_str(lpre, s, &bpl, 0, NULL, 0, 0, 1)) >= 0) {
++		    if (matchsubs) {
++			Cline tmp = get_cline(NULL, 0, NULL, 0, NULL, 0, 0);
+ 
+-		    tmp->prefix = matchsubs;
+-		    if (matchlastpart)
+-			matchlastpart->next = tmp;
++			tmp->prefix = matchsubs;
++			if (matchlastpart)
++			    matchlastpart->next = tmp;
++			else
++			    matchparts = tmp;
++		    }
++		    pline = matchparts;
++		    lpre += ml;
++		    llpl -= ml;
++		    bcp = ml;
++		    bpadd = strlen(s) - ml;
++		} else {
++		    if (llpl <= lpl && strpfx(lpre, s))
++			lpre = dupstring("");
++		    else if (llpl > lpl && strpfx(s, lpre))
++			lpre += lpl;
+ 		    else
+-			matchparts = tmp;
++			*argv = NULL;
++		    bcp = lpl;
+ 		}
+-		pline = matchparts;
+-		lpre += ml;
+-		llpl -= ml;
+-		bcp = ml;
+-		bpadd = strlen(s) - ml;
+-	    } else {
+-		if (llpl <= lpl && strpfx(lpre, s))
+-		    lpre = dupstring("");
+-		else if (llpl > lpl && strpfx(s, lpre))
+-		    lpre += lpl;
+-		else
+-		    *argv = NULL;
+-		bcp = lpl;
+ 	    }
+-	    s = dat->psuf ? dat->psuf : dupstring("");
+-	    if ((ml = match_str(lsuf, s, &bsl, 0, NULL, 1, 0, 1)) >= 0) {
+-		if (matchsubs) {
+-		    Cline tmp = get_cline(NULL, 0, NULL, 0, NULL, 0, CLF_SUF);
++	    if ((s = dat->psuf)) {
++		if ((ml = match_str(lsuf, s, &bsl, 0, NULL, 1, 0, 1)) >= 0) {
++		    if (matchsubs) {
++			Cline tmp = get_cline(NULL, 0, NULL, 0, NULL, 0, CLF_SUF);
+ 
+-		    tmp->suffix = matchsubs;
+-		    if (matchlastpart)
+-			matchlastpart->next = tmp;
++			tmp->suffix = matchsubs;
++			if (matchlastpart)
++			    matchlastpart->next = tmp;
++			else
++			    matchparts = tmp;
++		    }
++		    sline = revert_cline(matchparts);
++		    lsuf[llsl - ml] = '\0';
++		    llsl -= ml;
++		    bcs = ml;
++		    bsadd = strlen(s) - ml;
++		} else {
++		    if (llsl <= lsl && strsfx(lsuf, s))
++			lsuf = dupstring("");
++		    else if (llsl > lsl && strsfx(s, lsuf))
++			lsuf[llsl - lsl] = '\0';
+ 		    else
+-			matchparts = tmp;
++			*argv = NULL;
++		    bcs = lsl;
+ 		}
+-		sline = revert_cline(matchparts);
+-		lsuf[llsl - ml] = '\0';
+-		llsl -= ml;
+-		bcs = ml;
+-		bsadd = strlen(s) - ml;
+-	    } else {
+-		if (llsl <= lsl && strsfx(lsuf, s))
+-		    lsuf = dupstring("");
+-		else if (llsl > lsl && strsfx(s, lsuf))
+-		    lsuf[llsl - lsl] = '\0';
+-		else
+-		    *argv = NULL;
+-		bcs = lsl;
+ 	    }
+ 	    if (comppatmatch && *comppatmatch) {
+ 		int is = (*comppatmatch == '*');
+Index: Src/Zle/compmatch.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compmatch.c,v
+retrieving revision 1.13
+diff -u -r1.13 compmatch.c
+--- Src/Zle/compmatch.c	2000/05/15 09:34:12	1.13
++++ Src/Zle/compmatch.c	2000/05/17 11:56:20
+@@ -411,7 +411,8 @@
+ 
+     /* And add the cline. */
+     if (wl || ll) {
+-	n = get_cline(l, ll, w, wl, NULL, 0, flags);
++	n = get_cline(l, ll, w, wl, NULL, 0,
++		      flags | ((m && m->wlen == -2) ? CLF_SKIP : 0));
+ 	if (matchlastsub)
+ 	    matchlastsub->next = n;
+ 	else
+@@ -1925,9 +1926,9 @@
+ 		Cline t, tn, tt, to = NULL;
+ 
+ 		for (t = n; (tn = t->next); t = tn)
+-		    if (!(tn->flags & CLF_NEW)) {
++		    if (!(tn->flags & CLF_NEW) && (tn->flags & CLF_SKIP)) {
+ 			for (tt = o; (to = tt->next); tt = to)
+-			    if (!(to->flags & CLF_NEW) &&
++			    if (!(to->flags & CLF_NEW) && (to->flags & CLF_SKIP) &&
+ 				cmp_anchors(tn, to, 1))
+ 				break;
+ 			if (to)
+@@ -1953,8 +1954,9 @@
+ 		    n = n->next;
+ 		    continue;
+ 		} else {
+-		    for (t = o; (to = t->next) && !cmp_anchors(n, to, 1);
+-			 t = to);
++		    for (t = o; (to = t->next); t = to)
++			if ((to->flags & CLF_SKIP) && cmp_anchors(n, to, 1))
++			    break;
+ 
+ 		    if (to) {
+ 			diff = sub_join(n, o, to, 1);
+@@ -1975,9 +1977,11 @@
+ 			continue;
+ 		    } else {
+ 			for (tt = NULL, t = n; (tn = t->next); t = tn) {
+-			    for (tt = o;
+-				 (to = tt->next) &&
+-				     !cmp_anchors(tn, to, 1); tt = to);
++			    if (tn->flags & CLF_SKIP)
++				for (tt = o; (to = tt->next); tt = to)
++				    if ((to->flags & CLF_SKIP) &&
++					cmp_anchors(tn, to, 1))
++					break;
+ 			    if (to)
+ 				break;
+ 			}
+Index: Test/.distfiles
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/.distfiles,v
+retrieving revision 1.2
+diff -u -r1.2 .distfiles
+--- Test/.distfiles	2000/04/19 19:03:09	1.2
++++ Test/.distfiles	2000/05/17 11:56:20
+@@ -5,5 +5,5 @@
+     05command.ztst 06arith.ztst 07cond.ztst 08traps.ztst 09funcdef.ztst
+     10prompt.ztst 11glob.ztst 12procsubst.ztst 13parameter.ztst
+     50cd.ztst 51xtrace.ztst 52zregexparse.ztst
+-    53completion.ztst
++    53completion.ztst 54compmatch.ztst
+ '
+Index: Test/54compmatch.ztst
+===================================================================
+RCS file: 54compmatch.ztst
+diff -N 54compmatch.ztst
+--- /dev/null	Tue May  5 13:32:27 1998
++++ 54compmatch.ztst	Wed May 17 04:56:20 2000
+@@ -0,0 +1,488 @@
++# Tests for completion system matching control
++
++# Most tests follow this format:
++#	test_code $matcher_string selection_list
++#	comptest -c "$code" $' tst input_string'
++# test_code generates the string $codem which sets what words the completion
++# should be selecting from.  The comptest function actually performs the
++# completion test, using the completion function generated by test_code.
++#
++# This test also tests error conditions that compadd reports, so output also
++# contains the compadd output.
++
++%prep
++  zmodload -i zsh/zpty
++
++  TERM=vt100
++  export ZTST_testdir ZTST_srcdir TERM
++  comptest () { $ZTST_testdir/../Src/zsh -f $ZTST_srcdir/comptest -z $ZTST_testdir/../Src/zsh -d $ZTST_testdir/compdump.tmp "$@" }
++
++  mkdir match.tmp
++  cd match.tmp
++
++
++  list1=(IndianRed IndianRed2 IndianRed3 IndianRed4)
++  test_code () {
++	matcher=$1;
++	list=$2;
++	code="compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M '"
++	code="$code$matcher"
++	code="$code'  - ${(P)list} ; echo  -n '</COMPADD>'}"
++  }
++
++	 
++
++%test
++
++
++ test_code z: list1
++ comptest  -c "$code" $'tst \t'
++0:Match Error for "z:"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: unknown match specification character `z'}
++
++ test_code m: list1
++ comptest  -c "$code" $'tst \t'
++0:Match Error for "m:"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: missing patterns}
++
++ test_code M: list1
++ comptest -c "$code" $'tst \t'
++0:Match Error for "M:"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: missing patterns}
++
++ test_code r: list1
++ comptest -c "$code" $'tst \t'
++0:Match Error "r:"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: missing patterns}
++
++ test_code R: list1
++ comptest -c "$code" $'tst \t'
++0:Match Error "R:"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: missing patterns}
++
++ test_code l: list1
++ comptest -c "$code" $'tst \t'
++0:Match Error for "l:"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: missing patterns}
++
++ test_code L: list1
++ comptest -c "$code" $'tst \t'
++0:Match Error for "L:"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: missing patterns}
++
++ test_code 'm:{0-9' list1
++ comptest -c "$code" $'tst \t'
++0:Match Error for "m:{0-9"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: unterminated character class}
++
++ test_code 'm:{0-9}' list1
++ comptest -c "$code" $'tst \t'
++0:Match Error for "m:{0-9}"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: missing word pattern}
++
++ test_code 'm:{0-9}={' list1
++ comptest -c "$code" $'tst \t'
++0:Match Error for "m:{0-9}={"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: unterminated character class}
++
++ test_code 'm:{0-9}={0-' list1
++ comptest -c "$code" $'tst \t'
++0:Match Error for "m:{0-9}={0-"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: unterminated character class}
++
++ test_code 'm:{0-9}={-' list1
++ comptest -c "$code" $'tst \t'
++0:Match Error for "m:{0-9}={-"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: unterminated character class}
++
++ test_code r: list1
++ comptest -c "$code" $'tst \t'
++0:Match Error "r:"
++>line: {tst }{}
++>COMPADD:{_tst:compadd: missing patterns}
++
++  example1_list=(
++	kshoptionprint        shglob              
++	listambiguous         shinstdin           
++	listbeep              shnullcmd           
++	listpacked            shoptionletters     
++	listrowsfirst         shortloops          
++	listtypes             shwordsplit
++   )
++ options_matcher='L:|[nN][oO]= M:_= M:{A-Z}={a-z}'
++ test_code $options_matcher example1_list
++ comptest -c "$code" $'tst nolistbee\t'
++0:Documentation example for options, input "nolistbee"
++>line: {tst nolistbeep }{}
++>COMPADD:{}
++
++
++ test_code $options_matcher example1_list
++ comptest -c "$code" $'tst list_bee\t'
++0:Documentation example for options, input "list_bee"
++>line: {tst list_beep }{}
++>COMPADD:{}
++
++ test_code $options_matcher example1_list
++ comptest -c "$code" $'tst ListBee\t'
++0:Documentation example for options, input "ListBee"
++>line: {tst ListBeep }{}
++>COMPADD:{}
++
++ test_code $options_matcher example1_list
++ comptest -c "$code" $'tst NOList\tB\t'
++0:Documentation example for options, input "NOList"
++>line: {tst NOList}{}
++>COMPADD:{}
++>NO:{NOListambiguous}
++>NO:{NOListbeep}
++>NO:{NOListpacked}
++>NO:{NOListrowsfirst}
++>NO:{NOListtypes}
++>line: {tst NOListBeep }{}
++>COMPADD:{}
++
++
++ test_code $options_matcher example1_list
++ comptest -c "$code" $'tst NO_List\t__\tB\t'
++0:Documentation example for options, input "NO_List\t__\tB\t"
++>line: {tst NO_List}{}
++>COMPADD:{}
++>NO:{NO_Listambiguous}
++>NO:{NO_Listbeep}
++>NO:{NO_Listpacked}
++>NO:{NO_Listrowsfirst}
++>NO:{NO_Listtypes}
++>line: {tst NO_List__}{}
++>COMPADD:{}
++>NO:{NO_List__ambiguous}
++>NO:{NO_List__beep}
++>NO:{NO_List__packed}
++>NO:{NO_List__rowsfirst}
++>NO:{NO_List__types}
++>line: {tst NO_List__Beep }{}
++>COMPADD:{}
++
++ test_code $options_matcher example1_list
++ comptest -c "$code" $'tst __\tN\t__o\t___\tlist_\tbeep__\t'
++0:Documentation example for options, input "__\tN\t__o\t___\tlist_\tbeep__\t" 
++>line: {tst __}{}
++>COMPADD:{}
++>NO:{__kshoptionprint}
++>NO:{__listambiguous}
++>NO:{__listbeep}
++>NO:{__listpacked}
++>NO:{__listrowsfirst}
++>NO:{__listtypes}
++>NO:{__shglob}
++>NO:{__shinstdin}
++>NO:{__shnullcmd}
++>NO:{__shoptionletters}
++>NO:{__shortloops}
++>NO:{__shwordsplit}
++>line: {tst __N}{}
++>COMPADD:{}
++>line: {tst __N__o}{}
++>COMPADD:{}
++>line: {tst __N__o___}{}
++>COMPADD:{}
++>line: {tst __N__o___list_}{}
++>COMPADD:{}
++>line: {tst __N__o___list_beep__}{}
++>COMPADD:{}
++
++ test_code $options_matcher example1_list
++ comptest -c "$code" $'tst __\tNo\t___\tlist_\tbeep__\t'
++0:Documentation example for options, input "__\tNo\t___\tlist_\tbeep__\t" 
++>line: {tst __}{}
++>COMPADD:{}
++>NO:{__kshoptionprint}
++>NO:{__listambiguous}
++>NO:{__listbeep}
++>NO:{__listpacked}
++>NO:{__listrowsfirst}
++>NO:{__listtypes}
++>NO:{__shglob}
++>NO:{__shinstdin}
++>NO:{__shnullcmd}
++>NO:{__shoptionletters}
++>NO:{__shortloops}
++>NO:{__shwordsplit}
++>line: {tst __No}{}
++>COMPADD:{}
++>line: {tst __No___}{}
++>COMPADD:{}
++>line: {tst __No___list_}{}
++>COMPADD:{}
++>line: {tst __No___list_beep__}{}
++>COMPADD:{}
++
++
++ test_code $options_matcher example1_list
++ comptest -c "$code" $'tst ___\tlist_\tbeep__\t'
++0:Documentation example for options, input "___\tlist_\tbeep__\t" 
++>line: {tst ___}{}
++>COMPADD:{}
++>NO:{___kshoptionprint}
++>NO:{___listambiguous}
++>NO:{___listbeep}
++>NO:{___listpacked}
++>NO:{___listrowsfirst}
++>NO:{___listtypes}
++>NO:{___shglob}
++>NO:{___shinstdin}
++>NO:{___shnullcmd}
++>NO:{___shoptionletters}
++>NO:{___shortloops}
++>NO:{___shwordsplit}
++>line: {tst ___list_}{}
++>COMPADD:{}
++>NO:{___list_ambiguous}
++>NO:{___list_beep}
++>NO:{___list_packed}
++>NO:{___list_rowsfirst}
++>NO:{___list_types}
++>line: {tst ___list_beep__ }{}
++>COMPADD:{}
++
++ lower_insensitive_M="M:{a-z}={A-Z}"
++ lower_insensitive_m="m:{a-z}={A-Z}"
++ example2_list=(ABC Abc abc)
++ test_code $lower_insensitive_M example2_list
++ comptest -c "$code" $'tst ab\tC\t'
++0:Documentation example for lowercase insenitive M, input "ab\tC\t"
++>line: {tst ab}{}
++>COMPADD:{}
++>NO:{abC}
++>NO:{abc}
++>line: {tst abC }{}
++>COMPADD:{}
++
++ test_code $lower_insensitive_m example2_list
++ comptest -c "$code" $'tst A\t\t'
++0:Documentation example for lowercase insenitive m, input "A\t\t" 
++>line: {tst A}{}
++>COMPADD:{}
++>NO:{ABC}
++>NO:{Abc}
++>line: {tst ABC}{}
++>COMPADD:{}
++
++ example3_list=(ABC Abc abc)
++ case_insensitive_M="M:{a-zA-Z}={A-Za-z}"
++ case_insensitive_m="m:{a-zA-Z}={A-Za-z}"
++ test_code $case_insensitive_M example3_list
++ comptest -c "$code" $'tst aB\t\t'
++0:Documentation example for case insenitive M, input "aB\t\t"
++>line: {tst aB}{}
++>COMPADD:{}
++>NO:{aBC}
++>NO:{aBc}
++>line: {tst aBC}{}
++>COMPADD:{}
++
++
++ test_code $case_insensitive_m example3_list
++ comptest -c "$code" $'tst aB\t\t'
++0:Documentation example for case insenitive m, input "aB\t\t"
++>line: {tst a}{BC}
++>COMPADD:{}
++>line: {tst a}{BC}
++>COMPADD:{}
++>NO:{ABC}
++>NO:{Abc}
++>NO:{abc}
++
++  example4_matcher='r:|.=* r:|=*'
++  example4_list=(comp.sources.unix comp.sources.misc 
++  comp.graphics.algorithms comp.graphics.animation comp.graphics.api
++  comp.graphics.apps comp.graphics.misc comp.graphics.packages
++  comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias
++  comp.graphics.apps.gimp comp.graphics.apps.gnuplot
++  comp.graphics.apps.lightwave comp.graphics.apps.pagemaker
++  comp.graphics.apps.paint-shop-pro comp.graphics.apps.photoshop
++  comp.graphics.apps.softimage comp.graphics.apps.ulead
++  comp.graphics.rendering.misc comp.graphics.rendering.raytracing
++  comp.graphics.rendering.renderman)
++ test_code $example4_matcher example4_list
++ comptest -c "$code" $'tst c.s.u\t'
++0:Documentation example using input c.s.u
++>line: {tst comp.sources.unix }{}
++>COMPADD:{}
++
++ test_code $example4_matcher example4_list
++ comptest -c "$code" $'tst c.g.\ta\t.\tp\ta\tg\t'
++0:Documentation example using input c.g.\ta\t.\tp\ta\tg\t
++>line: {tst comp.graphics.}{}
++>COMPADD:{}
++>line: {tst comp.graphics.a}{}
++>COMPADD:{}
++>NO:{comp.graphics.algorithms}
++>NO:{comp.graphics.animation}
++>NO:{comp.graphics.api}
++>NO:{comp.graphics.apps}
++>NO:{comp.graphics.apps.alias}
++>NO:{comp.graphics.apps.gimp}
++>NO:{comp.graphics.apps.gnuplot}
++>NO:{comp.graphics.apps.lightwave}
++>NO:{comp.graphics.apps.pagemaker}
++>NO:{comp.graphics.apps.paint-shop-pro}
++>NO:{comp.graphics.apps.photoshop}
++>NO:{comp.graphics.apps.softimage}
++>NO:{comp.graphics.apps.ulead}
++>line: {tst comp.graphics.apps.}{}
++>COMPADD:{}
++>line: {tst comp.graphics.apps.p}{}
++>COMPADD:{}
++>NO:{comp.graphics.apps.pagemaker}
++>NO:{comp.graphics.apps.paint-shop-pro}
++>NO:{comp.graphics.apps.photoshop}
++>line: {tst comp.graphics.apps.pa}{}
++>COMPADD:{}
++>NO:{comp.graphics.apps.pagemaker}
++>NO:{comp.graphics.apps.paint-shop-pro}
++>line: {tst comp.graphics.apps.pagemaker }{}
++>COMPADD:{}
++
++ test_code $example4_matcher example4_list
++ comptest -c "$code" $'tst c...pag\t'
++0:Documentation example using input c...pag\t
++>line: {tst comp.graphics.apps.pagemaker }{}
++>COMPADD:{}
++
++ test_code $example4_matcher example4_list
++ comptest -c "$code" $'tst c...pa\tg\t'
++0:Documentation example using input c...pa\tg\t
++>line: {tst comp.graphics.apps.pa}{}
++>COMPADD:{}
++>line: {tst comp.graphics.apps.pagemaker }{}
++>COMPADD:{}
++
++ example5_matcher='r:|[.,_-]=* r:|=*'
++ example5_list=(veryverylongfile.c veryverylongheader.h)
++ test_code $example5_matcher example5_list
++ comptest -c "$code" $'tst  v.c\tv.h\t'
++0:Documentation example using input v.c\t
++>line: {tst  veryverylongfile.c }{}
++>COMPADD:{}
++>line: {tst  veryverylongfile.c veryverylongheader.h }{}
++>COMPADD:{}
++
++
++ example6_list=(LikeTHIS FooHoo 5foo123 5bar234)
++ test_code 'r:|[A-Z0-9]=* r:|=*' example6_list
++ comptest -c "$code" $'tst H\t'
++0:Documentation example using "r:|[A-Z0-9]=* r:|=*", input H
++>line: {tst H}{}
++>COMPADD:{}
++
++ test_code 'r:|[A-Z0-9]=* r:|=*' example6_list
++ comptest -c "$code" $'tst 2\t'
++0:Documentation example using "r:|[A-Z0-9]=* r:|=*", input 2
++>line: {tst 2}{}
++>COMPADD:{}
++
++ test_code 'r:|[A-Z0-9]=** r:|=*' example6_list
++ comptest -c "$code" $'tst H\t'
++0:Documentation example using "r:|[A-Z0-9]=* r:|=*", input 2
++>line: {tst H}{}
++>COMPADD:{}
++>NO:{FooHoo}
++>NO:{LikeTHIS}
++
++ test_code 'r:|[A-Z0-9]=** r:|=*' example6_list
++ comptest -c "$code" $'tst 2\t\t'
++0:Documentation example using "r:|[A-Z0-9]=* r:|=*", input 2
++>line: {tst 523}{}
++>COMPADD:{}
++>line: {tst 523}{}
++>COMPADD:{}
++>NO:{5bar234}
++>NO:{5foo123}
++
++ example7_matcher="r:[^A-Z0-9]||[A-Z0-9]=** r:|=*"
++ example7_list=($example6_list)
++ test_code $example7_matcher example7_list
++ comptest -c "$code" $'tst H\t2\t'
++0:Documentation example using "r:[^A-Z0-9]||[A-Z0-9]=** r:|=*"
++>line: {tst FooHoo }{}
++>COMPADD:{}
++>line: {tst FooHoo 5bar234 }{}
++>COMPADD:{}
++
++
++ workers_7311_matcher="m:{a-z}={A-Z} r:|[.,_-]=* r:|=*"
++ workers_7311_list=(Abc-Def-Ghij.txt Abc-def.ghi.jkl_mno.pqr.txt Abc_def_ghi_jkl_mno_pqr.txt)
++ test_code $workers_7311_matcher workers_7311_list
++ comptest -c "$code" $'tst a-a\t'
++0:Bug from workers 7311
++>line: {tst a-a}{}
++>COMPADD:{}
++
++ test_code $workers_7311_matcher workers_7311_list
++ comptest -c "$code" $'tst a\t\t-d.\t'
++0:Bug from workers_7311 
++>line: {tst Abc}{}
++>COMPADD:{}
++>line: {tst Abc}{}
++>COMPADD:{}
++>NO:{Abc-Def-Ghij.txt}
++>NO:{Abc-def.ghi.jkl_mno.pqr.txt}
++>NO:{Abc_def_ghi_jkl_mno_pqr.txt}
++>line: {tst Abc-def.ghi.jkl_mno.pqr.txt }{}
++>COMPADD:{}
++
++ workers_10886_matcher="r:|[A-Z0-9]=* r:|=*"
++ workers_10886_list=(BW UWB W)
++ test_code $workers_10886_matcher workers_10886_list
++ comptest -c "$code" $'tst W\t'
++0:Bug from workers 10886
++>line: {tst W }{}
++>COMPADD:{}
++
++ workers_11081_matcher='m:{a-zA-Z}={A-Za-z} r:|[.,_-]=* r:[^A-Z0-9]||[A-Z0-9]=* r:[A-Z0-9]||[^A-Z0-9]=* r:[^0-9]||[0-9]=* r:|=*'
++ workers_11081_list=(build.out build.out1 build.out2)
++ test_code $workers_11081_matcher workers_11081_list
++ comptest -c "$code" $'tst bui\t\t\t'
++0:Bug from workers 11081
++>line: {tst build.out}{}
++>COMPADD:{}
++>line: {tst build.out}{}
++>COMPADD:{}
++>NO:{build.out}
++>NO:{build.out1}
++>NO:{build.out2}
++>line: {tst build.out}{}
++>COMPADD:{}
++
++
++ workers_11388_matcher='r:|[:.]=* r:|=*'
++ workers_11388_list=(a.b:0 c.d:1)
++ test_code $workers_11388_matcher workers_11388_list
++ comptest -c "$code" $'tst :\t'
++0:Non-bug from workers 11388
++>line: {tst :}{}
++>COMPADD:{}
++
++ workers_11388_matcher='r:|[:.]=** r:|=*'
++ workers_11388_list=(a.b:0 c.d:1)
++ test_code $workers_11388_matcher workers_11388_list
++ comptest -c "$code" $'tst :\t'
++0:Non-bug from workers 11388
++>line: {tst }{.:}
++>COMPADD:{}
++
++%clean
++exit 0
+Index: Test/comptest
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/comptest,v
+retrieving revision 1.1.1.7
+diff -u -r1.1.1.7 comptest
+--- Test/comptest	2000/03/24 12:48:02	1.1.1.7
++++ Test/comptest	2000/05/17 11:56:20
+@@ -13,6 +13,7 @@
+ zsh=${ZSH:-zsh}
+ termcap_ce="$(echotc ce)"
+ 
++debug=yes
+ while getopts Dd:c:z: opt; do
+   case $opt in
+     D) debug=yes;;
+@@ -104,7 +105,7 @@
+   if [[ "$log" = (#b)*$'<LBUFFER>'(*)$'</LBUFFER>\r\n<RBUFFER>'(*)$'</RBUFFER>'* ]]; then
+     print -lr "line: {$match[1]}{$match[2]}"
+   fi
+-  while (( ${(N)log#*(#b)(<LC><(??)><RC>(*)<EC>|<DESCRIPTION>(*)</DESCRIPTION>|<MESSAGE>(*)</MESSAGE>)} )); do
++  while (( ${(N)log#*(#b)(<LC><(??)><RC>(*)<EC>|<DESCRIPTION>(*)</DESCRIPTION>|<MESSAGE>(*)</MESSAGE>|<COMPADD>(*)</COMPADD>)} )); do
+     log="${log[$mend[1]+1,-1]}"
+     if (( 0 <= $mbegin[2] )); then
+       if [[ $match[2] != TC && $match[3] != \ # ]]; then
+@@ -114,6 +115,9 @@
+       print -lr "DESCRIPTION:{$match[4]}"
+     elif (( 0 <= $mbegin[5] )); then
+       print -lr "MESSAGE:{$match[5]}"
++    elif (( 0 <= $mbegin[6] )); then
++      result=`echo $match[6] | tr -d '\012\015'`
++      print -lr "COMPADD:{$result}"
+     fi
+   done
+ done
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

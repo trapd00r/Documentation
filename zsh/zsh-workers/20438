@@ -1,0 +1,140 @@
+From zsh-workers-return-20438-mason-zsh=primenet.com.au@sunsite.dk Fri Oct 01 19:37:22 2004
+Return-Path: <zsh-workers-return-20438-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 24691 invoked from network); 1 Oct 2004 19:37:21 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 1 Oct 2004 19:37:21 -0000
+Received: (qmail 32734 invoked from network); 1 Oct 2004 19:37:15 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 1 Oct 2004 19:37:15 -0000
+Received: (qmail 7565 invoked by alias); 1 Oct 2004 19:37:02 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 20438
+Received: (qmail 7552 invoked from network); 1 Oct 2004 19:37:01 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 1 Oct 2004 19:37:01 -0000
+Received: (qmail 32424 invoked from network); 1 Oct 2004 19:37:01 -0000
+Received: from dsl3-63-249-88-2.cruzio.com (HELO binome.blorf.net) (63.249.88.2)
+  by a.mx.sunsite.dk with SMTP; 1 Oct 2004 19:36:59 -0000
+Received: by binome.blorf.net (Postfix, from userid 1000)
+	id D4CA46C6A; Fri,  1 Oct 2004 12:36:58 -0700 (PDT)
+Date: Fri, 1 Oct 2004 12:36:58 -0700
+From: Wayne Davison <wayned@users.sourceforge.net>
+To: zsh-workers@sunsite.dk
+Subject: skip rewriting history if exiting due to signal
+Message-ID: <20041001193658.GD26529@blorf.net>
+Mime-Version: 1.0
+Content-Type: multipart/mixed; boundary="yrj/dFKFPuw6o+aM"
+Content-Disposition: inline
+User-Agent: Mutt/1.5.6+20040722i
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: 
+X-Spam-Status: No, hits=0.0 required=6.0 tests=none autolearn=no version=2.63
+X-Spam-Hits: 0.0
+
+
+--yrj/dFKFPuw6o+aM
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+
+Here's my patch that implements the behavior that skips the history
+rewrite-after-appending if zsh is exiting because it received a signal.
+This should make the simultaneous closing of multiple zsh programs less
+contentious over the history file.  The safest way to go is to use
+INC_APPEND_HISTORY or SHARE_HISTORY (since new history lines are being
+appended as they are entered, not all at once on exit).
+
+People who don't append to the history file won't see any change in
+behavior from this patch (that will have to be improved in some other
+manner, possibly by switching over to using a *.new file to write out
+the new history lines).
+
+..wayne..
+
+--yrj/dFKFPuw6o+aM
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename="sighist.patch"
+
+--- Src/builtin.c	1 Oct 2004 18:51:44 -0000	1.127
++++ Src/builtin.c	1 Oct 2004 19:12:23 -0000
+@@ -1340,7 +1340,7 @@ bin_fc(char *nam, char **argv, Options o
+ 	    zwarnnam("fc", "too many arguments", NULL, 0);
+ 	    return 1;
+ 	}
+-	return !saveandpophiststack(-1);
++	return !saveandpophiststack(-1, HFILE_USE_OPTIONS);
+     }
+     /* with the -m option, the first argument is taken *
+      * as a pattern that history lines have to match   */
+@@ -4111,8 +4111,11 @@ zexit(int val, int from_where)
+     }
+     if (isset(RCS) && interact) {
+ 	if (!nohistsave) {
+-	    saveandpophiststack(1);
+-	    savehistfile(NULL, 1, HFILE_USE_OPTIONS);
++	    int writeflags = HFILE_USE_OPTIONS;
++	    if (from_where == 1)
++		writeflags |= HFILE_NO_REWRITE;
++	    saveandpophiststack(1, writeflags);
++	    savehistfile(NULL, 1, writeflags);
+ 	}
+ 	if (islogin && !subsh) {
+ 	    sourcehome(".zlogout");
+--- Src/hist.c	9 Sep 2004 10:12:47 -0000	1.53
++++ Src/hist.c	1 Oct 2004 19:12:24 -0000
+@@ -2093,7 +2093,8 @@ savehistfile(char *fn, int err, int writ
+ 	}
+ 	fclose(out);
+ 
+-	if ((writeflags & (HFILE_SKIPOLD | HFILE_FAST)) == HFILE_SKIPOLD) {
++	if (writeflags & HFILE_SKIPOLD
++	 && !(writeflags & (HFILE_FAST | HFILE_NO_REWRITE))) {
+ 	    int remember_histactive = histactive;
+ 
+ 	    /* Zeroing histactive avoids unnecessary munging of curline. */
+@@ -2445,7 +2446,7 @@ pophiststack(void)
+ 
+ /**/
+ int
+-saveandpophiststack(int pop_through)
++saveandpophiststack(int pop_through, int writeflags)
+ {
+     if (pop_through <= 0) {
+ 	pop_through += histsave_stack_pos + 1;
+@@ -2459,7 +2460,7 @@ saveandpophiststack(int pop_through)
+ 	return 0;
+     do {
+ 	if (!nohistsave)
+-	    savehistfile(NULL, 1, HFILE_USE_OPTIONS);
++	    savehistfile(NULL, 1, writeflags);
+ 	pophiststack();
+     } while (histsave_stack_pos >= pop_through);
+     return 1;
+--- Src/params.c	1 Oct 2004 19:06:49 -0000	1.91
++++ Src/params.c	1 Oct 2004 19:12:24 -0000
+@@ -3611,7 +3611,8 @@ mod_export void
+ endparamscope(void)
+ {
+     locallevel--;
+-    saveandpophiststack(0); /* Pops anything from a higher locallevel */
++    /* This pops anything from a higher locallevel */
++    saveandpophiststack(0, HFILE_USE_OPTIONS);
+     scanhashtable(paramtab, 0, 0, 0, scanendscope, 0);
+ }
+ 
+--- Src/zsh.h	9 Sep 2004 10:12:47 -0000	1.60
++++ Src/zsh.h	1 Oct 2004 19:10:59 -0000	1.62
+@@ -1365,6 +1365,7 @@ struct histent {
+ #define HFILE_SKIPDUPS		0x0004
+ #define HFILE_SKIPFOREIGN	0x0008
+ #define HFILE_FAST		0x0010
++#define HFILE_NO_REWRITE	0x0020
+ #define HFILE_USE_OPTIONS	0x8000
+ 
+ /******************************************/
+
+--yrj/dFKFPuw6o+aM--
+

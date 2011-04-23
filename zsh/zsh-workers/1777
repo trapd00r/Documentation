@@ -1,0 +1,321 @@
+From pws@ifh.de Fri Jul 26 18:16:42 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id SAA14631 for <mason@werple.mira.net.au>; Fri, 26 Jul 1996 18:16:39 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id EAA03001; Fri, 26 Jul 1996 04:09:44 -0400 (EDT)
+Resent-Date: Fri, 26 Jul 1996 04:09:44 -0400 (EDT)
+Message-Id: <199607260808.KAA09932@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: Re: Odd behavior of "trap" and "functions" in 3.0-pre2 
+In-reply-to: "schaefer@candle.brasslantern.com"'s message of "Sat, 06 Jul 1996 12:09:25 MET."
+             <960706120928.ZM17771@candle.brasslantern.com> 
+Date: Fri, 26 Jul 1996 10:08:34 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"urtYM2.0.pk.8r7-n"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1777
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 7692
+Status: O
+
+schaefer@candle.brasslantern.com wrote:
+> zagzig<14> trap "echo foo" USR2
+> zagzig<17> grep TRAP <<(functions)
+> TRAPALRM () {
+> zagzig<18>
+> 
+> I'm almost certain that `functions` used to list all the TRAPxxx ....
+
+Looks like the `trap' form of traps don't handle functions properly,
+while the TRAPxxx functions do handle traps properly, so this is
+certainly a mistake.  It seems the bin_trap() end of things got missed
+out in some reorganisation.
+
+I've tried to write this in such away as to maintain symmetry between
+settrap() and unsettrap().  They now have a final argument which is
+set to 1 if they should set/unset the corresponding function.  This is
+necessary because the function code needs to be able to do its own
+separate manipulations on the function.  The rule is therefore that
+any call from outside the function-handling code should set the last
+argument to 1 to maintain parallel trap/TRAPxxx settings.
+
+Note there's no memory leak in the second last hunk:  the function,
+the command list, and the name all needed to be separately allocated.
+
+I fixed a related bug:
+
+% TRAPUSR1() { }
+% trap
+TRAPUSR1() {}
+
+When defining the function, you now need the space between the braces
+because of the new brace rules (usually, anyway, and it never does any
+harm).
+
+
+There are still two function bugs, which are not trap-specific and
+which I haven't fixed:
+
+% TRAPUSR1() { }
+% functions TRAPUSR1
+TRAPUSR1()
+
+No braces at all here:  that's illegal for a definition.
+Any empty function does this.
+
+Finally, if you do forget the space between the braces:
+
+% TRAPUSR1() {}
+
+No error is flagged, and the definition is:
+
+% functions TRAPUSR1
+TRAPUSR1() {
+	{}
+}
+
+which crashes when you call it.  I can understand why `TRAPUSR1() { {}
+}' would now produce this effect, but presumably parsing is going
+astray with just the {}.
+
+*** Src/builtin.c.settrap	Wed Jul 17 10:49:55 1996
+--- Src/builtin.c	Fri Jul 26 10:00:16 1996
+***************
+*** 5432,5438 ****
+  	for (sig = 0; sig < VSIGCOUNT; sig++)
+  	    if (sigtrapped[sig])
+  		if (!sigfuncs[sig])
+! 		    printf("TRAP%s () {}\n", sigs[sig]);
+  		else {
+  		    s = getpermtext((void *) dupstruct((void *) sigfuncs[sig]));
+  		    printf("TRAP%s () {\n\t%s\n}\n", sigs[sig], s);
+--- 5432,5438 ----
+  	for (sig = 0; sig < VSIGCOUNT; sig++)
+  	    if (sigtrapped[sig])
+  		if (!sigfuncs[sig])
+! 		    printf("TRAP%s () { }\n", sigs[sig]);
+  		else {
+  		    s = getpermtext((void *) dupstruct((void *) sigfuncs[sig]));
+  		    printf("TRAP%s () {\n\t%s\n}\n", sigs[sig], s);
+***************
+*** 5446,5455 ****
+      if ((getsignum(*argv) != -1) || (!strcmp(*argv, "-") && argv++)) {
+  	if (!*argv)
+  	    for (sig = 0; sig < VSIGCOUNT; sig++)
+! 		unsettrap(sig);
+  	else
+  	    while (*argv)
+! 		unsettrap(getsignum(*argv++));
+  	return 0;
+      }
+  
+--- 5446,5455 ----
+      if ((getsignum(*argv) != -1) || (!strcmp(*argv, "-") && argv++)) {
+  	if (!*argv)
+  	    for (sig = 0; sig < VSIGCOUNT; sig++)
+! 		unsettrap(sig, 1);
+  	else
+  	    while (*argv)
+! 		unsettrap(getsignum(*argv++), 1);
+  	return 0;
+      }
+  
+***************
+*** 5469,5475 ****
+  	    zwarnnam(name, "undefined signal: %s", *argv, 0);
+  	    break;
+  	}
+! 	settrap(sig, l);
+      }
+      if (l)
+  	popheap();
+--- 5469,5475 ----
+  	    zwarnnam(name, "undefined signal: %s", *argv, 0);
+  	    break;
+  	}
+! 	settrap(sig, l, 1);
+      }
+      if (l)
+  	popheap();
+*** Src/exec.c.settrap	Fri Jul 26 09:28:20 1996
+--- Src/exec.c	Fri Jul 26 09:42:59 1996
+***************
+*** 1799,1805 ****
+  entersubsh(int how, int cl, int fake)
+  {
+      if (sigtrapped[SIGEXIT])
+! 	unsettrap(SIGEXIT);
+      if (unset(MONITOR)) {
+  	if (how & Z_ASYNC) {
+  	    sigtrapped[SIGINT] = 2;
+--- 1799,1805 ----
+  entersubsh(int how, int cl, int fake)
+  {
+      if (sigtrapped[SIGEXIT])
+! 	unsettrap(SIGEXIT, 1);
+      if (unset(MONITOR)) {
+  	if (how & Z_ASYNC) {
+  	    sigtrapped[SIGINT] = 2;
+***************
+*** 2355,2361 ****
+  	    if (!strncmp(s, "TRAP", 4)) {
+  		signum = getsignum(s + 4);
+  		if (signum != -1)
+! 		    settrap(signum, cmd->u.list);
+  	    }
+  	}
+      } LASTALLOC;
+--- 2355,2361 ----
+  	    if (!strncmp(s, "TRAP", 4)) {
+  		signum = getsignum(s + 4);
+  		if (signum != -1)
+! 		    settrap(signum, cmd->u.list, 0);
+  	    }
+  	}
+      } LASTALLOC;
+*** Src/hashtable.c.settrap	Fri Jul 26 09:28:29 1996
+--- Src/hashtable.c	Fri Jul 26 09:42:59 1996
+***************
+*** 679,685 ****
+  
+      if ((hn = removehashnode(shfunctab, nam))) {
+  	if (!strncmp(hn->nam, "TRAP", 4))
+! 	    unsettrap(getsignum(hn->nam + 4));
+  	return hn;
+      } else
+  	return NULL;
+--- 679,685 ----
+  
+      if ((hn = removehashnode(shfunctab, nam))) {
+  	if (!strncmp(hn->nam, "TRAP", 4))
+! 	    unsettrap(getsignum(hn->nam + 4), 0);
+  	return hn;
+      } else
+  	return NULL;
+***************
+*** 695,701 ****
+  {
+      hn->flags |= DISABLED;
+      if (!strncmp(hn->nam, "TRAP", 4))
+! 	unsettrap(getsignum(hn->nam + 4));
+  }
+  
+  /* Re-enable an entry in the shell function hash table.  *
+--- 695,701 ----
+  {
+      hn->flags |= DISABLED;
+      if (!strncmp(hn->nam, "TRAP", 4))
+! 	unsettrap(getsignum(hn->nam + 4), 0);
+  }
+  
+  /* Re-enable an entry in the shell function hash table.  *
+***************
+*** 713,719 ****
+      if (!strncmp(shf->nam, "TRAP", 4)) {
+  	signum = getsignum(shf->nam + 4);
+  	if (signum != -1)
+! 	    settrap(signum, shf->funcdef);
+      }
+  }
+  
+--- 713,719 ----
+      if (!strncmp(shf->nam, "TRAP", 4)) {
+  	signum = getsignum(shf->nam + 4);
+  	if (signum != -1)
+! 	    settrap(signum, shf->funcdef, 0);
+      }
+  }
+  
+*** Src/signals.c.settrap	Fri Jul  5 15:50:48 1996
+--- Src/signals.c	Fri Jul 26 09:51:25 1996
+***************
+*** 628,635 ****
+  
+  /**/
+  void
+! settrap(int sig, List l)
+  {
+      Cmd c;
+   
+      if (l && l->left && l->left->left) {
+--- 628,640 ----
+  
+  /**/
+  void
+! settrap(int sig, List l, int addfunc)
+  {
++     /*
++      * sig:     signal number to add trap for
++      * l:       the commands for the trap
++      * addfunc: if non-zero, add the corresponding TRAPxxx function too.
++      */
+      Cmd c;
+   
+      if (l && l->left && l->left->left) {
+***************
+*** 668,679 ****
+  	    sigfuncs[sig] = (List) dupstruct(l);
+          } LASTALLOC;
+      }
+  }
+  
+  /**/
+  void
+! unsettrap(int sig)
+  {
+      if (sig == -1)
+          return;
+      if (jobbing && (sig == SIGTTOU || sig == SIGTSTP ||
+--- 673,698 ----
+  	    sigfuncs[sig] = (List) dupstruct(l);
+          } LASTALLOC;
+      }
++     if (addfunc)
++ 	PERMALLOC {
++ 	    char *trapf = (char *)zalloc(5 + strlen(sigs[sig]));
++ 	    Shfunc shf = zcalloc(sizeof *shf);
++ 
++ 	    sprintf(trapf, "TRAP%s", sigs[sig]);
++ 	    shf->funcdef = (List) dupstruct(l);
++ 	    shfunctab->addnode(shfunctab, trapf, shf);
++ 	} LASTALLOC;
+  }
+  
+  /**/
+  void
+! unsettrap(int sig, int delfunc)
+  {
++     /*
++      * sig:     signal number
++      * delfunc: non-zero if we are to delete the correspond TRAPxxx function
++      */
++ 
+      if (sig == -1)
+          return;
+      if (jobbing && (sig == SIGTTOU || sig == SIGTSTP ||
+***************
+*** 699,704 ****
+--- 718,732 ----
+          freestruct(sigfuncs[sig]);
+          sigfuncs[sig] = NULL;
+      }
++     if (delfunc) {
++ 	char *signam = (char *)zalloc(strlen(sigs[sig])+5);
++ 	HashNode hn;
++ 
++ 	sprintf(signam, "TRAP%s", sigs[sig]);
++ 	if ((hn = shfunctab->removenode(shfunctab, signam)))
++ 	    shfunctab->freenode(hn);
++ 	free(signam);
++     }
+  }
+  
+  /* Execute a trap function for a given signal */
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+
+

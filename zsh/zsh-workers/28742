@@ -1,0 +1,126 @@
+From zsh-workers-return-28742-mason-zsh=primenet.com.au@zsh.org Fri Feb 11 16:33:55 2011
+Return-Path: <zsh-workers-return-28742-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 9565 invoked by alias); 11 Feb 2011 16:33:55 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 28742
+Received: (qmail 25265 invoked from network); 11 Feb 2011 16:33:52 -0000
+X-Spam-Checker-Version: SpamAssassin 3.3.1 (2010-03-16) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-1.9 required=5.0 tests=BAYES_00,RCVD_IN_DNSWL_NONE
+	autolearn=ham version=3.3.1
+Received-SPF: none (ns1.primenet.com.au: domain at klanderman.net does not designate permitted sender hosts)
+From: Greg Klanderman <gak@klanderman.net>
+To: zsh-workers@zsh.org
+Subject: Re: loading user startup files for zsh scripts
+Reply-To: gak@klanderman.net
+Date: Fri, 11 Feb 2011 11:28:43 -0500
+In-Reply-To: <110210192945.ZM31349@torch.brasslantern.com> (Bart Schaefer's message of "Thu, 10 Feb 2011 19:29:45 -0800")
+Message-ID: <m339nucz7o.fsf@klanderman.net>
+User-Agent: Gnus/5.1008 (Gnus v5.10.8) XEmacs/21.4.17 (linux)
+References: <19792.22365.139876.599478@gargle.gargle.HOWL>
+	<110207213357.ZM22407@torch.brasslantern.com>
+	<m3ipwue9m2.fsf@klanderman.net>
+	<20110208172056.6a985c90@pwslap01u.europe.root.pri>
+	<m362sudov6.fsf@klanderman.net>
+	<110208205856.ZM24066@torch.brasslantern.com>
+	<m3tygdci4b.fsf@klanderman.net>
+	<110209085358.ZM29014@torch.brasslantern.com>
+	<m3d3mzg8d6.fsf@klanderman.net>
+	<110210095253.ZM30860@torch.brasslantern.com>
+	<m3ipwrcpo2.fsf@klanderman.net>
+	<110210192945.ZM31349@torch.brasslantern.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+>>>>> On February 10, 2011 Bart Schaefer <schaefer@brasslantern.com> wrote:
+
+> This is odd considering that $* has already been set to the script
+> arguments by the time .zshenv is processed.  It also means that zsh
+> will read all the init files before discovering that it can't read
+> the script file.
+
+This appears to be due to support for the (undocumented) PATHSCRIPT
+option, whereby the path is searched for the runscript, and therefore
+the startup files must be read first so that PATH can be set properly.
+
+> I'm also finding it a little weird that $0 apparently might be a
+> metafied string, since setupshin() believes that unmeta(runscript)
+> is necessary before calling e.g. access().
+
+Did you note this line near the top of zsh_main():
+
+|    for (t = argv; *t; *t = metafy(*t, -1, META_ALLOC), t++);
+
+i.e. all the argv arguments are metified early on.
+
+> I'm inclined to suggest ZSH_SCRIPT to be initialized from runscript.
+
+How is the patch below?  I can add doc if you like it.. one open
+question is whether you want $ZSH_SCRIPT to be unset or empty when not
+running a script; currently it would be empty, which might be useful
+for detecting whether zsh is providing that parameter.
+
+> I'd also like to get ZSH_INTERPRETER to be the actual path to the shell
+> executable, but I suspect that's not universally available from the OS.
+
+Didn't touch this one.
+
+> Returning to your original problem ... I don't suppose all these user's
+> hosts are running linux?  You can examine /proc/$$/cmdline to find out
+> if a script name appears.
+
+Oooh that's tricky, yes all are a variety of linux distros, mostly
+debian/ubuntu and FC/RHEL/Centos.  Still would have to parse it and
+deal with the nul byte separators, yuck.
+
+Greg
+
+
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.118
+diff -u -r1.118 init.c
+--- Src/init.c	11 Feb 2011 04:04:05 -0000	1.118
++++ Src/init.c	11 Feb 2011 16:22:50 -0000
+@@ -1485,6 +1485,7 @@
+     opts[USEZLE] = 1;   /* may be unset in init_io() */
+     /* sets INTERACTIVE, SHINSTDIN and SINGLECOMMAND */
+     parseargs(argv, &runscript);
++    zsh_script = runscript;
+ 
+     SHTTY = -1;
+     init_io();
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.169
+diff -u -r1.169 params.c
+--- Src/params.c	16 Jan 2011 20:35:31 -0000	1.169
++++ Src/params.c	11 Feb 2011 16:22:51 -0000
+@@ -80,7 +80,8 @@
+      *rprompt2,		/* $RPROMPT2    */
+      *sprompt,		/* $SPROMPT     */
+      *wordchars,	/* $WORDCHARS   */
+-     *zsh_name;		/* $ZSH_NAME    */
++     *zsh_name,		/* $ZSH_NAME    */
++     *zsh_script;	/* $ZSH_SCRIPT  */
+ /**/
+ mod_export
+ char *ifs,		/* $IFS         */
+@@ -779,6 +780,7 @@
+     setsparam("TTY", ztrdup(ttystrname));
+     setsparam("VENDOR", ztrdup(VENDOR));
+     setsparam("ZSH_NAME", ztrdup(zsh_name));
++    setsparam("ZSH_SCRIPT", ztrdup(zsh_script));
+     setsparam("ZSH_VERSION", ztrdup(ZSH_VERSION));
+     setsparam("ZSH_PATCHLEVEL", ztrdup(ZSH_PATCHLEVEL));
+     setaparam("signals", sigptr = zalloc((SIGCOUNT+4) * sizeof(char *)));
+

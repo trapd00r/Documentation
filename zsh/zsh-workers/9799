@@ -1,0 +1,130 @@
+From zsh-workers-return-9799-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Feb 21 02:51:11 2000
+Return-Path: <zsh-workers-return-9799-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25771 invoked from network); 21 Feb 2000 02:51:09 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Feb 2000 02:51:09 -0000
+Received: (qmail 6165 invoked by alias); 21 Feb 2000 02:51:04 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9799
+Received: (qmail 6155 invoked from network); 21 Feb 2000 02:51:02 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000221025055.ZM21908@candle.brasslantern.com>
+Date: Mon, 21 Feb 2000 02:50:55 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Why ask when you know the answer?
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+This patch separates the FIONREAD test for typeahead from getquery() into
+its own function, which I've called noquery() because it returns non-zero
+when typeahead would cause getquery() to return 'n'.
+
+I've then made a separate call to noquery() from spckword(), to avoid the
+annoying prompt-and-beep when one e.g. cut'n'pastes a multi-line function
+definition into an xterm.  It's called again from getquery() itself, of
+course, after the prompt is printed, but spckword() now simply doesn't
+prompt or call getquery() at all if it can't possibly succeed.
+
+Does anyone see a problem with this?  The only thing that worries me is
+that previously attachtty();setcbreak();ioctl(FIONREAD);sttyinfo() were
+called, but now it's ioctl();attachtty();setcbreak();ioctl();sttyinfo()
+instead.  I'm not sure about attachtty(), but the ioctl() may cause the
+behavior to change on systems where setcbreak() causes typeahead to be
+lost -- although I think that may actually be an improvement.  If there
+is no problem, then perhaps the setcbreak() should be moved to after the
+call to noquery() even within getquery()?
+
+I didn't change checkrmall() or bin_read(); since files will actually not
+be removed if there's typeahead at checkrmall(), the appearance of the
+prompt conveys useful information about what happened, and in the case of
+bin_read() it might be confusing to call "read 'var?prompt'" yet not see
+the prompt.
+
+Index: Src/utils.c
+===================================================================
+@@ -1313,31 +1313,39 @@
+ 
+ /**/
+ int
+-getquery(char *valid_chars, int purge)
++noquery(int purge)
+ {
+-    int c, d;
+-    int isem = !strcmp(term, "emacs");
++    int c, val = 0;
+ 
+ #ifdef FIONREAD
+-    int val = 0;
++    ioctl(SHTTY, FIONREAD, (char *)&val);
++    if (purge) {
++	while(val--)
++	    read(SHTTY, &c, 1);
++    }
+ #endif
+ 
++    return val;
++}
++
++/**/
++int
++getquery(char *valid_chars, int purge)
++{
++    int c, d;
++    int isem = !strcmp(term, "emacs");
++
+     attachtty(mypgrp);
+     if (!isem)
+ 	setcbreak();
+ 
+-#ifdef FIONREAD
+-    ioctl(SHTTY, FIONREAD, (char *)&val);
+-    if(purge) {
+-	while(val--)
+-	    read(SHTTY, &c, 1);
+-    } else if (val) {
++    if (noquery(purge)) {
+ 	if (!isem)
+ 	    settyinfo(&shttyinfo);
+ 	write(SHTTY, "n\n", 2);
+ 	return 'n';
+     }
+-#endif
++
+     while ((c = read1char()) >= 0) {
+ 	if (c == 'Y' || c == '\t')
+ 	    c = 'y';
+@@ -1494,13 +1502,17 @@
+ 	    *guess = *best = ztokens[ic - Pound];
+ 	}
+ 	if (ask) {
+-	    char *pptbuf;
+-	    pptbuf = promptexpand(sprompt, 0, best, guess);
+-	    zputs(pptbuf, shout);
+-	    free(pptbuf);
+-	    fflush(shout);
+-	    zbeep();
+-	    x = getquery("nyae ", 0);
++	    if (noquery(0)) {
++		x = 'n';
++	    } else {
++		char *pptbuf;
++		pptbuf = promptexpand(sprompt, 0, best, guess);
++		zputs(pptbuf, shout);
++		free(pptbuf);
++		fflush(shout);
++		zbeep();
++		x = getquery("nyae ", 0);
++	    }
+ 	} else
+ 	    x = 'y';
+ 	if (x == 'y' || x == ' ') {
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

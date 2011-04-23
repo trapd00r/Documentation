@@ -1,0 +1,240 @@
+From zsh-workers-return-14430-mason-zsh=primenet.com.au@sunsite.dk Tue May 22 07:19:52 2001
+Return-Path: <zsh-workers-return-14430-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 915 invoked from network); 22 May 2001 07:19:51 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 22 May 2001 07:19:51 -0000
+Received: (qmail 26134 invoked by alias); 22 May 2001 07:19:41 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14430
+Received: (qmail 26112 invoked from network); 22 May 2001 07:19:38 -0000
+Message-ID: <Tc0a88d0153abfff013@mailsweeper01.cambridgesiliconradio.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: PATCH: test on Cygwin 
+In-Reply-To: Your message of "Mon, 21 May 2001 14:20:33 -0000."
+             <1010521142034.ZM10406@candle.brasslantern.com> 
+Date: Mon, 21 May 2001 16:37:11 +0100
+From: Peter Stephenson <pws@csr.com>
+
+Bart wrote;
+> On May 21, 11:30am, Peter Stephenson wrote:
+> } Subject: PATCH: test on Cygwin
+> }
+> } +  touch unmodish
+> } +  chmod 000 unmodish
+> }    [[ -r zerolength && ! -r unmodish ]]
+> } +  # This works around a bug in rm -f in some versions of Cygwin
+> } +  chmod 644 unmodish
+> }  0:-r cond
+> 
+> That can't be right.  The test condition (`0:') depends on the test
+> case itself (`[[ -r ... ]]') being the last thing executed.
+
+Oh.
+
+> This is what the %clean section is for, no?
+
+Unfortunately that doesn't get executed if a test failed.  That's because a
+test failure is currently catastrophic: ztst.zsh performs it's own cleanup
+and exits straight away.  The following makes failures less catastrophic;
+the Cygwin problem goes away with this and that other patch.
+
+I tested that the remaining behaviour with test failures is as before.
+It's still the case that one test failing will cause the sequence of tests
+in one file to be aborted.  That should now be fairly easy to alter.
+
+Note the fact that running the function ZTST_test before a `||' would
+affect the behaviour of TRAPZERR deep within a test --- it wouldn't trigger
+because it wouldn't be the last element of a condition.  I think this is
+probably right, but I'm not sure --- and if not, I have no idea where to
+draw the line.
+
+Index: Test/ztst.zsh
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/ztst.zsh,v
+retrieving revision 1.14
+diff -u -r1.14 ztst.zsh
+--- Test/ztst.zsh	2001/05/20 18:10:56	1.14
++++ Test/ztst.zsh	2001/05/21 15:30:51
+@@ -53,6 +53,8 @@
+ ZTST_testdir=$PWD
+ ZTST_testname=$1
+ 
++integer ZTST_testfailed
++
+ # The source directory is not necessarily the current directory,
+ # but if $0 doesn't contain a `/' assume it is.
+ if [[ $0 = */* ]]; then
+@@ -99,8 +101,8 @@
+     print -r "Was testing: $ZTST_message"
+   fi
+   print -r "$ZTST_testname: test failed."
+-  ZTST_cleanup
+-  exit 1
++  ZTST_testfailed=1
++  return 1
+ }
+ 
+ # Print messages if $ZTST_verbose is non-empty
+@@ -114,7 +116,10 @@
+   (( SECONDS > COLUMNS+1 && (SECONDS -= COLUMNS) ))
+ }
+ 
+-[[ ! -r $ZTST_testname ]] && ZTST_testfailed "can't read test file."
++if [[ ! -r $ZTST_testname ]]; then
++  ZTST_testfailed "can't read test file."
++  exit 1
++fi
+ 
+ exec 8>&1
+ exec 9<$ZTST_testname
+@@ -136,15 +141,18 @@
+ 
+ # Get the name of the section.  It may already have been read into
+ # $curline, or we may have to skip some initial comments to find it.
++# If argument present, it's OK to skip the reset of the current section,
++# so no error if we find garbage.
+ ZTST_getsect() {
+   local match mbegin mend
+ 
+   while [[ $ZTST_curline != '%'(#b)([[:alnum:]]##)* ]]; do
+     ZTST_getline || return 1
+     [[ $ZTST_curline = [[:blank:]]# ]] && continue
+-    if [[ $ZTST_curline != '%'[[:alnum:]]##* ]]; then
++    if [[ $# -eq 0 && $ZTST_curline != '%'[[:alnum:]]##* ]]; then
+       ZTST_testfailed "bad line found before or after section:
+ $ZTST_curline"
++      exit 1
+     fi
+   done
+   # have the next line ready waiting
+@@ -194,6 +202,7 @@
+   '?') fn=$ZTST_err
+        ;;
+    *)  ZTST_testfailed "bad redir operator: $char"
++       return 1
+        ;;
+ esac
+ if [[ $ZTST_flags = *q* ]]; then
+@@ -201,6 +210,8 @@
+ else
+   print -r -- "$ZTST_redir" >>$fn
+ fi
++
++return 0
+ }
+ 
+ # Execute an indented chunk.  Redirections will already have
+@@ -278,21 +289,23 @@
+ 	  else
+ 	    ZTST_testfailed "expecting test status at:
+ $ZTST_curline"
++	    return 1
+ 	  fi
+ 	  ZTST_getline
+ 	  found=1
+ 	  ;;
+-	'<'*) ZTST_getredir
++	'<'*) ZTST_getredir || return 1
+ 	  found=1
+ 	  ;;
+-	'>'*) ZTST_getredir
++	'>'*) ZTST_getredir || return 1
+ 	  found=1
+ 	  ;;
+-	'?'*) ZTST_getredir
++	'?'*) ZTST_getredir || return 1
+ 	  found=1
+ 	  ;;
+ 	*) ZTST_testfailed "bad line in test block:
+ $ZTST_curline"
++	  return 1
+           ;;
+       esac
+     done
+@@ -311,6 +324,7 @@
+ $ZTST_code${$(<$ZTST_terr):+
+ Error output:
+ $(<$ZTST_terr)}"
++	return 1
+       fi
+ 
+       ZTST_verbose 2 "ZTST_test: test produced standard output:
+@@ -324,6 +338,7 @@
+ $ZTST_code${$(<$ZTST_terr):+
+ Error output:
+ $(<$ZTST_terr)}"
++	return 1
+       fi
+       if [[ $ZTST_flags != *D* ]] && ! ZTST_diff -c $ZTST_err $ZTST_terr; then
+ 	ZTST_testfailed "error output differs from expected as shown above for:
+@@ -348,11 +363,13 @@
+ print "$ZTST_testname: starting."
+ 
+ # Now go through all the different sections until the end.
+-while ZTST_getsect; do
++ZTST_skipok=
++while ZTST_getsect $ZTST_skipok; do
+   case $ZTST_cursect in
+     prep) if (( ${ZTST_sects[prep]} + ${ZTST_sects[test]} + \
+ 	        ${ZTST_sects[clean]} )); then
+ 	    ZTST_testfailed "\`prep' section must come first"
++            exit 1
+ 	  fi
+ 	  ZTST_prepclean
+ 	  ZTST_sects[prep]=1
+@@ -360,22 +377,28 @@
+     test)
+ 	  if (( ${ZTST_sects[test]} + ${ZTST_sects[clean]} )); then
+ 	    ZTST_testfailed "bad placement of \`test' section"
++	    exit 1
+ 	  fi
++	  # careful here: we can't execute ZTST_test before || or &&
++	  # because that affects the behaviour of traps in the tests.
+ 	  ZTST_test
++	  (( $? )) && ZTST_skipok=1
+ 	  ZTST_sects[test]=1
+ 	  ;;
+     clean)
+ 	   if (( ${ZTST_sects[test]} == 0 || ${ZTST_sects[clean]} )); then
+ 	     ZTST_testfailed "bad use of \`clean' section"
++	   else
++	     ZTST_prepclean 1
++	     ZTST_sects[clean]=1
+ 	   fi
+-	   ZTST_prepclean 1
+-	   ZTST_sects[clean]=1
++	   ZTST_skipok=
+ 	   ;;
+     *) ZTST_testfailed "bad section name: $ZTST_cursect"
+        ;;
+   esac
+ done
+ 
+-print "$ZTST_testname: all tests successful."
++(( $ZTST_testfailed )) || print "$ZTST_testname: all tests successful."
+ ZTST_cleanup
+-exit 0
++exit $(( ZTST_testfailed ))
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

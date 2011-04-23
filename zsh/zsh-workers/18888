@@ -1,0 +1,213 @@
+From zsh-workers-return-18888-mason-zsh=primenet.com.au@sunsite.dk Wed Jul 23 01:12:33 2003
+Return-Path: <zsh-workers-return-18888-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 19355 invoked from network); 23 Jul 2003 01:12:32 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 23 Jul 2003 01:12:32 -0000
+Received: (qmail 10589 invoked by alias); 23 Jul 2003 01:12:13 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 18888
+Received: (qmail 10579 invoked from network); 23 Jul 2003 01:12:12 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 23 Jul 2003 01:12:12 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [216.27.190.146] by sunsite.dk (MessageWall 1.0.8) with SMTP; 23 Jul 2003 1:12:12 -0000
+Received: from ceramic.fifi.org (mail@ceramic.fifi.org [216.27.190.147])
+	by tantale.fifi.org (8.9.3p2/8.9.3/Debian 8.9.3-21) with ESMTP id SAA14955
+	for <zsh-workers@sunsite.dk>; Tue, 22 Jul 2003 18:12:11 -0700
+Received: from phil by ceramic.fifi.org with local (Exim 3.35 #1 (Debian))
+	id 19f8As-0008IX-00
+	for <zsh-workers@sunsite.dk>; Tue, 22 Jul 2003 18:12:10 -0700
+To: zsh-workers@sunsite.dk
+Subject: [PATCH] make clone try to acquire a controlling tty
+Mail-Copies-To: nobody
+From: Philippe Troin <phil@fifi.org>
+Date: 22 Jul 2003 18:12:10 -0700
+Message-ID: <87fzky59n9.fsf@ceramic.fifi.org>
+Lines: 94
+User-Agent: Gnus/5.09 (Gnus v5.9.0) Emacs/21.2
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=-=-="
+Sender: Philippe Troin <phil@fifi.org>
+
+
+--=-=-=
+
+The enclosed patch makes clone try to acquire a controlling tty. This
+makes clone more useful because it enables job control in cloned
+sessions.
+
+The patch applies on current cvs head.
+
+Notes about the patch:
+
+ - We don't call TIOCNOTTY if HAVE_SETSID: setsid() automatically
+   detaches from the current controlling tty.
+
+ - The logic for dup'ing the newly opened tty is changed for a better
+   one.
+
+ - Once the dup'ing of the newly opened tty is done, we try to acquire
+   the newly opened tty as a controlling tty. We print a message if
+   this fails.
+
+ - We have to reset mypgrp to zero so that init_io() can get its job
+   done correctly.
+
+Notes about controlling ttys:
+
+ - Due to the way job control works, it is impossible for a process to
+   acquire a controlling tty if another process already acquired it
+   since:
+
+     * POSIX mandates that if a session leader dies, all the processes
+       in the session loose their controlling tty.
+
+     * Most terminal emulator programs (including screen, but see note
+       about screen) acquire a controlling tty before exec'ing their
+       target process.
+
+ - This means that the following won't work (the cloned zsh will run,
+   but will not have a controlling tty (-> no job control)):
+
+     * Open a new xterm.
+
+     * Run tty in xterm.
+
+     * Run in the xterm:
+
+         exec zsh -c 'trap "" INT QUIT TSTP; while :; do sleep 100000; done'
+
+     * Do a clone in the xterm's tty.
+
+ - However this will work (the cloned zsh will have a controlling tty
+   and job control will work):
+
+     * clone /dev/tty<n> or clone /dev/vc/<n> on linux
+
+     * zsh will be able to open cloned shells with job control in a
+       screen session as long as the screen "setsid off" command is in
+       effect in the screen:
+
+        + Run screen. You're now in screen #0.
+
+        + Enter "setsid off": this is done by typing in:
+
+            ^A : setsid off <RETURN>
+
+        + Create a new screen. You're now in screen #1.
+
+        + The shell in screen 1 has job control disabled (it has no
+          controlling tty).
+ 
+        + In screen #1, run:
+
+            tty && exec sleep 1000000
+
+        + Switch back to screen #0: ^A 0
+
+        + Run clone on the tty that was printed in screen #1.
+
+        + Switch back to screen #1: ^A 1
+
+        + You now have a cloned zsh with job control active.
+
+Tested to work OK on Linux (with TIOCNOTTY/TIOCSCTTY controlling tty
+acquiring method) and Solaris (with SvR4's O_NOCTTY controlling tty
+acquiring method).
+
+Phil.
+
+Changelog entry:
+
+2003-07-22  Philippe Troin  <phil@fifi.org>
+
+	* Src/Modules/clone.c (bin_clone): Try to acquire a controlling
+	tty when possible. Report failures. Cleanup.
+
+
+--=-=-=
+Content-Type: text/x-patch
+Content-Disposition: attachment; filename=zsh-clone-ctty.patch
+
+Index: clone.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Modules/clone.c,v
+retrieving revision 1.3
+diff -b -u -r1.3 clone.c
+--- clone.c	27 Aug 2002 21:10:34 -0000	1.3
++++ clone.c	23 Jul 2003 01:07:48 -0000
+@@ -43,7 +43,7 @@
+ static int
+ bin_clone(char *nam, char **args, Options ops, int func)
+ {
+-    int ttyfd, pid;
++    int ttyfd, pid, cttyfd;
+ 
+     unmetafy(*args, NULL);
+     ttyfd = open(*args, O_RDWR|O_NOCTTY);
+@@ -57,29 +57,42 @@
+ 	ppid = getppid();
+ 	mypid = getpid();
+ #ifdef HAVE_SETSID
+-	if (setsid() != mypid) {
++	if (setsid() != mypid)
+ 	    zwarnnam(nam, "failed to create new session: %e", NULL, errno);
+-#endif
+-#ifdef TIOCNOTTY
++#elif defined(TIOCNOTTY)
+ 	    if (ioctl(SHTTY, TIOCNOTTY, 0))
+-		zwarnnam(nam, "%e", NULL, errno);
++	    zwarnnam(*args, "%e", NULL, errno);
+ 	    setpgrp(0L, mypid);
+ #endif
+-#ifdef HAVE_SETSID
+-	}
+-#endif
+-	if (ttyfd) {
+-	    close(0);
+-	    dup(ttyfd);
+-	} else
+-	    ttyfd = -1;
+-	close(1);
+-	close(2);
+-	dup(0);
+-	dup(0);
++	dup2(ttyfd,0);
++	dup2(ttyfd,1);
++	dup2(ttyfd,2);
++	if (ttyfd > 2)
++	    close(ttyfd);
+ 	closem(0);
+ 	close(coprocin);
+ 	close(coprocout);
++	/* Acquire a controlling terminal */
++	cttyfd = open(*args, O_RDWR);
++	if (cttyfd == -1)
++	    zwarnnam(nam, "%e", NULL, errno);
++	else {
++#ifdef TIOCSCTTY
++	    ioctl(cttyfd, TIOCSCTTY, 0);
++#endif
++	    close(cttyfd);
++	}
++	/* check if we acquired the tty successfully */
++	cttyfd = open("/dev/tty", O_RDWR);
++	if (cttyfd == -1)
++	    zwarnnam(nam, "could not make %s my controlling tty, job control "
++		     "disabled", *args, 0);
++	else
++	    close(cttyfd);
++
++	/* Clear mygrp so that acquire_pgrp() gets the new process group.
++	 * (acquire_pgrp() is called from init_io()) */
++	mypgrp = 0;
+ 	init_io();
+ 	setsparam("TTY", ztrdup(ttystrname));
+     }
+
+--=-=-=--
+

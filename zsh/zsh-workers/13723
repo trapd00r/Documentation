@@ -1,0 +1,154 @@
+From zsh-workers-return-13723-mason-zsh=primenet.com.au@sunsite.dk Fri Mar 23 08:43:19 2001
+Return-Path: <zsh-workers-return-13723-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 14260 invoked from network); 23 Mar 2001 08:43:18 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Mar 2001 08:43:18 -0000
+Received: (qmail 26240 invoked by alias); 23 Mar 2001 08:43:10 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13723
+Received: (qmail 26228 invoked from network); 23 Mar 2001 08:43:09 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010323084209.ZM21757@candle.brasslantern.com>
+Date: Fri, 23 Mar 2001 08:42:09 +0000
+In-Reply-To: <1010322065223.ZM19693@candle.brasslantern.com>
+Comments: In reply to "Bart Schaefer" <schaefer@candle.brasslantern.com>
+        "Re: ZSpeak! Only Zsh can do this!" (Mar 22,  6:52am)
+References: <200103191007.LAA01992@beta.informatik.hu-berlin.de> 
+	<87zoefdor5.fsf@home.delysid.org> 
+	<1010322065223.ZM19693@candle.brasslantern.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Mario Lang <mlang@home.delysid.org>
+Subject: Re: ZSpeak! Only Zsh can do this!
+Cc: zsh-workers@sunsite.dk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Mar 22,  6:52am (that's GMT), I wrote:
+} Subject: Re: ZSpeak! Only Zsh can do this!
+}
+} On Mar 21,  6:18pm, Mario Lang wrote:
+} } Subject: Re: ZSpeak! Only Zsh can do this!
+} }
+} } Another really nice to have(tm) feature would be stdout buffering.
+} } What I mean is that the shell should have an array (much like history)
+} } which contains the outputs (stdout and stderr separated)
+} } from the last commands.
+} 
+} However ... it might be possible to construct something based on the
+} zpty module, where stdout and stderr would (unless redirected) each go
+} to a separate pty, and both ptys would be managed by a front-end that
+} slurped up the output from each as it appeared.
+
+This seemed like such an interesting idea that I tried it.
+
+It should be pretty obvious how to modify this to do something else with
+the captured output, e.g., write it to a speech synthesizer instead of
+stuffing it into an array parameter ...
+
+This may also need to be tweaked in the event that a command does not
+begin producing output within one second; "zpty -r -t" is a rather blunt
+instrument with which to be doing precision work.
+
+
+#!/bin/zsh
+
+# zplitty -- run a command with stdout and stderr directed to separate ttys,
+# from which that output can be captured for later reference.
+#
+# Usage:
+#    zplitty command args ...
+#
+# Output from the command is captured in the arrays $stdout and $stderr,
+# one line per array element.  Beware of running commands that produce
+# voluminous output; "zplitty yes" will consume all available memory
+# unless interrupted. 
+#
+# zplitty can be used in a pipeline or with redirected I/O, but depending
+# on its location in the pipeline it may be run in a subshell, in which
+# case the parent shell is not able to make use of the captured output.
+#
+# zplitty requires the zsh/zpty module and uses the function zttyrun to
+# set up two ptys, ztdout and ztderr, to which output can be redirected
+# by referencing $ztdout and $ztderr.  Be careful not to redirect too
+# much output to a pty unless something is reading it with "zpty -r".
+#
+# The command zttystop closes these two ptys and discards the captured
+# output; zttyrun must be run again before a new zplitty can be started.
+# The stdout or stderr arrays can be reset at any time without zttystop
+# simply by assigning an empty array as usual.
+#
+# Note that some interactive commands (examples are zsh, vim, and less)
+# insist that their standard input and output be the same device.  Zsh
+# attempts to re-open its standard input for this, while vim and less do
+# the same with their standard error.  This causes "zplitty zsh" to stop
+# (SIGTTOU) and "zplitty vim" or "zplitty less" to hang (reading from
+# $ztderr, whence they'll never get any input).  Some other interactive
+# programs may (mis)behave in similar ways; use zplitty with caution.
+
+zmodload -i zsh/zpty || return
+
+zttywait () {
+    stty onlret -ocrnl -onlcr	# May need to adjust this for your OS
+    tty
+    read -e
+}
+
+zttyget() {
+    setopt localoptions extendedglob noshwordsplit
+    zpty $1 zttywait
+    zpty -r $1 $1
+    : ${(P)1::=${(P)1%%[[:space:]]#}}
+}
+
+zttyrun() {
+    setopt localoptions noshwordsplit
+    typeset -g ztdout='' ztderr=''
+    typeset -g -a stdout stderr
+    zttyget ztdout
+    zttyget ztderr
+}
+
+zttystop() {
+    unset stdout stderr ztdout ztderr
+    zpty -w ztdout exit &&
+    zpty -rt ztdout &&
+    zpty -d ztdout
+    zpty -w ztderr exit &&
+    zpty -rt ztderr &&
+    zpty -d ztderr
+}
+
+zplitty() {
+    setopt localoptions noshwordsplit nonotify noksharrays
+    local out err
+    ${@:?} > $ztdout 2> $ztderr &
+    sleep 1	# Let the background command get started
+    while zpty -r -t ztdout out || zpty -r -t ztderr err
+    do
+	(( $+out )) && {
+	    stdout[$#stdout+1]=$out
+	    print -Rn $out
+	}
+	(( $+err )) && {
+	    stderr[$#stderr+1]=$err
+	    print -u2 -Rn $err
+	}
+	unset out err
+    done
+}
+
+zttyrun
+[[ -o kshautoload ]] || zplitty "$@"
+
+# end of zplitty
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

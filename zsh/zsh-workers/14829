@@ -1,0 +1,129 @@
+From zsh-workers-return-14829-mason-zsh=primenet.com.au@sunsite.dk Sat Jun 09 20:59:56 2001
+Return-Path: <zsh-workers-return-14829-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23600 invoked from network); 9 Jun 2001 20:59:55 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 9 Jun 2001 20:59:55 -0000
+Received: (qmail 10762 invoked by alias); 9 Jun 2001 20:59:32 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14829
+Received: (qmail 10749 invoked from network); 9 Jun 2001 20:59:31 -0000
+X-Authentication-Warning: candle.brasslantern.com: schaefer set sender to lantern@shell10.ba.best.com using -f
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010609205833.ZM20464@candle.brasslantern.com>
+Date: Sat, 9 Jun 2001 20:58:32 +0000
+In-Reply-To: <20010608155309.A6700@dman.com>
+Comments: In reply to Clint Adams <clint@zsh.org>
+        "Re: PATCH: check deleted .zwc files" (Jun  8,  3:53pm)
+References: <20010608141719.A4626@dman.com> 
+	<010608115028.ZM5876@candle.brasslantern.com> 
+	<20010608150445.A5394@dman.com> 
+	<010608124608.ZM5942@candle.brasslantern.com> 
+	<20010608155309.A6700@dman.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: Clint Adams <clint@zsh.org>
+Subject: Re: PATCH: check deleted .zwc files
+Cc: zsh-workers@sunsite.dk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Jun 8,  3:53pm, Clint Adams wrote:
+} 
+} > I have a .zwc file for several functions.  I update one of those functions.
+} > I then remove and rebuild the .zwc file.  Now, stat() of the .zwc shows
+} > that it is newer than the function file, but any running zsh still has a
+} > mapped descriptor on the removed file.  With this code:
+} 
+} > >      if (stat(filename, buf)) {
+} [...]
+} 
+} > zwcstat() will cause zsh to decide that it can keep using the mapped copy,
+} > even though the function file is actually newer than the mapped copy.
+} 
+} Maybe I'm confused.  If you've generated a new .zwc file, that stat()
+} will return 0, and the mapped copy won't even be considered.
+
+OK, I was misunderstanding the way the contents of the struct stat are
+used after zwcstat() returns them.
+
+If there's a new file on the disk with the name zwcstat() is checking, it
+will be stat'd and then check_dump_file() will discover that none of the
+mapped files have the same st_dev && st_ino as any previously-loaded file.
+This will cause it to map the new file and load the desired function from
+it; any already-loaded functions defined in the same file will not be re-
+loaded, and the old file will not be unmapped.
+
+So here's the litany of difficulties with this; some are pre-existing, and
+some are new with the introduction of zwcstat():
+
+1.  The file search order is violated.  The doc says:
+
+      If ELEMENT already includes a .zwc extension (i.e. the
+      extension was explicitly given by the user), ELEMENT is
+      searched for the definition of the function without comparing
+      its age to that of other files; in fact, there does not need
+      to be any directory named ELEMENT without the suffix. ...
+
+    As of 14813, removing the directory's digest file is not sufficient
+    to cause the directory to be searched.  This is wrong because there
+    is no subsequent st_mtime comparison in this case.
+
+2.  Even st_mtime comparisons to a removed file can be misleading.
+
+      ... the order of searching is, first, in the *parents of*
+      directories in fpath for the newer of either a compiled
+      directory or a directory in fpath; second, if more than one of
+      these contains a definition for the function that is sought, the
+      leftmost in the fpath is chosen; and third, within a directory,
+      the newer of either a compiled function or an ordinary function
+      definition is used.
+
+    Suppose I've `mv'd a file from one directory to another in $fpath;
+    the st_mtime of the file is not changed by the `mv' -- in fact, it
+    may not even have changed the inode number -- but it should still be
+    used in preference to any mapped+removed .zwc, even if it's older
+    than the .zwc was at the time it was removed.
+
+3.  If the .zwc file is rewritten in place (so its dev/ino don't change),
+    the st_mtime on disk is used to decide whether to continue using
+    the mapped copy.
+
+    This is a particularly hairy one [and predates zwstat()].  If the
+    .zwc is overwritten, then either (a) the operating system will have
+    done some kind of copy-on-write thing and the memory-map will be
+    out of date, or (b) the newly-copied data will be accessed via the
+    mapped descriptor and zsh may execute garbage.
+
+4.  If the file is mapped, removed, replaced, mapped again, and then
+    removed again, etc., there will be multiple entries in the `dumps'
+    linked list with the same `filename' field.  The search in zwcstat()
+    does not find the most-recently-mapped version of the file.
+
+5.  As Andrej noted, every re-mapping wastes (not exactly leaks) memory,
+    though on a system that pages directly out of the mapped file that's
+    not of any particular concern.
+
+There's not really much we can do about (3b).  The closest thing would be 
+for zcompile to always create .zwc files by unlinking and recreating them
+(unless some sort of force option is given), and also to chmod that new
+file to remove write permission.
+
+For (1) and (2), it's necessary to split up the test for file existence
+from the search for an already-mapped copy, which means we need more than
+just zwcstat().
+
+Clint, maybe you could explain more WHY you want this to work?  Is it
+for the case where the ONLY place from which zsh can load the function
+definition is the (removed but still mapped) digest file?  Or is there
+some reason that you want the mapped file to take precedence over any
+other file on disk?
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

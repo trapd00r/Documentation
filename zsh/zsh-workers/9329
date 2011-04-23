@@ -1,0 +1,146 @@
+From zsh-workers-return-9329-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jan 17 09:10:35 2000
+Return-Path: <zsh-workers-return-9329-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13753 invoked from network); 17 Jan 2000 09:10:34 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 Jan 2000 09:10:34 -0000
+Received: (qmail 3262 invoked by alias); 17 Jan 2000 09:10:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9329
+Received: (qmail 3255 invoked from network); 17 Jan 2000 09:10:20 -0000
+Date: Mon, 17 Jan 2000 10:10:15 +0100 (MET)
+Message-Id: <200001170910.KAA09805@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: memory
+
+
+Found some more bugs/problems related to memory:
+
+- The hashtable for $compstate wasn't freed.
+- The pathbuf used in globbing wasn't freed.
+- The {zle,}parameter modules should use zero-length hashtables.
+  Btw, the sizes used for some hashtables (partly due to tables being
+  resized) for some of the tables are ridiculously large. In a normal
+  shell that has run for some time and where tables such as the
+  command and nameddir tables have reached their final size, hashinfo
+  says that I have more than 3000 free slots distributed over all the
+  tables -- that's 24KB of memory that will never be used. Hm.
+- Some time ago I set M_NSMALL to a larger value because some of our
+  structs have become larger. That was a thinko, I should have looked
+  at the sizes of long-lived memory blocks, otherwise we get lots of
+  unused memory allocated in the blocks used for small blocks that
+  will never be used or freed again.
+- Since (hopefully) on many systems the heaps don't interfere with the 
+  normal allocator any more, I think we can make M_FREE/M_KEEP less
+  aggressive (they define how much memory has to be free to make
+  memory being given back to the system and how much memory to keep).
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/Modules/parameter.c Src/Modules/parameter.c
+--- ../z.old/Src/Modules/parameter.c	Mon Jan 17 09:27:35 2000
++++ Src/Modules/parameter.c	Mon Jan 17 09:57:47 2000
+@@ -58,7 +58,7 @@
+     pm->gets.hfn = hashgetfn;
+     pm->sets.hfn = hashsetfn;
+     pm->unsetfn = stdunsetfn;
+-    pm->u.hash = ht = newhashtable(7, name, NULL);
++    pm->u.hash = ht = newhashtable(0, name, NULL);
+ 
+     ht->hash        = hasher;
+     ht->emptytable  = (TableFunc) shempty;
+diff -ru ../z.old/Src/Zle/complete.c Src/Zle/complete.c
+--- ../z.old/Src/Zle/complete.c	Mon Jan 17 09:27:31 2000
++++ Src/Zle/complete.c	Mon Jan 17 09:31:40 2000
+@@ -1133,14 +1133,21 @@
+ compunsetfn(Param pm, int exp)
+ {
+     if (exp) {
+-	if (PM_TYPE(pm->flags) == PM_SCALAR) {
+-	    zsfree(*((char **) pm->u.data));
+-	    *((char **) pm->u.data) = ztrdup("");
+-	} else if (PM_TYPE(pm->flags) == PM_ARRAY) {
+-	    freearray(*((char ***) pm->u.data));
+-	    *((char ***) pm->u.data) = zcalloc(sizeof(char *));
++	if (pm->u.data) {
++	    if (PM_TYPE(pm->flags) == PM_SCALAR) {
++		zsfree(*((char **) pm->u.data));
++		*((char **) pm->u.data) = ztrdup("");
++	    } else if (PM_TYPE(pm->flags) == PM_ARRAY) {
++		freearray(*((char ***) pm->u.data));
++		*((char ***) pm->u.data) = zcalloc(sizeof(char *));
++	    } else if (PM_TYPE(pm->flags) == PM_HASHED) {
++		deleteparamtable(pm->u.hash);
++		pm->u.hash = NULL;
++	    }
+ 	}
+-	pm->flags |= PM_UNSET;
++    } else if (PM_TYPE(pm->flags) == PM_HASHED) {
++	deletehashtable(pm->u.hash);
++	pm->u.hash = NULL;
+     }
+ }
+ 
+diff -ru ../z.old/Src/Zle/zleparameter.c Src/Zle/zleparameter.c
+--- ../z.old/Src/Zle/zleparameter.c	Mon Jan 17 09:27:34 2000
++++ Src/Zle/zleparameter.c	Mon Jan 17 09:59:21 2000
+@@ -54,7 +54,7 @@
+     pm->gets.hfn = hashgetfn;
+     pm->sets.hfn = hashsetfn;
+     pm->unsetfn = stdunsetfn;
+-    pm->u.hash = ht = newhashtable(7, name, NULL);
++    pm->u.hash = ht = newhashtable(0, name, NULL);
+ 
+     ht->hash        = hasher;
+     ht->emptytable  = (TableFunc) shempty;
+diff -ru ../z.old/Src/glob.c Src/glob.c
+--- ../z.old/Src/glob.c	Mon Jan 17 09:27:27 2000
++++ Src/glob.c	Mon Jan 17 09:31:41 2000
+@@ -179,12 +179,15 @@
+     memcpy(&(N), &curglobdata, sizeof(struct globdata)); \
+     (N).gd_pathpos = pathpos; \
+     (N).gd_pathbuf = pathbuf; \
++    (N).gd_pathbufsz = 0; \
++    (N).gd_pathbuf = NULL; \
+     (N).gd_glob_pre = glob_pre; \
+     (N).gd_glob_suf = glob_suf; \
+   } while (0)
+ 
+ #define restore_globstate(N) \
+   do { \
++    zfree(pathbuf, pathbufsz); \
+     memcpy(&curglobdata, &(N), sizeof(struct globdata)); \
+     pathpos = (N).gd_pathpos; \
+     pathbuf = (N).gd_pathbuf; \
+diff -ru ../z.old/Src/mem.c Src/mem.c
+--- ../z.old/Src/mem.c	Mon Jan 17 09:27:28 2000
++++ Src/mem.c	Mon Jan 17 09:31:41 2000
+@@ -689,8 +689,8 @@
+  *         back; note that this has to be less than M_FREE
+  * M_ALLOC is the number of extra bytes to request from the system */
+ 
+-#define M_FREE  65536
+-#define M_KEEP  32768
++#define M_FREE  32768
++#define M_KEEP  16384
+ #define M_ALLOC M_KEEP
+ 
+ /* a pointer to the last free block, a pointer to the free list (the blocks
+@@ -737,7 +737,7 @@
+ #define M_BSLEN(S) (((S) - sizeof(struct m_shdr *) -  \
+ 		     sizeof(zlong) - sizeof(struct m_hdr *)) / M_SNUM)
+ #endif
+-#define M_NSMALL   13
++#define M_NSMALL    8
+ 
+ static struct m_hdr *m_small[M_NSMALL];
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

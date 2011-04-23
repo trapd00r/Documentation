@@ -1,0 +1,157 @@
+From zsh-workers-return-27432-mason-zsh=primenet.com.au@zsh.org Tue Nov 24 16:07:51 2009
+Return-Path: <zsh-workers-return-27432-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 10769 invoked by alias); 24 Nov 2009 16:07:51 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27432
+Received: (qmail 17776 invoked from network); 24 Nov 2009 16:07:48 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received-SPF: none (ns2.melb.primenet.com.au: domain at klanderman.net does not designate permitted sender hosts)
+From: Greg Klanderman <gak@klanderman.net>
+To: zsh-workers@zsh.org
+Subject: Re: need help with enhancement to prevent completion from stat'ing automounts
+Reply-To: gak@klanderman.net
+Date: Tue, 24 Nov 2009 11:07:37 -0500
+In-Reply-To: <m3eiqen97n.fsf@klanderman.net> (Greg Klanderman's message of "Thu, 10 Sep 2009 10:52:12 -0400")
+Message-ID: <m3tywjrjna.fsf@klanderman.net>
+User-Agent: Gnus/5.1008 (Gnus v5.10.8) XEmacs/21.4.17 (linux)
+References: <19106.55413.238410.101865@gargle.gargle.HOWL>
+	<m3bplmnpwv.fsf@klanderman.net> <20090908111200.57cadc7c@news01>
+	<m3tyzddn12.fsf@klanderman.net> <20090910103012.64677425@news01>
+	<m3eiqen97n.fsf@klanderman.net>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+>>>>> On September 10, 2009 Peter Stephenson <pws@csr.com> wrote:
+
+>> It's high time we fixed this properly.  The whole problem with the
+>> completion system is arbitrary bits getting added without understanding the
+>> existing bits, and each time that happens it gets worse.
+
+Hi all,
+
+Just an update on this; since actually adding support for a fake-dirs
+zstyle and having both that and the fake-files zstyle not stat the
+fake files and directories is quite a bit of work, as a temporary
+solution for my company I made a relatively simple change so that in
+the interim we can have working completion of automounts, by
+introducing an array parameter to configure paths in which stating
+should be avoided in the ztat function.
+
+I'm pretty sure Peter isn't interested in committing this fix, but I
+figured it was worth posting the patch just in case others out there
+also need a temporary solution.
+
+You'd use this for configuring automounts as follows:
+
+  completion_nostat_dirs=( /net /home )
+  zstyle ':completion:*' fake-files \
+         '/net:netdir1 netdir2 .. netdirN' \
+         '/home:homedir1 homedir2 .. homedirM'
+
+In my actual usage I generate those arguments based on the contents of
+/etc/auto.* or output of 'ypcat -k auto.*'.
+
+cheers,
+Greg
+
+
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.106
+diff -u -r1.106 init.c
+--- Src/init.c	12 Jul 2009 15:10:07 -0000	1.106
++++ Src/init.c	13 Nov 2009 20:51:25 -0000
+@@ -799,6 +799,8 @@
+     modulestab = newmoduletable(17, "modules");
+     linkedmodules = znewlinklist();
+ 
++    completion_nostat_dirs = mkarray(NULL);
++
+     /* Set default prompts */
+     if(unset(INTERACTIVE)) {
+ 	prompt = ztrdup("");
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.157
+diff -u -r1.157 params.c
+--- Src/params.c	5 Sep 2009 19:49:20 -0000	1.157
++++ Src/params.c	13 Nov 2009 20:51:25 -0000
+@@ -102,6 +102,10 @@
+      zoptind,		/* $OPTIND      */
+      shlvl;		/* $SHLVL       */
+ 
++/**/
++mod_export
++char **completion_nostat_dirs;
++
+ /* $histchars */
+  
+ /**/
+@@ -343,6 +347,9 @@
+ #define IPDEF9(A,B,C) IPDEF9F(A,B,C,0)
+ IPDEF9F("*", &pparams, NULL, PM_ARRAY|PM_SPECIAL|PM_DONTIMPORT|PM_READONLY),
+ IPDEF9F("@", &pparams, NULL, PM_ARRAY|PM_SPECIAL|PM_DONTIMPORT|PM_READONLY),
++
++IPDEF9("completion_nostat_dirs", &completion_nostat_dirs, NULL),
++
+ {{NULL,NULL,0},BR(NULL),NULL_GSU,0,0,NULL,NULL,NULL,0},
+ 
+ #define IPDEF10(A,B) {{NULL,A,PM_ARRAY|PM_SPECIAL},BR(NULL),GSU(B),10,0,NULL,NULL,NULL,0}
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.78
+diff -u -r1.78 compresult.c
+--- Src/Zle/compresult.c	24 Apr 2009 09:00:38 -0000	1.78
++++ Src/Zle/compresult.c	13 Nov 2009 20:51:25 -0000
+@@ -863,11 +863,37 @@
+ ztat(char *nam, struct stat *buf, int ls)
+ {
+     int ret;
++    char **pp;
+ 
+     nam = unmeta(nam);
+     if (!nam)
+ 	return -1;
+ 
++    for (pp = completion_nostat_dirs; *pp; pp++) {
++        int len = strlen(*pp);
++
++        if ((*pp)[len-1] == '/')
++            len--;
++
++        if (strncmp(nam, *pp, len) == 0 && nam[len] == '/' && strchr(nam+len+1, '/') == NULL) {
++            buf->st_dev = 0;      /* device */
++            buf->st_ino = 0;      /* inode */
++            buf->st_mode = S_IFDIR;     /* protection */
++            buf->st_nlink = 0;    /* number of hard links */
++            buf->st_uid = 0;      /* user ID of owner */
++            buf->st_gid = 0;      /* group ID of owner */
++            buf->st_rdev = 0;     /* device type (if inode device) */
++            buf->st_size = 0;     /* total size, in bytes */
++            buf->st_blksize = 0;  /* blocksize for filesystem I/O */
++            buf->st_blocks = 0;   /* number of blocks allocated */
++            buf->st_atime = 0;    /* time of last access */
++            buf->st_mtime = 0;    /* time of last modification */
++            buf->st_ctime = 0;    /* time of last status change */
++
++            return 0;
++        }
++    }
++
+     if ((ret = ls ? lstat(nam, buf) : stat(nam, buf))) {
+ 	char *p, *q;
+ 
+

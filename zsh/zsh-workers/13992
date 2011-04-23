@@ -1,0 +1,422 @@
+From zsh-workers-return-13992-mason-zsh=primenet.com.au@sunsite.dk Sun Apr 15 19:04:45 2001
+Return-Path: <zsh-workers-return-13992-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4655 invoked from network); 15 Apr 2001 19:04:43 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 15 Apr 2001 19:04:43 -0000
+Received: (qmail 27269 invoked by alias); 15 Apr 2001 19:04:39 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13992
+Received: (qmail 27254 invoked from network); 15 Apr 2001 19:04:38 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1010415080610.ZM10250@candle.brasslantern.com>
+Date: Sun, 15 Apr 2001 08:06:09 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.dk
+Subject: PATCH: Assorted parameter stuff
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+The main point of this patch is to address Andrej's message from last August
+("SourceForge bug id 104052 - case study") and related issues with parsing
+array subscripts.  Some other stuff got tweaked in passing.
+
+I'll hold off committing this until a couple of you have applied it and say
+it seems OK.  The "make check" tests all pass for me, at least (and it was
+the completion tests, rather than the parameter tests, that gave it the best
+workout).
+
+Andrej noted three cases:
+
+} Case 1.
+} 
+} bor@itsrm2% typeset -A foo
+} bor@itsrm2% foo[\]]=bar
+} zsh: not an identifier: foo[\]]
+
+With the patch below, that correctly assigns `bar' to the array element
+with the index `]' (not `\]').
+
+} Case 2.
+} 
+} bor@itsrm2% print $foo[\]]
+} ]
+} bor@itsrm2% print ${foo[\]]}
+} zsh: bad substitution
+
+Both of these are fixed, too, and should both print `bar'.
+
+} Case 3.
+} 
+} bor@itsrm2% print ${(kv)foo}
+} a bar abc baz
+} bor@itsrm2% print $foo[(I)[^]]]
+} bar] <== that I do not understand at all!
+
+This happens in part because the following also happens:
+
+% print z]
+z]
+
+Note that an unmatched close-bracket is not an error, only an unmatched open
+bracket is (bad pattern). $foo[(I)[^]]] should give "bad pattern" for `[^]',
+but that error is ignored during subscript parsing (and I did not find any
+reasonable way to propagate it).  Ignoring the error means that the (I) flag
+is also ignored, with the result that ${${foo}[0]} is returned, which in the
+example is `bar' -- hence `bar]' is printed.
+
+This bug is not fixed, but braces around the original substitution reveal
+the error:
+
+% print ${foo[(I)[^]]]} 
+zsh: bad substitution
+
+However, with a correct pattern the correct result is obtained:
+
+% print $foo[(I)[^\]]]
+a
+% print ${foo[(I)[^\]]]}
+a
+
+Note that one must use [^\]] so that the "unquoted" [ ] will balance.  The
+backslash is now removed when the subscript is processed.
+
+There is one remaining problem:  foo[*] of course refers to the entire
+array foo, but foo[\*] refers to the element indexed by `\*'; so it is
+still the case that the only way to assign or refer to to an element
+named `*' is to use `x="*"; foo[$x]=value; : $foo[$x]'.  Maybe someone
+else will see an obvious solution to that one.
+
+Andrej said:
+
+} Case 1 is caused by the fact, that setsparam() gets unmetafied
+} parameter name. [...] Case 1 is basically independent of other two.
+} Unfortunately, to solve it we need to either remove call to isident()
+} in setsparam() or pass metafied parameter name to setsparam() and make
+} isident() smart enough.
+
+In fact, I did make isident() smarter, but I didn't pass it a metafied
+parameter name.  Instead it calls a new function parse_subscript(),
+which invokes dquote_parse() to process the matching [ ] (as if they
+were a $[...] math expression, which turns out to work just fine for
+subscripting).
+
+} Case 2 comes from the fact, that paramsubst() and getindex() treat
+} both quoted and unquoted brackets the same. [... The] lexer should
+} return different token for "]" as for \], e.g. Qoutbrack like Qstring.
+
+This turns out not to be necessary; subscripts are parsed recursively
+(after a very tangled fashion), so as long as each level can be parsed
+properly everything will work out fine.  getindex() now also calls the
+parse_subscript() function to manage this.  However, I have not checked
+how many backslashes are necessary to protect `]' when it's in a deeply
+nested subscript expression ...
+
+There's probably a lot of room for optimization here, particularly in
+the `needtok' computation in getarg(), which may not be necessary any
+more when the entire subscript has already been parsed.
+
+} Case 3 the problem seems to be getarg(). It blindly skips over
+} balanced brackets that is of course wrong in this case.
+
+Because getindex() now does a more sophisticated parse of the subscript,
+getarg() always gets the subscript untokenized and delimited by Inbrack
+and Outbrack, and so it no longer needs to count matching pairs of both
+tokenized and untokenized brackets.  I didn't remove the code to count
+the matching pairs, but it now looks only for Inbrack/Outbrack and I
+don't think it can ever find more than the one Outbrack (but I wasn't
+entirely sure).
+
+The final touch was to leave INULL() characters alone in the untokenize
+loop in getindex() and then kill them with a well-placed remnulargs()
+before using the subscript to index the array or hash.  I was hopeful
+that this would also fix the problem with $scalar[(i)${(q)pat}], but
+it does not ...
+
+The only side-effect I found of all this was that math expressions that
+assign to subscripted values need to untokenize() because some of the
+manipulations done by getindex() are done in-place in the input string.
+
+Finally, while looking at this, I noticed that `typeset' didn't seem to
+be tracking the Param structs all the way through, and that once it did
+so, the isident() test before calling typeset_single() became redundant.
+
+Then I kept being baffled about why $HISTFILE was being fetched in the
+midst of many other paramter substitutions.  Well, gee, some of those
+substitutions use the parser, and hence initialized the history buffers;
+but they never need the file written, so fetching $HISTFILE was a bit
+premature at the point where it was done.
+
+There's one last little hunk that fixes Michal's Debian complaint about
+$scalar[(i)notfound] returning 0 instead of $(($#scalar + 1)).  Whew.
+
+Index: Src/builtin.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/builtin.c,v
+retrieving revision 1.43
+diff -u -r1.43 builtin.c
+--- Src/builtin.c	2001/03/29 10:52:15	1.43
++++ Src/builtin.c	2001/04/15 06:28:53
+@@ -1690,8 +1690,8 @@
+ 		delenv(pm->env);
+ 		pm->env = NULL;
+ 	    }
+-	    if (value)
+-		setsparam(pname, ztrdup(value));
++	    if (value && !(pm = setsparam(pname, ztrdup(value))))
++		return 0;
+ 	} else if (value) {
+ 	    zwarnnam(cname, "can't assign new value for array %s", pname, 0);
+ 	    return NULL;
+@@ -1807,9 +1807,10 @@
+ 	pm->level = keeplocal;
+     else if (on & PM_LOCAL)
+ 	pm->level = locallevel;
+-    if (value && !(pm->flags & (PM_ARRAY|PM_HASHED)))
+-	setsparam(pname, ztrdup(value));
+-    else if (newspecial && !(pm->old->flags & PM_NORESTORE)) {
++    if (value && !(pm->flags & (PM_ARRAY|PM_HASHED))) {
++	if (!(pm = setsparam(pname, ztrdup(value))))
++	    return 0;
++    } else if (newspecial && !(pm->old->flags & PM_NORESTORE)) {
+ 	/*
+ 	 * We need to use the special setting function to re-initialise
+ 	 * the special parameter to empty.
+@@ -2061,12 +2062,6 @@
+ 
+     /* Take arguments literally.  Don't glob */
+     while ((asg = getasg(*argv++))) {
+-	/* check if argument is a valid identifier */
+-	if (!isident(asg->name)) {
+-	    zerr("not an identifier: %s", asg->name, 0);
+-	    returnval = 1;
+-	    continue;
+-	}
+ 	if (!typeset_single(name, asg->name,
+ 			    (Param) (paramtab == realparamtab ?
+ 				     gethashnode2(paramtab, asg->name) :
+Index: Src/hist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/hist.c,v
+retrieving revision 1.24
+diff -u -r1.24 hist.c
+--- Src/hist.c	2001/04/10 18:03:58	1.24
++++ Src/hist.c	2001/04/15 06:29:08
+@@ -1011,7 +1011,6 @@
+     DPUTS(stophist != 2 && !(inbufflags & INP_ALIAS) && !chline,
+ 	  "BUG: chline is NULL in hend()");
+     queue_signals();
+-    hf = getsparam("HISTFILE");
+     if (histdone & HISTFLAG_SETTY)
+ 	settyinfo(&shttyinfo);
+     if (!(histactive & HA_NOINC))
+@@ -1028,6 +1027,7 @@
+      && (hist_ignore_all_dups = isset(HISTIGNOREALLDUPS)) != 0)
+ 	histremovedups();
+     /* For history sharing, lock history file once for both read and write */
++    hf = getsparam("HISTFILE");
+     if (isset(SHAREHISTORY) && lockhistfile(hf, 0)) {
+ 	readhistfile(hf, 0, HFILE_USE_OPTIONS | HFILE_FAST);
+ 	curline.histnum = curhist+1;
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.16
+diff -u -r1.16 lex.c
+--- Src/lex.c	2001/03/06 13:00:41	1.16
++++ Src/lex.c	2001/04/15 06:29:18
+@@ -1458,6 +1458,38 @@
+     return err;
+ }
+ 
++/**/
++mod_export char *
++parse_subscript(char *s)
++{
++    int l = strlen(s), err;
++    char *t;
++
++    if (!*s || *s == ']')
++	return 0;
++    lexsave();
++    untokenize(t = dupstring(s));
++    inpush(t, 0, NULL);
++    strinbeg(0);
++    len = 0;
++    bptr = tokstr = s;
++    bsiz = l + 1;
++    err = dquote_parse(']', 1);
++    if (err) {
++	err = *bptr;
++	*bptr = 0;
++	untokenize(s);
++	*bptr = err;
++	s = 0;
++    } else
++	s = bptr;
++    strinend();
++    inpop();
++    DPUTS(cmdsp, "BUG: parse_subscript: cmdstack not empty.");
++    lexrestore();
++    return s;
++}
++
+ /* Tokenize a string given in s. Parsing is done as if s were a normal *
+  * command-line argument but it may contain separators.  This is used  *
+  * to parse the right-hand side of ${...%...} substitutions.           */
+Index: Src/math.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/math.c,v
+retrieving revision 1.8
+diff -u -r1.8 math.c
+--- Src/math.c	2001/01/16 13:44:20	1.8
++++ Src/math.c	2001/04/15 06:29:26
+@@ -517,6 +517,7 @@
+     }
+     if (noeval)
+ 	return v;
++    untokenize(s);
+     setnparam(s, v);
+     return v;
+ }
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.36
+diff -u -r1.36 params.c
+--- Src/params.c	2001/04/06 07:55:13	1.36
++++ Src/params.c	2001/04/15 06:29:49
+@@ -770,38 +770,18 @@
+ 	if (!iident(*ss))
+ 	    break;
+ 
+-#if 0
+-    /* If this exhaust `s' or the next two characters *
+-     * are [(, then it is a valid identifier.         */
+-    if (!*ss || (*ss == '[' && ss[1] == '('))
+-	return 1;
+-
+-    /* Else if the next character is not [, then it is *
+-     * definitely not a valid identifier.              */
+-    if (*ss != '[')
+-	return 0;
+-
+-    noeval = 1;
+-    (void)mathevalarg(++ss, &ss);
+-    if (*ss == ',')
+-	(void)mathevalarg(++ss, &ss);
+-    noeval = ne;		/* restore the value of noeval */
+-    if (*ss != ']' || ss[1])
+-	return 0;
+-    return 1;
+-#else
+     /* If the next character is not [, then it is *
+-     * definitely not a valid identifier.              */
++     * definitely not a valid identifier.         */
+     if (!*ss)
+ 	return 1;
+     if (*ss != '[')
+ 	return 0;
+ 
+-    /* Require balanced [ ] pairs */
+-    if (skipparens('[', ']', &ss))
++    /* Require balanced [ ] pairs with something between */
++    if (!(ss = parse_subscript(++ss)))
+ 	return 0;
+-    return !*ss;
+-#endif
++    untokenize(s);
++    return !ss[1];
+ }
+ 
+ /**/
+@@ -933,11 +913,11 @@
+     }
+ 
+     for (t = s, i = 0;
+-	 (c = *t) && ((c != ']' && c != Outbrack &&
++	 (c = *t) && ((c != Outbrack &&
+ 		       (ishash || c != ',')) || i); t++) {
+-	if (c == '[' || c == Inbrack)
++	if (c == Inbrack)
+ 	    i++;
+-	else if (c == ']' || c == Outbrack)
++	else if (c == Outbrack)
+ 	    i--;
+ 	if (ispecial(c))
+ 	    needtok = 1;
+@@ -945,6 +925,7 @@
+     if (!c)
+ 	return 0;
+     s = dupstrpfx(s, t - s);
++    remnulargs(s);
+     *str = tt = t;
+     if (needtok) {
+ 	if (parsestr(s))
+@@ -1156,7 +1137,7 @@
+ 				    return r;
+ 		    }
+ 		}
+-		return 0;
++		return down ? 0 : len + 1;
+ 	    }
+ 	}
+     }
+@@ -1170,13 +1151,17 @@
+     int start, end, inv = 0;
+     char *s = *pptr, *tbrack;
+ 
+-    *s++ = '[';
+-    for (tbrack = s; *tbrack && *tbrack != ']' && *tbrack != Outbrack; tbrack++)
++    *s++ = Inbrack;
++    s = parse_subscript(s); /* Error handled elsewhere */
++    for (tbrack = *pptr + 1; *tbrack && tbrack != s; tbrack++) {
++	if (INULL(*tbrack) && !*++tbrack)
++	    break;
+ 	if (itok(*tbrack))
+ 	    *tbrack = ztokens[*tbrack - Pound];
+-    if (*tbrack == Outbrack)
+-	*tbrack = ']';
+-    if ((s[0] == '*' || s[0] == '@') && s[1] == ']') {
++    }
++    *tbrack = Outbrack;
++    s = *pptr + 1;
++    if ((s[0] == '*' || s[0] == '@') && s[1] == Outbrack) {
+ 	if ((v->isarr || IS_UNSET_VALUE(v)) && s[0] == '@')
+ 	    v->isarr |= SCANPM_ISVAR_AT;
+ 	v->start = 0;
+@@ -1208,12 +1193,12 @@
+ 	    }
+ 	    if (*s == ',') {
+ 		zerr("invalid subscript", NULL, 0);
+-		while (*s != ']' && *s != Outbrack)
++		while (*s != Outbrack)
+ 		    s++;
+ 		*pptr = s;
+ 		return 1;
+ 	    }
+-	    if (*s == ']' || *s == Outbrack)
++	    if (*s == Outbrack)
+ 		s++;
+ 	} else {
+ 	    int com;
+@@ -1228,7 +1213,7 @@
+ 		start--;
+ 	    else if (start == 0 && end == 0)
+ 		end++;
+-	    if (*s == ']' || *s == Outbrack) {
++	    if (*s == Outbrack) {
+ 		s++;
+ 		if (v->isarr && start == end-1 && !com &&
+ 		    (!(v->isarr & SCANPM_MATCHMANY) ||
+
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

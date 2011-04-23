@@ -1,0 +1,152 @@
+From zsh-workers-return-9395-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jan 21 09:10:34 2000
+Return-Path: <zsh-workers-return-9395-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15491 invoked from network); 21 Jan 2000 09:10:25 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Jan 2000 09:10:25 -0000
+Received: (qmail 25114 invoked by alias); 21 Jan 2000 09:09:54 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9395
+Received: (qmail 25106 invoked from network); 21 Jan 2000 09:09:54 -0000
+Date: Fri, 21 Jan 2000 10:09:52 +0100 (MET)
+Message-Id: <200001210909.KAA01281@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Thu, 20 Jan 2000 19:57:03 +0000
+Subject: PATCH: Re: Two more wordcode problems, probably
+
+
+Peter Stephenson wrote:
+
+> These are presumably both a result of the wordcode changes:
+> 
+> 1) Bad results using ksh-format autoload:
+> 
+> % ./zsh -f
+> % fpath=(.)
+> % cat tst
+> tst() {
+>   print hello
+> }
+> % autoload tst
+> % tst
+> % which tst
+> tst () {
+> 
+> }
+> 
+> Basically, every single line is messed up, although it doesn't seem to dump
+> core (it has more fun without...)
+
+The patch changes stripkshdef(). It seems like I forgot it change it
+when I finally added the Patprog caching.
+
+> 2) completion after `cvs add' dumps core.
+
+The array created in ecgetarr() wasn't NULL-terminated. I had tested
+this, obviously I was just (un)lucky to get a piece of memory with a
+zero after it.
+
+>  Do you want the whole backtrace?
+> No? Bad luck.  (Phew.  I sometimes wonder what we've got ourselves into.)
+
+That's why I want to change the execution code to be (mostly)
+non-recursive some day (I don't think I'll try this any time soon,
+though). That would leave us with only the frames for the shell
+functions called (and some at the beginning/end, of course). I'd also
+like to get rid of the func_wrapper() wrapper. I was really tempted to 
+make the core keep a simple stack-allocated stack of functions
+currently active (func_wrapper() only keeps track of the function
+names for the $funcstack array).
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/exec.c Src/exec.c
+--- ../z.old/Src/exec.c	Fri Jan 21 09:25:08 2000
++++ Src/exec.c	Fri Jan 21 10:03:39 2000
+@@ -3281,7 +3281,6 @@
+ {
+     Wordcode pc = prog->prog;
+     wordcode code;
+-    Eprog ret;
+ 
+     if (!prog)
+ 	return NULL;
+@@ -3301,16 +3300,33 @@
+ 	*pc != 1 || strcmp(name, ecrawstr(prog, pc + 1)))
+ 	return prog;
+ 
+-    ret = (Eprog) zhalloc(sizeof(*prog));
+-    ret->len = (WC_FUNCDEF_SKIP(code) - 3) * sizeof(wordcode);
+-    ret->prog = pc + 3;
+-    ret->strs = (char *) (pc + pc[3]);
+-    ret->shf = NULL;
+-    ret->pats = prog->pats;
+-    ret->npats = prog->npats;
+-    ret->heap = 1;
++    {
++	Eprog ret;
++	Wordcode end = pc + WC_FUNCDEF_SKIP(code);
++	int nprg = pc[2] - 4;
++	int npats = pc[3];
++	int plen, len, i;
++	Patprog *pp;
+ 
+-    return ret;
++	pc += 4;
++
++	plen = (end - pc) * sizeof(wordcode);
++	len = plen + (npats * sizeof(Patprog));
++
++	ret = (Eprog) zhalloc(sizeof(*ret));
++	ret->heap = 1;
++	ret->len = len;
++	ret->npats = npats;
++	ret->pats = pp = (Patprog *) zhalloc(len);
++	ret->prog = (Wordcode) (ret->pats + npats);
++	for (i = npats; i--; pp++)
++	    *pp = dummy_patprog1;
++	memcpy(ret->prog, pc, plen);
++	ret->strs = (char *) (ret->prog + nprg);
++	ret->shf = NULL;
++
++	return ret;
++    }
+ }
+ 
+ /* check to see if AUTOCD applies here */
+diff -ru ../z.old/Src/parse.c Src/parse.c
+--- ../z.old/Src/parse.c	Fri Jan 21 09:25:10 2000
++++ Src/parse.c	Fri Jan 21 09:57:56 2000
+@@ -2467,10 +2467,11 @@
+ {
+     char **ret, **rp;
+ 
+-    ret = rp = (char **) zhalloc(num * sizeof(char *));
++    ret = rp = (char **) zhalloc((num + 1) * sizeof(char *));
+ 
+     while (num--)
+ 	*rp++ = ecgetstr(s, dup);
++    *rp = NULL;
+ 
+     return ret;
+ }
+diff -ru ../z.old/Src/text.c Src/text.c
+--- ../z.old/Src/text.c	Fri Jan 21 09:25:11 2000
++++ Src/text.c	Fri Jan 21 10:00:51 2000
+@@ -636,6 +636,7 @@
+ 			break;
+ 		    case COND_MOD:
+ 			taddstr(ecgetstr(state, 0));
++			taddchr(' ');
+ 			taddlist(state, WC_COND_SKIP(code));
+ 			stack = 1;
+ 			break;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

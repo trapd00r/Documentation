@@ -1,0 +1,141 @@
+From zsh-workers-return-19657-mason-zsh=primenet.com.au@sunsite.dk Thu Mar 18 12:21:37 2004
+Return-Path: <zsh-workers-return-19657-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8057 invoked from network); 18 Mar 2004 12:21:37 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 18 Mar 2004 12:21:37 -0000
+Received: (qmail 3787 invoked by alias); 18 Mar 2004 12:21:26 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19657
+Received: (qmail 3771 invoked from network); 18 Mar 2004 12:21:25 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 18 Mar 2004 12:21:25 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [62.189.58.19] by sunsite.dk (MessageWall 1.0.8) with SMTP; 18 Mar 2004 12:21:25 -0000
+Received: from MAILSWEEPER01.csr.com (mailhost1.csr.com [62.189.183.235])
+	by lhuumrelay3.lnd.ops.eu.uu.net (8.11.0/8.11.0) with ESMTP id i2ICLOv22545
+	for <zsh-workers@sunsite.dk>; Thu, 18 Mar 2004 12:21:25 GMT
+Received: from EXCHANGE02.csr.com (unverified [192.168.137.45]) by MAILSWEEPER01.csr.com
+ (Content Technologies SMTPRS 4.3.12) with ESMTP id <T686a539a11c0a88d015d4@MAILSWEEPER01.csr.com> for <zsh-workers@sunsite.dk>;
+ Thu, 18 Mar 2004 12:21:02 +0000
+Received: from csr.com ([192.168.144.127]) by EXCHANGE02.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Thu, 18 Mar 2004 12:23:42 +0000
+To: zw <zsh-workers@sunsite.dk>
+Subject: Re: memory leaks report 
+In-reply-to: "Felix Rosencrantz"'s message of "Tue, 09 Mar 2004 23:46:09 PST."
+             <20040310074609.94301.qmail@web10406.mail.yahoo.com> 
+Date: Thu, 18 Mar 2004 12:21:24 +0000
+Message-ID: <12309.1079612484@csr.com>
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 18 Mar 2004 12:23:42.0411 (UTC) FILETIME=[D9C851B0:01C40CE3]
+
+Felix Rosencrantz wrote:
+> V01zmodload.ztst:
+> This is a new leak:
+> 4 bytes in 1 blocks are definitely lost in loss record 1 of 19
+>    at  malloc (vg_replace_malloc.c:153)
+>    by  zalloc (mem.c:490)
+>    by  ztrdup (string.c:52)
+>    by  add_automathfunc (module.c:2118)
+>    by  bin_zmodload_math (module.c:1397)
+>    by  bin_zmodload (module.c:1005)
+
+This was easy to track down, but in the process I discovered that
+`zmodload -af' is fatally flawed: you can't autoload more than one
+function from the same library, since it complains about replacing
+autoloadable math functions other than the one that triggered module
+loading.  Since autoloading one math function is hardly worth it, and
+since there is only one math library, it rendered the feature useless.
+This seems to fix it.  We need more tests for autoloading.
+
+
+Index: Src/module.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/module.c,v
+retrieving revision 1.13
+diff -u -r1.13 module.c
+--- Src/module.c	11 Mar 2004 14:27:10 -0000	1.13
++++ Src/module.c	18 Mar 2004 12:08:23 -0000
+@@ -2039,6 +2039,19 @@
+ MathFunc mathfuncs;
+ 
+ /**/
++static void removemathfunc(MathFunc previous, MathFunc current)
++{
++    if (previous)
++	previous->next = current->next;
++    else
++	mathfuncs = current->next;
++
++    zsfree(current->name);
++    zsfree(current->module);
++    zfree(current, sizeof(*current));
++}
++
++/**/
+ MathFunc
+ getmathfunc(char *name, int autol)
+ {
+@@ -2049,13 +2062,7 @@
+ 	    if (autol && p->module) {
+ 		char *n = dupstring(p->module);
+ 
+-		if (q)
+-		    q->next = p->next;
+-		else
+-		    mathfuncs = p->next;
+-
+-		zsfree(p->module);
+-		zfree(p, sizeof(*p));
++		removemathfunc(q, p);
+ 
+ 		load_module(n);
+ 
+@@ -2071,14 +2078,22 @@
+ mod_export int
+ addmathfunc(MathFunc f)
+ {
+-    MathFunc p;
++    MathFunc p, q = NULL;
+ 
+     if (f->flags & MFF_ADDED)
+ 	return 1;
+ 
+-    for (p = mathfuncs; p; p = p->next)
+-	if (!strcmp(f->name, p->name))
++    for (p = mathfuncs; p; q = p, p = p->next)
++	if (!strcmp(f->name, p->name)) {
++	    if (p->module) {
++		/*
++		 * Autoloadable, replace.
++		 */
++		removemathfunc(q, p);
++		break;
++	    }
+ 	    return 1;
++	}
+ 
+     f->flags |= MFF_ADDED;
+     f->next = mathfuncs;
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 692070
+
+
+**********************************************************************
+This email and any files transmitted with it are confidential and
+intended solely for the use of the individual or entity to whom they
+are addressed. If you have received this email in error please notify
+the system manager.
+
+This footnote also confirms that this email message has been swept by
+MIMEsweeper for the presence of computer viruses.
+
+www.mimesweeper.com
+**********************************************************************
+

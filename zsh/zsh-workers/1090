@@ -1,0 +1,314 @@
+From wayne@clari.net Fri May 17 08:42:08 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id IAA02597 for <mason@werple.mira.net.au>; Fri, 17 May 1996 08:42:03 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id SAA10647; Thu, 16 May 1996 18:19:25 -0400 (EDT)
+Resent-Date: Thu, 16 May 1996 18:19:25 -0400 (EDT)
+Message-Id: <199605162217.PAA02955@tenor.clarinet.com>
+To: schaefer@nbn.com
+Cc: zsh-workers@math.gatech.edu
+Subject: Re: kill-word & friends in ZLE 
+In-reply-to: schaefer's message of Wed, 15 May 1996 17:49:05 -0700.
+	     <960515174908.ZM16874@candle.brasslantern.com> 
+Date: Thu, 16 May 1996 15:17:31 -0700
+From: Wayne Davison <wayne@clari.net>
+Resent-Message-ID: <"Um5xY2.0.Hc2.idwcn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1090
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 7080
+Status: O
+
+Bart Schaefer writes:
+> I'd still rather have more complicated solution, though. :-)
+
+Here's a more complicated solution for you:
+
+I've added an environment variable ``WORDCHARS2'' (which should probably
+have a better name...) that lists the characters that you want to
+SOMETIMES be treated as word chars (it's OK if WORDCHARS contains these
+characters as well).  In the context of word movement and deletion, the
+code will allow WORDCHARS words to be broken up by the delimiters listed
+in WORDCHARS2, but it also allows WORDCHARS2 words to be broken up by
+non-word characters.  It doesn't stop at every single transition from one
+set to the next, though -- it tries to be smarter than that (whether it
+succeeds or not is for you to decide).
+
+The default value for WORDCHARS2 is empty, so the word functions behave
+as they did before unless you customize it.  To give the new stuff a try,
+do something like this:
+
+WORDCHARS2='''"/'
+
+and see if you like it.  
+
+Internally:
+
+I've created a level of wordishness.  0 is never a word character, 1 is
+sometimes a word character, and 2 is always a word character.  When we
+are searching for words we look for certain increasing or decreasing
+transitions in the wordishness and stop when we find the one we like.
+
+I also removed the support for "wordflag" from the emacsforwardword
+function since this kludge would only potentially limit some vi word
+function to any non-word characters before a word.  That's not what
+a vi user would want even if they were silly enough to be using the
+emacs function in the first place.
+
+Otherwise, no vi functions were modified.
+
+..wayne..
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/globals.h
+@@ -332,7 +332,8 @@
+ EXTERN char *rprompt;		/* $RPROMPT    */
+ EXTERN char *sprompt;
+ 
+-EXTERN char *wordchars;
++EXTERN char *wordchars;		/* $WORDCHARS  */
++EXTERN char *wordchars2;	/* $WORDCHARS2 */
+ EXTERN char *rstring, *Rstring;
+ EXTERN char *postedit;
+ 
+Index: Src/hashtable.h
+@@ -106,6 +106,7 @@
+ IPDEF2("HOME", homegetfn, homesetfn, 0),
+ IPDEF2("TERM", termgetfn, termsetfn, 0),
+ IPDEF2("WORDCHARS", wordcharsgetfn, wordcharssetfn, 0),
++IPDEF2("WORDCHARS2", wordchars2getfn, wordchars2setfn, 0),
+ IPDEF2("IFS", ifsgetfn, ifssetfn, 0),
+ IPDEF2("_", underscoregetfn, IFN(nullsetfn), PM_READONLY),
+ #ifdef LC_ALL
+Index: Src/init.c
+@@ -599,6 +599,7 @@
+     ifs         = ztrdup(" \t\n  ");
+     ifs[3]      = Meta;
+     wordchars   = ztrdup(DEFAULT_WORDCHARS);
++    wordchars2  = ztrdup("");
+     postedit    = ztrdup("");
+     underscore  = ztrdup("");
+ 
+Index: Src/params.c
+@@ -1694,6 +1694,29 @@
+     inittyptab();
+ }
+ 
++/* Function to get value for special parameter `WORDCHARS2' */
++
++/**/
++char *
++wordchars2getfn(Param pm)
++{
++    return wordchars2;
++}
++
++/* Function to set value of special parameter `WORDCHARS2' */
++
++/**/
++void
++wordchars2setfn(Param pm, char *x)
++{
++    zsfree(wordchars2);
++    if (x)
++	wordchars2 = x;
++    else
++ 	wordchars2 = ztrdup("");
++    inittyptab();
++}
++
+ /* Function to get value for special parameter `_' */
+ 
+ /**/
+Index: Src/utils.c
+@@ -2472,6 +2472,8 @@
+ 	typtab[STOUC(*s == Meta ? *++s ^ 32 : *s)] |= ISEP;
+     for (s = wordchars; *s; s++)
+ 	typtab[STOUC(*s == Meta ? *++s ^ 32 : *s)] |= IWORD;
++    for (s = wordchars2; *s; s++)
++	typtab[STOUC(*s == Meta ? *++s ^ 32 : *s)] |= IWORD2;
+     for (s = SPECCHARS; *s; s++)
+ 	typtab[STOUC(*s)] |= ISPECIAL;
+     if (unset(NOBANGHIST) && bangchar)
+Index: Src/zle_word.c
+@@ -36,17 +36,20 @@
+ void
+ forwardword(void)
+ {
++    int ci, nci;
++
+     if (mult < 0) {
+ 	mult = -mult;
+ 	backwardword();
+ 	return;
+     }
+     while (mult--) {
+-	while (cs != ll && iword(line[cs]))
+-	    cs++;
+-	if (wordflag && !mult)
++	if (wordflag && !mult) {
++	    while (cs != ll && iword(line[cs]))
++		cs++;
+ 	    return;
+-	while (cs != ll && !iword(line[cs]))
++	}
++	for (ci = 2; cs != ll && (nci = iindex(line[cs])) <= ci; ci = nci)
+ 	    cs++;
+     }
+ }
+@@ -97,17 +100,15 @@
+ void
+ emacsforwardword(void)
+ {
++    int ci, nci;
++
+     if (mult < 0) {
+ 	mult = -mult;
+ 	emacsbackwardword();
+ 	return;
+     }
+     while (mult--) {
+-	while (cs != ll && !iword(line[cs]))
+-	    cs++;
+-	if (wordflag && !mult)
+-	    return;
+-	while (cs != ll && iword(line[cs]))
++	for (ci = 0; cs != ll && (nci = iindex(line[cs])) >= ci; ci = nci)
+ 	    cs++;
+     }
+ }
+@@ -156,15 +157,15 @@
+ void
+ backwardword(void)
+ {
++    int ci, nci;
++
+     if (mult < 0) {
+ 	mult = -mult;
+ 	forwardword();
+ 	return;
+     }
+     while (mult--) {
+-	while (cs && !iword(line[cs - 1]))
+-	    cs--;
+-	while (cs && iword(line[cs - 1]))
++	for (ci = 0; cs && (nci = iindex(line[cs - 1])) >= ci; ci = nci)
+ 	    cs--;
+     }
+ }
+@@ -211,15 +212,15 @@
+ void
+ emacsbackwardword(void)
+ {
++    int ci, nci;
++
+     if (mult < 0) {
+ 	mult = -mult;
+ 	emacsforwardword();
+ 	return;
+     }
+     while (mult--) {
+-	while (cs && !iword(line[cs - 1]))
+-	    cs--;
+-	while (cs && iword(line[cs - 1]))
++	for (ci = 0; cs && (nci = iindex(line[cs - 1])) >= ci; ci = nci)
+ 	    cs--;
+     }
+ }
+@@ -228,7 +229,7 @@
+ void
+ backwarddeleteword(void)
+ {
+-    int x = cs;
++    int ci, nci, x = cs;
+ 
+     if (mult < 0) {
+ 	mult = -mult;
+@@ -236,9 +237,7 @@
+ 	return;
+     }
+     while (mult--) {
+-	while (x && !iword(line[x - 1]))
+-	    x--;
+-	while (x && iword(line[x - 1]))
++	for (ci = 0; x && (nci = iindex(line[x - 1])) >= ci; ci = nci)
+ 	    x--;
+     }
+     backdel(cs - x);
+@@ -272,7 +271,7 @@
+ void
+ backwardkillword(void)
+ {
+-    int x = cs;
++    int ci, nci, x = cs;
+ 
+     if (mult < 0) {
+ 	mult = -mult;
+@@ -280,9 +279,7 @@
+ 	return;
+     }
+     while (mult--) {
+-	while (x && !iword(line[x - 1]))
+-	    x--;
+-	while (x && iword(line[x - 1]))
++	for (ci = 0; x && (nci = iindex(line[x - 1])) >= ci; ci = nci)
+ 	    x--;
+     }
+     backkill(cs - x, 1);
+@@ -357,7 +354,7 @@
+ void
+ deleteword(void)
+ {
+-    int x = cs;
++    int ci, nci, x = cs;
+ 
+     if (mult < 0) {
+ 	mult = -mult;
+@@ -365,9 +362,7 @@
+ 	return;
+     }
+     while (mult--) {
+-	while (x != ll && !iword(line[x]))
+-	    x++;
+-	while (x != ll && iword(line[x]))
++	for (ci = 0; x != ll && (nci = iindex(line[x])) >= ci; ci = nci)
+ 	    x++;
+     }
+     foredel(x - cs);
+@@ -377,7 +372,7 @@
+ void
+ killword(void)
+ {
+-    int x = cs;
++    int ci, nci, x = cs;
+ 
+     if (mult < 0) {
+ 	mult = -mult;
+@@ -385,9 +380,7 @@
+ 	return;
+     }
+     while (mult--) {
+-	while (x != ll && !iword(line[x]))
+-	    x++;
+-	while (x != ll && iword(line[x]))
++	for (ci = 0; x != ll && (nci = iindex(line[x])) >= ci; ci = nci)
+ 	    x++;
+     }
+     forekill(x - cs, 0);
+Index: Src/ztype.h
+@@ -42,6 +42,7 @@
+ #define IWORD	 1024
+ #define ISPECIAL 2048
+ #define IMETA	4096
++#define IWORD2	8192
+ #define _icom(X,Y) (typtab[(int) (unsigned char) (X)] & Y)
+ #define idigit(X) _icom(X,IDIGIT)
+ #define ialnum(X) _icom(X,IALNUM)
+@@ -56,3 +57,5 @@
+ #define iword(X) _icom(X,IWORD)
+ #define ispecial(X) _icom(X,ISPECIAL)
+ #define imeta(X) _icom(X,IMETA)
++#define iword2(X) _icom(X,IWORD2)
++#define iindex(X) (iword2(X)? 1 : (iword(X)? 2 : 0))
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+
+

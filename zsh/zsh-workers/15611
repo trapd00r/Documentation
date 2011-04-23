@@ -1,0 +1,180 @@
+From zsh-workers-return-15611-mason-zsh=primenet.com.au@sunsite.dk Sun Aug 12 18:55:23 2001
+Return-Path: <zsh-workers-return-15611-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17164 invoked from network); 12 Aug 2001 18:55:22 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Aug 2001 18:55:21 -0000
+Received: (qmail 17263 invoked by alias); 12 Aug 2001 18:55:13 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15611
+Received: (qmail 17248 invoked from network); 12 Aug 2001 18:55:11 -0000
+From: Bart Schaefer <schaefer@brasslantern.com>
+Message-Id: <1010812185502.ZM9949@candle.brasslantern.com>
+Date: Sun, 12 Aug 2001 18:55:02 +0000
+In-Reply-To: <1010726174930.ZM23256@candle.brasslantern.com>
+Comments: In reply to "Bart Schaefer" <schaefer@candle.brasslantern.com>
+        "Re: Nasty bug in array-element typeset assignments" (Jul 26,  5:49pm)
+References: <1010726051301.ZM19183@candle.brasslantern.com> 
+	<Tc0a88d0154fb31705e@mailsweeper01.cambridgesiliconradio.com> 
+	<001b01c115b5$657254a0$21c9ca95@mow.siemens.ru> 
+	<Tc0a88d0154fb44a8a5@mailsweeper01.cambridgesiliconradio.com> 
+	<001f01c115b9$72dec660$21c9ca95@mow.siemens.ru> 
+	<3B5FEB29.884D31BF@u.genie.co.uk> 
+	<3B5FF9F1.5171AC7D@u.genie.co.uk> 
+	<002001c115c3$524f76b0$21c9ca95@mow.siemens.ru> 
+	<002101c115c4$a7d768d0$21c9ca95@mow.siemens.ru> 
+	<3B60012C.EF6E906A@u.genie.co.uk> 
+	<Tc0a88d0154fbb3cdbf@mailsweeper01.cambridgesiliconradio.com> 
+	<000001c115d6$50e082c0$21c9ca95@mow.siemens.ru> 
+	<1010726174930.ZM23256@candle.brasslantern.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.dk
+Subject: PATCH (?): Re: Nasty bug in array-element typeset assignments
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+Remember this?  Sorry it took me so long to get back to it.
+
+On Jul 26,  5:49pm, Bart Schaefer wrote:
+}
+} It's not supposed to create a local *element*, it's just supposed to
+} assign to an element of a local array.
+} 
+} I discovered the bug when writing this:
+} 
+} 	function example() {
+} 	  local 'new_array[$#new_array+1]'=$^old_array
+} 	  # ...
+} 	}
+} 
+} The above works beautifully, and is equivalent to what you'd get if the
+} syntax `local new_array=( $old_array )' worked.
+} 
+} I don't want to print an error in this case, unless possibly the array
+} is non-local.
+} 
+} In fact, the following also works, and does not cause a core dump:
+} 
+} 	function example() {
+} 	  local path 'path[$#path+1]'=$^path
+} 	  # ...
+} 	}
+} 
+} Because in the above statement, `path' is made local before the elements
+} are assigned.  Et voila.
+} 
+} I have something working that's actually a very small change, and still
+} permits my second example above to work (while rejecting the first one).
+} Let me play with a few more cases so I can put the right regression tests
+} in D06 -- it'll probably be several hours before I get to concentrate on
+} it.
+
+The "very small change" I mentioned turned out not to work in all cases,
+which is why it's been so long since I followed up.  I actually now have
+an even smaller change, but I'm not sure I like the semantics.
+
+The most minimal change accepts the element assignment but does not make
+the array local.  E.g., `noglob local x[3]=bar' creates global array `x'
+(or assigns `x[3]' if `x' already exists in the current scope); in this
+case `noglob local x x[2]=foo x[3]=bar' creates local -scalar- `x' with
+the value `fobar'.  However, if `x' is special, then `local x ...' has
+the usual special effect, i.e. `noglob local path path[2]=foo' creates a
+local special array and sets its second element to `foo' (and its first
+element to empty).
+
+The next-most-minimal change rejects `noglob local x[3]=bar' with "can't
+create local array element".  In this case, `noglob typeset -g x[3]=bar'
+has the behavior described in the previous paragraph.  I guess this is
+actually consistent with current semantics for `typeset -g' (i.e., it
+uses the closest surrounding scope for existing parameters and global
+scope for new ones) so this is perhaps a better choice.  Unfortunately
+(perhaps), it breaks the very first `function example' excerpted above.
+
+I tried a couple of other variants involving implicitly creating the
+local arrays, but having re-read what I just wrote, I don't think they
+are worth going into.
+
+The final possibility is to accept `noglob local x[3]=bar' only when `x'
+already exists at the current locallevel.  This is less efficient than
+rejecting it entirely (it means stripping the subscript and looking up
+`x' to check its pm->local), but it allows the associative array syntax
+examples in the manual to work without a seemingly extraneous `-g', and
+it allows `noglob local x x[2]=foo' to work with scalars/specials.
+
+So, for consideration, here is the patch for that last.  No regression
+test yet (except the tweak to D06subscript).  It should be obvious what
+to remove to convert this into each variation described above (e.g. the
+first variant is just the 2-line change in the 3rd hunk).
+
+
+diff -ru -x CVS zsh-forge/current/Src/builtin.c zsh-4.0/Src/builtin.c
+--- zsh-forge/current/Src/builtin.c	Mon Jul  9 12:10:50 2001
++++ zsh-4.0/Src/builtin.c	Sun Aug 12 11:14:36 2001
+@@ -1586,6 +1586,7 @@
+ 	       int on, int off, int roff, char *value, Param altpm)
+ {
+     int usepm, tc, keeplocal = 0, newspecial = 0;
++    char *subscript;
+ 
+     /*
+      * Do we use the existing pm?  Note that this isn't the end of the
+@@ -1793,12 +1794,24 @@
+ 	    pm->ct = auxlen;
+ 	else
+ 	    pm->ct = 0;
+-    } else if (strchr(pname, '[')) {
++    } else if ((subscript = strchr(pname, '['))) {
+ 	if (on & PM_READONLY) {
+ 	    zerrnam(cname,
+ 		    "%s: can't create readonly array elements", pname, 0);
+ 	    return NULL;
+-	} else if (PM_TYPE(on) == PM_SCALAR) {
++	} else if (on & PM_LOCAL) {
++	    *subscript = 0;
++	    pm = (Param) (paramtab == realparamtab ?
++			  gethashnode2(paramtab, pname) :
++			  paramtab->getnode(paramtab, pname));
++	    *subscript = '[';
++	    if (!pm || pm->level != locallevel) {
++		zerrnam(cname,
++			"%s: can't create local array elements", pname, 0);
++		return NULL;
++	    }
++	}
++	if (PM_TYPE(on) == PM_SCALAR) {
+ 	    /*
+ 	     * This will either complain about bad identifiers, or will set
+ 	     * a hash element or array slice.  This once worked by accident,
+@@ -1808,6 +1821,8 @@
+ 	    if (!(pm = setsparam(pname, ztrdup(value ? value : ""))))
+ 		return NULL;
+ 	    value = NULL;
++	    keeplocal = 0;
++	    on = pm->flags;
+ 	} else {
+ 	    zerrnam(cname,
+ 		    "%s: array elements must be scalar", pname, 0);
+diff -ru -x CVS zsh-forge/current/Test/D06subscript.ztst zsh-4.0/Test/D06subscript.ztst
+--- zsh-forge/current/Test/D06subscript.ztst	Mon Jul  9 12:10:51 2001
++++ zsh-4.0/Test/D06subscript.ztst	Sun Aug 12 11:19:14 2001
+@@ -146,8 +146,8 @@
+ >\2 backcbrack cbrack star
+ >\\\4 \\\? star zounds
+ 
+-  typeset "A[one\"two\"three\"quotes]"=QQQ
+-  typeset 'A[one\"two\"three\"quotes]'=qqq
++  typeset -g "A[one\"two\"three\"quotes]"=QQQ
++  typeset -g 'A[one\"two\"three\"quotes]'=qqq
+   print -R "$A[one\"two\"three\"quotes]"
+   print -R $A[one\"two\"three\"quotes]
+   A[one"two"three"four"quotes]=QqQq
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,1045 @@
+From zsh-workers-return-8471-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Oct 28 08:12:46 1999
+Return-Path: <zsh-workers-return-8471-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6198 invoked from network); 28 Oct 1999 08:12:40 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 28 Oct 1999 08:12:40 -0000
+Received: (qmail 25451 invoked by alias); 28 Oct 1999 08:12:29 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8471
+Received: (qmail 25443 invoked from network); 28 Oct 1999 08:12:26 -0000
+Date: Thu, 28 Oct 1999 10:12:23 +0200 (MET DST)
+Message-Id: <199910280812.KAA18413@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Wed, 27 Oct 1999 10:42:32 +0200
+	(MET DST)
+Subject: Re: PATCH: completion
+
+
+I wrote:
+
+> That's why I also suggested splitting them into pairs: `functions' and 
+> `disabledfunctions' (or `disfunctions' or something like that).
+
+This patch does that, so there is now `disfunctions', etc. Even if
+it may turn out that this isn't the final solution, it is a lot
+cleaner than the mess I did before.
+
+This also removes the `zle' prefix from `zlekeymaps' and `zlewidgets'.
+
+
+Bye
+ Sven
+
+diff -u -r oldsrc/Modules/parameter.c Src/Modules/parameter.c
+--- oldsrc/Modules/parameter.c	Wed Oct 27 20:31:04 1999
++++ Src/Modules/parameter.c	Wed Oct 27 22:11:52 1999
+@@ -331,17 +331,13 @@
+ 
+ /**/
+ static void
+-setfunction(char *name, char *val)
++setfunction(char *name, char *val, int dis)
+ {
+     char *value = dupstring(val);
+     Shfunc shf;
+     List list;
+-    int sn, dis = 0;
++    int sn;
+ 
+-    if (strpfx("<disabled> ", val)) {
+-	strcpy(val, val + 11);
+-	dis = DISABLED;
+-    }
+     val = metafy(val, strlen(val), META_REALLOC);
+ 
+     HEAPALLOC {
+@@ -377,7 +373,14 @@
+ static void
+ setpmfunction(Param pm, char *value)
+ {
+-    setfunction(pm->nam, value);
++    setfunction(pm->nam, value, 0);
++}
++
++/**/
++static void
++setpmdisfunction(Param pm, char *value)
++{
++    setfunction(pm->nam, value, DISABLED);
+ }
+ 
+ /**/
+@@ -392,7 +395,7 @@
+ 
+ /**/
+ static void
+-setpmfunctions(Param pm, HashTable ht)
++setfunctions(Param pm, HashTable ht, int dis)
+ {
+     int i;
+     HashNode hn;
+@@ -409,14 +412,28 @@
+ 	    v.arr = NULL;
+ 	    v.pm = (Param) hn;
+ 
+-	    setfunction(hn->nam, ztrdup(getstrvalue(&v)));
++	    setfunction(hn->nam, ztrdup(getstrvalue(&v)), dis);
+ 	}
+     deleteparamtable(ht);
+ }
+ 
+ /**/
++static void
++setpmfunctions(Param pm, HashTable ht)
++{
++    setfunctions(pm, ht, 0);
++}
++
++/**/
++static void
++setpmdisfunctions(Param pm, HashTable ht)
++{
++    setfunctions(pm, ht, DISABLED);
++}
++
++/**/
+ static HashNode
+-getpmfunction(HashTable ht, char *name)
++getfunction(HashTable ht, char *name, int dis)
+ {
+     Shfunc shf;
+     Param pm = NULL;
+@@ -425,7 +442,7 @@
+ 	pm = (Param) zhalloc(sizeof(struct param));
+ 	pm->nam = dupstring(name);
+ 	pm->flags = PM_SCALAR;
+-	pm->sets.cfn = setpmfunction;
++	pm->sets.cfn = (dis ? setpmdisfunction : setpmfunction);
+ 	pm->gets.cfn = strgetfn;
+ 	pm->unsetfn = unsetpmfunction;
+ 	pm->ct = 0;
+@@ -434,7 +451,8 @@
+ 	pm->old = NULL;
+ 	pm->level = 0;
+ 
+-	if ((shf = (Shfunc) shfunctab->getnode2(shfunctab, name))) {
++	if ((shf = (Shfunc) shfunctab->getnode2(shfunctab, name)) &&
++	    (dis ? (shf->flags & DISABLED) : !(shf->flags & DISABLED))) {
+ 	    if (shf->flags & PM_UNDEFINED) {
+ 		pm->u.str = dyncat("builtin autoload -X",
+ 				   ((shf->flags & PM_UNALIASED) ?
+@@ -444,8 +462,7 @@
+ 		char *t = getpermtext((void *) dupstruct((void *)
+ 							 shf->funcdef)), *h;
+ 
+-		h = ((shf->flags & DISABLED) ?
+-		     dyncat("<disabled> ", t) : dupstring(t));
++		h = dupstring(t);
+ 		zsfree(t);
+ 		unmetafy(h, NULL);
+ 
+@@ -461,15 +478,29 @@
+ }
+ 
+ /**/
++static HashNode
++getpmfunction(HashTable ht, char *name)
++{
++    return getfunction(ht, name, 0);
++}
++
++/**/
++static HashNode
++getpmdisfunction(HashTable ht, char *name)
++{
++    return getfunction(ht, name, DISABLED);
++}
++
++/**/
+ static void
+-scanpmfunctions(HashTable ht, ScanFunc func, int flags)
++scanfunctions(HashTable ht, ScanFunc func, int flags, int dis)
+ {
+     struct param pm;
+     int i;
+     HashNode hn;
+ 
+     pm.flags = PM_SCALAR;
+-    pm.sets.cfn = setpmcommand;
++    pm.sets.cfn = (dis ? setpmdisfunction : setpmfunction);
+     pm.gets.cfn = strgetfn;
+     pm.unsetfn = unsetpmcommand;
+     pm.ct = 0;
+@@ -480,7 +511,7 @@
+ 
+     for (i = 0; i < shfunctab->hsize; i++)
+ 	for (hn = shfunctab->nodes[i]; hn; hn = hn->next) {
+-	    if (!(hn->flags & DISABLED)) {
++	    if (dis ? (hn->flags & DISABLED) : !(hn->flags & DISABLED)) {
+ 		pm.nam = hn->nam;
+ 		if (func != scancountparams) {
+ 		    if (((Shfunc) hn)->flags & PM_UNDEFINED) {
+@@ -494,9 +525,7 @@
+ 			char *t = getpermtext((void *)
+ 					      dupstruct((void *) ((Shfunc) hn)->funcdef));
+ 
+-			pm.u.str = ((hn->flags & DISABLED) ?
+-				    dyncat("<disabled> ", t) :
+-				    dupstring(t));
++			pm.u.str = dupstring(t);
+ 			unmetafy(pm.u.str, NULL);
+ 			zsfree(t);
+ 		    }
+@@ -506,11 +535,25 @@
+ 	}
+ }
+ 
++/**/
++static void
++scanpmfunctions(HashTable ht, ScanFunc func, int flags)
++{
++    scanfunctions(ht, func, flags, 0);
++}
++
++/**/
++static void
++scanpmdisfunctions(HashTable ht, ScanFunc func, int flags)
++{
++    scanfunctions(ht, func, flags, DISABLED);
++}
++
+ /* Functions for the builtins special parameter. */
+ 
+ /**/
+ static HashNode
+-getpmbuiltin(HashTable ht, char *name)
++getbuiltin(HashTable ht, char *name, int dis)
+ {
+     Param pm = NULL;
+     Builtin bn;
+@@ -527,12 +570,12 @@
+ 	pm->ename = NULL;
+ 	pm->old = NULL;
+ 	pm->level = 0;
+-	if ((bn = (Builtin) builtintab->getnode2(builtintab, name))) {
++	if ((bn = (Builtin) builtintab->getnode2(builtintab, name)) &&
++	    (dis ? (bn->flags & DISABLED) : !(bn->flags & DISABLED))) {
+ 	    char *t = ((bn->handlerfunc || (bn->flags & BINF_PREFIX)) ?
+ 		       "defined" : "undefined");
+ 
+-	    pm->u.str = ((bn->flags & DISABLED) ?
+-			 dyncat("<disabled> ", t) : dupstring(t));
++	    pm->u.str = dupstring(t);
+ 	} else {
+ 	    pm->u.str = dupstring("");
+ 	    pm->flags |= PM_UNSET;
+@@ -543,8 +586,22 @@
+ }
+ 
+ /**/
++static HashNode
++getpmbuiltin(HashTable ht, char *name)
++{
++    return getbuiltin(ht, name, 0);
++}
++
++/**/
++static HashNode
++getpmdisbuiltin(HashTable ht, char *name)
++{
++    return getbuiltin(ht, name, DISABLED);
++}
++
++/**/
+ static void
+-scanpmbuiltins(HashTable ht, ScanFunc func, int flags)
++scanbuiltins(HashTable ht, ScanFunc func, int flags, int dis)
+ {
+     struct param pm;
+     int i;
+@@ -562,78 +619,67 @@
+ 
+     for (i = 0; i < builtintab->hsize; i++)
+ 	for (hn = builtintab->nodes[i]; hn; hn = hn->next) {
+-	    pm.nam = hn->nam;
+-	    if (func != scancountparams) {
+-		char *t = ((((Builtin) hn)->handlerfunc ||
+-			    (hn->flags & BINF_PREFIX)) ?
+-			   "defined" : "undefined");
++	    if (dis ? (hn->flags & DISABLED) : !(hn->flags & DISABLED)) {
++		pm.nam = hn->nam;
++		if (func != scancountparams) {
++		    char *t = ((((Builtin) hn)->handlerfunc ||
++				(hn->flags & BINF_PREFIX)) ?
++			       "defined" : "undefined");
+ 
+-		pm.u.str = ((((Builtin) hn)->flags & DISABLED) ?
+-			    dyncat("<disabled> ", t) : dupstring(t));
++		    pm.u.str = dupstring(t);
++		}
++		func((HashNode) &pm, flags);
+ 	    }
+-	    func((HashNode) &pm, flags);
+ 	}
+ }
+ 
+-/* Functions for the reswords special parameter. */
+-
+ /**/
+-static HashNode
+-getpmresword(HashTable ht, char *name)
++static void
++scanpmbuiltins(HashTable ht, ScanFunc func, int flags)
+ {
+-    Param pm = NULL;
+-    HashNode hn;
+-
+-    HEAPALLOC {
+-	pm = (Param) zhalloc(sizeof(struct param));
+-	pm->nam = dupstring(name);
+-	pm->flags = PM_SCALAR | PM_READONLY;
+-	pm->sets.cfn = NULL;
+-	pm->gets.cfn = strgetfn;
+-	pm->unsetfn = NULL;
+-	pm->ct = 0;
+-	pm->env = NULL;
+-	pm->ename = NULL;
+-	pm->old = NULL;
+-	pm->level = 0;
+-	if ((hn = reswdtab->getnode2(reswdtab, name)))
+-	    pm->u.str = dupstring((hn->flags & DISABLED) ?
+-				  "<disabled>" : "<enabled>");
+-	else {
+-	    pm->u.str = dupstring("");
+-	    pm->flags |= PM_UNSET;
+-	}
+-    } LASTALLOC;
+-
+-    return (HashNode) pm;
++    scanbuiltins(ht, func, flags, 0);
+ }
+ 
+ /**/
+ static void
+-scanpmreswords(HashTable ht, ScanFunc func, int flags)
++scanpmdisbuiltins(HashTable ht, ScanFunc func, int flags)
++{
++    scanbuiltins(ht, func, flags, DISABLED);
++}
++
++/* Functions for the reswords special parameter. */
++
++/**/
++static char **
++getreswords(int dis)
+ {
+-    struct param pm;
+     int i;
+     HashNode hn;
++    char **ret, **p;
+ 
+-    pm.flags = PM_SCALAR | PM_READONLY;
+-    pm.sets.cfn = NULL;
+-    pm.gets.cfn = strgetfn;
+-    pm.unsetfn = NULL;
+-    pm.ct = 0;
+-    pm.env = NULL;
+-    pm.ename = NULL;
+-    pm.old = NULL;
+-    pm.level = 0;
++    p = ret = (char **) zhalloc((reswdtab->ct + 1) * sizeof(char *));
+ 
+     for (i = 0; i < reswdtab->hsize; i++)
+-	for (hn = reswdtab->nodes[i]; hn; hn = hn->next) {
+-	    pm.nam = hn->nam;
+-	    if (func != scancountparams)
+-		pm.u.str = dupstring((hn->flags & DISABLED) ?
+-				     "<disabled>" : "<enabled>");
+-	    func((HashNode) &pm, flags);
+-	}
++	for (hn = reswdtab->nodes[i]; hn; hn = hn->next)
++	    if (dis ? (hn->flags & DISABLED) : !(hn->flags & DISABLED))
++		*p++ = dupstring(hn->nam);
++    *p = NULL;
++
++    return ret;
++}
++
++/**/
++static char **
++reswordsgetfn(Param pm)
++{
++    return getreswords(0);
++}
++
++/**/
++static char **
++disreswordsgetfn(Param pm)
++{
++    return getreswords(DISABLED);
+ }
+ 
+ /* Functions for the options special parameter. */
+@@ -925,6 +971,7 @@
+ 
+ /* Functions for the dirstack special parameter. */
+ 
++/**/
+ static void
+ dirssetfn(Param pm, char **x)
+ {
+@@ -940,6 +987,7 @@
+ 	freearray(x);
+ }
+ 
++/**/
+ static char **
+ dirsgetfn(Param pm)
+ {
+@@ -1019,6 +1067,7 @@
+ 
+ /* Function for the historywords special parameter. */
+ 
++/**/
+ static char **
+ histwgetfn(Param pm)
+ {
+@@ -1050,6 +1099,7 @@
+ 
+ /* Functions for the jobtexts special parameter. */
+ 
++/**/
+ static char *
+ pmjobtext(int job)
+ {
+@@ -1137,6 +1187,7 @@
+ 
+ /* Functions for the jobstates special parameter. */
+ 
++/**/
+ static char *
+ pmjobstate(int job)
+ {
+@@ -1437,33 +1488,49 @@
+ 
+ /**/
+ static void
+-setpmralias(Param pm, char *value)
++setralias(Param pm, char *value, int dis)
+ {
+-    int dis = 0;
+-
+-    if (strpfx("<disabled> ", value)) {
+-	strcpy(value, value + 11);
+-	dis = DISABLED;
+-    }
+     aliastab->addnode(aliastab, ztrdup(pm->nam), createaliasnode(value, dis));
+ }
+ 
+ /**/
+ static void
+-setpmgalias(Param pm, char *value)
++setpmralias(Param pm, char *value)
+ {
+-    int dis = 0;
++    setralias(pm, value, 0);
++}
+ 
+-    if (strpfx("<disabled> ", value)) {
+-	strcpy(value, value + 11);
+-	dis = DISABLED;
+-    }
++/**/
++static void
++setpmdisralias(Param pm, char *value)
++{
++    setralias(pm, value, DISABLED);
++}
++
++/**/
++static void
++setgalias(Param pm, char *value, int dis)
++{
+     aliastab->addnode(aliastab, ztrdup(pm->nam),
+ 		      createaliasnode(value, dis | ALIAS_GLOBAL));
+ }
+ 
+ /**/
+ static void
++setpmgalias(Param pm, char *value)
++{
++    setgalias(pm, value, 0);
++}
++
++/**/
++static void
++setpmdisgalias(Param pm, char *value)
++{
++    setgalias(pm, value, DISABLED);
++}
++
++/**/
++static void
+ unsetpmalias(Param pm, int exp)
+ {
+     HashNode hd = aliastab->removenode(aliastab, pm->nam);
+@@ -1474,7 +1541,7 @@
+ 
+ /**/
+ static void
+-setpmaliases(Param pm, HashTable ht, int global)
++setaliases(Param pm, HashTable ht, int global, int dis)
+ {
+     int i;
+     HashNode hn, next, hd;
+@@ -1504,7 +1571,8 @@
+ 	    if ((val = getstrvalue(&v)))
+ 		aliastab->addnode(aliastab, ztrdup(hn->nam),
+ 				  createaliasnode(ztrdup(val),
+-						  (global ? ALIAS_GLOBAL : 0)));
++						  (global ? ALIAS_GLOBAL : 0) |
++						  (dis ? DISABLED : 0)));
+ 	}
+     deleteparamtable(ht);
+ }
+@@ -1513,19 +1581,33 @@
+ static void
+ setpmraliases(Param pm, HashTable ht)
+ {
+-    setpmaliases(pm, ht, 0);
++    setaliases(pm, ht, 0, 0);
++}
++
++/**/
++static void
++setpmdisraliases(Param pm, HashTable ht)
++{
++    setaliases(pm, ht, 0, DISABLED);
+ }
+ 
+ /**/
+ static void
+ setpmgaliases(Param pm, HashTable ht)
+ {
+-    setpmaliases(pm, ht, 1);
++    setaliases(pm, ht, 1, 0);
++}
++
++/**/
++static void
++setpmdisgaliases(Param pm, HashTable ht)
++{
++    setaliases(pm, ht, 1, DISABLED);
+ }
+ 
+ /**/
+ static HashNode
+-getpmalias(HashTable ht, char *name, int global)
++getalias(HashTable ht, char *name, int global, int dis)
+ {
+     Param pm = NULL;
+     Alias al;
+@@ -1534,7 +1616,8 @@
+ 	pm = (Param) zhalloc(sizeof(struct param));
+ 	pm->nam = dupstring(name);
+ 	pm->flags = PM_SCALAR;
+-	pm->sets.cfn = (global ? setpmgalias : setpmralias);
++	pm->sets.cfn = (global ? (dis ? setpmdisgalias : setpmgalias) :
++			(dis ? setpmdisralias : setpmralias));
+ 	pm->gets.cfn = strgetfn;
+ 	pm->unsetfn = unsetpmalias;
+ 	pm->ct = 0;
+@@ -1544,10 +1627,9 @@
+ 	pm->level = 0;
+ 	if ((al = (Alias) aliastab->getnode2(aliastab, name)) &&
+ 	    ((global && (al->flags & ALIAS_GLOBAL)) ||
+-	     (!global && !(al->flags & ALIAS_GLOBAL))))
+-	    pm->u.str = ((al->flags & DISABLED) ?
+-			 dyncat("<disabled> ", al->text) :
+-			 dupstring(al->text));
++	     (!global && !(al->flags & ALIAS_GLOBAL))) &&
++	    (dis ? (al->flags & DISABLED) : !(al->flags & DISABLED)))
++	    pm->u.str = dupstring(al->text);
+ 	else {
+ 	    pm->u.str = dupstring("");
+ 	    pm->flags |= PM_UNSET;
+@@ -1561,19 +1643,33 @@
+ static HashNode
+ getpmralias(HashTable ht, char *name)
+ {
+-    return getpmalias(ht, name, 0);
++    return getalias(ht, name, 0, 0);
++}
++
++/**/
++static HashNode
++getpmdisralias(HashTable ht, char *name)
++{
++    return getalias(ht, name, 0, 0);
+ }
+ 
+ /**/
+ static HashNode
+ getpmgalias(HashTable ht, char *name)
+ {
+-    return getpmalias(ht, name, 1);
++    return getalias(ht, name, 1, 0);
++}
++
++/**/
++static HashNode
++getpmdisgalias(HashTable ht, char *name)
++{
++    return getalias(ht, name, 1, DISABLED);
+ }
+ 
+ /**/
+ static void
+-scanpmaliases(HashTable ht, ScanFunc func, int flags, int global)
++scanaliases(HashTable ht, ScanFunc func, int flags, int global, int dis)
+ {
+     struct param pm;
+     int i;
+@@ -1581,7 +1677,8 @@
+     Alias al;
+ 
+     pm.flags = PM_SCALAR;
+-    pm.sets.cfn = (global ? setpmgalias : setpmralias);
++    pm.sets.cfn = (global ? (dis ? setpmdisgalias : setpmgalias) :
++		   (dis ? setpmdisralias : setpmralias));
+     pm.gets.cfn = strgetfn;
+     pm.unsetfn = unsetpmalias;
+     pm.ct = 0;
+@@ -1592,13 +1689,12 @@
+ 
+     for (i = 0; i < aliastab->hsize; i++)
+ 	for (hn = aliastab->nodes[i]; hn; hn = hn->next) {
+-	    if ((global && ((al = (Alias) hn)->flags & ALIAS_GLOBAL)) ||
+-		(!global && !((al = (Alias) hn)->flags & ALIAS_GLOBAL))) {
++	    if (((global && ((al = (Alias) hn)->flags & ALIAS_GLOBAL)) ||
++		 (!global && !((al = (Alias) hn)->flags & ALIAS_GLOBAL))) &&
++		(dis ? (al->flags & DISABLED) : !(al->flags & DISABLED))) {
+ 		pm.nam = hn->nam;
+ 		if (func != scancountparams)
+-		    pm.u.str = ((hn->flags & DISABLED) ?
+-				dyncat("<disabled> ", al->text) :
+-				dupstring(al->text));
++		    pm.u.str = dupstring(al->text);
+ 		func((HashNode) &pm, flags);
+ 	    }
+ 	}
+@@ -1608,14 +1704,28 @@
+ static void
+ scanpmraliases(HashTable ht, ScanFunc func, int flags)
+ {
+-    scanpmaliases(ht, func, flags, 0);
++    scanaliases(ht, func, flags, 0, 0);
++}
++
++/**/
++static void
++scanpmdisraliases(HashTable ht, ScanFunc func, int flags)
++{
++    scanaliases(ht, func, flags, 0, DISABLED);
+ }
+ 
+ /**/
+ static void
+ scanpmgaliases(HashTable ht, ScanFunc func, int flags)
+ {
+-    scanpmaliases(ht, func, flags, 1);
++    scanaliases(ht, func, flags, 1, 0);
++}
++
++/**/
++static void
++scanpmdisgaliases(HashTable ht, ScanFunc func, int flags)
++{
++    scanpmaliases(ht, func, flags, 1, DISABLED);
+ }
+ 
+ /* Table for defined parameters. */
+@@ -1642,25 +1752,34 @@
+     { "functions", 0,
+       getpmfunction, scanpmfunctions, setpmfunctions,
+       NULL, NULL, stdunsetfn, NULL },
++    { "disfunctions", 0,
++      getpmdisfunction, scanpmdisfunctions, setpmdisfunctions,
++      NULL, NULL, stdunsetfn, NULL },
+     { "builtins", PM_READONLY,
+       getpmbuiltin, scanpmbuiltins, hashsetfn,
+       NULL, NULL, stdunsetfn, NULL },
+-    { "reswords", PM_READONLY,
+-      getpmresword, scanpmreswords, hashsetfn,
++    { "disbuiltins", PM_READONLY,
++      getpmdisbuiltin, scanpmdisbuiltins, hashsetfn,
+       NULL, NULL, stdunsetfn, NULL },
++    { "reswords", PM_ARRAY|PM_SPECIAL|PM_READONLY,
++      NULL, NULL, NULL,
++      arrsetfn, reswordsgetfn, stdunsetfn, NULL },
++    { "disreswords", PM_ARRAY|PM_SPECIAL|PM_READONLY,
++      NULL, NULL, NULL,
++      arrsetfn, disreswordsgetfn, stdunsetfn, NULL },
+     { "options", 0,
+       getpmoption, scanpmoptions, setpmoptions,
+       NULL, NULL, stdunsetfn, NULL },
+     { "modules", PM_READONLY,
+       getpmmodule, scanpmmodules, hashsetfn,
+       NULL, NULL, stdunsetfn, NULL },
+-    { "dirstack", PM_ARRAY|PM_HIDE|PM_SPECIAL|PM_REMOVABLE,
++    { "dirstack", PM_ARRAY|PM_SPECIAL|PM_REMOVABLE,
+       NULL, NULL, NULL,
+       dirssetfn, dirsgetfn, stdunsetfn, NULL },
+     { "history", PM_READONLY,
+       getpmhistory, scanpmhistory, hashsetfn,
+       NULL, NULL, stdunsetfn, NULL },
+-    { "historywords", PM_ARRAY|PM_HIDE|PM_SPECIAL|PM_READONLY,
++    { "historywords", PM_ARRAY|PM_SPECIAL|PM_READONLY,
+       NULL, NULL, NULL,
+       arrsetfn, histwgetfn, stdunsetfn, NULL },
+     { "jobtexts", PM_READONLY,
+@@ -1681,6 +1800,12 @@
+     { "galiases", 0,
+       getpmgalias, scanpmgaliases, setpmgaliases,
+       NULL, NULL, stdunsetfn, NULL },
++    { "disraliases", 0,
++      getpmdisralias, scanpmdisraliases, setpmdisraliases,
++      NULL, NULL, stdunsetfn, NULL },
++    { "disgaliases", 0,
++      getpmdisgalias, scanpmdisgaliases, setpmdisgaliases,
++      NULL, NULL, stdunsetfn, NULL },
+     { NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL }
+ };
+ 
+@@ -1715,7 +1840,7 @@
+ 	    if (def->hsetfn)
+ 		def->pm->sets.hfn = def->hsetfn;
+ 	} else {
+-	    if (!(def->pm = createparam(def->name, def->flags)))
++	    if (!(def->pm = createparam(def->name, def->flags | PM_HIDE)))
+ 		return 1;
+ 	    def->pm->sets.afn = def->setfn;
+ 	    def->pm->gets.afn = def->getfn;
+diff -u -r oldsrc/Modules/parameter.mdd Src/Modules/parameter.mdd
+--- oldsrc/Modules/parameter.mdd	Wed Oct 27 20:31:04 1999
++++ Src/Modules/parameter.mdd	Wed Oct 27 21:31:22 1999
+@@ -1,3 +1,3 @@
+-autoparams="parameters commands functions builtins reswords options modules dirstack history historywords jobtexts jobstates nameddirs userdirs raliases galiases"
++autoparams="parameters commands functions disfunctions builtins disbuiltins reswords disreswords options modules dirstack history historywords jobtexts jobstates nameddirs userdirs raliases disraliases galiases disgaliases"
+ 
+ objects="parameter.o"
+diff -u -r oldsrc/Zle/zleparameter.c Src/Zle/zleparameter.c
+--- oldsrc/Zle/zleparameter.c	Wed Oct 27 21:31:53 1999
++++ Src/Zle/zleparameter.c	Wed Oct 27 21:32:14 1999
+@@ -185,10 +185,10 @@
+ };
+ 
+ static struct pardef partab[] = {
+-    { "zlewidgets", PM_READONLY,
++    { "widgets", PM_READONLY,
+       getpmwidgets, scanpmwidgets, hashsetfn,
+       NULL, NULL, stdunsetfn, NULL },
+-    { "zlekeymaps", PM_ARRAY|PM_HIDE|PM_SPECIAL|PM_READONLY,
++    { "keymaps", PM_ARRAY|PM_HIDE|PM_SPECIAL|PM_READONLY,
+       NULL, NULL, NULL,
+       arrsetfn, keymapsgetfn, stdunsetfn, NULL },
+     { NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL }
+diff -u -r oldsrc/Zle/zleparameter.mdd Src/Zle/zleparameter.mdd
+--- oldsrc/Zle/zleparameter.mdd	Wed Oct 27 21:31:53 1999
++++ Src/Zle/zleparameter.mdd	Wed Oct 27 21:32:25 1999
+@@ -1,5 +1,5 @@
+ moddeps="zle"
+ 
+-autoparams="zlewidgets zlekeymaps"
++autoparams="widgets keymaps"
+ 
+ objects="zleparameter.o"
+diff -u -r oldcompletion/Base/_command_names Completion/Base/_command_names
+--- oldcompletion/Base/_command_names	Tue Oct 26 20:35:59 1999
++++ Completion/Base/_command_names	Wed Oct 27 21:25:00 1999
+@@ -24,13 +24,13 @@
+ 
+ if [[ -z "$ext" ]]; then
+   _description expl 'builtin command'
+-  compadd "$expl[@]" "$@" - "${(k@)builtins[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)builtins}" && ret=0
+   _description expl 'shell function'
+-  compadd "$expl[@]" "$@" - "${(k@)functions[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)functions}" && ret=0
+   _description expl 'alias'
+-  compadd "$expl[@]" "$@" - "${(k@)raliases[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)raliases}" && ret=0
+   _description expl 'reserved word'
+-  compadd "$expl[@]" "$@" - "${(k@)reswords[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)reswords}" && ret=0
+ fi
+ 
+ if [[ nm -eq compstate[nmatches] ]]; then
+diff -u -r oldcompletion/Base/_equal Completion/Base/_equal
+--- oldcompletion/Base/_equal	Tue Oct 26 20:35:59 1999
++++ Completion/Base/_equal	Wed Oct 27 21:25:10 1999
+@@ -3,6 +3,6 @@
+ local expl
+ 
+ _description expl alias
+-compadd "$@" "$expl[@]" - "${(@k)aliases[(R)^?disabled*]}"
++compadd "$@" "$expl[@]" - "${(@k)aliases}"
+ _description expl command
+ compadd "$@" "$expl[@]" - "${(k@)commands}"
+diff -u -r oldcompletion/Builtins/_aliases Completion/Builtins/_aliases
+--- oldcompletion/Builtins/_aliases	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_aliases	Wed Oct 27 21:25:26 1999
+@@ -3,6 +3,6 @@
+ local expl
+ 
+ _description expl 'regular alias'
+-compadd "$expl[@]" - "${(@k)raliases[(R)^?disabled*]}"
++compadd "$expl[@]" - "${(@k)raliases}"
+ _description expl 'global alias'
+-compadd "$expl[@]" - "${(@k)galiases[(R)^?disabled*]}"
++compadd "$expl[@]" - "${(@k)galiases}"
+diff -u -r oldcompletion/Builtins/_bindkey Completion/Builtins/_bindkey
+--- oldcompletion/Builtins/_bindkey	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_bindkey	Wed Oct 27 21:33:40 1999
+@@ -11,8 +11,8 @@
+ 
+ if [[ "$words[2]" = -*[DAN]* || "$words[CURRENT-1]" = -*M ]]; then
+   _description expl keymap
+-  compadd "$expl[@]" - "$zlekeymaps[@]"
++  compadd "$expl[@]" - "$keymaps[@]"
+ else
+   _description expl widget
+-  compadd "$expl[@]" -M 'r:|-=* r:|=*' - "${(@k)zlewidgets}"
++  compadd "$expl[@]" -M 'r:|-=* r:|=*' - "${(@k)widgets}"
+ fi
+diff -u -r oldcompletion/Builtins/_builtin Completion/Builtins/_builtin
+--- oldcompletion/Builtins/_builtin	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_builtin	Wed Oct 27 21:25:36 1999
+@@ -8,5 +8,5 @@
+   local expl
+ 
+   _description expl 'builtin command'
+-  compadd "$expl[@]" "$@" - "${(k@)builtins[(R)^?disabled*]}"
++  compadd "$expl[@]" "$@" - "${(k@)builtins}"
+ fi
+diff -u -r oldcompletion/Builtins/_disable Completion/Builtins/_disable
+--- oldcompletion/Builtins/_disable	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_disable	Wed Oct 27 21:25:55 1999
+@@ -4,19 +4,19 @@
+ 
+ if [[ "$prev" = -*a* ]]; then
+   _description expl alias
+-  compadd "$expl[@]" "$@" - "${(k@)aliases[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)aliases}" && ret=0
+ fi
+ if [[ "$prev" = -*f* ]]; then
+   _description expl 'shell function'
+-  compadd "$expl[@]" "$@" - "${(k@)functions[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)functions}" && ret=0
+ fi
+ if [[ "$prev" = -*r* ]]; then
+   _description expl 'reserved word'
+-  compadd "$expl[@]" "$@" - "${(k@)reswords[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)reswords}" && ret=0
+ fi
+ if [[ "$prev" != -* ]]; then
+   _description expl 'builtin command'
+-  compadd "$expl[@]" "$@" - "${(k@)builtins[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)builtins}" && ret=0
+ fi
+ 
+ return ret
+diff -u -r oldcompletion/Builtins/_enable Completion/Builtins/_enable
+--- oldcompletion/Builtins/_enable	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_enable	Wed Oct 27 21:26:18 1999
+@@ -4,19 +4,19 @@
+ 
+ if [[ "$prev" = -*a* ]]; then
+   _description expl alias
+-  compadd "$expl[@]" "$@" - "${(k@)aliases[(R)?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)disaliases}" && ret=0
+ fi
+ if [[ "$prev" = -*f* ]]; then
+   _description expl 'shell function'
+-  compadd "$expl[@]" "$@" - "${(k@)functions[(R)?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)disfunctions}" && ret=0
+ fi
+ if [[ "$prev" = -*r* ]]; then
+   _description expl 'reserved word'
+-  compadd "$expl[@]" "$@" - "${(k@)reswords[(R)?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)disreswords}" && ret=0
+ fi
+ if [[ "$prev" != -* ]]; then
+   _description expl 'builtin command'
+-  compadd "$expl[@]" "$@" - "${(k@)builtins[(R)?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)disbuiltins}" && ret=0
+ fi
+ 
+ return ret
+diff -u -r oldcompletion/Builtins/_functions Completion/Builtins/_functions
+--- oldcompletion/Builtins/_functions	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_functions	Wed Oct 27 21:26:28 1999
+@@ -3,4 +3,4 @@
+ local expl
+ 
+ _description expl 'shell function'
+-compadd "$expl[@]" "$@" - "${(k@)functions[(R)^?disabled*]}"
++compadd "$expl[@]" "$@" - "${(k@)functions}"
+diff -u -r oldcompletion/Builtins/_unhash Completion/Builtins/_unhash
+--- oldcompletion/Builtins/_unhash	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_unhash	Wed Oct 27 21:27:03 1999
+@@ -8,11 +8,11 @@
+ fi
+ if [[ "$fl" = -*a* ]]; then
+   _description expl alias
+-  compadd "$expl[@]" - "${(@k)aliases}" && ret=0
++  compadd "$expl[@]" - "${(@k)aliases}" "${(@k)disaliases}" && ret=0
+ fi
+ if [[ "$fl" = -*f* ]]; then
+   _description expl 'shell function'
+-  compadd "$expl[@]" - "${(@k)functions}" && ret=0
++  compadd "$expl[@]" - "${(@k)functions}" "${(@k)disfunctions}" && ret=0
+ fi
+ if [[ "$fl" != -* ]]; then
+   _command_names -e && ret=0
+diff -u -r oldcompletion/Builtins/_which Completion/Builtins/_which
+--- oldcompletion/Builtins/_which	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_which	Wed Oct 27 21:27:26 1999
+@@ -5,10 +5,10 @@
+ _description expl 'external command'
+ compadd "$expl[@]" "$@" - "${(k@)commands}" && ret=0
+ _description expl 'builtin command'
+-compadd "$expl[@]" "$@" - "${(k@)builtins[(R)^?disabled*]}" && ret=0
++compadd "$expl[@]" "$@" - "${(k@)builtins}" && ret=0
+ _description expl 'shell function'
+-compadd "$expl[@]" "$@" - "${(k@)functions[(R)^?disabled*]}" && ret=0
++compadd "$expl[@]" "$@" - "${(k@)functions}" && ret=0
+ _description expl 'alias'
+-compadd "$expl[@]" "$@" - "${(k@)raliases[(R)^?disabled*]}" && ret=0
++compadd "$expl[@]" "$@" - "${(k@)raliases}" && ret=0
+ _description expl 'reserved word'
+-compadd "$expl[@]" "$@" - "${(k@)reswords[(R)^?disabled*]}" && ret=0
++compadd "$expl[@]" "$@" - "${(k@)reswords}" && ret=0
+diff -u -r oldcompletion/Builtins/_zle Completion/Builtins/_zle
+--- oldcompletion/Builtins/_zle	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_zle	Wed Oct 27 21:33:20 1999
+@@ -4,8 +4,8 @@
+ 
+ if [[ "$words[2]" = -N && CURRENT -eq 3 ]]; then
+   _description expl 'widget shell function'
+-  compadd "$expl[@]" "$@" - "${(k@)functions[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)functions}" && ret=0
+ else
+   _description expl widget
+-  compadd "$expl[@]" - "${(@k)zlewidgets}"
++  compadd "$expl[@]" - "${(@k)widgets}"
+ fi
+diff -u -r oldcompletion/Builtins/_zmodload Completion/Builtins/_zmodload
+--- oldcompletion/Builtins/_zmodload	Tue Oct 26 20:35:59 1999
++++ Completion/Builtins/_zmodload	Wed Oct 27 21:27:57 1999
+@@ -4,7 +4,7 @@
+ 
+ if [[ "$fl" = -*(a*u|u*a)* || "$fl" = -*a* && CURRENT -ge 4 ]]; then
+   _description expl 'builtin command'
+-  compadd "$expl[@]" "$@" - "${(k@)builtins[(R)^?disabled*]}" && ret=0
++  compadd "$expl[@]" "$@" - "${(k@)builtins}" && ret=0
+ elif [[ "$fl" = -*u* ]]; then
+   _description expl module
+   compadd "$expl[@]" - "${(@k)modules}"
+diff -u olddoc/Zsh/mod_parameter.yo Doc/Zsh/mod_parameter.yo
+--- olddoc/Zsh/mod_parameter.yo	Tue Oct 26 20:35:53 1999
++++ Doc/Zsh/mod_parameter.yo	Wed Oct 27 22:08:27 1999
+@@ -27,35 +27,51 @@
+ )
+ vindex(functions)
+ item(tt(functions))(
+-This association maps function names to their definitions. Setting a
+-key in it is like defining a function with the name given by the key
+-and the body given by the value. Unsetting a key removes the
+-definition for the function named by the key.
++This association maps names of enabled functions to their
++definitions. Setting a key in it is like defining a function with the
++name given by the key and the body given by the value. Unsetting a key
++removes the definition for the function named by the key.
++)
++vindex(disfunctions)
++item(tt(disfunctions))(
++Like tt(functions) but for disabled functions.
+ )
+ vindex(builtins)
+ item(tt(builtins))(
+ This association gives information about the builtin commands
+-currently known. The keys are the names of the builtin commands and
++currently enabled. The keys are the names of the builtin commands and
+ the values are either `tt(undefined)' for builtin commands that will
+ automatically be loaded from a module if invoked or `tt(defined)' for
+-builtin commands that are already loaded. Also, the string
+-`tt(<disabled> )' will be prepended to the value if the builtin
+-command is currently disabled.
++builtin commands that are already loaded.
++)
++vindex(disbuiltins)
++item(tt(disbuiltins))(
++Like tt(builtins) but for disabled builtin commands.
+ )
+ vindex(reswords)
+ item(tt(reswords))(
+-This association maps the reserved words to one of `tt(<enabled>)' or
+-`tt(<disabled>)' for enabled and disabled reserved words, respectively.
++This array contains the enabled reserved words.
++)
++vindex(disreswords)
++item(tt(disreswords))(
++Like tt(reswords) but for disabled reserved words.
+ )
+ vindex(raliases)
+ item(tt(raliases))(
+-This maps the names of the regular aliases currently defined to their
+-expansions. For disabled aliases the string `tt(<disabled>)' is
+-prepended to their value.
++This maps the names of the regular aliases currently enabled to their
++expansions.
++)
++vindex(disraliases)
++item(tt(disraliases))(
++Like tt(raliases) but for disabled regular aliases.
+ )
+ vindex(galiases)
+ item(tt(galiases))(
+ Like tt(raliases), but for global aliases.
++)
++vindex(disgaliases)
++item(tt(disgaliases))(
++Like tt(galiases) but for disabled global aliases.
+ )
+ vindex(parameters)
+ item(tt(parameters))(
+diff -u olddoc/Zsh/mod_zleparameter.yo Doc/Zsh/mod_zleparameter.yo
+--- olddoc/Zsh/mod_zleparameter.yo	Tue Oct 26 20:35:54 1999
++++ Doc/Zsh/mod_zleparameter.yo	Wed Oct 27 22:08:50 1999
+@@ -8,12 +8,12 @@
+ ).
+ 
+ startitem()
+-vindex(zlekeymaps)
+-item(tt(zlekeymaps))(
++vindex(keymaps)
++item(tt(keymaps))(
+ This array contains the names of the keymaps currently defined.
+ )
+-vindex(zlewidgets)
+-item(tt(zlewidgets))(
++vindex(widgets)
++item(tt(widgets))(
+ This associative array contains one entry per widget defined. The name 
+ of the widget is the key and the value gives information about the
+ widget. It is either the string `tt(builtin)' for builtin widgets, a
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

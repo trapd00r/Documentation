@@ -1,0 +1,376 @@
+From zsh-workers-return-6542-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jun 09 08:39:22 1999
+Return-Path: <zsh-workers-return-6542-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2291 invoked from network); 9 Jun 1999 08:39:20 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 9 Jun 1999 08:39:20 -0000
+Received: (qmail 20448 invoked by alias); 9 Jun 1999 08:38:39 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6542
+Received: (qmail 20412 invoked from network); 9 Jun 1999 08:38:24 -0000
+Date: Wed, 9 Jun 1999 10:38:22 +0200 (MET DST)
+Message-Id: <199906090838.KAA21125@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Wed, 09 Jun 1999 09:50:45 +0200
+Subject: PATCH: avoid history was: Re: PATCH: pws-21: parentheses in command word
+
+
+Peter Stephenson wrote:
+
+> Sorry, I originally made the patch after applying something sent by Sven,
+> so it doesn't apply to Src/lex.c as it should.
+
+After fixing a bug Peter showed me I now dare to send this...
+
+This is the last one of the patches I played with, trying to make zsh
+faster. It avoids using the history when the line built by is not
+used. The problem is that the code in hist.c always keeps a buffer
+with the stuff read, even when sourcing files or autoloading
+functions. The size of this buffer in incremented in steps of 16
+bytes, so when loading a function like _path_files, this results in
+several hundred calls to realloc() -- which is annoyingly expensive.
+
+Bye
+ Sven
+
+diff -u Src/builtin.c os/builtin.c
+--- Src/builtin.c	Wed Jun  9 10:32:03 1999
++++ os/builtin.c	Wed Jun  9 10:31:05 1999
+@@ -3078,7 +3078,8 @@
+     List list;
+ 
+     inpush(zjoin(argv, ' '), 0, NULL);
+-    strinbeg(0);
++    strinbeg();
++    stophist = 2;
+     list = parse_list();
+     strinend();
+     inpop();
+diff -u Src/exec.c os/exec.c
+--- Src/exec.c	Wed Jun  9 10:32:03 1999
++++ os/exec.c	Wed Jun  9 10:31:05 1999
+@@ -139,7 +139,8 @@
+ 
+     lexsave();
+     inpush(s, 0, NULL);
+-    strinbeg(0);
++    strinbeg();
++    stophist = 2;
+     l = parse_list();
+     strinend();
+     inpop();
+diff -u Src/hist.c os/hist.c
+--- Src/hist.c	Wed Jun  9 10:32:07 1999
++++ os/hist.c	Wed Jun  9 10:31:05 1999
+@@ -30,27 +30,6 @@
+ #include "zsh.mdh"
+ #include "hist.pro"
+ 
+-/* Functions to call for getting/ungetting a character and for history
+- * word control. */
+-
+-/**/
+-int (*hgetc) _((void));
+-
+-/**/
+-void (*hungetc) _((int));
+-
+-/**/
+-void (*hwaddc) _((int));
+-
+-/**/
+-void (*hwbegin) _((int));
+-
+-/**/
+-void (*hwend) _((void));
+-
+-/**/
+-void (*addtoline) _((int));
+-
+ /* != 0 means history substitution is turned off */
+  
+ /**/
+@@ -180,11 +159,12 @@
+ /* default event (usually curhist-1, that is, "!!") */
+  
+ static int defev;
+-
++ 
+ /* add a character to the current history word */
+ 
+-static void
+-ihwaddc(int c)
++/**/
++void
++hwaddc(int c)
+ {
+     /* Only if history line exists and lexing has not finished. */
+     if (chline && !(errflag || lexstop)) {
+@@ -202,7 +182,7 @@
+ 	if (hptr - chline >= hlinesz) {
+ 	    int oldsiz = hlinesz;
+ 
+-	    chline = realloc(chline, hlinesz = oldsiz + 64);
++	    chline = realloc(chline, hlinesz = oldsiz + 16);
+ 	    hptr = chline + oldsiz;
+ 	}
+     }
+@@ -212,12 +192,12 @@
+  * zsh expands history (see doexpandhist() in zle_tricky.c). It also     *
+  * calculates the new cursor position after the expansion. It is called  *
+  * from hgetc() and from gettok() in lex.c for characters in comments.   */
+-
++ 
+ /**/
+ void
+-iaddtoline(int c)
++addtoline(int c)
+ {
+-    if (!expanding || lexstop)
++    if (! expanding || lexstop)
+ 	return;
+     if (qbang && c == bangchar && stophist < 2) {
+ 	exlast--;
+@@ -236,8 +216,9 @@
+     line[cs++] = itok(c) ? ztokens[c - Pound] : c;
+ }
+ 
+-static int
+-ihgetc(void)
++/**/
++int
++hgetc(void)
+ {
+     int c = ingetc();
+ 
+@@ -253,7 +234,7 @@
+     }
+     if ((inbufflags & INP_HIST) && !stophist) {
+ 	/* the current character c came from a history expansion          *
+-	 * (inbufflags & INP_HIST) and history is not disabled            *
++	 * (inbufflags && INP_HIST) and history is not disabled           *
+ 	 * (e.g. we are not inside single quotes). In that case, \!       *
+ 	 * should be treated as ! (since this \! came from a previous     *
+ 	 * history line where \ was used to escape the bang). So if       *
+@@ -625,8 +606,9 @@
+ /* unget a char and remove it from chline. It can only be used *
+  * to unget a character returned by hgetc.                     */
+ 
+-static void
+-ihungetc(int c)
++/**/
++void
++hungetc(int c)
+ {
+     int doit = 1;
+ 
+@@ -659,10 +641,10 @@
+ 
+ /**/
+ void
+-strinbeg(int dohist)
++strinbeg(void)
+ {
+     strin++;
+-    hbegin(dohist);
++    hbegin();
+     lexinit();
+ }
+ 
+@@ -679,49 +661,17 @@
+     histdone = 0;
+ }
+ 
+-/* dummy functions to use instead of hwaddc(), hwbegin(), and hwend() when
+- * they aren't needed */
+-
+-static void
+-nohw(int c)
+-{
+-}
+-
+-static void
+-nohwe(void)
+-{
+-}
+-
+ /* initialize the history mechanism */
+ 
+ /**/
+ void
+-hbegin(int dohist)
++hbegin(void)
+ {
+     isfirstln = isfirstch = 1;
+     errflag = histdone = spaceflag = 0;
+-    stophist = (dohist ? ((!interact || unset(SHINSTDIN)) << 1) : 2);
+-    if (stophist == 2 || (inbufflags & INP_ALIAS)) {
+-	chline = hptr = NULL;
+-	hlinesz = 0;
+-	chwords = NULL;
+-	chwordlen = 0;
+-	hgetc = ingetc;
+-	hungetc = inungetc;
+-	hwaddc = nohw;
+-	hwbegin = nohw;
+-	hwend = nohwe;
+-	addtoline = nohw;
+-    } else {
+-	chline = hptr = zcalloc(hlinesz = 64);
+-	chwords = zalloc((chwordlen = 64) * sizeof(short));
+-	hgetc = ihgetc;
+-	hungetc = ihungetc;
+-	hwaddc = ihwaddc;
+-	hwbegin = ihwbegin;
+-	hwend = ihwend;
+-	addtoline = iaddtoline;
+-    }
++    stophist = (!interact || unset(BANGHIST) || unset(SHINSTDIN)) << 1;
++    chline = hptr = zcalloc(hlinesz = 16);
++    chwords = zalloc((chwordlen = 16)*sizeof(short));
+     chwordpos = 0;
+ 
+     if (histactive & HA_JUNKED)
+@@ -914,8 +864,7 @@
+     int flag, save = 1;
+     char *hf = getsparam("HISTFILE");
+ 
+-    DPUTS(stophist != 2 && !(inbufflags & INP_ALIAS) && !chline,
+-	  "BUG: chline is NULL in hend()");
++    DPUTS(!chline, "BUG: chline is NULL in hend()");
+     if (histdone & HISTFLAG_SETTY)
+ 	settyinfo(&shttyinfo);
+     if (!(histactive & HA_NOINC)) {
+@@ -1056,10 +1005,8 @@
+ 
+ /**/
+ void
+-ihwbegin(int offset)
++hwbegin(int offset)
+ {
+-    if (stophist == 2 || strin)
+-	return;
+     if (chwordpos%2)
+ 	chwordpos--;	/* make sure we're on a word start, not end */
+     /* If we're expanding an alias, we should overwrite the expansion
+@@ -1076,18 +1023,15 @@
+ 
+ /**/
+ void
+-ihwend(void)
++hwend(void)
+ {
+-    if (stophist == 2 || strin)
+-	return;
+     if (chwordpos%2 && chline) {
+ 	/* end of word reached and we've already begun a word */
+ 	if (hptr > chline + chwords[chwordpos-1]) {
+ 	    chwords[chwordpos++] = hptr - chline;
+ 	    if (chwordpos >= chwordlen) {
+ 		chwords = (short *) realloc(chwords,
+-					    (chwordlen += 32) * 
+-					    sizeof(short));
++					    (chwordlen += 16)*sizeof(short));
+ 	    }
+ 	    if (hwgetword > -1) {
+ 		/* We want to reuse the current word position */
+@@ -1662,7 +1606,7 @@
+     else if (!lockhistfile(fn, 1))
+ 	return;
+     if ((in = fopen(unmeta(fn), "r"))) {
+-	nwordlist = 64;
++	nwordlist = 16;
+ 	wordlist = (short *)zalloc(nwordlist*sizeof(short));
+ 	bufsiz = 1024;
+ 	buf = zalloc(bufsiz);
+@@ -1773,7 +1717,7 @@
+ 		if (*pt) {
+ 		    if (nwordpos >= nwordlist)
+ 			wordlist = (short *) realloc(wordlist,
+-					(nwordlist += 64)*sizeof(short));
++					(nwordlist += 16)*sizeof(short));
+ 		    wordlist[nwordpos++] = pt - start;
+ 		    while (*pt && !inblank(*pt))
+ 			pt++;
+diff -u Src/init.c os/init.c
+--- Src/init.c	Wed Jun  9 10:32:04 1999
++++ os/init.c	Wed Jun  9 10:31:06 1999
+@@ -94,7 +94,7 @@
+ 	    if (interact)
+ 		preprompt();
+ 	}
+-	hbegin(1);		/* init history mech        */
++	hbegin();		/* init history mech        */
+ 	intr();			/* interrupts on            */
+ 	lexinit();              /* initialize lexical state */
+ 	if (!(list = parse_event())) {	/* if we couldn't parse a list */
+diff -u Src/lex.c os/lex.c
+--- Src/lex.c	Wed Jun  9 10:32:04 1999
++++ os/lex.c	Wed Jun  9 10:31:06 1999
+@@ -179,12 +179,6 @@
+     int hwgetword;
+     int lexstop;
+     struct heredocs *hdocs;
+-    int (*hgetc) _((void));
+-    void (*hungetc) _((int));
+-    void (*hwaddc) _((int));
+-    void (*hwbegin) _((int));
+-    void (*hwend) _((void));
+-    void (*addtoline) _((int));
+ 
+     unsigned char *cstack;
+     int csp;
+@@ -232,12 +226,6 @@
+     ls->hwgetword = hwgetword;
+     ls->lexstop = lexstop;
+     ls->hdocs = hdocs;
+-    ls->hgetc = hgetc;
+-    ls->hungetc = hungetc;
+-    ls->hwaddc = hwaddc;
+-    ls->hwbegin = hwbegin;
+-    ls->hwend = hwend;
+-    ls->addtoline = addtoline;
+     cmdsp = 0;
+     inredir = 0;
+     hdocs = NULL;
+@@ -283,12 +271,6 @@
+     hwgetword = lstack->hwgetword;
+     lexstop = lstack->lexstop;
+     hdocs = lstack->hdocs;
+-    hgetc = lstack->hgetc;
+-    hungetc = lstack->hungetc;
+-    hwaddc = lstack->hwaddc;
+-    hwbegin = lstack->hwbegin;
+-    hwend = lstack->hwend;
+-    addtoline = lstack->addtoline;
+     hlinesz = lstack->hlinesz;
+     errflag = 0;
+ 
+@@ -1312,7 +1294,8 @@
+ 	lexsave();
+ 	untokenize(s);
+ 	inpush(dupstring(s), 0, NULL);
+-	strinbeg(0);
++	strinbeg();
++	stophist = 2;
+ 	len = 0;
+ 	bptr = tokstr = s;
+ 	bsiz = l + 1;
+@@ -1348,7 +1331,8 @@
+     lexsave();
+     untokenize(s);
+     inpush(dupstring(s), 0, NULL);
+-    strinbeg(0);
++    strinbeg();
++    stophist = 2;
+     len = 0;
+     bptr = tokstr = s;
+     bsiz = l + 1;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

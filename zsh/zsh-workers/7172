@@ -1,0 +1,538 @@
+From zsh-workers-return-7172-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jul 16 10:45:48 1999
+Return-Path: <zsh-workers-return-7172-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 29752 invoked from network); 16 Jul 1999 10:45:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 16 Jul 1999 10:45:44 -0000
+Received: (qmail 18001 invoked by alias); 16 Jul 1999 10:45:34 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7172
+Received: (qmail 17994 invoked from network); 16 Jul 1999 10:45:33 -0000
+Message-Id: <9907161014.AA17197@ibmth.df.unipi.it>
+To: "ZSH workers mailing list" <zsh-workers@sunsite.auc.dk>
+Subject: PATCH: 3.1.6-test-1: remorselessly strange cd behaviour
+In-Reply-To: ""Bart Schaefer""'s message of "Thu, 15 Jul 1999 17:27:47 DFT."
+             <990715172747.ZM2370@candle.brasslantern.com> 
+Date: Fri, 16 Jul 1999 12:14:33 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+"Bart Schaefer" wrote:
+> On Jul 14, 11:15am, Peter Stephenson wrote:
+> } On the other hand, cd .. works by examining and
+> } modifiying the current pwd, so you could cd from a non-existent directory.
+> 
+> Even with chaselinks set?  That would seem to me to be a bug.
+
+This will be fixed by removing fixdir() when chaselinks is set.
+
+> } - If $PWD is a prefix, rationalize away any immediately following ..'s
+> }   (and .'s, to be on the safe side) before doing any testing.
+> 
+> So my first suggestion is that no rationalization should happen when
+> chaselinks is set.
+
+This seems easy (! first thing that was), since zsh will always explicitly
+tidy up pwd when chaselinks is set (except as noted below), so the .. side
+effect was fixdir()'s only contribution.
+
+> } - At that point, even if $PWD is a prefix, look at the path and see if it
+> }   contains any /../ or finishes with /.. . If so, stat() it and check
+> }   that it exists.  If not, return and let the chdir code handle errors.
+> 
+> When chaselinks is NOT set, this approach mail fail due to permissions on
+> intermediate path elements when in fact it would succeed if the path were
+> rationalized first.  On the other hand, I suppose that if you want it to
+> fail because of nonexistent directories you probably want it to fail for
+> permissions as well.
+
+Maybe it's not as bad as you fear: the only thing that happens is that the
+physical path is used for the cd, rather than deleting directories from the
+path it can't handle; the cd will still succeed if it was ever going to,
+but you get the links resolved, since it didn't know what to do with them.
+
+> However, it's also that case that you can't test the entire path once
+> and then assume it's OK to rationalize it, because stat() will follow
+> intermediate symlinks whereas rationalization will not.  (You pointed
+> this out yourself in the message excerpted below.)
+
+Yes, I think this is now fixed.
+
+> As a third point, the correct way to test every component would in at
+> least some case be to actually chdir() there, not to stat() it.
+
+Probably, but this opens more avenues of complexity.  Plus it's presumably
+OK to remove `foo/..' from the path (when not chasing links) just so long
+as foo is a directory, even if you can't cd into it.
+
+> Here's what I propose, in more detail:
+> 
+> (1) When chaselinks is set, don't rationalize, simply attempt the cd and
+> either get the new directory if it succeeds or issue an error if it fails.
+> I'm going to peer at 3.0.6-pre; hopefully it isn't too hard to add this
+> one bit.
+
+This seems OK.
+
+> (2) When chaselinks is not set, either:
+> (2a) keep the pre-7139 behavior, or
+> (2b) add a "chasedots" option or some such that means zsh should act as
+> though chaselinks is set iff the path contains ".." anywhere.
+
+I don't think the old behaviour is quite up to scratch, so I've added
+chasedots.  But it has slightly obscure features, too:  suppose your home
+directory path is a link (typically because of an automounter), and you do
+a `cd ..' from a link below $HOME, which keeps you in your hierarchy under
+$HOME.  Then the home directory will be resolved to its physical directory
+at the same time as the .. is resolved to the physical directory.  But this
+is forced on us:  if we don't resolve the links, we simply don't know where
+we've changed to --- at least, without some directory-equivalence mechanism
+like Emacs, which I'm not proposing.
+
+> I just tried this in pre-7139 3.1.6-test-1, and found that zsh *always*
+> turns $PWD/.. into $PWD:h, completely independent of chaselinks.
+
+That's now gone when chaselinks is set.  I've mentioned this explicitly in
+the manual.
+
+> } (Although with AUTOCD `../rod' on its own already fails,
+> } because it tests for a physical directory, since cancd() doesn't call
+> } fixdir() --- anyone want that fixed?)
+> 
+> Only if you add the "chasedots" option.
+
+Hmm, the old behaviour just seems to me plain wrong.  ../rod on its own
+with AUTOCD should act the same as testing whether `cd ../rod' would work,
+and if so doing it, which failed in this case.
+
+> } I would be perfectly happy to back off the patch altogether, too.
+> 
+> That plus (1) above would make me comfortable.
+
+I'm not sure it should make you comfortable.
+
+Anyway, the horrors uncovered this time include:
+
+- With the previous patches, a `foo/..' which failed because foo wasn't
+  statable wouldn't have rationalised the .. away if for some reason
+  the chdir with the .. worked.  Now it does it to the physical directory.
+  This shouldn't happen very often.
+
+- I forgot to null-terminate the string passed back in such cases.
+
+- I forgot that fixdir() did it's own unmetafication.
+
+- xsymlink() refused to do anything if CHASELINKS wasn't set, yet
+  in only one case was it called without CHASELINKS, and in one other
+  CHASELINKS had to be set temporarily.  I've rationalized it so that it
+  alwasy chases links and doesn't get called if that's not needed.
+
+- xsymlinks() always got called with the flag 1, so I've hard-wired that.
+
+- xsymlink had the strange feature that if it didn't find symlinks, but did
+  remove ..'s, it gave you back the original buffer, potentially leaving
+  you a pwd with ..'s in it.  In the old days, fixdir() would have fixed
+  this (but using the logical, not the physical, path), but as it now
+  doesn't, I've made xsymlink always return the the rationalized path.
+
+--- Doc/Zsh/options.yo.cd3	Wed Jun 23 15:20:33 1999
++++ Doc/Zsh/options.yo	Fri Jul 16 11:48:47 1999
+@@ -205,11 +205,30 @@
+ slash, try to expand the expression as if it were preceded by a `tt(~)' (see
+ noderef(Filename Expansion)).
+ )
++pindex(CHASE_DOTS)
++cindex(cd, with .. in argument)
++item(tt(CHASE_DOTS))(
++When changing to a directory containing a path segment `tt(..)' which would
++otherwise be treated as cancelling the previous segment in the path (in
++other words, `tt(foo/..)' would be removed from the path, or if `tt(..)' is
++the first part of the path, the last part of tt($PWD) would be deleted),
++instead resolve the path to the physical directory.  This option is
++overridden by tt(CHASE_LINKS).
++
++For example, suppose tt(/foo/bar) is a link to the directory tt(/alt/rod).
++Without this option set, `tt(cd /foo/bar/..)' changes to tt(/foo); with it
++set, it changes to tt(/alt).  The same applies if the current directory
++is tt(/foo/bar) and `tt(cd ..)' is used.  Note that all other symbolic
++links in the path will also be resolved.
++)
+ pindex(CHASE_LINKS)
+ cindex(links, symbolic)
+ cindex(symbolic links)
+ item(tt(CHASE_LINKS) (tt(-w)))(
+ Resolve symbolic links to their true values when changing directory.
++This also has the effect of tt(CHASE_DOTS), i.e. a `tt(..)' path segment
++will be treated as referring to the physical parent, even if the preceeding
++path segment is a symbolic link.
+ )
+ pindex(CLOBBER)
+ cindex(clobbering, of files)
+--- Src/builtin.c.cd3	Thu Jul 15 17:40:15 1999
++++ Src/builtin.c	Fri Jul 16 12:00:02 1999
+@@ -658,6 +658,9 @@
+     }
+ }
+ 
++/* set if we are resolving links to their true paths */
++static int chasinglinks;
++
+ /* The main pwd changing function.  The real work is done by other     *
+  * functions.  cd_get_dest() does the initial argument processing;     *
+  * cd_do_chdir() actually changes directory, if possible; cd_new_pwd() *
+@@ -670,7 +673,6 @@
+ {
+     LinkNode dir;
+     struct stat st1, st2;
+-    int chaselinks;
+ 
+     if (isset(RESTRICTED)) {
+ 	zwarnnam(nam, "restricted", NULL, 0);
+@@ -694,7 +696,7 @@
+ 	for (s = *argv; *++s; ops[STOUC(*s)] = 1);
+     }
+   brk:
+-    chaselinks = ops['P'] || (isset(CHASELINKS) && !ops['L']);
++    chasinglinks = ops['P'] || (isset(CHASELINKS) && !ops['L']);
+     PERMALLOC {
+ 	pushnode(dirstack, ztrdup(pwd));
+ 	if (!(dir = cd_get_dest(nam, argv, ops, func))) {
+@@ -702,7 +704,7 @@
+ 	    LASTALLOC_RETURN 1;
+ 	}
+     } LASTALLOC;
+-    cd_new_pwd(func, dir, chaselinks);
++    cd_new_pwd(func, dir);
+ 
+     if (stat(unmeta(pwd), &st1) < 0) {
+ 	zsfree(pwd);
+@@ -710,7 +712,7 @@
+     } else if (stat(".", &st2) < 0)
+ 	chdir(unmeta(pwd));
+     else if (st1.st_ino != st2.st_ino || st1.st_dev != st2.st_dev) {
+-	if (chaselinks) {
++	if (chasinglinks) {
+ 	    zsfree(pwd);
+ 	    pwd = metafy(zgetcwd(), -1, META_DUP);
+ 	} else {
+@@ -915,40 +917,49 @@
+ cd_try_chdir(char *pfix, char *dest, int hard)
+ {
+     char *buf;
++    int dlen, dochaselinks = 0;
+ 
+     /* handle directory prefix */
+     if (pfix && *pfix) {
+ 	if (*pfix == '/')
+ 	    buf = tricat(pfix, "/", dest);
+ 	else {
+-	    int pwl = strlen(pwd);
+ 	    int pfl = strlen(pfix);
++	    dlen = strlen(pwd);
+ 
+-	    buf = zalloc(pwl + pfl + strlen(dest) + 3);
++	    buf = zalloc(dlen + pfl + strlen(dest) + 3);
+ 	    strcpy(buf, pwd);
+-	    buf[pwl] = '/';
+-	    strcpy(buf + pwl + 1, pfix);
+-	    buf[pwl + 1 + pfl] = '/';
+-	    strcpy(buf + pwl + pfl + 2, dest);
++	    buf[dlen] = '/';
++	    strcpy(buf + dlen + 1, pfix);
++	    buf[dlen + 1 + pfl] = '/';
++	    strcpy(buf + dlen + pfl + 2, dest);
+ 	}
+     } else if (*dest == '/')
+ 	buf = ztrdup(dest);
+     else {
+-	int pwl = strlen(pwd);
++	dlen = strlen(pwd);
+ 
+-	buf = zalloc(pwl + strlen(dest) + 2);
++	buf = zalloc(dlen + strlen(dest) + 2);
+ 	strcpy(buf, pwd);
+-	buf[pwl] = '/';
+-	strcpy(buf + pwl + 1, dest);
++	buf[dlen] = '/';
++	strcpy(buf + dlen + 1, dest);
+     }
+ 
+-    /* Normalise path.  See the definition of fixdir() for what this means. */
+-    fixdir(buf);
++    /* Normalise path.  See the definition of fixdir() for what this means.
++     * We do not do this if we are chasing links.
++     */
++    if (!chasinglinks)
++	dochaselinks = fixdir(buf);
++    else
++	unmetafy(buf, &dlen);
+ 
+     if (lchdir(buf, NULL, hard)) {
+-	zsfree(buf);
++	free(buf);
+ 	return NULL;
+     }
++    /* the chdir succeeded, so decide if we should force links to be chased */
++    if (dochaselinks)
++	chasinglinks = 1;
+     return metafy(buf, -1, META_NOALLOC);
+ }
+ 
+@@ -956,7 +967,7 @@
+ 
+ /**/
+ static void
+-cd_new_pwd(int func, LinkNode dir, int chaselinks)
++cd_new_pwd(int func, LinkNode dir)
+ {
+     List l;
+     char *new_pwd, *s;
+@@ -972,7 +983,7 @@
+     } else if (func == BIN_CD && unset(AUTOPUSHD))
+ 	zsfree(getlinknode(dirstack));
+ 
+-    if (chaselinks) {
++    if (chasinglinks) {
+ 	s = new_pwd;
+ 	new_pwd = findpwd(s);
+ 	zsfree(s);
+@@ -1039,16 +1050,20 @@
+ }
+ 
+ /* Normalise a path.  Segments consisting of ., and foo/.. *
+- * combinations, are removed and the path is unmetafied.   */
++ * combinations, are removed and the path is unmetafied.
++ * Returns 1 if we found a ../ path which should force links to
++ * be chased, 0 otherwise.
++ */
+ 
+ /**/
+-void
++int
+ fixdir(char *src)
+ {
+     char *dest = src, *d0 = dest;
+ #ifdef __CYGWIN
+     char *s0 = src;
+ #endif
++    int ret = 0;
+ 
+ /*** if have RFS superroot directory ***/
+ #ifdef HAVE_SUPERROOT
+@@ -1080,32 +1095,40 @@
+ 	    while (dest > d0 + 1 && dest[-1] == '/')
+ 		dest--;
+ 	    *dest = '\0';
+-	    return;
++	    return ret;
+ 	}
+ 	if (src[0] == '.' && src[1] == '.' &&
+-	  (src[2] == '\0' || src[2] == '/')) {
+-	    if (dest > d0 + 1) {
+-		/*
+-		 * remove a foo/.. combination:
+-		 * first check foo exists, else return
+-		 */
+-		struct stat st;
+-		*dest = '\0';
+-		if (stat(d0, &st) < 0 || !S_ISDIR(st.st_mode)) {
+-		    char *ptrd, *ptrs;
+-		    if (dest == src)
+-			*dest = '.';
+-		    for (ptrs = src, ptrd = dest; *ptrs; ptrs++, ptrd++)
+-			*ptrd = (*ptrs == Meta) ? (*++ptrs ^ 32) : *ptrs;
+-		    return;
++	    (src[2] == '\0' || src[2] == '/')) {
++	    if (isset(CHASEDOTS)) {
++		ret = 1;
++		/* and treat as normal path segment */
++	    } else {
++		if (dest > d0 + 1) {
++		    /*
++		     * remove a foo/.. combination:
++		     * first check foo exists, else return.
++		     */
++		    struct stat st;
++		    *dest = '\0';
++		    if (stat(d0, &st) < 0 || !S_ISDIR(st.st_mode)) {
++			char *ptrd, *ptrs;
++			if (dest == src)
++			    *dest = '.';
++			for (ptrs = src, ptrd = dest; *ptrs; ptrs++, ptrd++)
++			    *ptrd = (*ptrs == Meta) ? (*++ptrs ^ 32) : *ptrs;
++			*ptrd = '\0';
++			return 1;
++		    }
++		    for (dest--; dest > d0 + 1 && dest[-1] != '/'; dest--);
++		    if (dest[-1] != '/')
++			dest--;
+ 		}
+-		for (dest--; dest > d0 + 1 && dest[-1] != '/'; dest--);
+-		if (dest[-1] != '/')
+-		    dest--;
++		src++;
++		while (*++src == '/');
++		continue;
+ 	    }
+-	    src++;
+-	    while (*++src == '/');
+-	} else if (src[0] == '.' && (src[1] == '/' || src[1] == '\0')) {
++	}
++	if (src[0] == '.' && (src[1] == '/' || src[1] == '\0')) {
+ 	    /* skip a . section */
+ 	    while (*++src == '/');
+ 	} else {
+--- Src/exec.c.cd3	Thu Jul 15 17:40:01 1999
++++ Src/exec.c	Fri Jul 16 11:22:02 1999
+@@ -3144,16 +3144,24 @@
+ cancd2(char *s)
+ {
+     struct stat buf;
+-    char *us = unmeta(s), *us2 = NULL;
++    char *us, *us2 = NULL;
+ 
+-    if (*us != '/')
+-	us = us2 = tricat(unmeta(pwd), "/", us);
+-    else
+-	us = dupstring(us);
+-    fixdir(us);
++    /*
++     * If CHASEDOTS and CHASELINKS are not set, we want to rationalize the
++     * path by removing foo/.. combinations in the logical rather than
++     * the physical path.  If either is set, we test the physical path.
++     */
++    if (!isset(CHASEDOTS) && !isset(CHASELINKS)) {
++	if (*s != '/')
++	    us = tricat(pwd[1] ? pwd : "", "/", s);
++	else
++	    us = ztrdup(s);
++	fixdir(us2 = us);
++    } else
++	us = unmeta(s);
+     return !(access(us, X_OK) || stat(us, &buf) || !S_ISDIR(buf.st_mode));
+     if (us2)
+-	zsfree(us2);
++	free(us2);
+ }
+ 
+ /**/
+--- Src/options.c.cd3	Fri Jun 18 10:38:57 1999
++++ Src/options.c	Fri Jul 16 09:47:19 1999
+@@ -91,6 +91,7 @@
+ {NULL, "braceccl",	      0,			 BRACECCL},
+ {NULL, "bsdecho",	      OPT_EMULATE|OPT_SH,	 BSDECHO},
+ {NULL, "cdablevars",	      0,			 CDABLEVARS},
++{NULL, "chasedots",	      0,			 CHASEDOTS},
+ {NULL, "chaselinks",	      0,			 CHASELINKS},
+ {NULL, "clobber",	      OPT_ALL,			 CLOBBER},
+ {NULL, "completealiases",     0,			 COMPLETEALIASES},
+--- Src/utils.c.cd3	Tue Jul 13 14:20:12 1999
++++ Src/utils.c	Fri Jul 16 11:19:42 1999
+@@ -315,7 +315,7 @@
+ 
+ /**/
+ static int
+-xsymlinks(char *s, int flag)
++xsymlinks(char *s)
+ {
+     char **pp, **opp;
+     char xbuf2[PATH_MAX*2], xbuf3[PATH_MAX*2];
+@@ -338,15 +338,9 @@
+ 	    *p = '\0';
+ 	    continue;
+ 	}
+-	if (unset(CHASELINKS)) {
+-	    strcat(xbuf, "/");
+-	    strcat(xbuf, *pp);
+-	    zsfree(*pp);
+-	    continue;
+-	}
+ 	sprintf(xbuf2, "%s/%s", xbuf, *pp);
+ 	t0 = readlink(unmeta(xbuf2), xbuf3, PATH_MAX);
+-	if (t0 == -1 || !flag) {
++	if (t0 == -1) {
+ 	    strcat(xbuf, "/");
+ 	    strcat(xbuf, *pp);
+ 	    zsfree(*pp);
+@@ -355,9 +349,9 @@
+ 	    metafy(xbuf3, t0, META_NOALLOC);
+ 	    if (*xbuf3 == '/') {
+ 		strcpy(xbuf, "");
+-		xsymlinks(xbuf3 + 1, flag);
++		xsymlinks(xbuf3 + 1);
+ 	    } else
+-		xsymlinks(xbuf3, flag);
++		xsymlinks(xbuf3);
+ 	    zsfree(*pp);
+ 	}
+     }
+@@ -365,19 +359,19 @@
+     return ret;
+ }
+ 
+-/* expand symlinks in s, and remove other weird things */
++/*
++ * expand symlinks in s, and remove other weird things:
++ * note that this always expands symlinks.
++ */
+ 
+ /**/
+ char *
+ xsymlink(char *s)
+ {
+-    if (unset(CHASELINKS))
+-	return ztrdup(s);
+     if (*s != '/')
+ 	return NULL;
+     *xbuf = '\0';
+-    if (!xsymlinks(s + 1, 1))
+-	return ztrdup(s);
++    xsymlinks(s + 1);
+     if (!*xbuf)
+ 	return ztrdup("/");
+     return ztrdup(xbuf);
+@@ -387,15 +381,10 @@
+ void
+ print_if_link(char *s)
+ {
+-    int chase;
+-
+     if (*s == '/') {
+-	chase = opts[CHASELINKS];
+-	opts[CHASELINKS] = 1;
+ 	*xbuf = '\0';
+-	if (xsymlinks(s + 1, 1))
++	if (xsymlinks(s + 1))
+ 	    printf(" -> "), zputs(*xbuf ? xbuf : "/", stdout);
+-	opts[CHASELINKS] = chase;
+     }
+ }
+ 
+@@ -586,7 +575,8 @@
+ 	/* Retrieve an entry from the password table/database for this user. */
+ 	struct passwd *pw;
+ 	if ((pw = getpwnam(name))) {
+-	    char *dir = xsymlink(pw->pw_dir);
++	    char *dir = isset(CHASELINKS) ? xsymlink(pw->pw_dir)
++		: ztrdup(pw->pw_dir);
+ 	    adduserdir(name, dir, ND_USERNAME, 1);
+ 	    str = dupstring(dir);
+ 	    zsfree(dir);
+--- Src/zsh.h.cd3	Fri Jul 16 09:46:47 1999
++++ Src/zsh.h	Fri Jul 16 09:46:52 1999
+@@ -1171,6 +1171,7 @@
+     BRACECCL,
+     BSDECHO,
+     CDABLEVARS,
++    CHASEDOTS,
+     CHASELINKS,
+     CLOBBER,
+     COMPLETEALIASES,
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

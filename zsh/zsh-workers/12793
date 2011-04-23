@@ -1,0 +1,172 @@
+From zsh-workers-return-12793-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Sep 11 05:14:46 2000
+Return-Path: <zsh-workers-return-12793-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1929 invoked from network); 11 Sep 2000 05:14:44 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 Sep 2000 05:14:44 -0000
+Received: (qmail 4872 invoked by alias); 11 Sep 2000 05:14:00 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12793
+Received: (qmail 4863 invoked from network); 11 Sep 2000 05:13:57 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000911051352.ZM5002@candle.brasslantern.com>
+Date: Mon, 11 Sep 2000 05:13:51 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Redo _zle using _arguments
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+I started out to tweak one thing so that "zle -C" would complete properly,
+and just got carried away.
+
+This patch also fixes a couple of small documentation errors, related only
+in that I saw them while re-reading the docs for zle and _arguments.
+
+I also suspect there may be a bug in comparguments -- the '(*)-x' form of
+optspec is supposed to mean that the '*:msg:act' form is not completed
+when -x is on the command line, but that doesn't seem to happen (or at
+least, not always).  I imagine a fix is going to have to wait a few weeks
+for Sven to return, though.
+
+Random other question: Why isn't list-expand a completion widget for the
+purposes of "zle -C"?
+
+Index: Completion/Builtins/_zle
+===================================================================
+@@ -1,10 +1,77 @@
+ #compdef zle
+ 
+-local expl
++local expl ret=1 st
++local -a opts compwids state
+ 
+-if [[ "$words[2]" = -N && CURRENT -eq 3 ]]; then
+-  _wanted -C -N functions expl 'widget shell function' \
+-      compadd "$@" -k functions
+-else
+-  _wanted widgets expl widget compadd -k widgets
+-fi
++compwids=(accept-and-menu-complete
++	  complete-word
++	  delete-char-or-list
++	  expand-or-complete
++	  expand-or-complete-prefix
++	  list-choices
++	  menu-complete
++	  menu-expand-or-complete
++	  reverse-menu-complete)
++
++opts=(-A -C -D -L -M -N -R -U -a -c -l \* :)
++
++_arguments -s \
++    "($opts)-A[define widget alias]:old widget:->widget :new widget:->widget" \
++    "($opts)-C[define completion widget]:new widget name:->comp-widget :completion widget:->builtin-comp-widget :widget shell function:->function" \
++    "($opts)-D[delete widget]:*:widget:->widget" \
++    "(${opts#-l})-L+[with -l, list as commands]:*:-:->listing" \
++    "(${opts#-[La]})-l+[list user-defined widgets]:*:-:->listing" \
++    "(${opts#-l})-a+[with -l, list all widgets]:*:-:->listing" \
++    "($opts)-M[display message]:message: " \
++    "($opts)-N[define new widget]:widget name:->widget-or-function ::widget shell function:->function" \
++    "(${opts#-c})-R+[redisplay]:*:-:->redisplay" \
++    "(${opts#-R})-c+[with -R, clear listing]:*:-:->redisplay" \
++    "($opts)-U[unget to input stack]:string: " \
++    '(-)::widget name:->call'
++
++[[ $state == listing ]] &&
++  _arguments -s \
++    "-l[list user-defined widgets]" \
++    "(-a)-L[list as commands]" \
++    "(-L)-a[list all widgets]" \
++    '(-)*:widget name:->widget'
++
++for st in $state; do
++  case $st in
++    (call)
++      if ((CURRENT > 2)); then
++	_arguments \
++          '(-N)-n[numeric prefix]:number: ' \
++	  '(-n)-N[reset numeric prefix]' \
++	  ':widget::' '(-)*:widget arguments: ' && ret=0
++	  # :widget:: is a placeholder so we needn't shift words
++	continue
++      fi
++      ;&
++    (widget*)
++      _wanted widgets expl widget compadd -k widgets && ret=0
++      [[ $st != *function ]] && continue
++      ;&
++    (function)
++      _wanted functions expl 'widget shell function' \
++	compadd -k functions && ret=0
++      ;;
++    (comp-widget)
++      _wanted widgets expl 'completion widget' \
++	compadd -k "widgets[(R)(*:|)(.|)(${(j(|))compwids})(|:*)]" && ret=0
++      ;&
++    (builtin-comp-widget)
++      _wanted widgets expl 'builtin completion widget' \
++	compadd -k "widgets[(I)(.|)(${(j(|))compwids})]" && ret=0
++      ;;
++    (redisplay)
++      _arguments -s \
++        "-R[redisplay]" \
++	"(*)-c[clear listing]" \
++	"(-)::status line: " "*:strings to list: " && ret=0
++      ;;
++    (*) ret=$?;;
++  esac
++done
++
++return ret
+Index: Doc/Zsh/compwid.yo
+===================================================================
+@@ -640,7 +640,8 @@
+ match, the var(n)'th element of the var(array) is removed.  Elements
+ for which the corresponding var(word) is matched are retained.
+ )
+-item(tt(-), tt(--))(
++xitem(tt(-))
++item(tt(-)tt(-))(
+ This flag ends the list of flags and options. All arguments after it
+ will be taken as the words to use as matches even if they begin with
+ hyphens.
+Index: Doc/Zsh/mod_zle.yo
+===================================================================
+@@ -190,7 +190,7 @@
+ cindex(calling widgets)
+ cindex(widgets, defining)
+ cindex(defining widgets)
+-xitem(tt(zle) tt(-l) [ tt(-L) ] [ tt(-a) ] [ var(string) ... ])
++xitem(tt(zle) tt(-l) [ tt(-L) | tt(-a) ] [ var(string) ... ])
+ xitem(tt(zle) tt(-D) var(widget) ...)
+ xitem(tt(zle) tt(-A) var(old-widget) var(new-widget))
+ xitem(tt(zle) tt(-N) var(widget) [ var(function) ])
+@@ -204,7 +204,7 @@
+ ZLE.  Which operation it performs depends on its options:
+ 
+ startitem()
+-item(tt(-l) [ tt(-L) ])(
++item(tt(-l) [ tt(-L) | tt(-a) ])(
+ List all existing user-defined widgets.  If the tt(-L)
+ option is used, list in the form of tt(zle)
+ commands to create the widgets.
+@@ -238,7 +238,7 @@
+ ifnzman(noderef(Zsh Line Editor))\
+ .
+ )
+-citem(completion widgets, creating)
++cindex(completion widgets, creating)
+ item(tt(-C) var(widget) var(completion-widget) var(function))(
+ Create a user-defined completion widget named var(widget). The 
+ completion widget will behave like the built-in completion-widget
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,267 @@
+From zsh-workers-return-13123-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Nov 05 22:38:27 2000
+Return-Path: <zsh-workers-return-13123-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22059 invoked from network); 5 Nov 2000 22:38:26 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Nov 2000 22:38:26 -0000
+Received: (qmail 29776 invoked by alias); 5 Nov 2000 22:38:20 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13123
+Received: (qmail 29765 invoked from network); 5 Nov 2000 22:38:12 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1001105223736.ZM1787@candle.brasslantern.com>
+Date: Sun, 5 Nov 2000 22:37:36 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Run builtins, functions, etc. under zpty
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+This patch copies code from the clone module into newptycmd(), so that the
+forked process set up on the pty is initially a clone of the current shell.
+Then instead of calling execve(), the command can be parsed and executed
+with execode().  This is thus roughly equivalent to a shell function:
+
+	clone /dev/ttyxx
+	[[ $TTY == /dev/ttyxx ]] && {
+	    eval $*
+	    exit
+	}
+
+where zpty takes care of allocating the pty for /dev/ttyxx.
+
+I initially wanted to avoid the "eval", e.g. do the equivalent of executing
+$* directly; but there isn't any simple function for converting a char** to
+the wordcode for a simple command without re-parsing it, and anyway without
+the eval you can't do conditionals, loops or pipelines.
+
+This does mean that zpty can't test the goodness of the command until after
+it is executed in the forked process (no more findcmd() call).  Does anyone
+think this is a serious drawback?
+
+Included is correction of a couple of inconsequential typos in utils.c.
+
+Index: Doc/Zsh/mod_zpty.yo
+===================================================================
+@@ -5,12 +5,13 @@
+ 
+ startitem()
+ findex(zpty)
+-item(tt(zpty) [ tt(-e) ] [ tt(-b) ] var(name) var(command) [ var(args ...) ])(
+-In the first form, the var(command) is started with the var(args) as
+-arguments.  The command runs under a newly assigned pseudo-terminal; this
+-is useful for running commands non-interactively which expect an
+-interactive environment.  The var(name) is used to refer to this command
+-in later calls to tt(zpty).
++item(tt(zpty) [ tt(-e) ] [ tt(-b) ] var(name) [ var(arg ...) ])(
++The arguments following var(name) are concatenated with spaces between,
++then executed as a command, as if passed to the tt(eval) builtin.  The
++command runs under a newly assigned pseudo-terminal; this is useful for
++running commands non-interactively which expect an interactive
++environment.  The var(name) is not part of the command, but is used to
++refer to this command in later calls to tt(zpty).
+ 
+ With the tt(-e) option, the pseudo-terminal is set up so that input
+ characters are echoed.
+Index: Src/utils.c
+===================================================================
+@@ -2548,7 +2548,7 @@
+  *   META_NOALLOC:  buf points to a memory area which is long enough to hold *
+  *                  the quoted form, just quote it and return buf.           *
+  *   META_STATIC:   store the quoted string in a static area.  The original  *
+- *                  sting should be at most PATH_MAX long.                   *
++ *                  string should be at most PATH_MAX long.                   *
+  *   META_ALLOC:    allocate memory for the new string with zalloc().        *
+  *   META_DUP:      leave buf unchanged and allocate space for the return    *
+  *                  value even if buf does not contains special characters   *
+@@ -2600,7 +2600,7 @@
+ 	case META_NOALLOC:
+ 	    break;
+ 	default:
+-	    fprintf(stderr, "BUG: metafy called with invaild heap value\n");
++	    fprintf(stderr, "BUG: metafy called with invalid heap value\n");
+ 	    fflush(stderr);
+ 	    break;
+ #endif
+Index: Src/Modules/zpty.c
+===================================================================
+@@ -171,7 +171,7 @@
+     int ret;
+ 
+     if (master) {
+-	if ((mfd = open("/dev/ptmx", O_RDWR)) < 0)
++	if ((mfd = open("/dev/ptmx", O_RDWR|O_NOCTTY)) < 0)
+ 	    return 1;
+ 
+ 	if (grantpt(mfd) || unlockpt(mfd) || !(name = ptsname(mfd))) {
+@@ -182,7 +182,7 @@
+ 
+ 	return 0;
+     }
+-    if ((sfd = open(name, O_RDWR)) < 0) {
++    if ((sfd = open(name, O_RDWR|O_NOCTTY)) < 0) {
+ 	close(mfd);
+ 	return 1;
+     }
+@@ -242,7 +242,7 @@
+ 	    name[8] = *p1;
+ 	    for (p2 = char2; *p2; p2++) {
+ 		name[9] = *p2;
+-		if ((mfd = open(name, O_RDWR)) >= 0) {
++		if ((mfd = open(name, O_RDWR|O_NOCTTY)) >= 0) {
+ 		    *retfd = mfd;
+ 
+ 		    return 0;
+@@ -251,7 +251,7 @@
+ 	}
+     }
+     name[5] = 't';
+-    if ((sfd = open(name, O_RDWR)) >= 0) {
++    if ((sfd = open(name, O_RDWR|O_NOCTTY)) >= 0) {
+ 	*retfd = sfd;
+ 
+ 	return 0;
+@@ -268,12 +268,14 @@
+ {
+     Ptycmd p;
+     int master, slave, pid;
+-    char *cmd;
++    Eprog prog;
+ 
+-    if (!(cmd = findcmd(*args, 1))) {
+-	zwarnnam(nam, "unknown command: %s", *args, 0);
++    prog = parse_string(zjoin(args, ' ', 1), 0);
++    if (!prog) {
++	errflag = 0;
+ 	return 1;
+     }
++
+     if (get_pty(1, &master)) {
+ 	zwarnnam(nam, "can't open pseudo terminal: %e", NULL, errno);
+ 	return 1;
+@@ -283,41 +285,40 @@
+ 	close(master);
+ 	return 1;
+     } else if (!pid) {
+-
+-	pid = getpid();
++	/* This code copied from the clone module, except for getting *
++	 * the descriptor from get_pty() and duplicating it to 0/1/2. */
+ 
++	clearjobtab();
++	ppid = getppid();
++	mypid = getpid();
+ #ifdef HAVE_SETSID
+-	setsid();
+-#else
++	if (setsid() != mypid) {
++	    zwarnnam(nam, "failed to create new session: %e", NULL, errno);
++#endif
+ #ifdef TIOCNOTTY
+-	{
+-	    int t = open("/dev/tty", O_RDWR);
+-
+-	    ioctl(t, TIOCNOTTY, 0);
+-	    close(t);
+-	}
++	    if (ioctl(SHTTY, TIOCNOTTY, 0))
++		zwarnnam(nam, "%e", NULL, errno);
++	    setpgrp(0L, mypid);
+ #endif
++#ifdef HAVE_SETSID
++	}
+ #endif
+ 
+ 	if (get_pty(0, &slave))
+ 	    exit(1);
+-
+-#ifdef TIOCSCTTY
+-	ioctl(slave, TIOCSCTTY, 0);
+-#endif
+-
+-	/* This is taken from attachtty(). Should we exit in case of
+-	 * failure? */
++#ifdef TIOCGWINSZ
++	/* Set the window size before associating with the terminal *
++	 * so that we don't get hit with a SIGWINCH.  I'm paranoid. */
++	if (interact) {
++	    struct ttyinfo info;
+ 
+-#ifdef HAVE_TCSETPGRP
+-	tcsetpgrp(slave, pid);
+-#else
+-# if ardent
+-	setpgrp();
+-# else
+-	ioctl(slave, TIOCSPGRP, &pid);
+-# endif
+-#endif
++	    if (ioctl(slave, TIOCGWINSZ, (char *) &info.winsize) == 0) {
++		info.winsize.ws_row = lines;
++		info.winsize.ws_col = columns;
++		ioctl(slave, TIOCSWINSZ, (char *) &info.winsize);
++	    }
++	}
++#endif /* TIOCGWINSZ */
+ 
+ 	if (!echo) {
+ 	    struct ttyinfo info;
+@@ -336,21 +337,9 @@
+ 	    }
+ 	}
+ 
+-#ifdef TIOCGWINSZ
+-	if (interact) {
+-	    struct ttyinfo info;
+-
+-	    if (ioctl(slave, TIOCGWINSZ, (char *) &info.winsize) == 0) {
+-		info.winsize.ws_row = lines;
+-		info.winsize.ws_col = columns;
+-		ioctl(slave, TIOCSWINSZ, (char *) &info.winsize);
+-	    }
+-	}
+-#endif /* TIOCGWINSZ */
+-
+-	signal_default(SIGTERM);
+-	signal_default(SIGINT);
+-	signal_default(SIGQUIT);
++#ifdef TIOCSCTTY
++	ioctl(slave, TIOCSCTTY, 0);
++#endif
+ 
+ 	close(0);
+ 	close(1);
+@@ -360,16 +349,16 @@
+ 	dup2(slave, 1);
+ 	dup2(slave, 2);
+ 
++	closem(0);
+ 	close(slave);
+ 	close(master);
+-
+-	if (SHTTY != -1)
+-	    close(SHTTY);
+-
+-	closedumps();
++	close(coprocin);
++	close(coprocout);
++	init_io();
++	setsparam("TTY", ztrdup(ttystrname));
+ 
+-	execve(cmd, args, environ);
+-	exit(0);
++	execode(prog, 1, 0);
++	zexit(lastval, 0);
+     }
+     master = movefd(master);
+ 
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

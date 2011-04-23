@@ -1,0 +1,746 @@
+From pws@ifh.de Fri May 31 03:25:08 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id DAA03945 for <mason@werple.mira.net.au>; Fri, 31 May 1996 03:25:03 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id MAA25702; Thu, 30 May 1996 12:58:46 -0400 (EDT)
+Resent-Date: Thu, 30 May 1996 12:58:46 -0400 (EDT)
+Message-Id: <199605301658.SAA21722@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: execcmd() reordering
+In-reply-to: "hzoli@cs.elte.hu"'s message of "Tue, 28 May 1996 13:34:37 MET."
+             <199605281134.NAA18699@turan.elte.hu> 
+Date: Thu, 30 May 1996 18:58:29 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"eC-Pz.0.WH6.5FThn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1229
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 24941
+Status: OR
+
+hzoli@cs.elte.hu wrote about problem with command lines expanding to nothing:
+> The problem is more complicated
+> since if one write foo* and there is no file beginning with foo and
+> nullglob is set globlist() will produce empty args.  I think globlist
+> should be move before fork().  Probably it should be executed right after
+> prefork.  fixcline may come right after that.  In execcmd there is a test
+> for empty(args).  This should be moved after prefork/globlist/fixcline.
+> 
+> Also I think that command, exec, noglob, nocorrect and - should be removed
+> from reswdtab and the related code should be removed from parse.c, and
+> these should be handled in execcmd.  This would enable to do things like
+> 
+> FOO=exec ; $FOO something
+> 
+> which whould improve sh compatibility.
+
+Here's a biggish patch which does that.  I've listed the features of
+the change below, in some detail since there are a few
+incompatibilities which seem to be minor enough not to cause me any
+loss of sleep.  (With a bit of luck, even Bart won't have to change
+anything :-)).
+
+WARNING: execcmd() is the center of the whole shooting match.  I
+simply can't guarantee that changing things around in it won't have
+some unexpected effect (read the following and you'll see what I
+mean), though I think I've caught the obvious ones.  Please try this
+out if you get a chance.  (It took me half an hour to realise I'd
+broken nullexecs, it's that sort of piece of code.)
+
+1) exec, noglob, - and command are treated more like commands; they can
+appear from substitution, though not globbing (which would be stupid).
+I've hijacked the last1 variable to tell execcmd() if it's the last
+command in a pipeline: if it isn't, any exec flag gets ignored.  This
+corresponds to the old behaviour implemented in parse.c (exactly, even
+up to disallowing `exec >foo' in previous pipeline stages).
+
+2) Now `nocorrect' must appear before any of the above.  Logical,
+perhaps, considering that it is applied while the line is still being
+parsed, but a change from before when you could say `noglob nocorrect'.
+
+3) Also, variable assignment must appear before exec and friends.
+Again, this is natural and is required in other Bourne shell clones.
+Unfortunately there was a bug in old versions of the shell that you
+couldn't use variable assignment *before* exec, and there was a
+workaround that you could put it after.  This now won't work.  This is
+probably the most noticeable incompatibility for people with legacy
+software problems.
+
+4) $(command-producing-no-output) bugs fixed, also
+`blank=; $blank print foo' correctly calls the print builtin.
+This patch therefore replaces the previous fix for this.
+
+5) `noglob typeset foo=~/file' do not do tilde expansion without
+    ^^^^^^ ^^^^^^
+     etc.   etc.
+magic_glob_subst set.  Other shells are more generous about when the
+`=~' sequence is expanded anyway.  Maybe we should change.  Even
+magic_equal_subst is fairly sparing about when to expand:  it insists
+on the text before the = consisting only of characters which appear in
+identifiers, something I wrote but now rather regret.
+
+6) globbing is expanded before the fork.  Other than getting the
+prompt back an iota later when running background commands, I don't
+see this is a big deal.  One thing which seems to be a plus is that
+failures to match are now handled synchronously for background
+commands:
+
+% unsetopt nonomatch
+% ls Foo*Bar &
+zsh: no matches found: Foo*Bar
+
+instead of something like:
+
+% ls Foo*Bar &
+[1] 7621
+% zsh: no matches found: Foo*Bar
+% 
+
+7) The command line is checked after expansion (but again before
+globbing which didn't seem appropriate here) for things like
+redirection with no command, implicit fg's and autoresume.  rm *
+checks and autocd already behaved this way.
+
+I suppose you might think the restriction that you can't autoresume a
+command in the current directory with ./a*, or whatever, somewhat
+arbitrary.  This can still be reordered if it's wanted.  The main
+point is that the check for AUTORESUME comes most logically after the
+one for %something, and that shouldn't be globbed.
+
+Note, however, that globbing of redirs happens elsewhere, so you have
+always been able to do `exec <INP*'.  What you can't do is something
+like `exec *(N) <foo' where * expands to nothing and expect stdin to
+change.
+
+8)  fixcline() got moved up. This means things in the command line which
+expand to nothing are removed (if completely blank), or untokenised
+(if something like '') earlier.  The only consequent changes are that
+for AUTOCD the word mustn't be completely blank, since
+otherwise "$nonexistent" would have caused cd to home, which is a
+little counterintuitive.  Also, `[' doesn't need specially
+untokenising any more --- this must be a sign we're Doing the Right Thing.
+
+9) (Scraping the bottom of the barrel here):
+  addvar=varname $nonexistent
+previously did an autocd to home, now does nothing at all:  that's
+because the empty variable hasn't yet been removed from the command
+line, so it doesn't know there is no command.  I think this is reasonable;
+otherwise there would be what is essentially a syntactic change
+depending on whether or not $nonexistent is set.
+
+10) Technical, supposedly-user-transparent things
+  (i)   I had to retain CFLAG_EXEC and hence the flags element of struct
+        cmd since it appears once outside execcmd(), in execcursh()
+        to determine if a current shell procedure is being exec'd
+        and hence doesn't need to return.  It would be nicer to get rid
+        of this altogether.
+  (ii)  I wrapped a few overlong lines in the first half of exec.c.
+  (iii) The test
+  	 while (nonempty(args) && (s = (char *) peekfirst(args)) && !*s)
+  	     ugetnode(args);
+        after the fork is now unnecessary and has been removed.
+  (iv)  The new tests for `command', `exec', etc., are just simple
+        strcmp's.  It really didn't seem worth doing anything fancy
+        for four short strings.
+  (v)   In fact, globlist() doesn't appear *immediately* after prefork():
+        I've noted above things for which this seems inappropriate.
+  (vi)  I haven't looked at where the following unexpected (by me,
+        that is) behaviour comes from:
+          % NoSuchCom*(N)
+          zsh: command not found: NoSuchCom*
+        (I would have expected it just to disappear.)
+  (vii) I get extra brownie points for doing this the week before the
+        annual lattice field theory conference where I'm giving a
+        talk.  Please don't tell my collaborators :-).
+
+*** Src/exec.c.words	Thu May 30 15:45:12 1996
+--- Src/exec.c	Thu May 30 17:49:09 1996
+***************
+*** 561,567 ****
+   * that is about to exit, so we can exec instead of forking.  It gets *
+   * passed all the way down to execcmd() which actually makes the      *
+   * decision.  A 0 is always passed if the command is not the last in  *
+!  * the pipeline.  This function assumes that the sublist is not NULL. */
+  
+  /**/
+  int
+--- 561,570 ----
+   * that is about to exit, so we can exec instead of forking.  It gets *
+   * passed all the way down to execcmd() which actually makes the      *
+   * decision.  A 0 is always passed if the command is not the last in  *
+!  * the pipeline.  This function assumes that the sublist is not NULL. *
+!  * If last1 is zero but the command is at the end of a pipeline, we   *
+!  * pass 2 down to execcmd().                                          *
+!  */
+  
+  /**/
+  int
+***************
+*** 759,765 ****
+      if (pline_level == 1)
+  	strcpy(list_pipe_text, getjobtext((void *) pline->left));
+      if (pline->type == END) {
+! 	execcmd(pline->left, input, output, how, last1);
+  	pline->left = NULL;
+      } else {
+  	int old_list_pipe = list_pipe;
+--- 762,768 ----
+      if (pline_level == 1)
+  	strcpy(list_pipe_text, getjobtext((void *) pline->left));
+      if (pline->type == END) {
+! 	execcmd(pline->left, input, output, how, last1 ? 1 : 2);
+  	pline->left = NULL;
+      } else {
+  	int old_list_pipe = list_pipe;
+***************
+*** 1108,1113 ****
+--- 1111,1118 ----
+      int fil, is_cursh, type, i;
+      int nullexec = 0, assign = 0, forked = 0;
+      int is_shfunc = 0, is_builtin = 0;
++     /* Various flags to the command. */
++     int cf_command = 0, cf_noglob = 0, cf_dash = 0;
+  
+      doneps4 = 0;
+      args = cmd->args;
+***************
+*** 1118,1123 ****
+--- 1123,1178 ----
+  	mfds[i] = NULL;
+      }
+  
++     /* Check if it's a builtin needing automatic MAGIC_EQUALS_SUBST      *
++      * handling.  Things like typeset need this.  We can't detect the    *
++      * command if it contains some tokens (e.g. x=ex; ${x}port), so this *
++      * only works in simple cases.  has_token() is called to make sure   *
++      * this really is a simple case.
++      *
++      * This is now even simpler, since the case `noglob typeset' is
++      * not handled.
++      */
++     if(type == SIMPLE && nonempty(args)) {
++ 	char *cmdarg = (char *) peekfirst(args);
++ 
++ 	if(!has_token(cmdarg) && !shfunctab->getnode(shfunctab, cmdarg)) {
++ 	    HashNode hn2 = NULL;
++ 	    LinkNode ln = args->first;
++ 
++ 	    while((hn2 = builtintab->getnode(builtintab, (char *) ln->dat)) &&
++ 	        ((Builtin) hn2)->funcid == BIN_BUILTIN &&
++ 		(ln = ln->next) && !has_token((char *) ln->dat));
++ 	    if(hn2)
++ 		assign = (hn2->flags & BINF_MAGICEQUALS);
++ 	}
++     }
++ 
++     /* Do prefork substitutions */
++     prefork(args, (((type == CCASE) ? 4 : 0)
++ 		   | (assign ? 2 : isset(MAGICEQUALSUBST))));
++ 
++     /* Look for pre-command strings: -, exec, command, noglob. */
++     while (nonempty(args)) {
++ 	char *farg = (char *)peekfirst(args);
++ 
++ 	if (*farg == '-' && farg[1] == '\0')
++ 	    cf_dash = 1;
++ 	else if (!strcmp(farg, "exec")) {
++ 	    /* Current shell should not fork unless the
++ 	     * exec occurs at the end of a pipeline.
++ 	     */
++ 	    if (last1 == 2)
++ 		cmd->flags |= CFLAG_EXEC;
++ 	} else if (!strcmp(farg, "command"))
++ 	    cf_command = 1;
++ 	else if (!strcmp(farg, "noglob"))
++ 	    cf_noglob = 1;
++ 	else
++ 	    break;
++ 
++ 	firstnode(args) = nextnode(firstnode(args));
++     }
++ 
+      /* Empty command */
+      if (type == SIMPLE && empty(args)) {
+  	if (nonempty(cmd->redir)) {
+***************
+*** 1153,1159 ****
+      /* If the command begins with `%', then assume it is a *
+       * reference to a job in the job table.                */
+      if (nonempty(args) && *(char *)peekfirst(args) == '%') {
+! 	pushnode(args, dupstring((how & Z_DISOWN) ? "disown" : (how & Z_ASYNC) ? "bg" : "fg"));
+  	how = Z_SYNC;
+      }
+  
+--- 1208,1215 ----
+      /* If the command begins with `%', then assume it is a *
+       * reference to a job in the job table.                */
+      if (nonempty(args) && *(char *)peekfirst(args) == '%') {
+! 	pushnode(args, dupstring((how & Z_DISOWN)
+! 				 ? "disown" : (how & Z_ASYNC) ? "bg" : "fg"));
+  	how = Z_SYNC;
+      }
+  
+***************
+*** 1176,1216 ****
+      else
+  	text = NULL;
+  
+-     /* Check if it's a builtin needing automatic MAGIC_EQUALS_SUBST      *
+-      * handling.  Things like typeset need this.  We can't detect the    *
+-      * command if it contains some tokens (e.g. x=ex; ${x}port), so this *
+-      * only works in simple cases.  has_token() is called to make sure   *
+-      * this really is a simple case.                                     */
+-     if(type == SIMPLE && nonempty(args)) {
+- 	char *cmdarg = (char *) peekfirst(args);
+- 
+- 	if(!has_token(cmdarg) && !(cmd->flags & CFLAG_COMMAND)
+- 	    && !shfunctab->getnode(shfunctab, cmdarg)) {
+- 	    HashNode hn2 = NULL;
+- 	    LinkNode ln = args->first;
+- 
+- 	    while((hn2 = builtintab->getnode(builtintab, (char *) ln->dat)) &&
+- 	        ((Builtin) hn2)->funcid == BIN_BUILTIN &&
+- 		(ln = ln->next) && !has_token((char *) ln->dat));
+- 	    if(hn2)
+- 		assign = (hn2->flags & BINF_MAGICEQUALS);
+- 	}
+-     }
+- 
+-     /* Do prefork substitutions */
+-     prefork(args, (((type == CCASE) ? 4 : 0) | (assign ? 2 : isset(MAGICEQUALSUBST))));
+- 
+      /* Set up special parameter $_ */
+      zsfree(underscore);
+!     if (nonempty(args) && (underscore = ztrdup((char *) getdata(lastnode(args)))))
+  	untokenize(underscore); 
+      else
+    	underscore = ztrdup("");
+  
+      /* Warn about "rm *" */
+!     if (type == SIMPLE && interact && unset(RMSTARSILENT) && isset(SHINSTDIN) &&
+! 	nonempty(args) && nextnode(firstnode(args)) && !strcmp(peekfirst(args), "rm") &&
+! 	!(cmd->flags & CFLAG_NOGLOB)) {
+  	LinkNode node, next;
+  
+  	for (node = nextnode(firstnode(args)); node && !errflag; node = next) {
+--- 1232,1249 ----
+      else
+  	text = NULL;
+  
+      /* Set up special parameter $_ */
+      zsfree(underscore);
+!     if (nonempty(args)
+! 	&& (underscore = ztrdup((char *) getdata(lastnode(args)))))
+  	untokenize(underscore); 
+      else
+    	underscore = ztrdup("");
+  
+      /* Warn about "rm *" */
+!     if (type == SIMPLE && interact && unset(RMSTARSILENT)
+! 	&& isset(SHINSTDIN) && nonempty(args) && nextnode(firstnode(args))
+! 	&& !strcmp(peekfirst(args), "rm") && !cf_noglob) {
+  	LinkNode node, next;
+  
+  	for (node = nextnode(firstnode(args)); node && !errflag; node = next) {
+***************
+*** 1234,1282 ****
+  	    errflag = 1;
+      }
+  
+      if (errflag) {
+  	lastval = 1;
+  	return;
+      }
+  
+      /* Resolve simple commands */
+!     if (type == SIMPLE && nonempty(args)) {
+! 	char *cmdarg, *s;
+  
+! 	/* Get argument in command position */
+! 	cmdarg = (char *) peekfirst(args);
+  
+! 	/* If the command is `[' then we must untokenize it */
+! 	if (cmdarg[0] == Inbrack && cmdarg[1] == '\0')
+! 	    cmdarg[0] = '[';
+! 
+! 	/* Resolve shell functions and builtins */
+! 	if (!(cmd->flags & CFLAG_COMMAND)) {
+! 	    if ((hn = shfunctab->getnode(shfunctab, cmdarg))) {
+! 		is_shfunc = 1;
+! 	    } else if ((hn = builtintab->getnode(builtintab, cmdarg))) {
+! 		is_builtin = 1;
+  	    }
+- 	}
+  
+! 	/* Resolve external commands */
+! 	if (!hn) {
+! 	    hn = cmdnamtab->getnode(cmdnamtab, cmdarg);
+! 	    if (!hn && isset(HASHCMDS) && strcmp(cmdarg, "..")) {
+! 		for (s = cmdarg; *s && *s != '/'; s++);
+! 		if (!*s)
+! 		    hn = (HashNode) hashcmd(cmdarg, pathchecked);
+  	    }
+- 	}
+  
+! 	/* If no command found yet, see if it is *
+! 	 * a directory we should AUTOCD to.      */
+! 	if (!hn && isset(AUTOCD) && isset(SHINSTDIN) && empty(cmd->redir)
+! 	    && !nextnode(firstnode(args)) && (s = cancd(peekfirst(args)))) {
+! 	    peekfirst(args) = (void *) s;
+! 	    pushnode(args, dupstring("cd"));
+! 	    if ((hn = builtintab->getnode(builtintab, "cd")))
+! 		is_builtin = 1;
+  	}
+      }
+  
+--- 1267,1320 ----
+  	    errflag = 1;
+      }
+  
++     if (!cf_noglob && !errflag)
++ 	globlist(args);
++ 
+      if (errflag) {
+  	lastval = 1;
+  	return;
+      }
++     fixcline(args);
+  
+      /* Resolve simple commands */
+!     if (type == SIMPLE && !nullexec) {
+! 	if (empty(args))
+! 	    return;
+! 	else {
+! 	    char *cmdarg, *s;
+  
+! 	    /* Get argument in command position */
+! 	    cmdarg = (char *) peekfirst(args);
+  
+! 	    /* Resolve shell functions and builtins */
+! 	    if (!cf_command) {
+! 		if ((hn = shfunctab->getnode(shfunctab, cmdarg))) {
+! 		    is_shfunc = 1;
+! 		} else if ((hn = builtintab->getnode(builtintab, cmdarg))) {
+! 		    is_builtin = 1;
+! 		}
+  	    }
+  
+! 	    /* Resolve external commands */
+! 	    if (!hn) {
+! 		hn = cmdnamtab->getnode(cmdnamtab, cmdarg);
+! 		if (!hn && isset(HASHCMDS) && strcmp(cmdarg, "..")) {
+! 		    for (s = cmdarg; *s && *s != '/'; s++);
+! 		    if (!*s)
+! 			hn = (HashNode) hashcmd(cmdarg, pathchecked);
+! 		}
+  	    }
+  
+! 	    /* If no command found yet, see if it is *
+! 	     * a directory we should AUTOCD to.      */
+! 	    if (!hn && isset(AUTOCD) && isset(SHINSTDIN) && empty(cmd->redir)
+! 		&& !nextnode(firstnode(args)) && *(char *)peekfirst(args)
+! 		&& (s = cancd(peekfirst(args)))) {
+! 		peekfirst(args) = (void *) s;
+! 		pushnode(args, dupstring("cd"));
+! 		if ((hn = builtintab->getnode(builtintab, "cd")))
+! 		    is_builtin = 1;
+! 	    }
+  	}
+      }
+  
+***************
+*** 1291,1297 ****
+       *    b) This is an external command and we can't do a `fake exec'.       *
+       *                                                                        *
+       * A `fake exec' is possible if we have all the following conditions:     *
+!      * 1) last1 flag is set.  This indicates that the current shell will not  *
+       *    be needed after the current command.  This is typically the case    *
+       *    when when the command is the last stage in a subshell, or is the    *
+       *    last command after the option `-c'.                                 *
+--- 1329,1335 ----
+       *    b) This is an external command and we can't do a `fake exec'.       *
+       *                                                                        *
+       * A `fake exec' is possible if we have all the following conditions:     *
+!      * 1) last1 flag is 1.  This indicates that the current shell will not    *
+       *    be needed after the current command.  This is typically the case    *
+       *    when when the command is the last stage in a subshell, or is the    *
+       *    last command after the option `-c'.                                 *
+***************
+*** 1306,1312 ****
+  
+      if ((how & Z_ASYNC) || (!(cmd->flags & CFLAG_EXEC) &&
+         (((is_builtin || is_shfunc) && output) ||
+!        (!is_cursh && (!last1 || sigtrapped[SIGZERR] ||
+          sigtrapped[SIGEXIT] || havefiles()))))) {
+  
+  	pid_t pid;
+--- 1344,1350 ----
+  
+      if ((how & Z_ASYNC) || (!(cmd->flags & CFLAG_EXEC) &&
+         (((is_builtin || is_shfunc) && output) ||
+!        (!is_cursh && (last1 != 1 || sigtrapped[SIGZERR] ||
+          sigtrapped[SIGEXIT] || havefiles()))))) {
+  
+  	pid_t pid;
+***************
+*** 1363,1381 ****
+  	entersubsh(how, 1, 1);
+      }
+  
+-     if (!(cmd->flags & CFLAG_NOGLOB))
+- 	globlist(args);
+- 
+-     if (errflag) {
+- 	lastval = 1;
+- 	goto err;
+-     } else {
+- 	char *s;
+- 
+- 	while (nonempty(args) && (s = (char *) peekfirst(args)) && !*s)
+- 	    ugetnode(args);
+-     }
+- 
+      /* Add pipeline input/output to mnodes */
+      if (input)
+  	addfd(forked, save, mfds, 0, input, 0);
+--- 1401,1406 ----
+***************
+*** 1496,1502 ****
+  		execcursh, exectime, execfuncdef, execfor, execwhile,
+  		execrepeat, execif, execcase, execselect, execcond};
+  
+- 	    fixcline(args);
+  	    lastval = (func[type - CURSH]) (cmd);
+  	} else if (is_builtin || is_shfunc) {
+  	    /* builtin or shell function */
+--- 1521,1526 ----
+***************
+*** 1517,1523 ****
+  		    return;
+  		}
+  	    }
+- 	    fixcline(args);
+  
+  	    if (is_shfunc) {
+  		/* It's a shell function */
+--- 1541,1546 ----
+***************
+*** 1591,1609 ****
+  	    }
+  	    if (type == SIMPLE) {
+  		closem(1);
+! 		execute((Cmdnam) hn, cmd->flags & CFLAG_DASH);
+  	    } else {		/* ( ... ) */
+  		list_pipe = 0;
+  		if (subsh_close >= 0)
+  		    zclose(subsh_close);
+                  subsh_close = -1;
+  		/* If we're forked (and we should be), no need to return */
+! 		execlist(cmd->u.list, 0, last1 || forked);
+  	    }
+  	}
+      }
+  
+-   err:
+      if (forked)
+  	_exit(lastval);
+      fixfds(save);
+--- 1614,1631 ----
+  	    }
+  	    if (type == SIMPLE) {
+  		closem(1);
+! 		execute((Cmdnam) hn, cf_dash);
+  	    } else {		/* ( ... ) */
+  		list_pipe = 0;
+  		if (subsh_close >= 0)
+  		    zclose(subsh_close);
+                  subsh_close = -1;
+  		/* If we're forked (and we should be), no need to return */
+! 		execlist(cmd->u.list, 0, (last1 == 1) || forked);
+  	    }
+  	}
+      }
+  
+      if (forked)
+  	_exit(lastval);
+      fixfds(save);
+*** Src/hashtable.h.words	Thu May 30 16:00:30 1996
+--- Src/hashtable.h	Thu May 30 16:01:32 1996
+***************
+*** 34,42 ****
+  #ifdef GLOBALS
+  struct reswd reswds[] =
+  {
+-     {NULL, "-", 0, DASH},
+      {NULL, "case", 0, CASE},
+-     {NULL, "command", 0, COMMAND},
+      {NULL, "coproc", 0, COPROC},
+      {NULL, "do", 0, DO},
+      {NULL, "done", 0, DONE},
+--- 34,40 ----
+***************
+*** 44,57 ****
+      {NULL, "else", 0, ELSE},
+      {NULL, "end", 0, ZEND},
+      {NULL, "esac", 0, ESAC},
+-     {NULL, "exec", 0, EXEC},
+      {NULL, "fi", 0, FI},
+      {NULL, "for", 0, FOR},
+      {NULL, "foreach", 0, FOREACH},
+      {NULL, "function", 0, FUNC},
+      {NULL, "if", 0, IF},
+      {NULL, "nocorrect", 0, NOCORRECT},
+-     {NULL, "noglob", 0, NOGLOB},
+      {NULL, "repeat", 0, REPEAT},
+      {NULL, "select", 0, SELECT},
+      {NULL, "then", 0, THEN},
+--- 42,53 ----
+*** Src/parse.c.words	Thu May 30 15:57:06 1996
+--- Src/parse.c	Thu May 30 16:04:48 1996
+***************
+*** 255,261 ****
+      if (!(c = par_cmd()))
+  	return NULL;
+      if (tok == BAR) {
+- 	c->flags &= ~CFLAG_EXEC;
+  	cmdpush(CS_PIPE);
+  	yylex();
+  	while (tok == SEPER)
+--- 255,260 ----
+***************
+*** 270,276 ****
+      } else if (tok == BARAMP) {
+  	struct redir *rdr = (struct redir *)allocnode(N_REDIR);
+  
+- 	c->flags &= ~CFLAG_EXEC;
+  	rdr->type = MERGEOUT;
+  	rdr->fd1 = 2;
+  	rdr->fd2 = 1;
+--- 269,274 ----
+***************
+*** 903,918 ****
+  
+      c->type = SIMPLE;
+      for (;;) {
+! 	if (tok == COMMAND)
+! 	    c->flags |= CFLAG_COMMAND;
+! 	else if (tok == EXEC)
+! 	    c->flags |= CFLAG_EXEC;
+! 	else if (tok == NOGLOB)
+! 	    c->flags |= CFLAG_NOGLOB;
+! 	else if (tok == NOCORRECT)
+  	    nocorrect = 1;
+- 	else if (tok == DASH)
+- 	    c->flags |= CFLAG_DASH;
+  	else if (tok == ENVSTRING) {
+  	    struct varasg *v = (struct varasg *)make_varnode();
+  
+--- 901,908 ----
+  
+      c->type = SIMPLE;
+      for (;;) {
+! 	if (tok == NOCORRECT)
+  	    nocorrect = 1;
+  	else if (tok == ENVSTRING) {
+  	    struct varasg *v = (struct varasg *)make_varnode();
+  
+*** Src/text.c.words	Mon May  6 16:08:59 1996
+--- Src/text.c	Thu May 30 15:57:42 1996
+***************
+*** 198,211 ****
+  	break;
+      case N_CMD:
+  	nn = _Cmd(n);
+- 	if (nn->flags & CFLAG_EXEC)
+- 	    taddstr("exec ");
+- 	if (nn->flags & CFLAG_COMMAND)
+- 	    taddstr("command ");
+- 	if (nn->flags & CFLAG_NOGLOB)
+- 	    taddstr("noglob ");
+- 	if (nn->flags & CFLAG_DASH)
+- 	    taddstr("- ");
+  	switch (nn->type) {
+  	case SIMPLE:
+  	    getsimptext(nn);
+--- 198,203 ----
+*** Src/zsh.h.words	Thu May 30 16:00:33 1996
+--- Src/zsh.h	Thu May 30 16:04:24 1996
+***************
+*** 129,158 ****
+  #define AMPERBANG      38
+  
+  /* Tokens for reserved words */
+- #define DASH           39	/* -         */
+  #define CASE           40	/* case      */
+! #define COMMAND        41	/* command   */
+! #define COPROC         42	/* coproc    */
+! #define DO             43	/* do        */
+! #define DONE           44	/* done      */
+! #define ELIF           45	/* elif      */
+! #define ELSE           46	/* else      */
+! #define ZEND           47	/* end       */
+! #define ESAC           48	/* esac      */
+! #define EXEC           49	/* exec      */
+! #define FI             50	/* fi        */
+! #define FOR            51	/* for       */
+! #define FOREACH        52	/* foreach   */
+! #define FUNC           53	/* function  */
+! #define IF             54	/* if        */
+! #define NOCORRECT      55	/* nocorrect */
+! #define NOGLOB         56	/* noglob    */
+! #define REPEAT         57	/* repeat    */
+! #define SELECT         58	/* select    */
+! #define THEN           59	/* then      */
+! #define TIME           60	/* time      */
+! #define UNTIL          61	/* until     */
+! #define WHILE          62	/* while     */
+  
+  #define WRITE           0
+  #define WRITENOW        1
+--- 129,154 ----
+  #define AMPERBANG      38
+  
+  /* Tokens for reserved words */
+  #define CASE           40	/* case      */
+! #define COPROC         41	/* coproc    */
+! #define DO             42	/* do        */
+! #define DONE           43	/* done      */
+! #define ELIF           44	/* elif      */
+! #define ELSE           45	/* else      */
+! #define ZEND           46	/* end       */
+! #define ESAC           47	/* esac      */
+! #define FI             48	/* fi        */
+! #define FOR            49	/* for       */
+! #define FOREACH        50	/* foreach   */
+! #define FUNC           51	/* function  */
+! #define IF             52	/* if        */
+! #define NOCORRECT      53	/* nocorrect */
+! #define REPEAT         54	/* repeat    */
+! #define SELECT         55	/* select    */
+! #define THEN           56	/* then      */
+! #define TIME           57	/* time      */
+! #define UNTIL          58	/* until     */
+! #define WHILE          59	/* while     */
+  
+  #define WRITE           0
+  #define WRITENOW        1
+***************
+*** 396,404 ****
+  
+  /* flags for command modifiers */
+  #define CFLAG_EXEC	(1<<0)	/* exec ...    */
+- #define CFLAG_COMMAND	(1<<1)	/* command ... */
+- #define CFLAG_NOGLOB	(1<<2)	/* noglob ...  */
+- #define CFLAG_DASH	(1<<3)	/* - ...       */
+  
+  /* tree element for redirection lists */
+  
+--- 392,397 ----
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+
+

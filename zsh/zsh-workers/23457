@@ -1,0 +1,103 @@
+From zsh-workers-return-23457-mason-zsh=primenet.com.au@sunsite.dk Tue May 22 11:22:08 2007
+Return-Path: <zsh-workers-return-23457-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26916 invoked from network); 22 May 2007 11:22:03 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.0 (2007-05-01) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=BAYES_00 autolearn=no
+	version=3.2.0
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 22 May 2007 11:22:03 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 56071 invoked from network); 22 May 2007 11:21:57 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 22 May 2007 11:21:57 -0000
+Received: (qmail 1713 invoked by alias); 22 May 2007 11:21:55 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23457
+Received: (qmail 1703 invoked from network); 22 May 2007 11:21:55 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 22 May 2007 11:21:55 -0000
+Received: (qmail 55756 invoked from network); 22 May 2007 11:21:55 -0000
+Received: from gate.uk.cyberscience.com (81.2.73.194)
+  by a.mx.sunsite.dk with SMTP; 22 May 2007 11:21:49 -0000
+Received: from elva.uk.cyberscience.com ([172.16.2.59]:54051)
+	by gate.uk.cyberscience.com with esmtp (Exim 4.66)
+	(envelope-from <jvb@cyberscience.com>)
+	id 1HqSR2-0004Dk-QD
+	for zsh-workers@sunsite.dk; Tue, 22 May 2007 12:21:48 +0100
+Received: from aston.uk.cyberscience.com ([172.16.2.31]:37107)
+	by elva.uk.cyberscience.com with esmtp (Exim 4.63)
+	(envelope-from <jvb@cyberscience.com>)
+	id 1HqSQx-0002VK-E2
+	for zsh-workers@sunsite.dk; Tue, 22 May 2007 12:21:48 +0100
+Subject: Subshell with multios causes hang
+From: John Buddery <jvb@cyberscience.com>
+Reply-To: jvb@cyberscience.com
+To: Zsh-Workers <zsh-workers@sunsite.dk>
+Content-Type: text/plain
+Organization: Cyberscience Corporation
+Date: Tue, 22 May 2007 12:21:43 +0100
+Message-Id: <1179832903.3015.505.camel@aston.uk.cyberscience.com>
+Mime-Version: 1.0
+X-Mailer: Evolution 2.6.2 (2.6.2-1.fc5.5) 
+Content-Transfer-Encoding: 7bit
+
+Hi, since upgrading from 2.4.5 to 2.4.6 I find that one of my functions
+which uses a multios redirect on a subshell list is hanging. I tried
+4.3.4 as well with no luck.
+
+Essentially I run the equivalent of:
+
+   ( echo hello ) >| /tmp/out >| /tmp/out2
+
+and in an interactive shell (or any with job control) this hangs.
+
+Digging a little I find the change between 2.4.5 and 2.4.6 which causes
+this was the fix to clearjobtab() in jobs.c to make it actually clear
+the job table. What happens is this:
+
+    entersubsh() calls clearjobtab() which clears the job table.
+        Note thisjob == 1 at this point.
+
+    The multios are applied, starting a subprocess in closemn().
+
+    closemn() registers the pid of the subprocess with addproc()
+       This updates the auxprocs list for thisjob (still == 1).
+       Note that the stat of thisjob is 0 (not in use), since the jobtab
+       was cleared, so this seems wrong.
+
+    execpline is called to run the subshell list, and calls initjob().
+       The new job is given number 1, since this is the first free slot.
+       Note that the pid for the multios is still in the auxprocs list
+       for job 1, this seems very wrong.
+
+    When the echo has finished, execpline() proceeds to wait for the
+    auxproc pid, since this is listed against the current job. This
+    hangs, since the multios process is still reading the unclosed
+    pipe.
+
+All of the following fixes solve this problem, but I don't know what
+else they break:
+
+    Not clearing the job table in clearjobtab() - works, but just seems
+wrong, and a step backwards.
+
+    Preserving the entry for "thisjob" in clearjobtab() - not much
+better, it might be a subjob and it's parent is no longer there, and
+it's pid lists might not be valid.
+
+    Setting thisjob = -1 in clearjobtab(), since there is no current
+job, and making addproc() ignore the addition of aux processes if
+thisjob == -1. This also seems wrong, as we are completely loosing the
+pid information for the multios, so for example we can't kill it.
+
+    Setting thisjob = 1 in clearjobtab (if it was >= 0), and setting
+jobtab[thisjob].stat = STAT_INUSE after clearing jobtab. This is what I
+ended up with, but is it a valid thing to do ?
+
+Thanks for any help, and for reading this stupidly long post...
+

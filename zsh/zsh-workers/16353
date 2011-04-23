@@ -1,0 +1,717 @@
+From zsh-workers-return-16353-mason-zsh=primenet.com.au@sunsite.dk Mon Dec 17 12:03:10 2001
+Return-Path: <zsh-workers-return-16353-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8645 invoked from network); 17 Dec 2001 12:03:09 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 17 Dec 2001 12:03:09 -0000
+Received: (qmail 19687 invoked by alias); 17 Dec 2001 12:03:03 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16353
+Received: (qmail 19676 invoked from network); 17 Dec 2001 12:03:02 -0000
+X-VirusChecked: Checked
+X-Authentication-Warning: iris.logica.co.uk: Host kiddleo@rambo.logica.co.uk [158.234.33.58] claimed to be yahoo.co.uk
+Sender: kiddleo@iris.logica.co.uk
+Message-ID: <3C1DDED9.EAE72162@yahoo.co.uk>
+Date: Mon, 17 Dec 2001 12:02:33 +0000
+From: Oliver Kiddle <okiddle@yahoo.co.uk>
+X-Mailer: Mozilla 4.77 [en] (X11; U; Linux 2.2.15 i686)
+X-Accept-Language: en
+MIME-Version: 1.0
+To: zsh-workers@sunsite.dk
+Subject: PATCH: += parameter assignments
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: 7bit
+
+This adds += assignments -- a ksh93 feature. It is useful as a quick
+way to add elements to an array or append to a string. For numeric
+variables, it uses arithmetic evaluation to add to the variable. With
+indexes specified, it can have other uses like inserting into the
+middle of an array or string.
+
+One possible extension beyond what ksh does would be to also add a -=
+assignment. It could be made to prepend to string and array values
+which would be fairly useful. Or does anyone think that that behaviour
+for -= would be too illogical?
+
+Note that unlike ksh, this can't be used with typeset and its variants.
+I have followed ksh behaviour with three exceptions that I'm aware of:
+
+  1.  array+=scalar
+In ksh this is equivalent to array[0]+=scalar while I've made it
+equivalent to array+=( scalar ) which I think is more useful. The ksh
+behaviour is a consequence of the ksh implementation of arrays so with
+the ksh_arrays option set, it will behave like ksh for compatibility.
+
+  2. array[i]+=( array )
+In ksh, the index is ignored so this adds to the end of the array. I
+insert the array in the middle after the index. This is useful but
+might be regretted if we ever want to implement 2D arrays.
+
+  3. assoc+=scalar
+In ksh, this does absolutely nothing and so would assoc=scalar. I'm not
+sure about this one but have made it the same as assoc=scalar in zsh -
+it replaces the association with a new scalar.
+
+Oliver
+
+Index: Doc/Zsh/params.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/params.yo,v
+retrieving revision 1.12
+diff -u -r1.12 params.yo
+--- Doc/Zsh/params.yo	2001/09/24 16:22:30	1.12
++++ Doc/Zsh/params.yo	2001/12/17 11:57:29
+@@ -20,8 +20,9 @@
+ indent(var(name)tt(=)var(value))
+ 
+ If the integer attribute, tt(-i), is set for var(name), the var(value)
+-is subject to arithmetic evaluation.  See noderef(Array Parameters)
+-for additional forms of assignment.
++is subject to arithmetic evaluation.  Furthermore, by replacing `tt(=)'
++with `tt(+=)', a parameter can be added or appended to.  See
++noderef(Array Parameters) for additional forms of assignment.
+ 
+ To refer to the value of a parameter, write `tt($)var(name)' or
+ `tt(${)var(name)tt(})'.  See
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.39
+diff -u -r1.39 exec.c
+--- Src/exec.c	2001/10/13 17:54:28	1.39
++++ Src/exec.c	2001/12/17 11:57:29
+@@ -1512,7 +1512,8 @@
+ 	if (htok)
+ 	    untokenize(name);
+ 	if (xtr)
+-	    fprintf(xtrerr, "%s=", name);
++	    fprintf(xtrerr,
++	    	WC_ASSIGN_TYPE2(ac) == WC_ASSIGN_INC ? "%s+=" : "%s=", name);
+ 	if ((isstr = (WC_ASSIGN_TYPE(ac) == WC_ASSIGN_SCALAR))) {
+ 	    init_list1(svl, ecgetstr(state, EC_DUPTOK, &htok));
+ 	    vl = &svl;
+@@ -1561,10 +1562,12 @@
+ 		}
+ 		allexp = opts[ALLEXPORT];
+ 		opts[ALLEXPORT] = 1;
+-		pm = setsparam(name, val);
++	    	pm = assignsparam(name, val,
++		    WC_ASSIGN_TYPE2(ac) == WC_ASSIGN_INC);
+ 		opts[ALLEXPORT] = allexp;
+ 	    } else
+-		pm = setsparam(name, val);
++	    	pm = assignsparam(name, val,
++		    WC_ASSIGN_TYPE2(ac) == WC_ASSIGN_INC);
+ 	    if (errflag) {
+ 		state->pc = opc;
+ 		return;
+@@ -1587,7 +1590,7 @@
+ 		fprintf(xtrerr, "%s ", *ptr);
+ 	    fprintf(xtrerr, ") ");
+ 	}
+-	setaparam(name, arr);
++	assignaparam(name, arr, WC_ASSIGN_TYPE2(ac) == WC_ASSIGN_INC);
+ 	if (errflag) {
+ 	    state->pc = opc;
+ 	    return;
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.20
+diff -u -r1.20 lex.c
+--- Src/lex.c	2001/08/27 07:31:38	1.20
++++ Src/lex.c	2001/12/17 11:57:30
+@@ -1140,6 +1140,7 @@
+ 			skipparens(Inbrack, Outbrack, &t);
+ 		    }
+ 		}
++		if (*t == '+') t++;
+ 		if (t == bptr) {
+ 		    e = hgetc();
+ 		    if (e == '(' && incmdpos) {
+Index: Src/params.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v
+retrieving revision 1.55
+diff -u -r1.55 params.c
+--- Src/params.c	2001/12/17 11:10:47	1.55
++++ Src/params.c	2001/12/17 11:57:30
+@@ -1724,9 +1724,12 @@
+     }
+     if (v->start == 0 && v->end == -1) {
+ 	if (PM_TYPE(v->pm->flags) == PM_HASHED)
+-	    arrhashsetfn(v->pm, val);
++	    arrhashsetfn(v->pm, val, 0);
+ 	else
+ 	    (v->pm->sets.afn) (v->pm, val);
++    } else if (v->start == -1 && v->end == 0 &&
++    	    PM_TYPE(v->pm->flags) == PM_HASHED) {
++    	arrhashsetfn(v->pm, val, 1);
+     } else {
+ 	char **old, **new, **p, **q, **r;
+ 	int n, ll, i;
+@@ -1870,12 +1873,15 @@
+ 
+ /**/
+ mod_export Param
+-setsparam(char *s, char *val)
++assignsparam(char *s, char *val, int augment)
+ {
+     struct value vbuf;
+     Value v;
+     char *t = s;
+-    char *ss;
++    char *ss, *copy, *var;
++    size_t lv;
++    mnumber lhs, rhs;
++    int sstart;
+ 
+     if (!isident(s)) {
+ 	zerr("not an identifier: %s", s, 0);
+@@ -1893,8 +1899,10 @@
+     } else {
+ 	if (!(v = getvalue(&vbuf, &s, 1)))
+ 	    createparam(t, PM_SCALAR);
+-	else if ((PM_TYPE(v->pm->flags) & (PM_ARRAY|PM_HASHED)) &&
+-		 !(v->pm->flags & (PM_SPECIAL|PM_TIED)) && unset(KSHARRAYS)) {
++	else if ((((v->pm->flags & PM_ARRAY) && !augment) ||
++	    	 (v->pm->flags & PM_HASHED)) &&
++		 !(v->pm->flags & (PM_SPECIAL|PM_TIED)) && 
++		 unset(KSHARRAYS)) {
+ 	    unsetparam(t);
+ 	    createparam(t, PM_SCALAR);
+ 	    v = NULL;
+@@ -1905,6 +1913,78 @@
+ 	zsfree(val);
+ 	return NULL;
+     }
++    if (augment) {
++	if (v->start == 0 && v->end == -1) {
++	    switch (PM_TYPE(v->pm->flags)) {
++	    case PM_SCALAR:
++		v->start = INT_MAX;  /* just append to scalar value */
++		break;
++	    case PM_INTEGER:
++	    case PM_EFLOAT:
++	    case PM_FFLOAT:
++		rhs = matheval(val);
++		lhs = getnumvalue(v);
++		if (lhs.type == MN_FLOAT) {
++		    if ((rhs.type) == MN_FLOAT)
++        		lhs.u.d = lhs.u.d + rhs.u.d;
++		    else
++			lhs.u.d = lhs.u.d + (double)rhs.u.l;
++		} else {
++        	    if ((rhs.type) == MN_INTEGER)
++			lhs.u.l = lhs.u.l + rhs.u.l;
++		    else
++			lhs.u.l = lhs.u.l + (zlong)rhs.u.d;
++		}
++		setnumvalue(v, lhs);
++    	    	unqueue_signals();
++		zsfree(val);
++		return v->pm; /* avoid later setstrvalue() call */
++	    case PM_ARRAY:
++	    	if (unset(KSHARRAYS)) {
++		    v->start = arrlen(v->pm->gets.afn(v->pm));
++		    v->end = v->start + 1;
++		} else {
++		    /* ksh appends scalar to first element */
++		    v->end = 1;
++		    goto kshappend;
++		}
++		break;
++	    }
++	} else {
++	    switch (PM_TYPE(v->pm->flags)) {
++	    case PM_SCALAR:
++    		if (v->end > 0)
++		    v->start = v->end;
++		else
++		    v->start = v->end = strlen(v->pm->gets.cfn(v->pm)) +
++			v->end + 1;
++	    	break;
++	    case PM_INTEGER:
++	    case PM_EFLOAT:
++	    case PM_FFLOAT:
++		unqueue_signals();
++		zerr("attempt to add to slice of a numeric variable",
++		    NULL, 0);
++		zsfree(val);
++		return NULL;
++	    case PM_ARRAY:
++	      kshappend:
++		/* treat slice as the end element */
++		v->start = sstart = v->end > 0 ? v->end - 1 : v->end;
++		v->isarr = 0;
++		var = getstrvalue(v);
++		v->start = sstart;
++		copy = val;
++		lv = strlen(var);
++		val = (char *)zalloc(lv + strlen(var));
++		strcpy(val, var);
++		strcpy(val + lv, copy);
++		zsfree(copy);
++		break;
++	    }
++	}
++    }
++    
+     setstrvalue(v, val);
+     unqueue_signals();
+     return v->pm;
+@@ -1912,7 +1992,7 @@
+ 
+ /**/
+ mod_export Param
+-setaparam(char *s, char **val)
++assignaparam(char *s, char **val, int augment)
+ {
+     struct value vbuf;
+     Value v;
+@@ -1946,6 +2026,18 @@
+ 	else if (!(PM_TYPE(v->pm->flags) & (PM_ARRAY|PM_HASHED)) &&
+ 		 !(v->pm->flags & (PM_SPECIAL|PM_TIED))) {
+ 	    int uniq = v->pm->flags & PM_UNIQUE;
++	    if (augment) {
++	    	/* insert old value at the beginning of the val array */
++		char **new;
++		int lv = arrlen(val);
++
++		new = (char **) zalloc(sizeof(char *) * (lv + 2));
++		*new = ztrdup(getstrvalue(v));
++		memcpy(new+1, val, sizeof(char *) * (lv + 1));
++		free(val);
++		val = new;
++		
++	    }
+ 	    unsetparam(t);
+ 	    createparam(t, PM_ARRAY | uniq);
+ 	    v = NULL;
+@@ -1954,8 +2046,27 @@
+     if (!v)
+ 	if (!(v = fetchvalue(&vbuf, &t, 1, SCANPM_ASSIGNING))) {
+ 	    unqueue_signals();
++	    freearray(val);
+ 	    return NULL;
+ 	}
++
++    if (augment) {
++    	if (v->start == 0 && v->end == -1) {
++	    if (PM_TYPE(v->pm->flags) & PM_ARRAY) {
++	    	v->start = arrlen(v->pm->gets.afn(v->pm));
++	    	v->end = v->start + 1;
++	    } else if (PM_TYPE(v->pm->flags) & PM_HASHED)
++	    	v->start = -1, v->end = 0;
++	} else {
++	    if (v->end > 0)
++		v->start = v->end--;
++	    else if (PM_TYPE(v->pm->flags) & PM_ARRAY) {
++		v->end = arrlen(v->pm->gets.afn(v->pm)) + v->end;
++		v->start = v->end + 1;
++	    }
++	}
++    }
++
+     setarrvalue(v, val);
+     unqueue_signals();
+     return v->pm;
+@@ -2291,7 +2402,7 @@
+ 
+ /**/
+ static void
+-arrhashsetfn(Param pm, char **val)
++arrhashsetfn(Param pm, char **val, int augment)
+ {
+     /* Best not to shortcut this by using the existing hash table,   *
+      * since that could cause trouble for special hashes.  This way, *
+@@ -2309,7 +2420,8 @@
+ 	return;
+     }
+     if (alen)
+-	ht = paramtab = newparamtable(17, pm->nam);
++    	if (!(augment && (ht = paramtab = pm->gets.hfn(pm))))
++	    ht = paramtab = newparamtable(17, pm->nam);
+     while (*aptr) {
+ 	/* The parameter name is ztrdup'd... */
+ 	v->pm = createparam(*aptr, PM_SCALAR|PM_UNSET);
+Index: Src/parse.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/parse.c,v
+retrieving revision 1.31
+diff -u -r1.31 parse.c
+--- Src/parse.c	2001/11/21 17:03:57	1.31
++++ Src/parse.c	2001/12/17 11:57:30
+@@ -1488,11 +1488,17 @@
+ 	} else if (tok == ENVSTRING) {
+ 	    char *p, *name, *str;
+ 
+-	    ecadd(WCB_ASSIGN(WC_ASSIGN_SCALAR, 0));
+ 	    name = tokstr;
+-	    for (p = tokstr; *p && *p != Inbrack && *p != '='; p++);
+-	    if (*p == Inbrack && !skipparens(Inbrack, Outbrack, &p) &&
+-		*p == '=') {
++	    for (p = tokstr; *p && *p != Inbrack && *p != '=' && *p != '+';
++	         p++);
++	    if (*p == Inbrack) skipparens(Inbrack, Outbrack, &p);
++	    if (*p == '+') {
++	    	*p++ = '\0';
++	    	ecadd(WCB_ASSIGN(WC_ASSIGN_SCALAR, WC_ASSIGN_INC, 0));
++	    } else
++		ecadd(WCB_ASSIGN(WC_ASSIGN_SCALAR, WC_ASSIGN_NEW, 0));
++    	
++	    if (*p == '=') {
+ 		*p = '\0';
+ 		str = p + 1;
+ 	    } else
+@@ -1501,15 +1507,20 @@
+ 	    ecstr(str);
+ 	    isnull = 0;
+ 	} else if (tok == ENVARRAY) {
+-	    int oldcmdpos = incmdpos, n;
++	    int oldcmdpos = incmdpos, n, type2;
+ 
+ 	    p = ecadd(0);
+ 	    incmdpos = 0;
++	    if ((type2 = strlen(tokstr) - 1) && tokstr[type2] == '+') {
++	    	tokstr[type2] = '\0';
++		type2 = WC_ASSIGN_INC;
++    	    } else
++		type2 = WC_ASSIGN_NEW;
+ 	    ecstr(tokstr);
+ 	    cmdpush(CS_ARRAY);
+ 	    yylex();
+ 	    n = par_nl_wordlist();
+-	    ecbuf[p] = WCB_ASSIGN(WC_ASSIGN_ARRAY, n);
++	    ecbuf[p] = WCB_ASSIGN(WC_ASSIGN_ARRAY, type2, n);
+ 	    cmdpop();
+ 	    if (tok != OUTPAR)
+ 		YYERROR(oecused);
+@@ -2288,8 +2299,8 @@
+ #define FD_MINMAP 4096
+ 
+ #define FD_PRELEN 12
+-#define FD_MAGIC  0x03040506
+-#define FD_OMAGIC 0x06050403
++#define FD_MAGIC  0x04050607
++#define FD_OMAGIC 0x07060504
+ 
+ #define FDF_MAP   1
+ #define FDF_OTHER 2
+Index: Src/text.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/text.c,v
+retrieving revision 1.9
+diff -u -r1.9 text.c
+--- Src/text.c	2001/09/25 12:50:46	1.9
++++ Src/text.c	2001/12/17 11:57:30
+@@ -323,6 +323,7 @@
+ 	    break;
+ 	case WC_ASSIGN:
+ 	    taddstr(ecgetstr(state, EC_NODUP, NULL));
++	    if (WC_ASSIGN_TYPE2(code) == WC_ASSIGN_INC) taddchr('+');
+ 	    taddchr('=');
+ 	    if (WC_ASSIGN_TYPE(code) == WC_ASSIGN_ARRAY) {
+ 		taddchr('(');
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.35
+diff -u -r1.35 zsh.h
+--- Src/zsh.h	2001/11/03 23:36:33	1.35
++++ Src/zsh.h	2001/12/17 11:57:30
+@@ -591,10 +591,13 @@
+ #define WCB_REDIR(T)        wc_bld(WC_REDIR, (T))
+ 
+ #define WC_ASSIGN_TYPE(C)   (wc_data(C) & ((wordcode) 1))
++#define WC_ASSIGN_TYPE2(C)  ((wc_data(C) & ((wordcode) 2)) >> 1)
+ #define WC_ASSIGN_SCALAR    0
+ #define WC_ASSIGN_ARRAY     1
+-#define WC_ASSIGN_NUM(C)    (wc_data(C) >> 1)
+-#define WCB_ASSIGN(T,N)     wc_bld(WC_ASSIGN, ((T) | ((N) << 1)))
++#define WC_ASSIGN_NEW       0
++#define WC_ASSIGN_INC       1
++#define WC_ASSIGN_NUM(C)    (wc_data(C) >> 2)
++#define WCB_ASSIGN(T,A,N)   wc_bld(WC_ASSIGN, ((T) | ((A) << 1) | ((N) << 2)))
+ 
+ #define WC_SIMPLE_ARGC(C)   wc_data(C)
+ #define WCB_SIMPLE(N)       wc_bld(WC_SIMPLE, (N))
+@@ -1197,6 +1200,9 @@
+ #define ARRPARAMDEF(name, var) \
+     { name, PM_ARRAY, (void *) var, (void *) arrvarsetfn, \
+       (void *) arrvargetfn, (void *) stdunsetfn }
++
++#define setsparam(S,V) assignsparam(S,V,0)
++#define setaparam(S,V) assignaparam(S,V,0)
+ 
+ /* node for named directory hash table (nameddirtab) */
+ 
+Index: Test/A06assign.ztst
+===================================================================
+RCS file: A06assign.ztst
+diff -N A06assign.ztst
+--- /dev/null	Thu May 24 22:33:05 2001
++++ A06assign.ztst	Mon Dec 17 03:57:30 2001
+@@ -0,0 +1,253 @@
++# Tests of parameter assignments
++
++%test
++
++ typeset -A assoc
++ assoc=(one 1 two 2 odd)
++1:assign to association with odd no. of values
++?(eval):2: bad set of key/value pairs for associative array
++
++# tests of var+=scalar
++
++ s+=foo
++ echo $s
++0:append scalar to unset scalar
++>foo
++
++ s=foo
++ s+=bar
++ echo $s
++0:append to scalar
++>foobar
++
++ set -- a b c
++ 2+=end
++ echo $2
++0:append to positional parameter
++>bend
++
++ a=(first second)
++ a+=last
++ print -l $a
++0:add scalar to array
++>first
++>second
++>last
++
++ setopt ksharrays
++ a=(first second)
++ a+=last
++ print -l $a
++ unsetopt ksharrays
++0:add scalar to array with ksharrays set
++>firstlast
++
++ a=(1 2)
++ a[@]+=3
++ print -l $a
++0:add scalar to array with alternate syntax
++>1
++>2
++>3
++
++ integer i=10
++ i+=20
++ (( i == 30 ))
++0:add to integer
++
++ float f=3.4
++ f+=2.3
++ printf "%g\n" f
++0:add to float
++>5.7
++
++ typeset -A hash
++ hash=(one 1)
++ h+=string
++ [[ $h[@] == string ]]
++0:add scalar to association
++
++# tests of var+=(array)
++
++ unset a
++ a+=(1 2 3)
++ print -l $a
++0:add array to unset parameter
++>1
++>2
++>3
++
++ a=(a)
++ a+=(b)
++ print -l $a
++0:add array to existing array
++>a
++>b
++
++ s=foo
++ s+=(bar)
++ print -l $s
++0:add array to scalar
++>foo
++>bar
++
++ integer i=1
++ i+=(2 3)
++ print -l $i
++0:add array to integer
++>1
++>2
++>3
++
++ float f=2.5
++ f+=(3.5 4.5)
++ printf '%g\n' $f
++0:add array to float
++>2.5
++>3.5
++>4.5
++
++ typeset -A h
++ h+=(a 1 b 2)
++ print -l $h
++0:add to empty association
++>1
++>2
++
++ typeset -A h
++ h=(a 1)
++ h+=(b 2 c 3)
++ print -l $h
++0:add to association
++>1
++>2
++>3
++
++# tests of var[range]+=scalar
++
++ s=sting
++ s[2]+=art
++ echo $s
++0:insert scalar inside another
++>starting
++
++ s=inert
++ s[-4]+=s
++ echo $s
++0:insert scalar inside another with negative index
++>insert
++
++ s=append
++ s[2,6]+=age
++ echo $s
++0:append scalar to scalar using a range
++>appendage
++
++ s=123456789
++ s[3,-5]+=X
++ echo $s
++0:insert scalar inside another, specifying a slice
++>12345X6789
++
++ a=(a b c)
++ a[2]+=oo
++ echo $a
++0:append to array element
++>a boo c
++
++ a=(a b c d)
++ a[-2]+=ool
++ echo $a
++0:append to array element with negative index
++>a b cool d
++
++ a=(a b c d)
++ a[2,-1]+=oom
++ echo $a
++0:append to array element, specifying a slice
++>a b c doom
++
++ setopt ksharrays
++ a=(a b c d)
++ a[0]+=0
++ echo $a
++ unsetopt ksharrays
++0:append to array element with ksharrays set
++>a0
++
++ typeset -A h
++ h=(one foo)
++ h[one]+=bar
++ echo $h
++0:append to association element
++>foobar
++
++ typeset -A h
++ h[foo]+=bar
++ echo ${(kv)h}
++0:append to non-existent association element
++>foo bar
++
++ typeset -A h
++ h=(one a two b three c four d)
++ h[(I)*o*]+=append
++1:attempt to append to slice of association
++?(eval):3: h: attempt to set slice of associative array
++
++ integer i=123
++ i[2]+=6
++1:attempt to add to indexed integer variable
++?(eval):2: attempt to add to slice of a numeric variable
++
++ float f=1234.5
++ f[2,4]+=3
++1:attempt to add to slice of float variable
++?(eval):2: attempt to add to slice of a numeric variable
++
++ unset u
++ u[3]+=third
++ echo $u[1]:$u[3]
++0:append to unset variable with index
++>:third
++ 
++# tests of var[range]+=(array)
++
++ a=(1 2 3)
++ a[2]+=(a b)
++ echo $a
++0:insert array inside another
++>1 2 a b 3
++
++ a=(a b c)
++ a[-1]+=(d)
++ echo $a
++0:append to array using negative index
++>a b c d
++
++ a=(1 2 3 4)
++ a[-1,-3]+=(x)
++ echo $a
++0:insert array using negative range
++>1 2 x 3 4
++
++ s=string
++ s[2]+=(a b)
++1:attempt to insert array into string
++?(eval):2: s: attempt to assign array value to non-array
++
++ integer i=365
++ i[2]+=(1 2)
++1:attempt to insert array into string
++?(eval):2: i: attempt to assign array value to non-array
++
++ typeset -A h
++ h=(a 1)
++ h[a]+=(b 2)
++1:attempt to append array to hash element
++?(eval):3: h: attempt to set slice of associative array
++
++ unset u
++ u[-34,-2]+=(a z)
++ echo $u
++0:add array to indexed unset variable
++>a z
+
+_____________________________________________________________________
+This message has been checked for all known viruses by the 
+MessageLabs Virus Scanning Service. For further information visit
+http://www.messagelabs.com/stats.asp
+

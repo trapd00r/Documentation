@@ -1,0 +1,267 @@
+From zsh-workers-return-19858-mason-zsh=primenet.com.au@sunsite.dk Fri Apr 30 21:23:48 2004
+Return-Path: <zsh-workers-return-19858-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25811 invoked from network); 30 Apr 2004 21:23:47 -0000
+Received: from thor.dotsrc.org (HELO a.mx.sunsite.dk) (qmailr@130.225.247.86)
+  by ns1.primenet.com.au with SMTP; 30 Apr 2004 21:23:47 -0000
+Received: (qmail 20826 invoked from network); 30 Apr 2004 21:23:07 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 30 Apr 2004 21:23:07 -0000
+Received: (qmail 20770 invoked by alias); 30 Apr 2004 21:22:48 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 19858
+Received: (qmail 20684 invoked from network); 30 Apr 2004 21:22:47 -0000
+Received: from thor.dotsrc.org (HELO a.mx.sunsite.dk) (qmailr@130.225.247.86)
+  by sunsite.dk with SMTP; 30 Apr 2004 21:22:44 -0000
+Received: (qmail 18458 invoked from network); 30 Apr 2004 21:22:23 -0000
+Received: from cmailg3.svr.pol.co.uk (195.92.195.173)
+  by a.mx.sunsite.dk with SMTP; 30 Apr 2004 21:22:20 -0000
+Received: from modem-75.pinnatus-batfish.dialup.pol.co.uk ([62.137.50.75] helo=pwstephenson.fsnet.co.uk)
+	by cmailg3.svr.pol.co.uk with esmtp (Exim 4.14)
+	id 1BJfST-0000Wt-Bt; Fri, 30 Apr 2004 22:22:09 +0100
+Received: by pwstephenson.fsnet.co.uk (Postfix, from userid 501)
+	id 7C6B48551; Fri, 30 Apr 2004 17:26:25 -0400 (EDT)
+Received: from pwstephenson.fsnet.co.uk (localhost [127.0.0.1])
+	by pwstephenson.fsnet.co.uk (Postfix) with ESMTP
+	id 530CF8543; Fri, 30 Apr 2004 22:26:25 +0100 (BST)
+To: Vincent Stemen <zsh@hightek.org>,
+	zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: (3) Re: FreeBSD compatability feature request 
+In-reply-to: "Vincent Stemen"'s message of "Thu, 22 Apr 2004 03:59:56 CDT."
+             <20040422085956.GA69814@quark.hightek.org> 
+Date: Fri, 30 Apr 2004 22:26:24 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20040430212625.7C6B48551@pwstephenson.fsnet.co.uk>
+X-Spam-Checker-Version: SpamAssassin 2.63 on a.mx.sunsite.dk
+X-Spam-Level: *
+X-Spam-Status: No, hits=1.5 required=6.0 tests=RCVD_IN_SORBS autolearn=no 
+	version=2.63
+X-Spam-Hits: 1.5
+
+Patch to apply on top of previous goes to attempt to handle TRAPS_ASYNC
+the way I think is intended.  It's basically an `if' with a
+sigemptyset() inside it, hope no one was expecting anything sophisticated.
+
+It doesn't fix the behaviour I noted, that without the option any child
+exiting, not just the one the shell is currently expecting, causes traps
+to be run.  Probably that's not a big issue; I should really check the
+wording of POSIX.
+
+So I think that's it... Vincent?
+
+Index: Doc/Zsh/options.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/options.yo,v
+retrieving revision 1.31
+diff -u -r1.31 options.yo
+--- Doc/Zsh/options.yo	19 Apr 2004 16:02:22 -0000	1.31
++++ Doc/Zsh/options.yo	30 Apr 2004 21:15:10 -0000
+@@ -1191,11 +1191,11 @@
+ )
+ pindex(TRAPS_ASYNC)
+ cindex(traps, asynchronous)
+-item(tt(TRAPS_ASYNC) <C> <Z>)(
+-While waiting for a program to exit, run traps immediately.  Otherwise
+-the trap is run after the program has exited.  Note this does not affect
+-the point at which traps are run for any case other than when the shell is
+-waiting for a child process.
++item(tt(TRAPS_ASYNC))(
++While waiting for a program to exit, handle signals and run traps
++immediately.  Otherwise the trap is run after a child process has exited.
++Note this does not affect the point at which traps are run for any case
++other than when the shell is waiting for a child process.
+ )
+ pindex(TYPESET_SILENT)
+ item(tt(TYPESET_SILENT))(
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.27
+diff -u -r1.27 jobs.c
+--- Src/jobs.c	21 Apr 2004 11:21:24 -0000	1.27
++++ Src/jobs.c	30 Apr 2004 21:15:19 -0000
+@@ -971,14 +971,14 @@
+ 
+     /* child_block() around this loop in case #ifndef WNOHANG */
+     dont_queue_signals();
+-    child_block();		/* unblocked in child_suspend() */
++    child_block();		/* unblocked in signal_suspend() */
+     while (!errflag && (kill(pid, 0) >= 0 || errno != ESRCH)) {
+ 	if (first)
+ 	    first = 0;
+ 	else
+ 	    kill(pid, SIGCONT);
+ 
+-	child_suspend(SIGINT);
++	signal_suspend(SIGCHLD, SIGINT);
+ 	child_block();
+     }
+     child_unblock();
+@@ -995,8 +995,7 @@
+     Job jn = jobtab + job;
+ 
+     dont_queue_signals();
+-    queue_traps();
+-    child_block();		 /* unblocked during child_suspend() */
++    child_block();		 /* unblocked during signal_suspend() */
+     if (jn->procs || jn->auxprocs) { /* if any forks were done         */
+ 	jn->stat |= STAT_LOCKED;
+ 	if (jn->stat & STAT_CHANGED)
+@@ -1004,7 +1003,7 @@
+ 	while (!errflag && jn->stat &&
+ 	       !(jn->stat & STAT_DONE) &&
+ 	       !(interact && (jn->stat & STAT_STOPPED))) {
+-	    child_suspend(sig);
++	    signal_suspend(SIGCHLD, sig);
+ 	    /* Commenting this out makes ^C-ing a job started by a function
+ 	       stop the whole function again.  But I guess it will stop
+ 	       something else from working properly, we have to find out
+@@ -1026,7 +1025,6 @@
+ 	numpipestats = 1;
+     }
+     child_unblock();
+-    dont_queue_traps();
+     restore_queue_signals(q);
+ }
+ 
+Index: Src/options.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/options.c,v
+retrieving revision 1.18
+diff -u -r1.18 options.c
+--- Src/options.c	19 Apr 2004 16:02:22 -0000	1.18
++++ Src/options.c	30 Apr 2004 21:15:22 -0000
+@@ -203,7 +203,7 @@
+ {NULL, "singlelinezle",	      OPT_KSH,			 SINGLELINEZLE},
+ {NULL, "sunkeyboardhack",     0,			 SUNKEYBOARDHACK},
+ {NULL, "transientrprompt",    0,			 TRANSIENTRPROMPT},
+-{NULL, "trapsasync",	      OPT_EMULATE|OPT_NONBOURNE, TRAPSASYNC},
++{NULL, "trapsasync",	      0,			 TRAPSASYNC},
+ {NULL, "typesetsilent",	      OPT_EMULATE|OPT_BOURNE,	 TYPESETSILENT},
+ {NULL, "unset",		      OPT_EMULATE|OPT_BSHELL,	 UNSET},
+ {NULL, "verbose",	      0,			 VERBOSE},
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.27
+diff -u -r1.27 signals.c
+--- Src/signals.c	21 Apr 2004 11:21:34 -0000	1.27
++++ Src/signals.c	30 Apr 2004 21:15:24 -0000
+@@ -350,11 +350,15 @@
+     sigset_t oset;
+ #endif /* BROKEN_POSIX_SIGSUSPEND */
+ 
+-    sigfillset(&set);
+-    sigdelset(&set, sig);
+-    sigdelset(&set, SIGHUP);  /* still don't know why we add this? */
+-    if (sig2)
+-        sigdelset(&set, sig2);
++    if (isset(TRAPSASYNC)) {
++	sigemptyset(&set);
++    } else {
++	sigfillset(&set);
++	sigdelset(&set, sig);
++	sigdelset(&set, SIGHUP);  /* still don't know why we add this? */
++	if (sig2)
++	    sigdelset(&set, sig2);
++    }
+ #ifdef BROKEN_POSIX_SIGSUSPEND
+     sigprocmask(SIG_SETMASK, &set, &oset);
+     pause();
+@@ -366,11 +370,15 @@
+ # ifdef BSD_SIGNALS
+     sigset_t set;
+ 
+-    sigfillset(&set);
+-    sigdelset(&set, sig);
+-    if (sig2)
+-      sigdelset(&set, sig2);
+-    ret = sigpause(set);
++    if (isset(TRAPSASYNC)) {
++	sigemptyset(&set);
++    } else {
++	sigfillset(&set);
++	sigdelset(&set, sig);
++	if (sig2)
++	    sigdelset(&set, sig2);
++	ret = sigpause(set);
++    }
+ # else
+ #  ifdef SYSV_SIGNALS
+     ret = sigpause(sig);
+@@ -426,7 +434,7 @@
+     do_jump = suspend_longjmp;              /* do we need to longjmp to signal_suspend */
+     suspend_longjmp = 0;                    /* In case a SIGCHLD somehow arrives       */
+ 
+-    if (sig == SIGCHLD) {                   /* Traps can cause nested child_suspend()  */
++    if (sig == SIGCHLD) {                   /* Traps can cause nested signal_suspend()  */
+         if (do_jump)
+             jump_to = suspend_jmp_buf;      /* Copy suspend_jmp_buf                    */
+     }
+@@ -1065,17 +1073,5 @@
+     if ((sigtrapped[sig] & ZSIG_IGNORED) || !sigfuncs[sig] || errflag)
+ 	return;
+ 
+-    /* Adapted from signal queueing in zhandler */
+-    if (trap_queueing_enabled && !isset(TRAPSASYNC)) {
+-	int temp_rear = ++trap_queue_rear % MAX_QUEUE_SIZE;
+-
+-	DPUTS(temp_rear == trap_queue_front, "BUG: trap queue full");
+-	if (temp_rear != trap_queue_front) {
+-	    trap_queue_rear = temp_rear;
+-	    trap_queue[trap_queue_rear] = sig;
+-	}
+-	return;
+-    }
+-
+     dotrapargs(sig, sigtrapped+sig, sigfuncs[sig]);
+ }
+Index: Src/signals.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.h,v
+retrieving revision 1.5
+diff -u -r1.5 signals.h
+--- Src/signals.h	21 Apr 2004 11:21:34 -0000	1.5
++++ Src/signals.h	30 Apr 2004 21:15:24 -0000
+@@ -58,7 +58,6 @@
+  
+ #define child_block()      signal_block(sigchld_mask)
+ #define child_unblock()    signal_unblock(sigchld_mask)
+-#define child_suspend(S)   signal_suspend(SIGCHLD, S)
+ 
+ /* ignore a signal */
+ #define signal_ignore(S)   signal(S, SIG_IGN)
+@@ -101,24 +100,6 @@
+ 
+ #define restore_queue_signals(q) (queueing_enabled = (q))
+ 
+-/*
+- * Similar (but simpler) mechanism used for queueing traps.
+- * Only needed if NO_TRAPS_ASYNC is set.
+- */
+-#define queue_traps()	(trap_queueing_enabled++)
+-
+-#define run_queued_traps() do { \
+-    while (trap_queue_front != trap_queue_rear) { /* while traps in queue */ \
+-	trap_queue_front = (trap_queue_front + 1) % MAX_QUEUE_SIZE; \
+-	dotrap(trap_queue[trap_queue_front]);  /* handle queued trap   */ \
+-    } \
+-} while (0)
+-
+-#define dont_queue_traps() do { \
+-    trap_queueing_enabled = 0; \
+-    run_queued_traps(); \
+-} while (0)
+-
+ /* Make some signal functions faster. */
+ 
+ #ifdef POSIX_SIGNALS
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

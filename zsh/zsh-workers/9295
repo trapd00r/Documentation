@@ -1,0 +1,180 @@
+From zsh-workers-return-9295-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Jan 11 21:49:53 2000
+Return-Path: <zsh-workers-return-9295-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20652 invoked from network); 11 Jan 2000 21:49:52 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 Jan 2000 21:49:52 -0000
+Received: (qmail 17639 invoked by alias); 11 Jan 2000 21:49:46 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9295
+Received: (qmail 17632 invoked from network); 11 Jan 2000 21:49:45 -0000
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: Re: PATCH: 3.1.6-pws-11: basic tests 
+In-reply-to: "Peter Stephenson"'s message of "Mon, 13 Dec 1999 19:04:57 GMT."
+             <E11xalM-0005Vf-00.1999-12-13-19-04-00@mail2.svr.pol.co.uk> 
+Date: Tue, 11 Jan 2000 21:51:49 +0000
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <E1289Ad-0007xM-00.2000-01-11-21-49-43@cmailg3.svr.pol.co.uk>
+
+Peter Stephenson wrote:
+> Here are some tests for basic shell syntax, etc.
+> ...
+> A few issues turned up during this.  I have not looked into these in much
+> detail.
+
+I've now fixed these.
+
+> First, the test that runs this
+>   { cd /NonExistentDirectory >&/dev/null; } || print false
+> fails if the semicolon is missing, even though the same test usually works
+> in an interactive shell or after zsh -fc.
+
+This traces to bad handling of values when retrieving the $options hash for
+options with negative number, which is supposed to mean negate.  The
+problem was triggered by braceexpand, a negated alias for ignorebraces.
+
+> Second, `select' loops appear to try to open the input from the terminal
+> even in a non-interactive shell.  According to the manual page, it should
+> always use stdin.  One or maybe both of these is wrong.  In any case it's
+> impossible to run a simple non-interactive test for it.
+
+The test for whether to use the terminal was different from the test for
+whether to use zle, so sometimes the terminal was used instead of stdin
+even when zle wasn't.  I've used the more restrictive test in both cases
+and altered the manual.
+
+> Third, alternate forms of complex commands with braces are described in the
+> manual as just requiring a list before the opening brace.  This would
+> allow things like
+>   if true
+>   {
+>     print true
+>   }
+> which doesn't work.  Actually, it's already described in the FAQ that the
+> test has to be `clearly delimited', so in this case the manual just needs
+> to be clearer, and more explicit about what is allowed.
+
+I've made the manual much clearer about this.
+
+> Fourth, which could be related to the first, this:
+>   case bravo {
+>     (alpha) print schmalpha
+> 	    ;;
+>     (bravo) print schmavo
+> 	    ;;
+>     (charlie) print schmarlie
+> 	    ;;
+>   }
+> doesn't work in the tests although, again, it works interactively or from
+> zsh -c.
+
+This is the same problem with retrieving the braceexpand element of $options.
+
+Index: Doc/Zsh/grammar.yo
+===================================================================
+RCS file: /home/pws/CVSROOT/projects/zsh/Doc/Zsh/grammar.yo,v
+retrieving revision 1.1.1.1
+diff -u -r1.1.1.1 grammar.yo
+--- Doc/Zsh/grammar.yo	1999/11/28 17:42:27	1.1.1.1
++++ Doc/Zsh/grammar.yo	2000/01/11 21:21:20
+@@ -205,9 +205,10 @@
+ where var(term) is one or more newline or tt(;) to terminate the var(word)s.
+ Print the set of var(word)s, each preceded by a number.
+ If the tt(in) var(word) is omitted, use the positional parameters.
+-The tt(PROMPT3) prompt is printed and a line is read from standard
+-input.  If this line consists of the number of one of the listed
+-var(word)s, then the parameter var(name)
++The tt(PROMPT3) prompt is printed and a line is read from the line editor
++if the shell is interactive and that is active, or else standard input.
++If this line consists of the
++number of one of the listed var(word)s, then the parameter var(name)
+ is set to the var(word) corresponding to this number.
+ If this line is empty, the selection list is printed again.
+ Otherwise, the value of the parameter var(name) is set to null.
+@@ -263,11 +264,26 @@
+ removed in the future.  The versions in the previous section should be
+ preferred instead.  The short versions below only work if var(sublist)
+ is of the form `tt({) var(list) tt(})' or if the tt(SHORT_LOOPS)
+-option is set.
++option is set.  In this case, the test part of the loop must also be
++suitably delimited, such as by `tt([[ ... ]])' or `tt((( ... )))', else
++the end of the test will not be recognized.
+ 
+ startitem()
+ item(tt(if) var(list) tt({) var(list) tt(}) [ tt(elif) var(list) tt({) var(list) tt(}) ] ... [ tt(else {) var(list) tt(}) ])(
+-An alternate form of tt(if).
++An alternate form of tt(if).  The rules mean that
++
++example(if [[ -o ignorebraces ]] {
++  print yes
++})
++
++works, but
++
++example(if true {  # Does not work!
++  print yes
++}
++)
++
++does em(not), since the test is not suitably delimited.
+ )
+ item(tt(if) var(list) var(sublist))(
+ A short form of the alternate `if'.
+Index: Src/loop.c
+===================================================================
+RCS file: /home/pws/CVSROOT/projects/zsh/Src/loop.c,v
+retrieving revision 1.3
+diff -u -r1.3 loop.c
+--- Src/loop.c	2000/01/04 22:04:35	1.3
++++ Src/loop.c	2000/01/11 21:15:05
+@@ -154,7 +154,7 @@
+     Forcmd node;
+     char *str, *s;
+     LinkNode n;
+-    int i;
++    int i, usezle;
+     FILE *inp;
+     size_t more;
+ 
+@@ -172,12 +172,13 @@
+     lastval = 0;
+     pushheap();
+     cmdpush(CS_SELECT);
+-    inp = fdopen(dup((SHTTY == -1) ? 0 : SHTTY), "r");
++    usezle = interact && SHTTY != -1 && isset(USEZLE);
++    inp = fdopen(dup(usezle ? SHTTY : 0), "r");
+     more = selectlist(args, 0);
+     for (;;) {
+ 	for (;;) {
+ 	    if (empty(bufstack)) {
+-	    	if (interact && SHTTY != -1 && isset(USEZLE)) {
++	    	if (usezle) {
+ 		    int oef = errflag;
+ 
+ 		    isfirstln = 1;
+Index: Src/Modules/parameter.c
+===================================================================
+RCS file: /home/pws/CVSROOT/projects/zsh/Src/Modules/parameter.c,v
+retrieving revision 1.4
+diff -u -r1.4 parameter.c
+--- Src/Modules/parameter.c	1999/12/21 15:18:28	1.4
++++ Src/Modules/parameter.c	2000/01/11 20:54:06
+@@ -838,8 +838,10 @@
+ 
+     for (i = 0; i < optiontab->hsize; i++)
+ 	for (hn = optiontab->nodes[i]; hn; hn = hn->next) {
++	    int optno = ((Optname) hn)->optno, ison;
+ 	    pm.nam = hn->nam;
+-	    pm.u.str = dupstring(opts[((Optname) hn)->optno] ? "on" : "off");
++	    ison = optno < 0 ? !opts[-optno] : opts[optno];
++	    pm.u.str = dupstring(ison ? "on" : "off");
+ 	    func((HashNode) &pm, flags);
+ 	}
+ }
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+

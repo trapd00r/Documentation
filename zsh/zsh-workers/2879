@@ -1,0 +1,229 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Thu Feb 06 13:00:24 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 7220 invoked from network); 6 Feb 1997 13:00:20 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 6 Feb 1997 13:00:20 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA10025; Thu, 6 Feb 1997 07:47:02 -0500 (EST)
+Resent-Date: Thu, 6 Feb 1997 07:47:02 -0500 (EST)
+Message-Id: <199702061248.NAA22179@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: BUG: permanent allocation in arrfixenv
+Date: Thu, 06 Feb 1997 13:48:50 +0100
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"4belO.0.aS2.5BT-o"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2879
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+This message arises when editing $path using vared.  Going back to the
+call of setaparam() in bin_vared(), zle_main.c around line 618, I see
+it's deliberately set up to use PERMALLOC, so I don't really see where
+that should be changed.
+
+However, I think the only problem is the zjoin() in arrfixenv().  This
+isn't actually called very much, and as far as I can see always in
+contexts which know whether they are permanent or not (I think the
+colonarrgetfn() return value has to come off the heap).  Further, two
+of the uses have explicit PERMALLOC's for the express purpose of
+zjoin'ing.  Wouldn't it be better to given zjoin() an explicit
+heap/permanent flag?  This is what the following patch does.  It would
+be nice if someone else would cast an eye over arrfixenv(), and also
+that chunk of bin_print() in builtin.c with the ent->text line changed
+to make sure they really are clean now, but it certainly looks that
+way.
+
+I altered bin_eval() to use permanent storage because it looked a
+little neater.
+
+It looks like there was a bug in zjoin(), which always returned an
+unduplicated "" when the array passed to it was empty, though
+presumably that never actually happened for various reasons.
+
+It would be possible to do the same with sepjoin(), but the case isn't
+so clear cut.
+
+*** Src/builtin.c.zj	Thu Feb  6 12:08:47 1997
+--- Src/builtin.c	Thu Feb  6 12:22:56 1997
+***************
+*** 2099,2126 ****
+  	int nwords = 0, nlen, iwords;
+  	char **pargs = args;
+  
+! 	PERMALLOC {
+! 	    ent = gethistent(++curhist);
+! 	    zsfree(ent->text);
+! 	    if (ent->nwords)
+! 		zfree(ent->words, ent->nwords*2*sizeof(short));
+! 	    while (*pargs++)
+! 		nwords++;
+! 	    if ((ent->nwords = nwords)) {
+! 		ent->words = (short *)zalloc(nwords*2*sizeof(short));
+! 		nlen = iwords = 0;
+! 		for (pargs = args; *pargs; pargs++) {
+! 		    ent->words[iwords++] = nlen;
+! 		    nlen += strlen(*pargs);
+! 		    ent->words[iwords++] = nlen;
+! 		    nlen++;
+! 		}
+! 	    } else
+! 		ent->words = (short *)NULL;
+! 	    ent->text = zjoin(args, ' ');
+! 	    ent->stim = ent->ftim = time(NULL);
+! 	    ent->flags = 0;
+! 	} LASTALLOC;
+  	return 0;
+      }
+      /* -u and -p -- output to other than standard output */
+--- 2099,2124 ----
+  	int nwords = 0, nlen, iwords;
+  	char **pargs = args;
+  
+! 	ent = gethistent(++curhist);
+! 	zsfree(ent->text);
+! 	if (ent->nwords)
+! 	    zfree(ent->words, ent->nwords*2*sizeof(short));
+! 	while (*pargs++)
+! 	    nwords++;
+! 	if ((ent->nwords = nwords)) {
+! 	    ent->words = (short *)zalloc(nwords*2*sizeof(short));
+! 	    nlen = iwords = 0;
+! 	    for (pargs = args; *pargs; pargs++) {
+! 		ent->words[iwords++] = nlen;
+! 		nlen += strlen(*pargs);
+! 		ent->words[iwords++] = nlen;
+! 		nlen++;
+! 	    }
+! 	} else
+! 	    ent->words = (short *)NULL;
+! 	ent->text = zjoin(args, ' ', 1);
+! 	ent->stim = ent->ftim = time(NULL);
+! 	ent->flags = 0;
+  	return 0;
+      }
+      /* -u and -p -- output to other than standard output */
+***************
+*** 2632,2638 ****
+  {
+      List list;
+  
+!     inpush(zjoin(argv, ' '), 0, NULL);
+      strinbeg();
+      stophist = 2;
+      list = parse_list();
+--- 2630,2636 ----
+  {
+      List list;
+  
+!     inpush(zjoin(argv, ' ', 1), INP_FREE, NULL);
+      strinbeg();
+      stophist = 2;
+      list = parse_list();
+***************
+*** 3194,3202 ****
+      of scheduled commands. */
+      sch = (struct schedcmd *) zcalloc(sizeof *sch);
+      sch->time = t;
+!     PERMALLOC {
+! 	sch->cmd = zjoin(argv, ' ');
+!     } LASTALLOC;
+      sch->next = NULL;
+      for (sch2 = (struct schedcmd *)&schedcmds; sch2->next; sch2 = sch2->next);
+      sch2->next = sch;
+--- 3192,3198 ----
+      of scheduled commands. */
+      sch = (struct schedcmd *) zcalloc(sizeof *sch);
+      sch->time = t;
+!     sch->cmd = zjoin(argv, ' ', 1);
+      sch->next = NULL;
+      for (sch2 = (struct schedcmd *)&schedcmds; sch2->next; sch2 = sch2->next);
+      sch2->next = sch;
+*** Src/params.c.zj	Thu Feb  6 12:08:47 1997
+--- Src/params.c	Thu Feb  6 12:14:37 1997
+***************
+*** 1348,1354 ****
+  char *
+  colonarrgetfn(Param pm)
+  {
+!     return zjoin(*(char ***)pm->data, ':');
+  }
+  
+  /**/
+--- 1348,1354 ----
+  char *
+  colonarrgetfn(Param pm)
+  {
+!     return zjoin(*(char ***)pm->data, ':', 0);
+  }
+  
+  /**/
+***************
+*** 1788,1797 ****
+      int len_s;
+      Param pm;
+  
+-     MUSTUSEHEAP("arrfixenv");
+      if (t == path)
+  	cmdnamtab->emptytable(cmdnamtab);
+!     u = zjoin(t, ':');
+      len_s = strlen(s);
+      pm = (Param) paramtab->getnode(paramtab, s);
+      for (ep = environ; *ep; ep++)
+--- 1788,1796 ----
+      int len_s;
+      Param pm;
+  
+      if (t == path)
+  	cmdnamtab->emptytable(cmdnamtab);
+!     u = zjoin(t, ':', 0);
+      len_s = strlen(s);
+      pm = (Param) paramtab->getnode(paramtab, s);
+      for (ep = environ; *ep; ep++)
+*** Src/utils.c.zj	Thu Feb  6 12:08:47 1997
+--- Src/utils.c	Thu Feb  6 13:27:00 1997
+***************
+*** 1354,1360 ****
+  
+  /**/
+  char *
+! zjoin(char **arr, int delim)
+  {
+      int len = 0;
+      char **s, *ret, *ptr;
+--- 1354,1360 ----
+  
+  /**/
+  char *
+! zjoin(char **arr, int delim, int useperm)
+  {
+      int len = 0;
+      char **s, *ret, *ptr;
+***************
+*** 1362,1369 ****
+      for (s = arr; *s; s++)
+  	len += strlen(*s) + 1;
+      if (!len)
+! 	return "";
+!     ptr = ret = (char *) ncalloc(len);
+      for (s = arr; *s; s++) {
+  	strucpy(&ptr, *s);
+  	if (delim)
+--- 1362,1369 ----
+      for (s = arr; *s; s++)
+  	len += strlen(*s) + 1;
+      if (!len)
+! 	return useperm ? ztrdup("") : "";
+!     ptr = ret = (char *) (useperm ? zalloc(len) : halloc(len));
+      for (s = arr; *s; s++) {
+  	strucpy(&ptr, *s);
+  	if (delim)
+
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

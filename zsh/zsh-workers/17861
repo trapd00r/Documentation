@@ -1,0 +1,200 @@
+From zsh-workers-return-17861-mason-zsh=primenet.com.au@sunsite.dk Sat Oct 26 03:22:27 2002
+Return-Path: <zsh-workers-return-17861-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25826 invoked from network); 26 Oct 2002 03:22:27 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 26 Oct 2002 03:22:27 -0000
+Received: (qmail 20607 invoked by alias); 26 Oct 2002 03:22:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 17861
+Received: (qmail 20569 invoked from network); 26 Oct 2002 03:22:20 -0000
+To: zsh-workers@sunsite.dk
+Subject: Inconsistent signal handling?
+From: Philippe Troin <phil@fifi.org>
+Date: 25 Oct 2002 20:22:16 -0700
+Message-ID: <877kg5c2af.fsf@ceramic.fifi.org>
+Lines: 105
+User-Agent: Gnus/5.09 (Gnus v5.9.0) Emacs/21.2
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=-=-="
+Sender: Philippe Troin <phil@fifi.org>
+
+--=-=-=
+
+In init.c, init_signals() says:
+
+    void
+    init_signals(void)
+    {
+        sigchld_mask = signal_mask(SIGCHLD);
+
+        intr();
+
+    #ifndef QDEBUG
+        signal_ignore(SIGQUIT);
+    #endif
+
+        install_handler(SIGHUP);
+        install_handler(SIGCHLD);
+    #ifdef SIGWINCH
+        install_handler(SIGWINCH);
+    #endif
+        if (interact) {
+            install_handler(SIGALRM);
+[1]         signal_ignore(SIGTERM);
+        }
+        if (jobbing) {
+[2]         long ttypgrp;
+[2]
+[2]         while ((ttypgrp = gettygrp()) != -1 && ttypgrp != mypgrp)
+[2]             kill(0, SIGTTIN);
+[2]         if (ttypgrp == -1) {
+[2]             opts[MONITOR] = 0;
+[2]         } else {
+[2]             signal_ignore(SIGTTOU);
+[2]             signal_ignore(SIGTSTP);
+[2]             signal_ignore(SIGTTIN);
+[2]             attachtty(mypgrp);
+[2]         }
+        }
+[3]     if (islogin) {
+[4]         signal_setmask(signal_mask(0));
+        } else if (interact) {
+            sigset_t set;
+
+            sigemptyset(&set);
+            sigaddset(&set, SIGINT);
+            sigaddset(&set, SIGQUIT);
+            signal_unblock(set);
+        }
+    }
+
+My remarks:
+
+ [1] Why do we ignore SIGTERM on interactive sessions? That sounds
+     like a bad idea to me.
+
+ [2] See my previous mail <87bs5hc31h.fsf@ceramic.fifi.org>
+
+ [3] Why do we only clean-up the signal mask on login shells? It
+     should happen on interactive shells (there can be login
+     non-interactive shells, eg. for X11 startup).
+
+ [4] This is not enough to clean-up all inherited signal
+     properties. If some signals have been ignored (with
+     signal(SIG_IGN)) before zsh was exec()ed, then they are still
+     ignored by zsh. exec*() only resets the disposition of signals
+     which have a signal handler to SIG_DFL, but leaves SIG_IGNored
+     signals as is (this is a POSIX requirement).
+
+I'd suggest changing init_signals to:
+
+void
+init_signals(void)
+{
+    if (interact) {
+        int i;
+        signal_setmask(signal_mask(0));
+        for (i=0; i<NSIG; ++i)
+            signal_default(i);
+    }
+    sigchld_mask = signal_mask(SIGCHLD);
+
+    intr();
+
+#ifndef QDEBUG
+    signal_ignore(SIGQUIT);
+#endif
+
+    install_handler(SIGHUP);
+    install_handler(SIGCHLD);
+#ifdef SIGWINCH
+    install_handler(SIGWINCH);
+#endif
+    if (interact) {
+        install_handler(SIGALRM);
+    }
+    if (jobbing) {
+        signal_ignore(SIGTTOU);
+        signal_ignore(SIGTSTP);
+        signal_ignore(SIGTTIN);
+    }
+}
+
+Patch against 4.0.6 attached.
+
+Phil.
+
+--=-=-=
+Content-Type: text/x-patch
+Content-Disposition: attachment; filename=zsh-4.0.6-signals.patch
+
+diff -rc zsh-4.0.6.orig/Src/init.c zsh-4.0.6/Src/init.c
+*** zsh-4.0.6.orig/Src/init.c	Fri Oct 25 19:43:15 2002
+--- zsh-4.0.6/Src/init.c	Fri Oct 25 20:19:02 2002
+***************
+*** 842,847 ****
+--- 842,853 ----
+  void
+  init_signals(void)
+  {
++     if (interact) {
++ 	int i;
++ 	signal_setmask(signal_mask(0));
++ 	for (i=0; i<NSIG; ++i)
++ 	    signal_default(i);
++     }
+      sigchld_mask = signal_mask(SIGCHLD);
+  
+      intr();
+***************
+*** 857,887 ****
+  #endif
+      if (interact) {
+  	install_handler(SIGALRM);
+- 	signal_ignore(SIGTERM);
+      }
+      if (jobbing) {
+! 	long ttypgrp;
+! 
+! 	while ((ttypgrp = gettygrp()) != -1 && ttypgrp != mypgrp)
+! 	    kill(0, SIGTTIN);
+! 	if (ttypgrp == -1) {
+! 	    opts[MONITOR] = 0;
+! 	} else {
+! 	    signal_ignore(SIGTTOU);
+! 	    signal_ignore(SIGTSTP);
+! 	    signal_ignore(SIGTTIN);
+! 	    attachtty(mypgrp);
+! 	}
+!     }
+!     if (islogin) {
+! 	signal_setmask(signal_mask(0));
+!     } else if (interact) {
+! 	sigset_t set;
+! 
+! 	sigemptyset(&set);
+! 	sigaddset(&set, SIGINT);
+! 	sigaddset(&set, SIGQUIT);
+! 	signal_unblock(set);
+      }
+  }
+  
+--- 863,873 ----
+  #endif
+      if (interact) {
+  	install_handler(SIGALRM);
+      }
+      if (jobbing) {
+! 	signal_ignore(SIGTTOU);
+! 	signal_ignore(SIGTSTP);
+! 	signal_ignore(SIGTTIN);
+      }
+  }
+  
+
+--=-=-=--
+

@@ -1,0 +1,223 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Wed Aug 28 22:20:45 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id WAA08741 for <mason@primenet.com.au>; Wed, 28 Aug 1996 22:20:40 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA05360; Wed, 28 Aug 1996 07:28:39 -0400 (EDT)
+Resent-Date: Wed, 28 Aug 1996 07:28:39 -0400 (EDT)
+From: Geoff Wing <mason@primenet.com.au>
+Message-Id: <199608281127.VAA08348@coral.primenet.com.au>
+Subject: zle_refresh uncommon bug fix and movement optimisation
+To: zsh-workers@math.gatech.edu
+Date: Wed, 28 Aug 1996 21:27:20 +1000 (EST)
+X-Mailer: ELM [version 2.4 PL25]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"OtoK82.0.gJ1.cr29o"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2090
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Heyla,
+ this will fix a bug and improve output on terminals with poor right 
+ movement capabilities.  The bug is something I came across at the start of
+ the year when I was rewriting that area and promptly forgot about.
+ Someone (Zefram?) was doing a large change in the prompt stuff at that time
+ and I forgot about the bug.  It's very minor and you should never have come
+ across it.
+ Terminals with poor right movement capabilities will have much less
+ output, especially if users use RPROMPTs.
+ The whole tc_rightcurs() routine has been reworked to be a bit smarter.
+
+ If you come across any problems with it (hopefully not) just give me a yell.
+
+
+
+*** zle_refresh.c.~1~	Wed Aug 28 20:02:25 1996
+--- zle_refresh.c	Wed Aug 28 21:11:16 1996
+***************
+*** 233,256 ****
+--- 233,258 ----
+              if (tccan(TCCLEAREOD))
+                  tcout(TCCLEAREOD);
+              else
+                  cleareol = 1;   /* request: clear to end of line */
+          if (t0 > -1)
+              olnct = t0;
+          if (isset(SINGLELINEZLE) || termok != TERM_OK)
+              vcs = 0;
+          else if (!clearflag && lpptlen) {
+              fwrite(lpptbuf, lpptlen, 1, shout);
++ 	    SELECT_ADD_COST(lpptlen);
+  	    fflush(shout);
+  	}
+  	if (clearflag) {
+  	    putc('\r', shout);
++ 	    SELECT_ADD_COST(1);
+  	    vcs = 0;
+  	    moveto(0, pptw);
+  	}
+  	clearf = clearflag;
+      } else if (winw != columns)
+  	resetvideo();
+  
+  /* now winw equals columns; now all width comparisons can be made to winw */
+  
+      if (isset(SINGLELINEZLE) || termok != TERM_OK) {
+***************
+*** 750,815 ****
+  	    tcout(cap);
+  	return 1;
+      }
+      return 0;
+  }
+  
+  /**/
+  void
+  tc_rightcurs(int cl)
+  {
+!     int ct = cl - vcs,		/* number of characters to move across	    */
+  	horz_tabs = 0,		/* number of horizontal tabs if we do them  */
+  	i = vcs,		/* cursor position after initial movements  */
+! 	j = 0;			/* number of chars outputted if we use tabs */
+      char *t;
+  
+  /* calculate how many horizontal tabs it would take, if we can do them -
+     tabs are assumed to be 8 spaces */
+      if (tccan(TCNEXTTAB) && ((vcs | 7) < cl)) {
+  	horz_tabs = 1;
+  	i = (vcs | 7) + 1;
+  	for (; i + 8 <= cl; i += 8)
+  	    horz_tabs++;
+  	j = cl - i;		/* number of chars after last tab */
+- 	if (tccan(TCRIGHT))
+- 	    j *= tclen[TCRIGHT];
+  	j += (horz_tabs * tclen[TCNEXTTAB]); /* # of chars if we use tabs */
+      }
+  
+  /* do a multright if we can - if it's cheaper or we can't use other tricks */
+!     if (tccan(TCMULTRIGHT) &&
+! 	(!tccan(TCRIGHT) || (tclen[TCMULTRIGHT] < tclen[TCRIGHT] * ct) ||
+! 	 !tccan(TCNEXTTAB) || (tclen[TCMULTRIGHT] < j))) {
+  	tcoutarg(TCMULTRIGHT, ct);
+  	SELECT_ADD_COST(tclen[TCMULTRIGHT]);
+  	return;
+      }
+  
+  /* try to go with tabs if a multright is not feasible/convenient */
+      if (horz_tabs) {
+  	SELECT_ADD_COST((tclen[TCNEXTTAB] * horz_tabs));
+  	for (; horz_tabs--;)
+  	    tcout(TCNEXTTAB);
+  	if ((ct = cl - i) == 0) /* number of chars still to move across */
+  	    return;
+      }
+  
+! /* or try to dump lots of right movements */
+!     if (tccan(TCRIGHT)) {
+! 	SELECT_ADD_COST((tclen[TCRIGHT] * ct));
+! 	for (; ct--;)
+! 	    tcout(TCRIGHT);
+! 	return;
+      }
+  
+- /* otherwise _carefully_ write the contents of the video buffer */
+      SELECT_ADD_COST(ct);
+      for (j = 0, t = nbuf[vln]; *t && (j < i); j++, t++);
+      if (j == i)
+  	for ( ; *t && ct; ct--, t++)
+  	    putc(*t, shout);
+      while (ct--)
+  	putc(' ', shout);	/* not my fault your terminal can't go right */
+  }
+  
+  /**/
+--- 752,832 ----
+  	    tcout(cap);
+  	return 1;
+      }
+      return 0;
+  }
+  
+  /**/
+  void
+  tc_rightcurs(int cl)
+  {
+!     int ct,			/* number of characters to move across	    */
+  	horz_tabs = 0,		/* number of horizontal tabs if we do them  */
+  	i = vcs,		/* cursor position after initial movements  */
+! 	j;			/* number of chars outputted		    */
+      char *t;
+  
++     j = ct = cl - vcs;
++ 
+  /* calculate how many horizontal tabs it would take, if we can do them -
+     tabs are assumed to be 8 spaces */
+      if (tccan(TCNEXTTAB) && ((vcs | 7) < cl)) {
+  	horz_tabs = 1;
+  	i = (vcs | 7) + 1;
+  	for (; i + 8 <= cl; i += 8)
+  	    horz_tabs++;
+  	j = cl - i;		/* number of chars after last tab */
+  	j += (horz_tabs * tclen[TCNEXTTAB]); /* # of chars if we use tabs */
+      }
+  
+  /* do a multright if we can - if it's cheaper or we can't use other tricks */
+!     if (tccan(TCMULTRIGHT)
+! 	&& (!tccan(TCNEXTTAB) || (tclen[TCMULTRIGHT] <= j)
+! 	    || (vln == 0 && i < pptw))) {
+  	tcoutarg(TCMULTRIGHT, ct);
+  	SELECT_ADD_COST(tclen[TCMULTRIGHT]);
+  	return;
+      }
+  
+  /* try to go with tabs if a multright is not feasible/convenient */
+      if (horz_tabs) {
+  	SELECT_ADD_COST((tclen[TCNEXTTAB] * horz_tabs));
+  	for (; horz_tabs--;)
+  	    tcout(TCNEXTTAB);
+  	if ((ct = cl - i) == 0) /* number of chars still to move across */
+  	    return;
+      }
+  
+! /* otherwise _carefully_ write the contents of the video buffer.
+!    if we're anywhere in the prompt, goto the left column and write the whole
+!    prompt out unless lpptlen == pptw : we can cheat then */
+!     if (vln == 0 && i < pptw) {
+! 	if (lpptlen == pptw) {
+! 	    SELECT_ADD_COST(lpptlen - i);
+! 	    fwrite(lpptbuf + i, lpptlen - i, 1, shout);
+! 	} else if (tclen[TCRIGHT] * ct < lpptlen) {
+! 	    /* it is cheaper to send TCRIGHT than reprint the whole prompt */
+! 	    SELECT_ADD_COST(ct);
+! 	    for ( ; ct--; )
+! 		tcout(TCRIGHT);
+!         } else {
+! 	    if (i != 0) {
+! 		SELECT_ADD_COST(1);
+! 		putc('\r', shout);
+! 	    }
+! 	    SELECT_ADD_COST(lpptlen);
+! 	    fwrite(lpptbuf, lpptlen, 1, shout);
+! 	}
+! 	i = pptw;
+! 	ct = cl - i;
+      }
+  
+      SELECT_ADD_COST(ct);
+      for (j = 0, t = nbuf[vln]; *t && (j < i); j++, t++);
+      if (j == i)
+  	for ( ; *t && ct; ct--, t++)
+  	    putc(*t, shout);
+      while (ct--)
+  	putc(' ', shout);	/* not my fault your terminal can't go right */
+  }
+  
+  /**/
+
+
+
+-- 
+Geoff Wing [mason@primenet.com.au]   PrimeNet - Internet Consultancy
+  Web: http://www.primenet.com.au/   Facsimile: +61-3-9819 3788
+

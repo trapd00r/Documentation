@@ -1,0 +1,259 @@
+From zsh-workers-return-10059-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Mar 10 15:37:42 2000
+Return-Path: <zsh-workers-return-10059-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8483 invoked from network); 10 Mar 2000 15:37:40 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 10 Mar 2000 15:37:40 -0000
+Received: (qmail 28652 invoked by alias); 10 Mar 2000 15:37:35 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10059
+Received: (qmail 28638 invoked from network); 10 Mar 2000 15:37:34 -0000
+Date: Fri, 10 Mar 2000 16:33:53 +0100 (MET)
+Message-Id: <200003101533.QAA08405@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: ksh (with PATCH)
+
+
+There is a whole lot of fun waiting for us... the source distribution
+of ksh93 contains a directory with tests. Sigh.
+
+
+Things I hope to have fixed with the patch below:
+
+- typeset -Ai foo reported an error message because bin_typeset() wasn't 
+  checking for combinations of PM_HASHED with PM_INTEGER or PM_?FLOAT.
+  The order in which the tests are done in bin_typeset() means that
+  the float/integer options override the -[aA]. Is that really a good
+  idea? Even without looking at compatibility to ksh this seems wrong.
+  In ksh typeset -Ai works, I think we should create an assoc in this
+  case (unless someone wants to write all the code needed to get real
+  assocs-of-ints in zsh).
+- Here-docs. Two things:
+  - Something like:
+      foo << \! | cat
+      baz
+      !
+    failed utterly (the important bit is the `| cat'). That's because
+    I forgot to update the pointers in the herdocs structs when
+    inserting or deleting wordcodes.
+  - zsh converts here-docs to here-strings during parsing, but the
+    text (job-text, $functions, etc.) created for it didn't quote the
+    here-string. I've made this put such strings always in single
+    quotes, lokks better, I think. I don't plan to even attempt to
+    change it so that here-docs are kept in parsed code.
+- Two problems with `|&':
+  - The pipe-code was put in the wrong place.
+  - SEPERs weren't skipped.
+
+
+Things that should be fixed some day:
+
+- test -d .  -a '(' ! -f . ')' isn't parsed correctly.
+- [[ $(print -r - "$(print -r - 'abc*|" \')") !=  'abc*|" \' ]] isn't
+  parsed correctly either.
+
+
+Of course, there are also many other things that failed, including:
+
+- The ${foo:x:y} subscript syntax.
+- $_ and $LINENO seem to be writable in ksh.
+- [[ string ]] seems to be allowed...
+- ksh has some mathematical functions built-in, things we have in the
+  mathfunc module.
+
+These may be changed, someway, I think.
+
+
+One last remark: ksh seems to have some kind of structs (?):
+
+    point=(
+	float x
+	float y
+    )
+    (( point.x = cos(pi/6), point.y = sin(pi/6) ))
+
+Or is it part of the name-space stuff? (Haven't read the manual yet.)
+Anyway: Whew!
+
+
+Ok, here is the patch... some SEGVs less.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Src/builtin.c Src/builtin.c
+--- ../z.old/Src/builtin.c	Fri Mar 10 13:57:27 2000
++++ Src/builtin.c	Fri Mar 10 14:38:28 2000
+@@ -1816,17 +1816,17 @@
+ 
+     /* Sanity checks on the options.  Remove conficting options. */
+     if (on & PM_FFLOAT) {
+-	off |= PM_RIGHT_B | PM_LEFT | PM_RIGHT_Z | PM_UPPER | PM_ARRAY
+-	    | PM_INTEGER | PM_EFLOAT;
++	off |= PM_RIGHT_B | PM_LEFT | PM_RIGHT_Z | PM_UPPER | PM_ARRAY |
++	    PM_HASHED | PM_INTEGER | PM_EFLOAT;
+ 	/* Allow `float -F' to work even though float sets -E by default */
+ 	on &= ~PM_EFLOAT;
+     }
+     if (on & PM_EFLOAT)
+-	off |= PM_RIGHT_B | PM_LEFT | PM_RIGHT_Z | PM_UPPER | PM_ARRAY
+-	    | PM_INTEGER | PM_FFLOAT;
++	off |= PM_RIGHT_B | PM_LEFT | PM_RIGHT_Z | PM_UPPER | PM_ARRAY |
++	    PM_HASHED | PM_INTEGER | PM_FFLOAT;
+     if (on & PM_INTEGER)
+ 	off |= PM_RIGHT_B | PM_LEFT | PM_RIGHT_Z | PM_UPPER | PM_ARRAY |
+-	    PM_EFLOAT | PM_FFLOAT;
++	    PM_HASHED | PM_EFLOAT | PM_FFLOAT;
+     if (on & PM_LEFT)
+ 	off |= PM_RIGHT_B | PM_INTEGER | PM_EFLOAT | PM_FFLOAT;
+     if (on & PM_RIGHT_B)
+diff -ru ../z.old/Src/lex.c Src/lex.c
+--- ../z.old/Src/lex.c	Fri Mar 10 13:57:28 2000
++++ Src/lex.c	Fri Mar 10 15:20:49 2000
+@@ -339,10 +339,9 @@
+ 	    char *name;
+ 
+ 	    hwbegin(0);
+-	    cmdpush(WC_REDIR_TYPE(*(hdocs->pc)) == HEREDOC ?
+-		    CS_HEREDOC : CS_HEREDOCD);
++	    cmdpush(hdocs->type == HEREDOC ? CS_HEREDOC : CS_HEREDOCD);
+ 	    STOPHIST
+-	    name = gethere(hdocs->str, WC_REDIR_TYPE(*hdocs->pc));
++	    name = gethere(hdocs->str, hdocs->type);
+ 	    ALLOWHIST
+ 	    cmdpop();
+ 	    hwend();
+diff -ru ../z.old/Src/parse.c Src/parse.c
+--- ../z.old/Src/parse.c	Fri Mar 10 13:57:29 2000
++++ Src/parse.c	Fri Mar 10 16:22:00 2000
+@@ -233,6 +233,18 @@
+ /**/
+ int ecsoffs, ecssub, ecnfunc;
+ 
++/* Adjust pointers in here-doc structs. */
++
++static void
++ecadjusthere(int p, int d)
++{
++    struct heredocs *h;
++
++    for (h = hdocs; h; h = h->next)
++	if (h->pc >= p)
++	    h->pc += d;
++}
++
+ /* Insert n free code-slots at position p. */
+ 
+ static void
+@@ -250,6 +262,7 @@
+     if ((m = ecused - p) > 0)
+ 	memmove(ecbuf + p + n, ecbuf + p, m * sizeof(wordcode));
+     ecused += n;
++    ecadjusthere(p, n);
+ }
+ 
+ /* Add one wordcode. */
+@@ -278,6 +291,7 @@
+     if (n > 0)
+ 	memmove(ecbuf + p, ecbuf + p + 1, n * sizeof(wordcode));
+     ecused--;
++    ecadjusthere(p, -1);
+ }
+ 
+ /* Build the wordcode for a string. */
+@@ -682,7 +696,6 @@
+ 	for (r = p + 1; wc_code(ecbuf[r]) == WC_REDIR; r += 3);
+ 
+ 	ecispace(r, 3);
+-	p += 3;
+ 	ecbuf[r] = WCB_REDIR(MERGEOUT);
+ 	ecbuf[r + 1] = 2;
+ 	ecbuf[r + 2] = ecstrcode("1");
+@@ -690,6 +703,8 @@
+ 	*complex = 1;
+ 	cmdpush(CS_ERRPIPE);
+ 	yylex();
++	while (tok == SEPER)
++	    yylex();
+ 	ecbuf[p] = WCB_PIPE(WC_PIPE_MID, (line >= 0 ? line + 1 : 0));
+ 	ecispace(p + 1, 1);
+ 	ecbuf[p + 1] = ecused - 1 - p;
+@@ -1577,12 +1592,6 @@
+ 	/* <<[-] name */
+ 	struct heredocs **hd;
+ 
+-	for (hd = &hdocs; *hd; hd = &(*hd)->next);
+-	*hd = zalloc(sizeof(struct heredocs));
+-	(*hd)->next = NULL;
+-	(*hd)->pc = ecbuf + r;
+-	(*hd)->str = tokstr;
+-
+ 	/* If we ever need more than three codes (or less), we have to change
+ 	 * the factors in par_cmd() and par_simple(), too. */
+ 	ecispace(r, 3);
+@@ -1590,6 +1599,13 @@
+ 	ecbuf[r] = WCB_REDIR(type);
+ 	ecbuf[r + 1] = fd1;
+ 
++	for (hd = &hdocs; *hd; hd = &(*hd)->next);
++	*hd = zalloc(sizeof(struct heredocs));
++	(*hd)->next = NULL;
++	(*hd)->type = type;
++	(*hd)->pc = r;
++	(*hd)->str = tokstr;
++
+ 	yylex();
+ 	return;
+     }
+@@ -1626,10 +1642,10 @@
+ 
+ /**/
+ void
+-setheredoc(Wordcode pc, int type, char *str)
++setheredoc(int pc, int type, char *str)
+ {
+-    pc[0] = WCB_REDIR(type);
+-    pc[2] = ecstrcode(str);
++    ecbuf[pc] = WCB_REDIR(type);
++    ecbuf[pc + 2] = ecstrcode(str);
+ }
+ 
+ /*
+diff -ru ../z.old/Src/text.c Src/text.c
+--- ../z.old/Src/text.c	Fri Mar 10 13:57:31 2000
++++ Src/text.c	Fri Mar 10 15:37:03 2000
+@@ -737,7 +737,12 @@
+ 		taddchr('0' + f->fd1);
+ 	    taddstr(fstr[f->type]);
+ 	    taddchr(' ');
+-	    taddstr(f->name);
++	    if (f->type == HERESTR) {
++		taddchr('\'');
++		taddstr(bslashquote(f->name, NULL, 1));
++		taddchr('\'');
++	    } else
++		taddstr(f->name);
+ 	    taddchr(' ');
+ 	    break;
+ #ifdef DEBUG
+diff -ru ../z.old/Src/zsh.h Src/zsh.h
+--- ../z.old/Src/zsh.h	Fri Mar 10 13:57:31 2000
++++ Src/zsh.h	Fri Mar 10 15:20:17 2000
+@@ -737,7 +737,8 @@
+ 
+ struct heredocs {
+     struct heredocs *next;
+-    Wordcode pc;
++    int type;
++    int pc;
+     char *str;
+ };
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,116 @@
+From zsh-workers-return-16624-mason-zsh=primenet.com.au@sunsite.dk Wed Feb 13 18:36:35 2002
+Return-Path: <zsh-workers-return-16624-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 4498 invoked from network); 13 Feb 2002 18:36:34 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 13 Feb 2002 18:36:34 -0000
+Received: (qmail 3061 invoked by alias); 13 Feb 2002 18:36:29 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16624
+Received: (qmail 3049 invoked from network); 13 Feb 2002 18:36:28 -0000
+Date: Wed, 13 Feb 2002 10:36:00 -0800 (PST)
+From: Wayne Davison <wayned@users.sourceforge.net>
+X-X-Sender:  <wayne@phong.blorf.net>
+To: Bart Schaefer <schaefer@brasslantern.com>
+Cc: Zsh Workers <zsh-workers@sunsite.dk>
+Subject: Re: Improving resizehistents()
+In-Reply-To: <1020213171403.ZM21018@candle.brasslantern.com>
+Message-ID: <Pine.LNX.4.33L2.0202131020580.20999-100000@phong.blorf.net>
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; charset=US-ASCII
+
+On Wed, 13 Feb 2002, Bart Schaefer wrote:
+> My intuition is that you've made the right choice, but I know there are
+> some people out there using HISTSIZE into the many thousands.  How big
+> can the history get before this creates a noticeable delay?
+
+I tried the following test with $n set to 10000, 20000, and 100000:
+
+    setopt histexpiredupsfirst
+    HISTSIZE=$n
+    SAVEHIST=$n
+    fc -R unique$n
+    date ; HISTSIZE=1 ; date
+
+(Of course, the file unique10000 had 10000 unique commands in it, etc.)
+
+The results for the current code on my PII 433 are:
+
+ 10000:  4 secs
+ 20000: 31 secs
+100000: [killed zsh after over 7 minutes of 98% cpu usage]
+
+I then tested a function that I wrote that allows restarting the scan:
+
+ 10000: 0 secs
+ 20000: 0 secs
+100000: 0 secs
+
+I've appended a diff between my first patch and the new code.  It's a
+bit more complex, but not too bad.  I think I'll commit it after a
+little more testing.  Feel free to let me know what you think.
+
+..wayne..
+
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/hist.c
+--- Src/hist.c	13 Feb 2002 18:13:14 -0000	1.38
++++ Src/hist.c	13 Feb 2002 18:27:48 -0000
+@@ -914,17 +914,23 @@
+ }
+
+ static void
+-putoldhistentryontop(void)
++putoldhistentryontop(short keep_going)
+ {
+-    Histent he = hist_ring->down;
++    static Histent next = NULL;
++    Histent he = keep_going? next : hist_ring->down;
+     if (isset(HISTEXPIREDUPSFIRST) && !(he->flags & HIST_DUP)) {
+-	int max_unique_ct = getiparam("SAVEHIST");
++	static int max_unique_ct = 0;
++	if (!keep_going)
++	    max_unique_ct = getiparam("SAVEHIST");
++	next = he->down;
+ 	do {
+ 	    if (max_unique_ct-- <= 0) {
++		max_unique_ct = 1; /* On next keep_going, scan 1 more entry */
+ 		he = hist_ring->down;
+ 		break;
+ 	    }
+-	    he = he->down;
++	    he = next;
++	    next = he->down;
+ 	} while (he != hist_ring->down && !(he->flags & HIST_DUP));
+ 	if (he != hist_ring->down) {
+ 	    he->up->down = he->down;
+@@ -963,7 +969,7 @@
+ 	histlinect++;
+     }
+     else {
+-	putoldhistentryontop();
++	putoldhistentryontop(0);
+ 	freehistdata(hist_ring, 0);
+     }
+     hist_ring->histnum = ++curhist;
+@@ -1762,9 +1768,13 @@
+ void
+ resizehistents(void)
+ {
+-    while (histlinect > histsiz) {
+-	putoldhistentryontop();
++    if (histlinect > histsiz) {
++	putoldhistentryontop(0);
+ 	freehistnode((HashNode)hist_ring);
++	while (histlinect > histsiz) {
++	    putoldhistentryontop(1);
++	    freehistnode((HashNode)hist_ring);
++	}
+     }
+ }
+
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+

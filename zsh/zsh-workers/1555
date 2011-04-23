@@ -1,0 +1,526 @@
+From hzoli@cs.elte.hu Mon Jul  8 10:59:46 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3/2) with ESMTP id KAA09143 for <mason@werple.mira.net.au>; Mon, 8 Jul 1996 10:59:42 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id UAA29285; Sun, 7 Jul 1996 20:48:50 -0400 (EDT)
+Resent-Date: Sun, 7 Jul 1996 20:48:50 -0400 (EDT)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199607080048.CAA05629@hzoli.ppp.cs.elte.hu>
+Subject: Re: Remaining zsh3.0-pre2 bugs
+To: huyle@chop.ugcs.caltech.edu (Huy Le)
+Date: Mon, 8 Jul 1996 02:48:18 +0200 (MET DST)
+Cc: zsh-workers@math.gatech.edu
+In-Reply-To: <199607062259.PAA11588@envy.ugcs.caltech.edu> from Huy Le at "Jul 6, 96 03:59:25 pm"
+X-Mailer: ELM [version 2.4ME+ PL17 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"4lkCV3.0.V97.nh5un"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1555
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 11646
+Status: OR
+
+> 1. History bug:
+> The magic-space binding seems to mess up the history of
+> a line with a quoted argument that spawns two lines.
+> Note that in the following examples the number of spaces
+> and the placement of the single-quote matter.
+[...]
+> pride% exec ./zsh -f
+> pride% bindkey ' ' magic-space
+> pride% echo 'a
+> > b c'
+> a
+> b c
+> pride% history
+>     1  bindkey ' ' magic-space
+>     2  history
+
+And an other bug is that here documents do not appear in the history.
+That's in fact a much more difficult bug.  The bug described above can be
+fixed just by adding hwgetword to the list of saved variables in lexsave.
+
+The patch below should fix both problems.  After this patch
+
+% cat << EOF ; echo 'foo
+bar'
+foobar
+EOF
+
+gives
+
+foobar
+foo
+bar
+
+which is the way other shells behave.  There is an other change in this
+patch to make par_redir even more simple.  History expansion is not
+disables in the name of here document (but it is still disabled in here
+documents of course).  So
+
+% cat << !$
+foo
+!$
+
+will no longer work if history expansion is enabled.  Note that this change
+only affect interactive shell where here documents are rarely used and even
+if one uses a here document it is very unlikely that she puts a bangchar in
+the end-mark.
+
+The patch is quite big so please test it extensively as there may be some
+cases when it does not behave the way it should.
+
+Zoltan
+
+
+*** Src/globals.h	1996/07/01 20:59:36	2.23
+--- Src/globals.h	1996/07/01 20:59:36
+***************
+*** 107,112 ****
+--- 107,114 ----
+  /* lexical analyzer error flag */
+   
+  EXTERN int lexstop;
++ 
++ EXTERN struct heredocs *hdocs;
+   
+  /* suppress error messages */
+   
+*** Src/zsh.h	1996/07/05 20:50:29	2.27
+--- Src/zsh.h	1996/07/05 20:50:29
+***************
+*** 601,606 ****
+--- 601,610 ----
+      int cmdoutval;
+  };
+  
++ struct heredocs {
++     struct heredocs *next;
++     Redir rd;
++ };
+  
+  /*******************************/
+  /* Definitions for Hash Tables */
+*** Src/parse.c	1996/07/01 20:59:36	2.15
+--- Src/parse.c	1996/07/08 00:19:37
+***************
+*** 1118,1127 ****
+  void
+  par_redir(LinkList l)
+  {
+-     char *toks;
+      struct redir *fn = (struct redir *)allocnode(N_REDIR);
+      int oldcmdpos, oldnc;
+-     int nohist;
+  
+      oldcmdpos = incmdpos;
+      incmdpos = 0;
+--- 1118,1125 ----
+***************
+*** 1130,1210 ****
+  	nocorrect = 1;
+      fn->type = redirtab[tok - OUTANG];
+      fn->fd1 = tokfd;
+-     if ((nohist = fn->type == HEREDOC || fn->type == HEREDOCDASH))
+- 	STOPHIST
+      yylex();
+-     if (nohist)
+- 	ALLOWHIST
+      if (tok != STRING && tok != ENVSTRING)
+  	YYERRORV;
+-     toks = tokstr;
+      incmdpos = oldcmdpos;
+      nocorrect = oldnc;
+-     yylex();
+- 
+- /* assign default fd */
+  
+      if (fn->fd1 == -1)
+  	fn->fd1 = IS_READFD(fn->type) ? 0 : 1;
+  
+!     fn->name = toks;
+  
+      switch (fn->type) {
+      case HEREDOC:
+      case HEREDOCDASH: {
+  	/* <<[-] name */
+! 	char tbuf[256], *tlin = NULL;
+! 	int tsiz = 0, redirl;
+  
+! 	/* Save the rest of the current line for later tokenization */
+! 	if (!isnewlin) {
+! 	    while (ingets(tbuf, 256) != NULL) {
+! 		redirl = strlen(tbuf);
+! 		if (tsiz == 0) {
+! 		    tlin = ztrdup(tbuf);	/* Test for failure? */
+! 		    tsiz = redirl;
+! 		} else {
+! 		    tlin = realloc(tlin, tsiz + redirl + 1);	/* Test for failure? */
+! 		    strcpy(&tlin[tsiz], tbuf);
+! 		    tsiz += redirl;
+! 		}
+! 		if (tbuf[redirl - 1] == '\n')
+! 		    break;
+! 	    }
+! 	}
+! 	cmdpush(fn->type == HEREDOC ? CS_HEREDOC : CS_HEREDOCD);
+! 	/* Now grab the document */
+! 	fn->name = gethere(toks, fn->type);
+! 	fn->type = HERESTR;
+! 	cmdpop();
+! 	/* Put back the saved line to resume tokenizing */
+! 	if (tsiz > 0) {
+! 	    inputsetline(tlin, INP_FREE);
+! 	}
+  	break;
+      }
+- 
+      case WRITE:
+      case WRITENOW:
+! 	if (toks[0] == Outang && toks[1] == Inpar)
+  	    /* > >(...) */
+  	    fn->type = OUTPIPE;
+! 	else if (toks[0] == Inang && toks[1] == Inpar)
+  	    YYERRORV;
+  	break;
+- 
+      case READ:
+! 	if (toks[0] == Inang && toks[1] == Inpar)
+  	    /* < <(...) */
+  	    fn->type = INPIPE;
+! 	else if (toks[0] == Outang && toks[1] == Inpar)
+  	    YYERRORV;
+  	break;
+      case READWRITE:
+! 	if ((toks[0] == Inang || toks[0] == Outang) && toks[1] == Inpar)
+! 	    fn->type = toks[0] == Inang ? INPIPE : OUTPIPE;
+  	break;
+      }
+      addlinknode(l, fn);
+  }
+  
+--- 1128,1178 ----
+  	nocorrect = 1;
+      fn->type = redirtab[tok - OUTANG];
+      fn->fd1 = tokfd;
+      yylex();
+      if (tok != STRING && tok != ENVSTRING)
+  	YYERRORV;
+      incmdpos = oldcmdpos;
+      nocorrect = oldnc;
+  
++     /* assign default fd */
+      if (fn->fd1 == -1)
+  	fn->fd1 = IS_READFD(fn->type) ? 0 : 1;
+  
+!     fn->name = tokstr;
+  
+      switch (fn->type) {
+      case HEREDOC:
+      case HEREDOCDASH: {
+  	/* <<[-] name */
+! 	struct heredocs **hd;
+  
+! 	for (hd = &hdocs; *hd; hd = &(*hd)->next);
+! 	*hd = zalloc(sizeof(struct heredocs));
+! 	(*hd)->next = NULL;
+! 	(*hd)->rd = fn;
+  	break;
+      }
+      case WRITE:
+      case WRITENOW:
+! 	if (tokstr[0] == Outang && tokstr[1] == Inpar)
+  	    /* > >(...) */
+  	    fn->type = OUTPIPE;
+! 	else if (tokstr[0] == Inang && tokstr[1] == Inpar)
+  	    YYERRORV;
+  	break;
+      case READ:
+! 	if (tokstr[0] == Inang && tokstr[1] == Inpar)
+  	    /* < <(...) */
+  	    fn->type = INPIPE;
+! 	else if (tokstr[0] == Outang && tokstr[1] == Inpar)
+  	    YYERRORV;
+  	break;
+      case READWRITE:
+! 	if ((tokstr[0] == Inang || tokstr[0] == Outang) && tokstr[1] == Inpar)
+! 	    fn->type = tokstr[0] == Inang ? INPIPE : OUTPIPE;
+  	break;
+      }
++     yylex();
+      addlinknode(l, fn);
+  }
+  
+*** Src/init.c	1996/07/07 16:03:48	2.24
+--- Src/init.c	1996/07/08 00:06:51
+***************
+*** 737,744 ****
+  {
+      if (cmd) {
+  	if (SHIN >= 10)
+! 	    zclose(SHIN);
+  	SHIN = movefd(open("/dev/null", O_RDONLY));
+  	execstring(cmd, 0, 1);
+  	stopmsg = 1;
+  	zexit(lastval, 0);
+--- 737,745 ----
+  {
+      if (cmd) {
+  	if (SHIN >= 10)
+! 	    fclose(bshin);
+  	SHIN = movefd(open("/dev/null", O_RDONLY));
++ 	bshin = fdopen(SHIN, "r");
+  	execstring(cmd, 0, 1);
+  	stopmsg = 1;
+  	zexit(lastval, 0);
+*** Src/input.c	1996/06/28 02:05:24	2.7
+--- Src/input.c	1996/07/07 23:05:35
+***************
+*** 303,324 ****
+      return 0;
+  }
+  
+- /* Read one line of at most n-1 chars from the input queue */
+- 
+- /**/
+- char *
+- ingets(char *buf, int n)
+- {
+-     int l;
+- 
+-     for (l = 0; l < n - 1 && (buf[l++] = ingetc()) != '\n' && !lexstop;);
+-     if (lexstop)
+- 	l--;
+-     buf[l] = '\0';
+- 
+-     return (!lexstop || l) ? buf : NULL;
+- }
+- 
+  /*
+   * Put a string in the input queue:
+   * inbuf is only freeable if the flags include INP_FREE.
+--- 303,308 ----
+*** Src/lex.c	1996/07/07 00:18:17	2.31
+--- Src/lex.c	1996/07/07 23:36:51
+***************
+*** 36,41 ****
+--- 36,42 ----
+  static int dbparens;
+  int len = 0, bsiz = 256;
+  char *bptr;
++ extern int hwgetword;
+  
+  struct lexstack {
+      struct lexstack *next;
+***************
+*** 55,66 ****
+--- 56,70 ----
+      char *hline;
+      char *hptr;
+      int tok;
++     int isnewlin;
+      char *tokstr;
+      char *bptr;
+      int bsiz;
+      short *chwords;
+      int chwordlen;
+      int chwordpos;
++     int hwgetword;
++     struct heredocs *hdocs;
+  
+      unsigned char *cstack;
+      int csp;
+***************
+*** 103,116 ****
+--- 107,124 ----
+      ls->csp = cmdsp;
+      cmdstack = (unsigned char *)zalloc(256);
+      ls->tok = tok;
++     ls->isnewlin = isnewlin;
+      ls->tokstr = tokstr;
+      ls->bptr = bptr;
+      ls->bsiz = bsiz;
+      ls->chwords = chwords;
+      ls->chwordlen = chwordlen;
+      ls->chwordpos = chwordpos;
++     ls->hwgetword = hwgetword;
++     ls->hdocs = hdocs;
+      cmdsp = 0;
+      inredir = 0;
++     hdocs = NULL;
+  
+      ls->next = lstack;
+      lstack = ls;
+***************
+*** 146,157 ****
+--- 154,168 ----
+      cmdstack = lstack->cstack;
+      cmdsp = lstack->csp;
+      tok = lstack->tok;
++     isnewlin = lstack->isnewlin;
+      tokstr = lstack->tokstr;
+      bptr = lstack->bptr;
+      bsiz = lstack->bsiz;
+      chwords = lstack->chwords;
+      chwordlen = lstack->chwordlen;
+      chwordpos = lstack->chwordpos;
++     hwgetword = lstack->hwgetword;
++     hdocs = lstack->hdocs;
+      clearalstack();
+      hlinesz = lstack->hlinesz;
+      lexstop = errflag = 0;
+***************
+*** 170,175 ****
+--- 181,202 ----
+      do
+  	tok = gettok();
+      while (tok != ENDINPUT && exalias());
++     if (tok == NEWLIN || tok == ENDINPUT) {
++ 	while (hdocs) {
++ 	    struct heredocs *next = hdocs->next;
++ 
++ 	    hwbegin(0);
++ 	    cmdpush(hdocs->rd->type == HEREDOC ? CS_HEREDOC : CS_HEREDOCD);
++ 	    STOPHIST
++ 	    hdocs->rd->name = gethere(hdocs->rd->name, hdocs->rd->type);
++ 	    ALLOWHIST
++ 	    cmdpop();
++ 	    hwend();
++ 	    hdocs->rd->type = HERESTR;
++ 	    zfree(hdocs, sizeof(struct heredocs));
++ 	    hdocs = next;
++ 	}
++     }
+      if (tok != NEWLIN)
+  	isnewlin = 0;
+      else
+*** Src/hist.c	1996/07/04 19:40:08	2.16
+--- Src/hist.c	1996/07/07 19:41:00
+***************
+*** 144,149 ****
+--- 144,165 ----
+      return c;
+  }
+  
++ /* Read one line of at most n-1 chars from the input */
++ 
++ /**/
++ char *
++ hgets(char *buf, int n)
++ {
++     int l;
++ 
++     for (l = 0; l < n - 1 && (buf[l++] = hgetc()) != '\n' && !lexstop;);
++     if (lexstop)
++ 	l--;
++     buf[l] = '\0';
++ 
++     return (!lexstop || l) ? buf : NULL;
++ }
++ 
+  /**/
+  void
+  safeinungetc(int c)
+***************
+*** 725,731 ****
+  }
+  
+  /* Gives current expansion word if not last word before chwordpos. */
+! static int hwgetword = -1;
+  
+  /* begin a word */
+  
+--- 741,747 ----
+  }
+  
+  /* Gives current expansion word if not last word before chwordpos. */
+! int hwgetword = -1;
+  
+  /* begin a word */
+  
+***************
+*** 794,809 ****
+  {
+      int pos = hwgetword > -1 ? hwgetword : chwordpos - 2;
+  
+! #if 0
+      /* debugging only */
+      if (hwgetword == -1 && !chwordpos) {
+  	/* no words available */
+! 	zerr("hwget called with no words.", NULL, 0);
+  	*startptr = "";
+  	return;
+      } 
+      else if (hwgetword == -1 && chwordpos%2) {
+! 	zerr("hwget called in middle of word.", NULL, 0);
+  	*startptr = "";
+  	return;
+      }
+--- 810,825 ----
+  {
+      int pos = hwgetword > -1 ? hwgetword : chwordpos - 2;
+  
+! #ifdef DEBUG
+      /* debugging only */
+      if (hwgetword == -1 && !chwordpos) {
+  	/* no words available */
+! 	DPUTS(1, "hwget called with no words.");
+  	*startptr = "";
+  	return;
+      } 
+      else if (hwgetword == -1 && chwordpos%2) {
+! 	DPUTS(1, "hwget called in middle of word.");
+  	*startptr = "";
+  	return;
+      }
+*** Src/exec.c	1996/07/04 19:40:08	2.53
+--- Src/exec.c	1996/07/08 00:10:03
+***************
+*** 1442,1447 ****
+--- 1442,1449 ----
+      /* Do io redirections */
+      while (nonempty(cmd->redir)) {
+  	fn = (Redir) ugetnode(cmd->redir);
++ 	DPUTS(fn->type == HEREDOC || fn->type == HEREDOCDASH,
++ 	      "BUG: unexpanded here document\n");
+  	if (fn->type == INPIPE) {
+  	    if (fn->fd2 == -1) {
+  		fixfds(save);
+***************
+*** 1852,1858 ****
+      for (;;) {
+  	char *u, *v;
+  
+! 	if (!ingets(pbuf, sizeof(pbuf)))
+  	    break;
+  	bptr = pbuf;
+  	if (!siz || t[siz-1] == '\n') {
+--- 1854,1860 ----
+      for (;;) {
+  	char *u, *v;
+  
+! 	if (!hgets(pbuf, sizeof(pbuf)))
+  	    break;
+  	bptr = pbuf;
+  	if (!siz || t[siz-1] == '\n') {
+***************
+*** 1862,1868 ****
+  	    for (u = bptr, v = str; *u != '\n' && *v; u++, v++)
+  		if (*u != *v)
+  		    break;
+! 	    if (*u == '\n' && !*v)
+  		break;
+  	}
+  	l = strlen(bptr);
+--- 1864,1870 ----
+  	    for (u = bptr, v = str; *u != '\n' && *v; u++, v++)
+  		if (*u != *v)
+  		    break;
+! 	    if ((!*u || *u == '\n') && !*v)
+  		break;
+  	}
+  	l = strlen(bptr);
+
+

@@ -1,0 +1,248 @@
+From zsh-workers-return-12516-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Aug 04 07:02:34 2000
+Return-Path: <zsh-workers-return-12516-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20035 invoked from network); 4 Aug 2000 07:02:32 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 4 Aug 2000 07:02:32 -0000
+Received: (qmail 23172 invoked by alias); 4 Aug 2000 07:02:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12516
+Received: (qmail 23153 invoked from network); 4 Aug 2000 07:02:25 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1000804070216.ZM23696@candle.brasslantern.com>
+Date: Fri, 4 Aug 2000 07:02:16 +0000
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: pathconf() again
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+There was a problem with the string passed to pathconf() from the files
+module:  It might contain metacharacters, and thus be an invalid path.
+
+Consequently, I rewrote the entire HAVE_PATHCONF patch from scratch, with
+the exception of the innocuous configure.in bit.
+
+This patch introduces a new function in compat.c, zpathmax(dir), which
+returns -1 if the dir is too long (or otherwise invalid), or returns the
+max path length otherwise.  It returns 0 (and sets errno = 0) if path
+lengths are unlimited (see the comment), but this isn't used yet.  I'm
+not sure the (strlen(dir) < pathmax) test can ever fail, but in case
+the limit is for some bizarre reason set to zero ...
+
+There's a macro version of zpathmax() in system.h for not-HAVE_PATHCONF.
+
+I'm not sure how pathconf() treats a path that's exactly PATH_MAX long,
+but I decided that since the argument is a directory name it's pretty
+silly to create one to which no '/' can be appended; hence zpathmax()
+gives ENAMETOOLONG in that case.
+
+I then tore out all the #ifdef HAVE_PATHCONF and put in zpathmax() calls.
+I'm tempted to add something to Etc/zsh-development-guide about isolating
+#ifdefs in this way whenever possible.
+
+I restrained myself (and was badly bruised in the process) from inserting
+spaces before the left-parens in all the if() for() while() statements in
+the files module.  I'm tempted to add something to zsh-development-guide
+about this, too, but at the moment it'd sound much too ascerbic.
+
+Random questions:  Can someone explain how one is supposed to determine a
+useful buffer size for e.g. readlink() if pathconf() returns `unlimited'?
+For that matter, how does one even know what directory name to pass into
+pathconf() in that case?
+
+Index: Src/compat.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/compat.c,v
+retrieving revision 1.2
+diff -u -r1.2 compat.c
+--- compat.c	1999/12/02 17:16:06	1.2
++++ compat.c	2000/08/04 06:53:48
+@@ -105,6 +105,43 @@
+ #endif
+ 
+ 
++#ifdef HAVE_PATHCONF
++
++/* The documentation for pathconf() says something like:             *
++ *     The limit is returned, if one exists.  If the system  does    *
++ *     not  have  a  limit  for  the  requested  resource,  -1 is    *
++ *     returned, and errno is unchanged.  If there is  an  error,    *
++ *     -1  is returned, and errno is set to reflect the nature of    *
++ *     the error.                                                    *
++ *                                                                   *
++ * This is less useful than may be, as one must reset errno to 0 (or *
++ * some other flag value) in order to determine that the resource is *
++ * unlimited.  What use is leaving errno unchanged?  Instead, define *
++ * a wrapper that resets errno to 0 and returns 0 for "the system    *
++ * does not have a limit."                                           *
++ *                                                                   *
++ * This is replaced by a macro from system.h if not HAVE_PATHCONF.   */
++
++/**/
++mod_export long
++zpathmax(char *dir)
++{
++    long pathmax;
++    errno = 0;
++    if ((pathmax = pathconf(dir, _PC_PATH_MAX)) >= 0) {
++	if (strlen(dir) < pathmax)
++	    return pathmax;
++	else
++	    errno = ENAMETOOLONG;
++    }
++    if (errno)
++	return -1;
++    else
++	return 0; /* pathmax should be considered unlimited */
++}
++#endif
++
++
+ /**/
+ mod_export char *
+ zgetdir(struct dirsav *d)
+Index: Src/system.h
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/system.h,v
+retrieving revision 1.7
+diff -u -r1.7 system.h
+--- system.h	2000/05/18 17:19:38	1.7
++++ system.h	2000/08/04 06:49:07
+@@ -194,8 +194,8 @@
+ # define VARARR(X,Y,Z)	X *(Y) = (X *) alloca(sizeof(X) * (Z))
+ #endif
+ 
+-/* we should be getting this value from pathconf(_PC_PATH_MAX) */
+-/* but this is too much trouble                                */
++/* we should handle unlimited sizes from pathconf(_PC_PATH_MAX) */
++/* but this is too much trouble                                 */
+ #ifndef PATH_MAX
+ # ifdef MAXPATHLEN
+ #  define PATH_MAX MAXPATHLEN
+@@ -203,6 +203,11 @@
+    /* so we will just pick something */
+ #  define PATH_MAX 1024
+ # endif
++#endif
++#ifndef HAVE_PATHCONF
++# define zpathmax(X) ((long)((strlen(X) >= PATH_MAX) ? \
++			     ((errno = ENAMETOOLONG), -1) : \
++			     ((errno = 0), PATH_MAX))
+ #endif
+ 
+ /* we should be getting this value from sysconf(_SC_OPEN_MAX) */
+Index: Src/Modules/files.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/Modules/files.c,v
+retrieving revision 1.9
+diff -u -r1.9 files.c
+--- files.c	2000/08/03 04:51:42	1.9
++++ files.c	2000/08/04 06:12:00
+@@ -71,9 +71,6 @@
+     mode_t oumask = umask(0);
+     mode_t mode = 0777 & ~oumask;
+     int err = 0;
+-#ifdef HAVE_PATHCONF
+-    int pathmax = 0;
+-#endif
+ 
+     umask(oumask);
+     if(ops['m']) {
+@@ -94,21 +91,11 @@
+ 
+ 	while(ptr > *args + (**args == '/') && *--ptr == '/')
+ 	    *ptr = 0;
+-#ifdef HAVE_PATHCONF
+-	errno = 0;
+-	if(((pathmax = pathconf(*args,_PC_PATH_MAX)) == -1) && errno) {
+-	  zwarnnam(nam, "%s: %e", *args, errno);
+-	  err = 1;
+-	  continue;
+-	}
+-	else if((ztrlen(*args) > pathmax - 1) && errno != -1) {
+-#else
+-	  if(ztrlen(*args) > PATH_MAX - 1) {
+-#endif
+-	    zwarnnam(nam, "%s: %e", *args, ENAMETOOLONG);
++	if(zpathmax(unmeta(*args)) < 0) {
++	    zwarnnam(nam, "%s: %e", *args, errno);
+ 	    err = 1;
+ 	    continue;
+-	  }
++	}
+ 	if(ops['p']) {
+ 	    char *ptr = *args;
+ 
+Index: Src/Modules/parameter.c
+===================================================================
+RCS file: /extra/cvsroot/zsh/zsh-3.1/Src/Modules/parameter.c,v
+retrieving revision 1.46
+diff -u -r1.46 parameter.c
+--- parameter.c	2000/08/03 14:49:44	1.46
++++ parameter.c	2000/08/04 06:03:22
+@@ -1397,20 +1397,9 @@
+ static void
+ setpmnameddir(Param pm, char *value)
+ {
+-#ifdef HAVE_PATHCONF
+-    int pathmax = 0;
+-
+     errno = 0;
+-    pathmax = pathconf(value, _PC_PATH_MAX);
+-    if ((pathmax == -1) && errno) {
+-      zwarn("%s: %e", value, errno);
+-    }
+-    else if (!value || *value != '/' || ((strlen(value) >= pathmax) &&
+-            pathmax != -1))
+-#else
+-    if (!value || *value != '/' || strlen(value) >= PATH_MAX)
+-#endif
+-	zwarn("invalid value: %s", value, 0);
++    if (!value || *value != '/' || zpathmax(value) < 0)
++	zwarn((errno ? "%s: %e" : "invalid value: %s"), value, errno);
+     else
+ 	adduserdir(pm->nam, value, 0, 1);
+     zsfree(value);
+@@ -1432,9 +1421,6 @@
+ {
+     int i;
+     HashNode hn, next, hd;
+-#ifdef HAVE_PATHCONF
+-    int pathmax = 0;
+-#endif
+ 
+     if (!ht)
+ 	return;
+@@ -1457,19 +1443,9 @@
+ 	    v.arr = NULL;
+ 	    v.pm = (Param) hn;
+ 
+-#ifdef HAVE_PATHCONF
+ 	    errno = 0;
+-            if((((pathmax = pathconf(val, _PC_PATH_MAX)) == -1)) && errno)
+-                zwarn("%s: %e", val, errno);
+-            else
+-#endif
+-	    if (!(val = getstrvalue(&v)) || *val != '/' ||
+-#ifdef HAVE_PATHCONF
+-                ((strlen(val) >= pathmax)) && pathmax != -1)
+-#else
+-		strlen(val) >= PATH_MAX)
+-#endif
+-		zwarn("invalid value: %s", val, 0);
++	    if (!(val = getstrvalue(&v)) || *val != '/' || zpathmax(val) < 0)
++		zwarn((errno ? "%s: %e" : "invalid value: %s"), val, errno);
+ 	    else
+ 		adduserdir(hn->nam, val, 0, 1);
+ 	}
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,196 @@
+From zsh-workers-return-10608-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Apr 10 07:59:35 2000
+Return-Path: <zsh-workers-return-10608-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 25378 invoked from network); 10 Apr 2000 07:59:30 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 10 Apr 2000 07:59:30 -0000
+Received: (qmail 5679 invoked by alias); 10 Apr 2000 07:59:12 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 10608
+Received: (qmail 5601 invoked from network); 10 Apr 2000 07:59:01 -0000
+Date: Mon, 10 Apr 2000 09:58:54 +0200 (MET DST)
+Message-Id: <200004100758.JAA31384@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Andrej Borsenkow"'s message of Tue, 4 Apr 2000 13:29:11 +0400
+Subject: Re: copy-prev-word question RE: Bug report interface comments
+
+
+Andrej Borsenkow wrote:
+
+> > Erm... could we, until we have some automatic forwarding from the bug
+> > manager to zsh-workers, agree that full bug descriptions be sent to
+> > zsh-workers, too?
+> 
+> bor@itsrm2% mv BI<TAB>
+> bor@itsrm2% mv BIC\ NMI.rm2/
+> bor@itsrm2% mv BIC\ NMI.rm2 <ESC-^_>
+> bor@itsrm2% mv BIC\ NMI.rm2 NMI.rm2
+> 
+> I'd expect it to respect shell quouting ... note, that insert-last-word
+> does that:
+> 
+> ...
+
+The patch could be something like the one below. I haven't committed
+it because it would change the behaviour it always had and I don't
+know if it counts as a bug fix.
+
+The core is the new function bufferwords() in hist.c which returns a
+list containing the words from the current line. The patch makes that
+also be used for the $historywords parameter.
+
+And the maual was wrong, wasn't it?
+
+Bye
+ Sven
+
+diff -u -r ../oz/Doc/Zsh/zle.yo ./Doc/Zsh/zle.yo
+--- ../oz/Doc/Zsh/zle.yo	Fri Apr  7 20:06:26 2000
++++ ./Doc/Zsh/zle.yo	Fri Apr  7 21:31:46 2000
+@@ -637,7 +637,7 @@
+ )
+ tindex(copy-prev-word)
+ item(tt(copy-prev-word) (ESC-^_) (unbound) (unbound))(
+-Duplicate the word behind the cursor.
++Duplicate the word before the cursor.
+ )
+ tindex(vi-delete)
+ item(tt(vi-delete) (unbound) (d) (unbound))(
+diff -u -r ../oz/Src/Modules/parameter.c ./Src/Modules/parameter.c
+--- ../oz/Src/Modules/parameter.c	Fri Apr  7 20:06:31 2000
++++ ./Src/Modules/parameter.c	Fri Apr  7 21:27:16 2000
+@@ -1081,10 +1081,14 @@
+ histwgetfn(Param pm)
+ {
+     char **ret, **p, *h, *e, sav;
+-    LinkList l = newlinklist();
++    LinkList l = newlinklist(), ll;
+     LinkNode n;
+     int i = addhistnum(curhist, -1, HIST_FOREIGN), iw;
+     Histent he = quietgethistent(i, GETHIST_UPWARD);
++
++    ll = bufferwords(NULL);
++    for (n = firstnode(ll); n; incnode(n))
++	pushnode(l, getdata(n));
+ 
+     while (he) {
+ 	for (iw = he->nwords - 1; iw >= 0; iw--) {
+diff -u -r ../oz/Src/Zle/zle_misc.c ./Src/Zle/zle_misc.c
+--- ../oz/Src/Zle/zle_misc.c	Fri Apr  7 20:06:30 2000
++++ ./Src/Zle/zle_misc.c	Fri Apr  7 21:11:44 2000
+@@ -523,20 +523,25 @@
+ int
+ copyprevword(char **args)
+ {
+-    int len, t0;
++    LinkList l;
++    LinkNode n;
++    int i;
++    char *p = NULL;
+ 
+-    for (t0 = cs - 1; t0 >= 0; t0--)
+-	if (iword(line[t0]))
+-	    break;
+-    for (; t0 >= 0; t0--)
+-	if (!iword(line[t0]))
++    l = bufferwords(&i);
++
++    for (n = firstnode(l); n; incnode(n))
++	if (!i--) {
++	    p = getdata(n);
+ 	    break;
+-    if (t0)
+-	t0++;
+-    len = cs - t0;
+-    spaceinline(len);
+-    memcpy((char *)&line[cs], (char *)&line[t0], len);
+-    cs += len;
++	}
++    if (p) {
++	int len = strlen(p);
++
++	spaceinline(len);
++	memcpy(line + cs, p, len);
++	cs += len;
++    }
+     return 0;
+ }
+ 
+diff -u -r ../oz/Src/hist.c ./Src/hist.c
+--- ../oz/Src/hist.c	Fri Apr  7 20:06:27 2000
++++ ./Src/hist.c	Fri Apr  7 21:14:42 2000
+@@ -2032,3 +2032,66 @@
+ 	free(lockfile);
+     }
+ }
++
++/* Get the words in the current buffer. Using the lexer. */
++
++/**/
++mod_export LinkList
++bufferwords(int *index)
++{
++    LinkList list = newlinklist();
++    int num = 0, cur = -1, got = 0, ne = noerrs, ocs = cs;
++    char *p;
++
++    zleparse = 1;
++    addedx = 0;
++    noerrs = 1;
++    lexsave();
++    if (!isfirstln && chline) {
++	p = (char *) zhalloc(hptr - chline + ll + 2);
++	memcpy(p, chline, hptr - chline);
++	memcpy(p + (hptr - chline), line, ll);
++	p[(hptr - chline) + ll] = ' ';
++	p[(hptr - chline) + ll + 1] = '\0';
++	inpush(p, 0, NULL);
++	cs += hptr - chline;
++    } else {
++	p = (char *) zhalloc(ll + 2);
++	memcpy(p, line, ll);
++	p[ll] = ' ';
++	p[ll + 1] = '\0';
++	inpush(p, 0, NULL);
++    }
++    if (cs)
++	cs--;
++    strinbeg(0);
++    noaliases = 1;
++    do {
++	ctxtlex();
++	if (tok == ENDINPUT || tok == LEXERR)
++	    break;
++	if (tokstr && *tokstr) {
++	    untokenize((p = dupstring(tokstr)));
++	    addlinknode(list, p);
++	    num++;
++	}
++	if (!got && !zleparse) {
++	    got = 1;
++	    cur = num - 1;
++	}
++    } while (tok != ENDINPUT && tok != LEXERR);
++    if (cur < 0 && num)
++	cur = num - 1;
++    noaliases = 0;
++    strinend();
++    inpop();
++    errflag = zleparse = 0;
++    noerrs = ne;
++    lexrestore();
++    cs = ocs;
++
++    if (index)
++	*index = cur;
++
++    return list;
++}
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,229 @@
+From zsh-workers-return-13370-mason-zsh=primenet.com.au@sunsite.dk Wed Jan 17 18:42:24 2001
+Return-Path: <zsh-workers-return-13370-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 13487 invoked from network); 17 Jan 2001 18:42:23 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 Jan 2001 18:42:23 -0000
+Received: (qmail 21367 invoked by alias); 17 Jan 2001 18:42:15 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13370
+Received: (qmail 21356 invoked from network); 17 Jan 2001 18:42:14 -0000
+X-Envelope-Sender-Is: Andrej.Borsenkow@mow.siemens.ru (at relayer goliath.siemens.de)
+From: "Andrej Borsenkow" <Andrej.Borsenkow@mow.siemens.ru>
+To: "Zsh hackers list" <zsh-workers@sunsite.auc.dk>,
+   <koen.van_hoof@alcatel.be>
+Subject: Some general problems with exporting cariables (Was: TERMCAP problem. )
+Date: Wed, 17 Jan 2001 21:41:57 +0300
+Message-ID: <001201c080b5$2be27070$21c9ca95@mow.siemens.ru>
+MIME-Version: 1.0
+Content-Type: multipart/mixed;
+	boundary="----=_NextPart_000_0013_01C080CE.512FA870"
+X-Priority: 3 (Normal)
+X-MSMail-Priority: Normal
+X-Mailer: Microsoft Outlook IMO, Build 9.0.2416 (9.0.2911.0)
+In-Reply-To: <000001c0805a$97397130$21c9ca95@mow.siemens.ru>
+X-MimeOLE: Produced By Microsoft MimeOLE V5.50.4133.2400
+Importance: Normal
+
+This is a multi-part message in MIME format.
+
+------=_NextPart_000_0013_01C080CE.512FA870
+Content-Type: text/plain;
+	charset="koi8-r"
+Content-Transfer-Encoding: 7bit
+
+>
+>
+> >
+> > It's changed since then.  If you have HAVE_PUTENV defined in config.h, try
+> > undefining it for something a bit more like (but not identical to) the old
+> > behaviour to see if that makes a difference.
+> >
+>
+> I believe, I know what happens. When zsh creates parameters from
+> environment,
+> it splits env string in-place;
+
+Well, it turned out to be not directly related.  What actually happens is,
+when zsh initially (in creatparamtable) gets env string for predefined colon
+array it finally calls colnarrsetfn that unconditionally calls arrfixenv().
+This one does not even check if variable is exported but simply tries to
+replace environment string  with replenv() that tries to free previous
+environment string ... that resides somewhere in global memory.
+
+After we looped over env's all is clean again - every env string was allocated
+by Zsh. But the above simply happens too early.
+
+Ironically, when Zsh did not copy original env strings it appeared to work
+(but who knows, what memory corruption could it cause). But when I wrote a
+patch to copy original string, zsh started to crash.
+
+I do not know, if it was my fault or was there before. I probably have not
+changed usage of replenv() bit may have changed it's semantic. Anyway, as is
+stands now, there seems to be no point in having it at all - either variable
+is exported and has PM_EXPORTED set or it is not exported and does not have
+this flag. If it is not true, something is seriously broken anyway. So, this
+patch removes all replenv() usage with checking for PM_EXPORTED and addenv().
+I still removed env string in-place modification just in case.
+
+Koen, could you test if it helps? It appears to work here, but so did
+unmodified Zsh as well. I appreciate, if anybody could review memory
+allocation usage here - I still do not grok completely Zsh memory usage.
+
+The patch is against current CVS.
+
+-andrej
+
+------=_NextPart_000_0013_01C080CE.512FA870
+Content-Type: application/octet-stream;
+	name="zsh.replenv.diff"
+Content-Transfer-Encoding: quoted-printable
+Content-Disposition: attachment;
+	filename="zsh.replenv.diff"
+
+Index: Src/params.c=0A=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=0A=
+RCS file: /cvsroot/zsh/zsh/Src/params.c,v=0A=
+retrieving revision 1.30=0A=
+diff -u -r1.30 params.c=0A=
+--- Src/params.c	2001/01/16 13:44:20	1.30=0A=
++++ Src/params.c	2001/01/17 18:34:13=0A=
+@@ -446,6 +446,32 @@=0A=
+ 	return NULL;=0A=
+ }=0A=
+ =0A=
++/*=0A=
++ * Split environment string into (name, vlaue) pair.=0A=
++ * this is used to avoid in-place editing of environment table=0A=
++ * that results in core dump on some systems=0A=
++ */=0A=
++=0A=
++static int=0A=
++split_env_string(char *env, char **name, char **value)=0A=
++{=0A=
++    char *str, *tenv;=0A=
++=0A=
++    if (!env || !name || !value)=0A=
++	return 0;=0A=
++=0A=
++    tenv =3D strcpy(zhalloc(strlen(env) + 1), env);=0A=
++    for (str =3D tenv; *str && *str !=3D '=3D'; str++)=0A=
++	;=0A=
++    if (str !=3D tenv && *str =3D=3D '=3D') {=0A=
++	*str =3D '\0';=0A=
++	*name =3D tenv;=0A=
++	*value =3D str + 1;=0A=
++	return 1;=0A=
++    } else=0A=
++	return 0;=0A=
++}=0A=
++    =0A=
+ /* Set up parameter hash table.  This will add predefined  *=0A=
+  * parameter entries as well as setting up parameter table *=0A=
+  * entries for environment variables we inherit.           */=0A=
+@@ -460,7 +486,7 @@=0A=
+     int  envsize;=0A=
+ #endif=0A=
+     char **envp, **envp2, **sigptr, **t;=0A=
+-    char buf[50], *str, *iname, *hostnam;=0A=
++    char buf[50], *str, *iname, *ivalue, *hostnam;=0A=
+     int  oae =3D opts[ALLEXPORT];=0A=
+ #ifdef HAVE_UNAME=0A=
+     struct utsname unamebuf;=0A=
+@@ -513,20 +539,18 @@=0A=
+     environ =3D new_environ;=0A=
+ #endif=0A=
+ =0A=
++    /* Use heap allocation to avoid many small alloc/free calls */=0A=
++    pushheap();=0A=
++=0A=
+     /* Now incorporate environment variables we are inheriting *=0A=
+      * into the parameter hash table. Copy them into dynamic   *=0A=
+      * memory so that we can free them if needed               */=0A=
+     for (envp =3D envp2 =3D environ; *envp2; envp2++) {=0A=
+-	for (str =3D *envp2; *str && *str !=3D '=3D'; str++);=0A=
+-	if (*str =3D=3D '=3D') {=0A=
+-	    iname =3D NULL;=0A=
+-	    *str =3D '\0';=0A=
+-	    if (!idigit(**envp2) && isident(*envp2) && !strchr(*envp2, '[')) {=0A=
+-		iname =3D *envp2;=0A=
++	if (split_env_string(*envp2, &iname, &ivalue)) {=0A=
++	    if (!idigit(*iname) && isident(iname) && !strchr(iname, '[')) {=0A=
+ 		if ((!(pm =3D (Param) paramtab->getnode(paramtab, iname)) ||=0A=
+ 		     !(pm->flags & PM_DONTIMPORT || pm->flags & PM_EXPORTED)) &&=0A=
+-		    (pm =3D setsparam(iname, metafy(str + 1, -1, META_DUP)))) {=0A=
+-		    *str =3D '=3D';=0A=
++		    (pm =3D setsparam(iname, metafy(ivalue, -1, META_DUP)))) {=0A=
+ 		    pm->flags |=3D PM_EXPORTED;=0A=
+ 		    if (pm->flags & PM_SPECIAL)=0A=
+ 			pm->env =3D mkenvstr (pm->nam,=0A=
+@@ -536,9 +560,9 @@=0A=
+ 		    *envp++ =3D pm->env;=0A=
+ 		}=0A=
+ 	    }=0A=
+-	    *str =3D '=3D';=0A=
+ 	}=0A=
+     }=0A=
++    popheap();=0A=
+     *envp =3D '\0';=0A=
+     opts[ALLEXPORT] =3D oae;=0A=
+ =0A=
+@@ -1503,12 +1527,16 @@=0A=
+ 			pm->flags, NULL);=0A=
+     else=0A=
+ 	val =3D pm->gets.cfn(pm);=0A=
++#if 0  /* looks like replenv is evil and should be removed */=0A=
+     if (pm->env)=0A=
+ 	pm->env =3D replenv(pm->nam, val, pm->flags);=0A=
+     else {=0A=
++#endif=0A=
+ 	pm->flags |=3D PM_EXPORTED;=0A=
+ 	pm->env =3D addenv(pm->nam, val, pm->flags);=0A=
++#if 0=0A=
+     }=0A=
++#endif=0A=
+ }=0A=
+ =0A=
+ /**/=0A=
+@@ -2867,20 +2895,31 @@=0A=
+     char *u;=0A=
+     Param pm;=0A=
+ =0A=
++    if (t =3D=3D path)=0A=
++	cmdnamtab->emptytable(cmdnamtab);=0A=
++=0A=
+     pm =3D (Param) paramtab->getnode(paramtab, s);=0A=
++    =0A=
+     /*=0A=
++     * Do not "fix" parameters that were not exported=0A=
++     */=0A=
++=0A=
++    if (!(pm->flags & PM_EXPORTED) && !isset(ALLEXPORT))=0A=
++	return;=0A=
++=0A=
++    /*=0A=
+      * Only one level of a parameter can be exported.  Unless=0A=
+      * ALLEXPORT is set, this must be global.=0A=
+      */=0A=
+-    if (t =3D=3D path)=0A=
+-	cmdnamtab->emptytable(cmdnamtab);=0A=
+     if (pm->flags & PM_HASHELEM)=0A=
+ 	return;=0A=
+     u =3D t ? zjoin(t, ':', 1) : "";=0A=
++#if 0 /* attempt to get rid of evil replenv */=0A=
+     if (findenv(s, 0)) {=0A=
+ 	pm->env =3D replenv(s, u, pm->flags);=0A=
+ 	return;=0A=
+     }=0A=
++#endif=0A=
+     if (isset(ALLEXPORT))=0A=
+ 	pm->flags |=3D PM_EXPORTED;=0A=
+     if (pm->flags & PM_EXPORTED)=0A=
+
+------=_NextPart_000_0013_01C080CE.512FA870--
+

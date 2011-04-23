@@ -1,0 +1,619 @@
+From zsh-workers-return-5775-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Mar 12 13:11:45 1999
+Return-Path: <zsh-workers-return-5775-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2534 invoked from network); 12 Mar 1999 13:11:41 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Mar 1999 13:11:41 -0000
+Received: (qmail 26626 invoked by alias); 12 Mar 1999 13:11:00 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5775
+Received: (qmail 26619 invoked from network); 12 Mar 1999 13:10:58 -0000
+Date: Fri, 12 Mar 1999 14:10:51 +0100 (MET)
+Message-Id: <199903121310.OAA03206@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Thu, 11 Mar 1999 18:02:19 +0100
+Subject: Re: completion features
+
+
+Peter Stephenson wrote:
+
+> 2.
+> Something like ++^D when you have correction set to 2 will allow anything
+> at all to be completed, assuming there was no exact match.  Sven mentioned
+> something about this, but it looks particularly funny here.  What are we
+> going to do? 
+>   - max no. of corrections is one *less* than length of prefix+suffix?
+> Maybe workable, since you're unlikely to expect a one word prefix to
+> be corrected at all, even if logically it should be.  E.g., if I type a^D,
+> and there aren't any a*'s I probably don't expect every other file in the
+> directory, even if logically I should, while if I type ab^D, I'm probably
+> willing to contemplate `bacterium', `acanthus' and `botulinus' if there was
+> no exact match, but probably not `phrenology'.  I think this is my
+> preferred solution.  Does this fit into _main_complete OK?
+
+Like Bart I prefer this one. We need some changes in other functions,
+though. And while trying to make this work I found a problem in tricky.c: 
+in some cases menucompletion wasn't switched on even when the user
+explicitly set `compstate[pattern_match]=yes', so there is also a hunk 
+for that.
+
+
+One more question: we could make this user-configurable. E.g.
+`compconfig[...]=-1' would mean that `line_len - 1' errors would be
+accepted and so on. Should we...? Any suggestions for the `...'? ;-)
+
+
+This should also fix the problem Peter reported in 5772 -- I forgot to 
+stick the `matchflags' in front of `patlast'.
+
+
+The patch also makes the change I talked about yesterday: compconfig
+is now used for the name of the dump-file, too. The name of the file
+is given as an argument to `compinit':
+
+  source ../compinit -d ~/.zcomp
+
+...or something like that. If no name is given, the default name is
+used as before. `COMPDUMP' is not used anymore.
+
+This and the automatic `correct_prompt' initialisation requires
+setting values in `compconfig' in `compinit', which means that doing
+`compconfig=( ... )' is NOT recommended anymore (unless you know what
+you are doing). Instead, either set them directly:
+
+  compconfig[correct]=2n
+  ...
+
+Or use the new helper function:
+
+  compconf correct=2n correct_orig=always
+
+I added a small comment in `README' for all this.
+
+Should we initialise other values in `compinit'?
+
+
+And while we are at it, some more questions:
+
+  - Peter: could you rename `_comp_parts' to, say, `_sep_parts' in
+    pws-12? Since no other completion function starts with `_comp'
+    this looks a bit weird (especially since some internal helper
+    functions start with `(_|)comp').
+  - Then, should we move `_long_options' into `Base'? If once we have
+    long options for builtins, this may look weird, too (although I'm
+    far from sure that they should support `--help', but at least
+    `_long_options' is not a function doing completion for a user
+    command in itself).
+  - Should we add a file `_first' showing some of the things that
+    could be done with `-first-' completion? I'd suggest to add it
+    with only a comment and without a `#defcomp' so it will not
+    interfere with anything or use up time.
+
+Bye
+ Sven
+
+diff -u -r oc/Base/_match_pattern Completion/Base/_match_pattern
+--- oc/Base/_match_pattern	Tue Mar  9 15:24:59 1999
++++ Completion/Base/_match_pattern	Fri Mar 12 13:52:51 1999
+@@ -28,4 +28,10 @@
+ # like the `r:|[.-]=* r:|=*'. To make this work, the function `_match_test'
+ # would have to be changed to `(( compstate[matcher] <= 2 ))'
+ #
++# When automatic correction is used (see the file `_main_complete'), you
++# probably don't want to set matching flags here as that may make the
++# results slightly unpredictable. For this, change the line above to:
++#
++#   [[ compstate[matcher] -lt 0 ]] && eval "${3}='(#l)'"
++#
+ # The default implementation of this function is empty.
+diff -u -r oc/Core/_comp_parts Completion/Core/_comp_parts
+--- oc/Core/_comp_parts	Fri Mar 12 10:37:41 1999
++++ Completion/Core/_comp_parts	Fri Mar 12 13:07:40 1999
+@@ -61,10 +61,14 @@
+ 
+   # Build a pattern matching the possible matches and get all these
+   # matches in an array.
++
+   test="${str%%${sep}*}"
++  [[ -n "$_comp_correct" && $#test -le _comp_correct ]] && return 1
++
+   matchflags=""
+   _match_pattern _comp_parts test matchflags
+   [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
++
+   test="${matchflags}${test}"
+   testarr=( "${(@M)${(@P)arr}:#${~test}*}" )
+   testarr=( "${(@)testarr:#}" )
+@@ -89,10 +93,14 @@
+ fi
+ if [[ $# -le 1 || "$str" != *${2}* ]]; then
+   # No more separators, build the matches.
+-  matchflags=""
++
+   test="$str"
++  [[ -n "$_comp_correct" && $#test -le _comp_correct ]] && return 1
++
++  matchflags=""
+   _match_pattern _comp_parts test matchflags
+   [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
++
+   test="${matchflags}${test}"
+   testarr=( "${(@M)${(@P)arr}:#${~test}*}" )
+   testarr=( "${(@)testarr:#}" )
+@@ -117,6 +125,9 @@
+   else
+     test="$str"
+   fi
++
++  [[ -n "$_comp_correct" && $#test -le _comp_correct ]] && return 1
++
+   matchflags=""
+   _match_pattern _comp_parts test matchflags
+   [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+diff -u -r oc/Core/_main_complete Completion/Core/_main_complete
+--- oc/Core/_main_complete	Fri Mar 12 10:37:41 1999
++++ Completion/Core/_main_complete	Fri Mar 12 13:50:19 1999
+@@ -20,7 +20,9 @@
+ # tried, but if a numeric argument is given, automatic correction will
+ # be used. Once the number of errors to accept is determined, the code
+ # will repeatedly try to generate matches by allowing one error, two
+-# errors, and so on.
++# errors, and so on. Independent of the number of errors the user
++# wants to accept, the code will allow only fewer errors than there
++# are characters in the string from the line.
+ # The value of `compconfig[correct_orig]' is used to determine if the
+ # original string should be included in the list (and thus be
+ # presented to the user when cycling through the corrections). If it
+@@ -123,6 +125,7 @@
+ 	compstate[force_list]=list
+       fi
+       # Since we have matches, we don't want to try again.
++
+       break
+     fi
+ 
+@@ -130,16 +133,22 @@
+ 
+     if [[ -n "$_comp_correct" ]]; then
+ 
+-      # Yes, give up if we reached the maximum number of tries,
+-      # otherwise increment our counter.
++      # Yes, give up if we reached the maximum number of tries or the
++      # string from the line is too short, otherwise increment our 
++      # counter.
+ 
+-      [[ _comp_correct -eq comax ]] && break
++      [[ _comp_correct -eq comax ||
++         "${#${:-$PREFIX$SUFFIX}}" -le _comp_correct+1 ]] && break
+       (( _comp_correct++ ))
+ 
+       _correct_prompt="${compconfig[correct_prompt]//\%e/$_comp_correct}"
+ 
+     elif [[ compstate[matcher] -eq compstate[total_matchers] ]]; then
+ 
++      # We don't try correction if the string is too short.
++
++      [[ "${#${:-$PREFIX$SUFFIX}}" -le 1 ]] && return
++
+       # No matches and no correction tried yet, but we just tried the
+       # last global match specification, so let's see if we should use
+       # correction now. First, get the maximum number of errors.
+@@ -160,6 +169,9 @@
+       # ignored prefix).
+ 
+       compadd() {
++        [[ "$*" != *-([a-zA-Z/]#|)U* &&
++           "${#${:-$PREFIX$SUFFIX}}" -le _comp_correct ]] && return
++
+         if [[ "$PREFIX" = \~*/* ]]; then
+ 	  PREFIX="${PREFIX%%/*}/(#a${_comp_correct})${PREFIX#*/}"
+ 	else
+@@ -172,6 +184,9 @@
+ 	fi
+       }
+       compgen() {
++        [[ "$*" != *-([a-zA-Z/]#|)U* &&
++           "${#${:-$PREFIX$SUFFIX}}" -le _comp_correct ]] && return
++
+         if [[ "$PREFIX" = \~*/* ]]; then
+ 	  PREFIX="${PREFIX%%/*}/(#a${_comp_correct})${PREFIX#*/}"
+ 	else
+diff -u -r oc/Core/_multi_parts Completion/Core/_multi_parts
+--- oc/Core/_multi_parts	Fri Mar 12 10:37:41 1999
++++ Completion/Core/_multi_parts	Fri Mar 12 13:14:20 1999
+@@ -8,7 +8,7 @@
+ # separator character are then completed independently.
+ 
+ local sep matches patstr orig matchflags pref i tmp1 tmp2 nm
+-local group expl menu
++local group expl menu origflags mflags
+ 
+ _match_test _multi_parts || return 1
+ 
+@@ -51,12 +51,13 @@
+ fi
+ orig="${PREFIX}${SUFFIX}"
+ 
+-[[ $compstate[insert] = *menu ||
++[[ $compstate[insert] = *menu || -n "$_comp_correct" ||
+    ( $#compstate[pattern_match] -ne 0 &&
+      "$orig" != "${orig:q}" ) ]] && menu=yes
+ 
+ matchflags=""
+ _match_pattern _path_files patstr matchflags
++origflags="$matchflags"
+ [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+ 
+ patstr="${${patstr//$sep/*$sep}//\*##/*}"
+@@ -72,8 +73,14 @@
+   # `matches' that match the prefix we have and the exact substring in 
+   # the array `tmp1'.
+ 
++  if [[ -n "$_comp_correct" && "${#orig%%${sep}*}" -le _comp_correct ]]; then
++    mflags="$origflags"
++  else
++    mflags="$matchflags"
++  fi
++
+   pat="${${${patstr#*${sep}}%${sep}*}//\*/[^${sep}]#}"
+-  tmp1=( "${(@M)matches:#${~matchflags}${orig%%${sep}*}${sep}${~pat}}" )
++  tmp1=( "${(@M)matches:#${~mflags}${orig%%${sep}*}${sep}${~pat}}" )
+ 
+   # If there are no words matching the exact substring, stop.
+ 
+@@ -98,7 +105,12 @@
+ else
+   pat="$patstr"
+ fi
+-tmp1=( "${(@M)matches:#${~matchflags}${~pat}}" )
++if [[ -n "$_comp_correct" && "${#orig%%${sep}*}" -le _comp_correct ]]; then
++  mflags="$origflags"
++else
++  mflags="$matchflags"
++fi
++tmp1=( "${(@M)matches:#${~mflags}${~pat}}" )
+ 
+ if (( $#tmp1 )); then
+ 
+@@ -116,7 +128,7 @@
+     tmp2=( "${(@)matches:#${tmp1}*}" )
+     (( $#tmp2 )) && break
+ 
+-    # All matches have the same prefix, but it into `pref' and remove
++    # All matches have the same prefix, put it into `pref' and remove
+     # it from the matches.
+ 
+     pref="$pref$tmp1"
+@@ -171,7 +183,12 @@
+     # First we get all words matching at least this component in
+     # `tmp1'. If there are none, we give up.
+ 
+-    tmp1=( "${(@M)matches:#${~matchflags}${~patstr%%${sep}*}${sep}*}" )
++    if [[ -n "$_comp_correct" && "${#orig%%${sep}*}" -le _comp_correct ]]; then
++      mflags="$origflags"
++    else
++      mflags="$matchflags"
++    fi
++    tmp1=( "${(@M)matches:#${~mflags}${~patstr%%${sep}*}${sep}*}" )
+     (( $#tmp1 )) || break
+ 
+     # Then we check if there are words that have a different prefix.
+diff -u -r oc/Core/_path_files Completion/Core/_path_files
+--- oc/Core/_path_files	Fri Mar 12 10:37:41 1999
++++ Completion/Core/_path_files	Fri Mar 12 13:47:07 1999
+@@ -23,6 +23,7 @@
+ local nm prepaths str linepath realpath donepath patstr prepath testpath rest
+ local tmp1 collect tmp2 suffixes i ignore matchflags opt group sopt pats gopt
+ local addpfx addsfx expl orig ostr nm=$compstate[nmatches] menu remsfx patlast
++local origflags mflags
+ 
+ setopt localoptions nullglob rcexpandparam extendedglob
+ unsetopt markdirs globsubst shwordsplit nounset
+@@ -108,7 +109,7 @@
+ fi
+ orig="${PREFIX}${SUFFIX}"
+ 
+-[[ $compstate[insert] = *menu ||
++[[ $compstate[insert] = *menu || -n "$_comp_correct" ||
+    ( $#compstate[pattern_match] -ne 0 &&
+      "$orig" != "${orig:q}" ) ]] && menu=yes
+ 
+@@ -116,7 +117,7 @@
+ # We will first try normal completion called with `compgen', but only if we
+ # weren't given a `-F', `-r', or `-R' option.
+ 
+-if (( ! ( $#ignore + $#remsfx ) )); then
++if [[ $#ignore -eq 0 && $#remsfx -eq 0 && -z "$_comp_correct" ]]; then
+   # First build an array containing the `-W' option, if there is any and we
+   # want to use it. We don't want to use it if the string from the command line
+   # is a absolute path or relative to the current directory.
+@@ -139,11 +140,11 @@
+   # If this generated any matches, we don't want to do in-path completion.
+ 
+   [[ compstate[nmatches] -eq nm ]] || return 0
++fi
+ 
+-  # No `-F' option, so we want to use `fignore'.
++# No `-F' option, so we want to use `fignore'.
+ 
+-  ignore=(-F fignore)
+-fi
++(( $#ignore )) || ignore=(-F fignore)
+ 
+ # Now let's have a closer look at the string to complete.
+ 
+@@ -191,6 +192,7 @@
+ patstr="$str"
+ matchflags=""
+ _match_pattern _path_files patstr matchflags
++origflags="$matchflags"
+ [[ -n "$_comp_correct" ]] && matchflags="$matchflags(#a$_comp_correct)"
+ 
+ # We almost expect the pattern to have changed `..' into `*.*.', `/.' into
+@@ -211,21 +213,28 @@
+ # `*.tex' would yield `a*x*.tex' which is not what we want.
+ 
+ if [[ "$patstr" = */* ]]; then
+-  patlast="*/${${patstr##*/}//\*/[^/]#}"
++  if [[ -n "$_comp_correct" && "${#orig##*/}" -le _comp_correct ]]; then
++    patlast="*/${origflags}${${patstr##*/}//\*/[^/]#}"
++  else
++    patlast="*/${matchflags}${${patstr##*/}//\*/[^/]#}"
++  fi
+   patstr="${patstr%/*}/"
+ else
+-  patlast="${patstr//\*/[^/]#}"
++  if [[ -n "$_comp_correct" && "$#orig" -le _comp_correct ]]; then
++    patlast="${origflags}${patstr//\*/[^/]#}"
++  else
++    patlast="${matchflags}${patstr//\*/[^/]#}"
++  fi
+   patstr=""
+ fi
+ 
+-
+ # First we skip over all pathname components in `str' which really exist in
+ # the file-system, so that `/usr/lib/l<TAB>' doesn't offer you `lib' and
+ # `lib5'. Pathname components skipped this way are taken from `orig' and added
+ # to `donepath'.
+ 
+ while [[ "$orig" = */* ]] do
+-  tmp1=( ${~matchflags}$realpath$donepath${orig%%/*}/${~patstr#*/}$^pats )
++  tmp1=( $realpath$donepath${orig%%/*}/${~matchflags}${~patstr#*/}$^pats )
+   tmp1=("${(@M)tmp1:#$~patlast}")
+   [[ $#tmp1 -gt 0 && -e "$realpath$donepath${orig%%/*}" ]] || break
+   donepath="$donepath${orig%%/*}/"
+@@ -252,8 +261,13 @@
+     # we get the globbing matches for the pathname component currently
+     # handled.
+ 
++    if [[ -n "$_comp_correct" && "${#ostr%%/*}" -le _comp_correct ]]; then
++      mflags="$origflags"
++    else
++      mflags="$matchflags"
++    fi
+     rest="${str#*/}"
+-    tmp1="${prepath}${realpath}${testpath}${~matchflags}${str%%/*}(-/)"
++    tmp1="${prepath}${realpath}${testpath}${~mflags}${str%%/*}(-/)"
+     tmp1=( $~tmp1 )
+ 
+     if [[ $#tmp1 -eq 0 ]]; then
+@@ -275,12 +289,18 @@
+       suffixes=( $rest$^pats )
+       suffixes=( "${(@)suffixes:gs.**.*.}" )
+ 
++      if [[ -n "$_comp_correct" && "${#ostr#*/}" -le _comp_correct ]]; then
++        mflags="$origflags"
++      else
++        mflags="$matchflags"
++      fi
++
+       # In the loop the prefixes from the `tmp1' array produced above and
+       # the suffixes we just built are used to produce possible matches
+       # via globbing.
+ 
+       for i in "$tmp1[@]" ; do
+-        tmp2=( ${~i}/${~matchflags}${~suffixes} )
++        tmp2=( ${~i}/${~mflags}${~suffixes} )
+         tmp2=("${(@M)tmp2:#$~patlast}")
+         [[ $#tmp2 -ne 0 ]] && collect=( $collect $i )
+       done
+@@ -319,7 +339,7 @@
+ 	if [[ -n "$menu" ]]; then
+           compadd -QU "$addpfx[@]" "$addsfx[@]" "$group[@]" "$expl[@]" \
+                   -i "$IPREFIX" -p "$linepath${testpath:q}" \
+-		  -S "/${ostr#*/}" \
++		  -s "/${ostr#*/}" \
+ 		  -W "$tmp1" -f "$ignore[@]" - "${(@)${(@)collect%%/*}:q}"
+ 	else
+           for i in $collect; do
+@@ -334,12 +354,27 @@
+ 
+ 	continue 2
+       fi
++
+       # We reach this point if only one of the path prefixes in `tmp1'
+       # has a existing path-suffix matching the string from the line.
+       # In this case we accept this match and continue with the next
+       # path-name component.
+ 
+       tmp1=( "$collect[1]" )
++    elif [[ -n "$_comp_correct" && "$mflags" = "$matchflags" ]]; then
++
++      # If we got only one match with auto-correction and if we get none
++      # without correction, stop now.
++
++      tmp2="${prepath}${realpath}${testpath}${~origflags}${str%%/*}(-/)"
++      tmp2=( $~tmp2 )
++
++      if [[ $#tmp1 -ne $#tmp2 ]]; then
++        compadd -QU "$addpfx[@]" -S '' "$group[@]" "$expl[@]" \
++                -i "$IPREFIX" -p "$linepath${testpath:q}" -s "/${ostr#*/}" \
++		- "${${tmp1#${prepath}${realpath}${testpath}}:q}"
++        continue 2
++      fi
+     fi
+     # This is also reached if the first globbing produced only one match
+     # in this case we just continue with the next pathname component, too.
+@@ -355,6 +390,11 @@
+   # no path suffix, the `-W' we are currently handling, all the matches we
+   # can produce in this directory, if any.
+ 
++  if [[ -n "$_comp_correct" && "${#ostr#*/}" -le _comp_correct ]]; then
++    mflags="$origflags"
++  else
++    mflags="$matchflags"
++  fi
+   tmp1="$prepath$realpath$testpath"
+   suffixes=( $str$^pats )
+   suffixes=( "${(@)suffixes:gs.**.*.}" )
+diff -u -r oc/Core/compdump Completion/Core/compdump
+--- oc/Core/compdump	Fri Mar 12 10:37:41 1999
++++ Completion/Core/compdump	Fri Mar 12 10:48:09 1999
+@@ -15,7 +15,7 @@
+ # Print the number of files used for completion. This is used in compinit
+ # to see if auto-dump should re-dump the dump-file.
+ 
+-_d_file=${COMPDUMP-${0:h}/compinit.dump}
++_d_file=${compconfig[dump_file]-${0:h}/compinit.dump}
+ 
+ typeset -U _d_files
+ _d_files=( ${^~fpath}/_*~*~(N:t) )
+diff -u -r oc/Core/compinit Completion/Core/compinit
+--- oc/Core/compinit	Fri Mar 12 10:37:41 1999
++++ Completion/Core/compinit	Fri Mar 12 12:01:14 1999
+@@ -40,18 +40,21 @@
+ # Functions that are used to generate matches should return zero if they
+ # were able to add matches and non-zero otherwise.
+ #
+-# See the file `compdump' for how to speed up initialiation.
++# See the file `compdump' for how to speed up initialisation.
+ #
+ # If you are using global matching specifications with `compctl -M ...'
+ # have a look at the files `_match_test' and `_match_pattern'. To make
+ # all the example functions use matching as specified with `-M' these
+ # need some editing.
+-#
++
+ # If we got the `-d'-flag, we will automatically dump the new state (at
+ # the end).
++# If we were given an argument, this will be taken as the name of the
++# file in which to store the dump.
+ 
+ if [[ "$1" = -d ]]; then
+   _i_autodump=1
++  shift
+ else
+   _i_autodump=0
+ fi
+@@ -66,6 +69,14 @@
+ 
+ typeset -A compconfig
+ 
++# Standard initialisation for `compconfig'.
++
++(( $# )) && compconfig[dump_file]="$1"
++[[ -z "$compconfig[dump_file]" ]] && compconfig[dump_file]="$0.dump"
++
++compconfig[correct_prompt]='correct to:'
++
++
+ # This function is used to register or delete completion functions. For
+ # registering completion functions, it is invoked with the name of the
+ # function as it's first argument (after the options). The other
+@@ -204,11 +215,25 @@
+   fi
+ }
+ 
+-# Now we automatically make the definition files autoloaded.
+-
+-# First we get the name of a dump file if this will be used.
++# Functional interface to configuration. This takes its arguments
++# and sets the according values in `compconfig'.
++# Arguments may be `foo=bar' to set key `foo' to `bar' or `baz' to
++# set key `baz' to the empty string.
++
++compconf() {
++  local i name
++
++  for i; do
++    if [[ "$i" = *\=* ]]; then
++      name="${i%%\=*}"
++      compconfig[$name]="${i#*\=}"
++    else
++      compconfig[$i]=''
++    fi
++  done
++}
+ 
+-: ${COMPDUMP:=$0.dump}
++# Now we automatically make the definition files autoloaded.
+ 
+ if [[ ! -o extendedglob ]]; then
+   _i_noextglob=yes
+@@ -222,10 +247,10 @@
+ 
+ # If we have a dump file, load it.
+ 
+-if [[ -f "$COMPDUMP" ]]; then
+-  read -rA _i_line < "$COMPDUMP"
++if [[ -f "$compconfig[dump_file]" ]]; then
++  read -rA _i_line < "$compconfig[dump_file]"
+   if [[ _i_autodump -eq 1 && $_i_line[2] -eq $#_i_files ]]; then
+-    builtin . "$COMPDUMP"
++    builtin . "$compconfig[dump_file]"
+     _i_done=yes
+   fi
+   unset _i_line
+diff -u -r oc/README Completion/README
+--- oc/README	Tue Mar  9 15:25:02 1999
++++ Completion/README	Fri Mar 12 14:09:06 1999
+@@ -9,9 +9,12 @@
+ a file containing the necessary variables, bindkeys etc., making later
+ loading much faster.  For example,
+   [[ -f ~/completion/compinit ]] && . ~/completion/compinit -d
++The name of the file to use may be given as an extra argument.
++
+ This will rebind any keys which do completion to use the new system.
+ For more detailed instructions, including how to add new completions, see
+-the top of Core/compinit.
++the top of Core/compinit. For information about how to configure the code,
++see the comment at the top of Core/_main_complete.
+ 
+ The subdirectories contain:
+ 
+diff -u -r oc/User/_long_options Completion/User/_long_options
+--- oc/User/_long_options	Thu Mar 11 14:58:25 1999
++++ Completion/User/_long_options	Fri Mar 12 13:16:25 1999
+@@ -201,8 +201,10 @@
+   PREFIX="${str#*\=}"
+   SUFFIX=""
+ 
+-  # We will chech if the arrays contain an option matching what's on
++  # We will check if the arrays contain an option matching what's on
+   # the line. To do this good, we build a pattern.
++
++  [[ -n "$_comp_correct" && $#pre -le _comp_correct ]] && return 1
+ 
+   pat="${pre}*"
+   patflags=''
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Fri Mar 12 10:36:28 1999
++++ Src/Zle/zle_tricky.c	Fri Mar 12 12:52:20 1999
+@@ -5057,6 +5057,8 @@
+ 	    clearlist = 1;
+ 	    goto compend;
+ 	}
++	if (comppatmatch && *comppatmatch)
++	    haspattern = 1;
+ 	if (!useline && uselist)
+ 	    /* All this and the guy only wants to see the list, sigh. */
+ 	    showinglist = -2;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

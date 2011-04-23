@@ -1,0 +1,257 @@
+From zsh-workers-return-14858-mason-zsh=primenet.com.au@sunsite.dk Tue Jun 12 10:26:23 2001
+Return-Path: <zsh-workers-return-14858-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22021 invoked from network); 12 Jun 2001 10:26:22 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Jun 2001 10:26:22 -0000
+Received: (qmail 4830 invoked by alias); 12 Jun 2001 10:25:52 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 14858
+Received: (qmail 4805 invoked from network); 12 Jun 2001 10:25:51 -0000
+Message-ID: <Tc0a88d015418d1118f@mailsweeper01.cambridgesiliconradio.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: HP-UX 11.00 tgetenv dilemma 
+In-reply-to: ""Bart Schaefer""'s message of "Mon, 11 Jun 2001 15:52:27 PDT."
+             <010611155227.ZM23318@candle.brasslantern.com> 
+Date: Tue, 12 Jun 2001 11:25:42 +0100
+From: Peter Stephenson <pws@csr.com>
+
+"Bart Schaefer" wrote:
+> On Jun 11, 10:24pm, Andrej Borsenkow wrote:
+> > 
+> > a normal guy wrote:
+> > 
+> > > P.S.  What is the latest line of thought about the Export word
+> > > splitting problem?  To fix or not to fix?
+> > 
+> > so far you are the first person to note it :-) That does not mean I am 
+> > opposed to "fixing" it - I just have no idea how easy (or difficult) it is.
+> 
+> It shouldn't be all that difficult ... `export' and `typeset' already have
+> special handling of foo=bar arguments for MAGIC_EQUAL_SUBST.
+
+Here's an attempt.  The KSH_TYPESET option prevents wordsplitting if it
+finds an `=' in the pre-expansion text for typeset etc.  It doesn't force
+other typeset arguments not to be split, for example
+
+  foo=(param1 param2)
+  typeset $foo
+
+clearly shouldn't inhibit wordsplitting.
+
+I've made the MAGIC_EQUAL_SUBST behaviour follow the same behaviour that
+would be used after typeset, i.e. respecting KSH_TYPESET.  This seems to be
+the natural way to do it.
+
+The new tests (which are supposed to pass) show how it works.  There'll be
+some offset in the patch since I've been adding new options tests which I
+haven't committed yet.
+
+I shall assume this is good enough to go on the development branch straight
+away --- it won't go on the 4.0 branch at all.
+
+Index: Doc/Zsh/options.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/options.yo,v
+retrieving revision 1.19
+diff -u -r1.19 options.yo
+--- Doc/Zsh/options.yo	2001/06/11 10:41:19	1.19
++++ Doc/Zsh/options.yo	2001/06/12 10:16:08
+@@ -668,6 +668,16 @@
+ set and unset options, all options are shown, marked `on' if
+ they are in the non-default state, `off' otherwise.
+ )
++pindex(KSH_TYPESET)
++cindex(argument splitting, in typeset etc.)
++cindex(ksh, argument splitting in typeset)
++item(tt(KSH_TYPESET) <K>)(
++Alters the way arguments to the tt(typeset) family of commands, including
++tt(declare), tt(export), tt(float), tt(integer), tt(local) and
++tt(readonly), are processed.  Without this option, zsh will perform normal
++word splitting after command and parameter expansion in arguments of an
++assignment; with it, word splitting does not take place in those cases.
++)
+ pindex(LIST_AMBIGUOUS)
+ cindex(ambiguous completion)
+ cindex(completion, ambiguous)
+@@ -757,6 +767,10 @@
+ argument, and not used as an actual parameter assignment.  For example, in
+ tt(echo foo=~/bar:~/rod), both occurrences of tt(~) would be replaced.
+ Note that this happens anyway with tt(typeset) and similar statements.
++
++This option respects the setting of the tt(KSH_TYPESET) option.  In other
++words, if both options are in effect, arguments looking like
++assignments will not undergo wordsplitting.
+ )
+ pindex(MAIL_WARNING)
+ cindex(mail, warning of reading)
+Index: Src/options.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/options.c,v
+retrieving revision 1.8
+diff -u -r1.8 options.c
+--- Src/options.c	2001/03/30 16:20:04	1.8
++++ Src/options.c	2001/06/12 10:16:09
+@@ -145,6 +145,7 @@
+ {NULL, "kshautoload",	      OPT_EMULATE|OPT_BOURNE,	 KSHAUTOLOAD},
+ {NULL, "kshglob",             OPT_EMULATE|OPT_KSH,       KSHGLOB},
+ {NULL, "kshoptionprint",      OPT_EMULATE|OPT_KSH,	 KSHOPTIONPRINT},
++{NULL, "kshtypeset",          OPT_EMULATE|OPT_KSH,	 KSHTYPESET},
+ {NULL, "listambiguous",	      OPT_ALL,			 LISTAMBIGUOUS},
+ {NULL, "listbeep",	      OPT_ALL,			 LISTBEEP},
+ {NULL, "listpacked",	      0,			 LISTPACKED},
+Index: Src/subst.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/subst.c,v
+retrieving revision 1.19
+diff -u -r1.19 subst.c
+--- Src/subst.c	2001/05/19 00:31:23	1.19
++++ Src/subst.c	2001/06/12 10:16:09
+@@ -50,6 +50,7 @@
+ prefork(LinkList list, int flags)
+ {
+     LinkNode node;
++    int asssub = (flags & PF_TYPESET) && isset(KSHTYPESET);
+ 
+     queue_signals();
+     for (node = firstnode(list); node; incnode(node)) {
+@@ -70,7 +71,7 @@
+ 	    if (isset(SHFILEEXPANSION))
+ 		filesub((char **)getaddrdata(node),
+ 			flags & (PF_TYPESET|PF_ASSIGN));
+-	    if (!(node = stringsubst(list, node, flags & PF_SINGLE))) {
++	    if (!(node = stringsubst(list, node, flags & PF_SINGLE, asssub))) {
+ 		unqueue_signals();
+ 		return;
+ 	    }
+@@ -97,7 +98,7 @@
+ 
+ /**/
+ static LinkNode
+-stringsubst(LinkList list, LinkNode node, int ssub)
++stringsubst(LinkList list, LinkNode node, int ssub, int asssub)
+ {
+     int qt;
+     char *str3 = (char *)getdata(node);
+@@ -211,6 +212,12 @@
+ 	    str3 = str2;
+ 	    setdata(node, str3);
+ 	    continue;
++	} else if (asssub && ((c == '=') || c == Equals) && str != str3) {
++	    /*
++	     * We are in a normal argument which looks like an assignment
++	     * and is to be treated like one, with no word splitting.
++	     */
++	    ssub = 1;
+ 	}
+ 	str++;
+     }
+@@ -1885,7 +1892,7 @@
+ 
+ 	    *--fstr = Marker;
+ 	    init_list1(tl, fstr);
+-	    if (!eval && !stringsubst(&tl, firstnode(&tl), ssub))
++	    if (!eval && !stringsubst(&tl, firstnode(&tl), ssub, 0))
+ 		return NULL;
+ 	    *str = aptr;
+ 	    tn = firstnode(&tl);
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.30
+diff -u -r1.30 zsh.h
+--- Src/zsh.h	2001/06/08 18:34:53	1.30
++++ Src/zsh.h	2001/06/12 10:16:09
+@@ -1384,6 +1384,7 @@
+     KSHAUTOLOAD,
+     KSHGLOB,
+     KSHOPTIONPRINT,
++    KSHTYPESET,
+     LISTAMBIGUOUS,
+     LISTBEEP,
+     LISTPACKED,
+Index: Test/E01options.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/E01options.ztst,v
+retrieving revision 1.4
+diff -u -r1.4 E01options.ztst
+--- Test/E01options.ztst	2001/05/19 23:38:22	1.4
++++ Test/E01options.ztst	2001/06/12 10:16:09
+@@ -502,6 +503,22 @@
+ >unset
+ >globassign
+ 
++  setopt kshtypeset
++  ktvars=(ktv1 ktv2)
++  typeset ktfoo=`echo arg1 arg2` $ktvars
++  print $+ktv1 $+ktv2 $+ktv3
++  print $ktfoo
++  unsetopt kshtypeset
++  typeset noktfoo=`echo noktarg1 noktarg2`
++  print $noktfoo
++  print $+noktarg1 $+noktarg2
++  unset ktfoo ktv1 ktv2 noktfoo noktarg2
++0:KSH_TYPESET option
++>1 1 0
++>arg1 arg2
++>noktarg1
++>0 1
++
+   showopt() { setopt | egrep 'localoptions|ksharrays'; }
+   f1() { setopt localoptions ksharrays; showopt }
+   f2() { setopt ksharrays; showopt }
+@@ -526,14 +543,28 @@
+ 
+ # LOCAL_TRAPS was tested in C03traps (phew).
+ 
+-  fn() { local HOME=/any/old/name; print var=~ 'anything goes/here'=~; }
++  fn() {
++    local HOME=/any/old/name
++    print -l var=~ 'anything goes/here'=~ split=`echo maybe not`;
++  }
+   setopt magicequalsubst
++  fn
++  setopt kshtypeset
+   fn
+-  unsetopt magicequalsubst
++  unsetopt magicequalsubst kshtypeset
+   fn
+ 0:MAGIC_EQUAL_SUBST option
+->var=/any/old/name anything goes/here=/any/old/name
+->var=~ anything goes/here=~
++>var=/any/old/name
++>anything goes/here=/any/old/name
++>split=maybe
++>not
++>var=/any/old/name
++>anything goes/here=/any/old/name
++>split=maybe not
++>var=~
++>anything goes/here=~
++>split=maybe
++>not
+ 
+   setopt MARK_DIRS
+   print tmp*
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Unit 300, Science Park, Milton Road,
+Cambridge, CB4 0XL, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

@@ -1,0 +1,190 @@
+From zsh-workers-return-8590-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Nov 08 11:45:29 1999
+Return-Path: <zsh-workers-return-8590-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6709 invoked from network); 8 Nov 1999 11:45:27 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 8 Nov 1999 11:45:27 -0000
+Received: (qmail 13747 invoked by alias); 8 Nov 1999 11:45:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 8590
+Received: (qmail 13736 invoked from network); 8 Nov 1999 11:45:18 -0000
+Date: Mon, 8 Nov 1999 12:45:05 +0100 (MET)
+Message-Id: <199911081145.MAA19516@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Andrej Borsenkow"'s message of Fri, 5 Nov 1999 19:02:31 +0300
+Subject: Re: Some (completeinword , _match) oddities
+
+
+Andrej Borsenkow wrote:
+
+> This is zsh-3.1.6-bart-8 with all patches (except for export files)
+> 
+> 1. completeinword
+> 
+> ...
+> 
+> itsrm2% ls /u/i/fc<TAB>.h
+> Beeps
+> 
+> Why? I have single match /usr/include/fcntl.h.
+
+Some trouble with setting up PREFIX/SUFFIX.
+
+> 2. _match
+> 
+> itsrm2% compconf completer=_complete:_match
+> itsrm2% ls /u/i/s*/f*.h<TAB>
+> Beeps
+> 
+> Why? Is it illegal to have two wildcards? Compare this with
+>
+> itsrm2% ls /u/i/sys/f*.h<TAB>
+> 
+> that works nicely. What the difference?
+
+`_path_files' has to match the generated path with the original string 
+and the way the matches are added, that can only be done without
+glob-pattern-matching in the path-prefix and -suffix. I.e.: `s*' is
+not a prefix of `sys', so -- no match.
+We could only try to find out if there are multiple pathname
+components with patterns and, if so, add either the whole paths or at
+least anything from/to the first/last component with a pattern as the
+matches themselves (not as the `-[ps]' prefixes/suffixes).
+
+Personally, I don't feel like hacking this, so everyone is kindly
+invited to write that into `_path_files'.
+
+> 3. Cursor positioning
+> 
+> itsrm2% ls /u/i/sys/f*.h<CURSOR HERE><TAB>
+> itsrm2% ls /usr/include/sys/fault.h<CURSOR HERE>
+> fault.h         fcntl.h         file.h          forcerr.h       fsid.h
+> fblk.h          fcp.h           filio.h         fp.h            fstyp.h
+> fbuf.h          fcpal_space.h   filsys.h        fppriocntl.h
+> fc.h            fd.h            fixpri.h        fpu.h
+> fc_debug.h      fddihdr.h       flock.h         fsiboot.h
+> 
+> Now press undo ...
+> 
+> itsrm2% ls /u/i/sys/f*<CURSOR HERE>.h
+> 
+> Well, I really expect "undo" to *undo* the things ... not to add anything else
+> ...
+
+The undo system didn't keep track of the cursor positions at all. If
+it couldn't be done with just deleting/inserting some characters, things
+went wrong. The patch makes it keep track of the cursor positions.
+Since the completion code is the only place where this may have gone
+wrong (at least I /think/ it is the only place), this is probably a
+bit oversized, but I don't see another solution.
+
+There is also still the problem that the first undo after a completion 
+seems to do nothing if the suffix gets removed and immediatly re-added.
+
+Bye
+ Sven
+
+diff -u -r oldsrc/Zle/zle.h Src/Zle/zle.h
+--- oldsrc/Zle/zle.h	Mon Nov  8 11:23:32 1999
++++ Src/Zle/zle.h	Mon Nov  8 12:24:48 1999
+@@ -107,6 +107,7 @@
+     int off;			/* offset of the text changes */
+     char *del;			/* characters to delete (metafied) */
+     char *ins;			/* characters to insert (metafied) */
++    int old_cs, new_cs;		/* old and new cursor positions */
+ };
+ 
+ #define CH_NEXT (1<<0)   /* next structure is also part of this change */
+diff -u -r oldsrc/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- oldsrc/Zle/zle_tricky.c	Mon Nov  8 11:23:34 1999
++++ Src/Zle/zle_tricky.c	Mon Nov  8 12:41:14 1999
+@@ -512,6 +512,9 @@
+     char *s, *ol;
+     int olst = lst, chl = 0, ne = noerrs, ocs, ret = 0;
+ 
++    if (undoing)
++	setlastline();
++
+     if (runhookdef(BEFORECOMPLETEHOOK, (void *) &lst))
+ 	return 0;
+ 
+diff -u -r oldsrc/Zle/zle_utils.c Src/Zle/zle_utils.c
+--- oldsrc/Zle/zle_utils.c	Mon Nov  8 11:23:34 1999
++++ Src/Zle/zle_utils.c	Mon Nov  8 12:24:43 1999
+@@ -53,7 +53,7 @@
+ /**/
+ char *lastline;
+ /**/
+-int lastlinesz, lastll;
++int lastlinesz, lastll, lastcs;
+ 
+ /* size of line buffer */
+ 
+@@ -438,6 +438,7 @@
+     curchange->del = curchange->ins = NULL;
+     lastline = zalloc(lastlinesz = linesz);
+     memcpy(lastline, line, lastll = ll);
++    lastcs = cs;
+ }
+ 
+ /**/
+@@ -511,6 +512,8 @@
+     ch->next = NULL;
+     ch->hist = histline;
+     ch->off = pre;
++    ch->old_cs = lastcs;
++    ch->new_cs = cs;
+     if(suf + pre == lastll)
+ 	ch->del = NULL;
+     else
+@@ -541,6 +544,7 @@
+     if(lastlinesz != linesz)
+ 	lastline = realloc(lastline, lastlinesz = linesz);
+     memcpy(lastline, line, lastll = ll);
++    lastcs = cs;
+ }
+ 
+ /* move backwards through the change list */
+@@ -578,6 +582,7 @@
+ 	    else
+ 		line[cs++] = STOUC(*c);
+     }
++    cs = ch->old_cs;
+ }
+ 
+ /* move forwards through the change list */
+@@ -616,6 +621,7 @@
+ 	    else
+ 		line[cs++] = STOUC(*c);
+     }
++    cs = ch->new_cs;
+ }
+ 
+ /* vi undo: toggle between the end of the undo list and the preceding point */
+diff -u -r oldcompletion/Core/_path_files Completion/Core/_path_files
+--- oldcompletion/Core/_path_files	Mon Nov  8 11:23:16 1999
++++ Completion/Core/_path_files	Mon Nov  8 11:33:46 1999
+@@ -400,8 +400,13 @@
+   done
+ 
+   if [[ -z "$tmp4" ]]; then
+-    PREFIX="${opre}${osuf}"
+-    SUFFIX=""
++    if [[ "$osuf" = */* ]]; then
++      PREFIX="${opre}${osuf}"
++      SUFFIX=""
++    else
++      PREFIX="${opre}"
++      SUFFIX="${osuf}"
++    fi
+     tmp4="$testpath"
+     compquote tmp4 tmp1
+     compadd -Qf -p "$linepath$tmp4" \
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

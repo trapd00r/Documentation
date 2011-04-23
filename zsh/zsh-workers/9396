@@ -1,0 +1,142 @@
+From zsh-workers-return-9396-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Jan 21 09:36:52 2000
+Return-Path: <zsh-workers-return-9396-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15695 invoked from network); 21 Jan 2000 09:36:51 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Jan 2000 09:36:51 -0000
+Received: (qmail 27430 invoked by alias); 21 Jan 2000 09:36:38 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9396
+Received: (qmail 27423 invoked from network); 21 Jan 2000 09:36:38 -0000
+Date: Fri, 21 Jan 2000 10:36:35 +0100 (MET)
+Message-Id: <200001210936.KAA02351@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: vared and history
+
+
+Again no `PATCH:' in the subject because I'm not sure about this at
+all...
+
+The patch just makes bin_vared() call hbegin(1) and hend() when given
+the -h option. That's the same loop() does, so it seemed sensible...
+
+Peter: does this look like the right thing for you? It seems to work.
+
+Aside: for functions like nslookup it would be nice if we could have
+multiple histories and switch to a separate one in such functions.
+Preferably with saving (into another file than the one for the normal
+history) and so on...
+
+Another thing is that in functions like nslookup one probably wants to 
+be able to use ^D on an empty line to leave vared. I couldn't find a
+way to make this possible, so I added the -e option (making it accept
+EOF). Is that right? Was there really no way?
+
+
+The stuff in nslookup just makes it use -e and history and improves
+the prompt styles.
+
+
+Bye
+ Sven
+
+diff -ru ../z.old/Doc/Zsh/mod_zle.yo Doc/Zsh/mod_zle.yo
+--- ../z.old/Doc/Zsh/mod_zle.yo	Fri Jan 21 10:12:19 2000
++++ Doc/Zsh/mod_zle.yo	Fri Jan 21 10:36:14 2000
+@@ -144,7 +144,7 @@
+ findex(vared)
+ cindex(parameters, editing)
+ cindex(editing parameters)
+-item(tt(vared) [ tt(-Aach) ] [ tt(-p) var(prompt) ] [ tt(-r) var(rprompt) ] var(name))(
++item(tt(vared) [ tt(-Aache) ] [ tt(-p) var(prompt) ] [ tt(-r) var(rprompt) ] var(name))(
+ The value of the parameter var(name) is loaded into the edit
+ buffer, and the line editor is invoked.  When the editor exits,
+ var(name) is set to the string value returned by the editor.
+@@ -161,7 +161,9 @@
+ If the tt(-p) flag is given, the following string will be taken as
+ the prompt to display at the left.  If the tt(-r) flag is given,
+ the following string gives the prompt to display at the right.  If the
+-tt(-h) flag is specified, the history can be accessed from ZLE.
++tt(-h) flag is specified, the history can be accessed from ZLE. If the 
++tt(-e) flag is given, typing tt(^D) (Control-D) on an empty line
++causes tt(vared) to exit immediatly with a non-zero return value.
+ )
+ findex(zle)
+ cindex(widgets, rebinding)
+diff -ru ../z.old/Functions/Misc/nslookup Functions/Misc/nslookup
+--- ../z.old/Functions/Misc/nslookup	Fri Jan 21 10:12:55 2000
++++ Functions/Misc/nslookup	Fri Jan 21 10:32:06 2000
+@@ -8,19 +8,23 @@
+ trap 'return 130' INT
+ trap 'zpty -d nslookup' EXIT
+ 
+-zstyle -s ':nslookup' prompt pmpt || pmpt='> '
++pmpt=()
++zstyle -s ':nslookup' prompt tmp && pmpt=(-p "$tmp")
++zstyle -s ':nslookup' rprompt tmp && pmpt=("$pmpt[@]" -r "$tmp")
++(( $#pmpt )) || pmpt=(-p '> ')
+ 
+ zpty nslookup nslookup
+ 
+ zpty -r nslookup line '*> '
+ print -nr "$line"
+ 
+-while line=''; vared -p "$pmpt" line; do
++while line=''; vared -he "$pmpt[@]" line; do
++  print -s "$line"
+   [[ "$line" = exit ]] && break
+ 
+   zpty -w nslookup "$line"
+ 
+-  zpty -r nslookup line '*> '
++  zpty -r nslookup line '*> ' || break
+   print -nr "$line"
+ done
+ 
+diff -ru ../z.old/Src/Zle/zle_main.c Src/Zle/zle_main.c
+--- ../z.old/Src/Zle/zle_main.c	Fri Jan 21 10:12:12 2000
++++ Src/Zle/zle_main.c	Fri Jan 21 10:28:36 2000
+@@ -734,7 +734,7 @@
+     char *s, *t, *ova = varedarg;
+     Value v;
+     Param pm = 0;
+-    int create = 0;
++    int create = 0, ifl;
+     int type = PM_SCALAR, obreaks = breaks, haso = 0;
+     char *p1 = NULL, *p2 = NULL;
+     FILE *oshout = NULL;
+@@ -787,6 +787,10 @@
+ 		/* -h option -- enable history */
+ 		ops['h'] = 1;
+ 		break;
++	    case 'e':
++		/* -e option -- enable EOF */
++		ops['e'] = 1;
++		break;
+ 	    default:
+ 		/* unrecognised option character */
+ 		zwarnnam(name, "unknown option: %s", *args, 0);
+@@ -834,7 +838,15 @@
+ 	pushnode(bufstack, ztrdup(s));
+     } LASTALLOC;
+     varedarg = *args;
++    ifl = isfirstln;
++    if (ops['e'])
++	isfirstln = 1;
++    if (ops['h'])
++	hbegin(1);
+     t = (char *) zleread(p1, p2, ops['h'] ? ZLRF_HISTORY : 0);
++    if (ops['h'])
++	hend();
++    isfirstln = ifl;
+     varedarg = ova;
+     if (haso) {
+ 	close(SHTTY);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

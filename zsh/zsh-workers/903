@@ -1,0 +1,163 @@
+From seniorr@teleport.com Wed Apr 10 20:47:09 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id UAA13482 for <mason@werple.mira.net.au>; Wed, 10 Apr 1996 20:47:06 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id GAA04956; Wed, 10 Apr 1996 06:32:07 -0400 (EDT)
+Resent-Date: Wed, 10 Apr 1996 06:32:07 -0400 (EDT)
+Date: Wed, 10 Apr 1996 03:31:58 -0700 (PDT)
+Message-Id: <199604101031.DAA04027@linda.teleport.com>
+From: Russell Senior <seniorr@teleport.com>
+To: zsh-workers@math.gatech.edu
+Subject: History file locking?
+Resent-Message-ID: <"SnykZ1.0.MD1.cuuQn"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/903
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 3543
+Status: O
+
+
+In order to keep Zsh from trashing its history file, I have
+implemented the following local patch.  Perhaps this can be worked
+into the source tree?  This patch uses the fcntl() function to lock
+the entire contents of the history file during read and write
+operations, using the corresponding blocking read and write locks. 
+
+-- 
+Russell Senior                                seniorr@teleport.com
+
+
+
+*** hist.c-orig	Thu Dec 21 14:44:16 1995
+--- hist.c	Wed Apr 10 03:22:35 1996
+***************
+*** 30,35 ****
+--- 30,36 ----
+   */
+  
+  #include "zsh.h"
++ #include <fcntl.h>
+  
+  extern int cs, ll;
+  
+***************
+*** 1250,1255 ****
+--- 1251,1262 ----
+      time_t tim = time(NULL);
+      short *wordlist;
+      int nwordpos, nwordlist;
++     struct flock lk;
++ 
++     lk.l_type = F_RDLCK;
++     lk.l_whence = SEEK_SET;
++     lk.l_start = 0;
++     lk.l_len = 0;
+  
+      if (!s)
+  	return;
+***************
+*** 1257,1262 ****
+--- 1264,1271 ----
+  	nwordlist = 16;
+  	wordlist = (short *)zalloc(nwordlist*sizeof(short));
+  
++         fcntl(fileno(in),F_SETLKW,&lk);
++         
+  	while (fgets(buf, sizeof(buf), in)) {
+  	    int l = strlen(buf);
+  	    char *pt, *start;
+***************
+*** 1326,1333 ****
+  	    } else
+  		ent->words = (short *)NULL;
+  	}
+  	fclose(in);
+! 
+  	zfree(wordlist, nwordlist*sizeof(short));
+      } else if (err)
+  	zerr("can't read history file", s, 0);
+--- 1335,1345 ----
+  	    } else
+  		ent->words = (short *)NULL;
+  	}
++         
++         lk.l_type = F_UNLCK;
++         fcntl(fileno(in),F_SETLKW,&lk);
+  	fclose(in);
+!         
+  	zfree(wordlist, nwordlist*sizeof(short));
+      } else if (err)
+  	zerr("can't read history file", s, 0);
+***************
+*** 1341,1347 ****
+--- 1353,1364 ----
+      FILE *out;
+      int ev;
+      Histent ent;
++     struct flock lk;
+  
++     lk.l_whence = SEEK_SET;
++     lk.l_start = 0;
++     lk.l_len = 0;
++     
+      if (!s || !interact || savehist == 0)
+  	return;
+      ev = curhist - savehist + 1;
+***************
+*** 1352,1357 ****
+--- 1369,1376 ----
+      else
+  	out = fdopen(open(s, O_CREAT | O_WRONLY | O_TRUNC, 0600), "w");
+      if (out) {
++         lk.l_type = F_WRLCK;
++         fcntl(fileno(out),F_SETLKW,&lk);
+  	for (; ev <= curhist; ev++) {
+  	    ent = gethistent(ev);
+  	    if (app & 2) {
+***************
+*** 1374,1385 ****
+--- 1393,1410 ----
+  	    }
+  	    fputc('\n', out);
+  	}
++         
++         lk.l_type = F_UNLCK;
++         fcntl(fileno(out),F_SETLKW,&lk);
+  	fclose(out);
+  
+  	if (app & 2 && (out = fopen(s, "r"))) {
+  	    char **store, buf[1024], **ptr;
+  	    int i, l, histnum = 0;
+  
++             lk.l_type = F_WRLCK;
++             fcntl(fileno(out),F_SETLKW,&lk);
++ 
+  	    store = (char **)zcalloc((savehist + 1) * sizeof *store);
+  	    while (fgets(buf, sizeof(buf), out)) {
+  		l = strlen(buf);
+***************
+*** 1394,1407 ****
+--- 1419,1439 ----
+  		strcpy(store[i], buf);
+  		histnum++;
+  	    }
++             lk.l_type = F_UNLCK;
++             fcntl(fileno(out),F_SETLKW,&lk);
+  	    fclose(out);
+  	    if ((out = fdopen(open(s, O_WRONLY | O_TRUNC, 0600), "w"))) {
++                 lk.l_type = F_WRLCK;
++                 fcntl(fileno(out),F_SETLKW,&lk);
++ 
+  		if (histnum < savehist)
+  		    for (i = 0; i < histnum; i++)
+  			fprintf(out, "%s", store[i]);
+  		else
+  		    for (i = histnum; i < histnum + savehist; i++)
+  			fprintf(out, "%s", store[i % savehist]);
++                 lk.l_type = F_UNLCK;
++                 fcntl(fileno(out),F_SETLKW,&lk);
+  		fclose(out);
+  	    }
+  	    for (ptr = store; *ptr; ptr++)
+
+

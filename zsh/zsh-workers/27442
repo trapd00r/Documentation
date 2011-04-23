@@ -1,0 +1,181 @@
+From zsh-workers-return-27442-mason-zsh=primenet.com.au@zsh.org Mon Nov 30 18:37:27 2009
+Return-Path: <zsh-workers-return-27442-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 6362 invoked by alias); 30 Nov 2009 18:37:27 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27442
+Received: (qmail 15791 invoked from network); 30 Nov 2009 18:37:15 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.3 required=5.0 tests=AWL,BAYES_00,PLING_QUERY,
+	RCVD_IN_DNSWL_LOW autolearn=no version=3.2.5
+Received-SPF: none (ns1.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Date: Mon, 30 Nov 2009 18:37:07 +0000
+From: Peter Stephenson <pws@csr.com>
+To: zsh-workers@zsh.org
+Subject: Re: unable to wait on completed job [was: should $! give the pid of
+ subshell?]
+Message-ID: <20091130183707.4f8ea36e@news01>
+In-Reply-To: <091129211436.ZM1769@torch.brasslantern.com>
+References: <19213.26295.345572.732238@gargle.gargle.HOWL>
+	<200911251748.nAPHmrCX010198@news01.csr.com>
+	<m3638sr72x.fsf_-_@klanderman.net>
+	<091129211436.ZM1769@torch.brasslantern.com>
+Organization: CSR
+X-Mailer: Claws Mail 3.5.0 (GTK+ 2.12.8; i386-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+X-OriginalArrivalTime: 30 Nov 2009 18:37:07.0590 (UTC) FILETIME=[1EC49260:01CA71EC]
+X-Scanned-By: MailControl A-09-22-03 (www.mailcontrol.com) on 10.68.0.116
+
+On Sun, 29 Nov 2009 21:14:36 -0800
+Bart Schaefer <schaefer@brasslantern.com> wrote:
+> [schaefer@torch]$ (sleep 10; exit 19) &
+> [1] 1680
+> [schaefer@torch]$ pid=$!
+> [schaefer@torch]$ sleep 12; wait $pid
+> [1]+  Exit 19                 ( sleep 10; exit 19 )
+> bash: wait: pid 1680 is not a child of this shell
+>>..
+> Apparently POSIX.2 requires "wait" be able to access the exit status
+> of an asynchronous job until the next asynchronous job is started.
+> Zsh is only able to access that status until the next job (whether
+> synchronous or not) completes; the completion of "sleep 12" clears
+> the previously-completed "sleep 10 &" from the job table, so "wait"
+> is no longer able to see it.
+
+(Moved to zsh-workers.)
+
+If it's only an issue for $! (lastpid internally), I think it's fairly
+straightforward to fix.  I tried to make it work even if a new process with
+the same PID came along later.
+
+No idea about anything to do with SIGTTOU, however, that's outside my
+range.
+
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.172
+diff -u -r1.172 exec.c
+--- Src/exec.c	22 Sep 2009 09:17:10 -0000	1.172
++++ Src/exec.c	30 Nov 2009 18:34:17 -0000
+@@ -2727,6 +2727,8 @@
+ #endif
+ 	    if (how & Z_ASYNC) {
+ 		lastpid = (zlong) pid;
++		/* indicate it's possible to set status for lastpid */
++		lastpid_status = -2L;
+ 	    } else if (!jobtab[thisjob].stty_in_env && varspc) {
+ 		/* search for STTY=... */
+ 		Wordcode p = varspc;
+Index: Src/init.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/init.c,v
+retrieving revision 1.106
+diff -u -r1.106 init.c
+--- Src/init.c	12 Jul 2009 15:10:07 -0000	1.106
++++ Src/init.c	30 Nov 2009 18:34:18 -0000
+@@ -913,6 +913,7 @@
+     bufstack = znewlinklist();
+     hsubl = hsubr = NULL;
+     lastpid = 0;
++    lastpid_status = -1L;
+     bshin = SHIN ? fdopen(SHIN, "r") : stdin;
+     if (isset(SHINSTDIN) && !SHIN && unset(INTERACTIVE)) {
+ #ifdef _IONBF
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.73
+diff -u -r1.73 jobs.c
+--- Src/jobs.c	30 Sep 2009 20:32:49 -0000	1.73
++++ Src/jobs.c	30 Nov 2009 18:34:18 -0000
+@@ -104,6 +104,15 @@
+ /**/
+ int numpipestats, pipestats[MAX_PIPESTATS];
+ 
++/*
++ * The status associated with the process lastpid.
++ * -1 if not set and no associated lastpid
++ * -2 if lastpid is set and status isn't yet
++ * else the value returned by wait().
++ */
++/**/
++long lastpid_status;
++
+ /* Diff two timevals for elapsed-time computations */
+ 
+ /**/
+@@ -1109,6 +1118,14 @@
+ {
+     Process pn, *pnlist;
+ 
++    if (pid == lastpid && lastpid_status != -2L) {
++	/*
++	 * The status for the previous lastpid is invalid.
++	 * Presumably process numbers have wrapped.
++	 */
++	lastpid_status = -1L;
++    }
++
+     DPUTS(thisjob == -1, "No valid job in addproc.");
+     pn = (Process) zshcalloc(sizeof *pn);
+     pn->pid = pid;
+@@ -1845,6 +1862,8 @@
+ 		retval = waitforpid(pid, 1);
+ 		if (!retval)
+ 		    retval = lastval2;
++	    } else if (pid == lastpid && lastpid_status >= 0L) {
++		retval = (int)lastpid_status;
+ 	    } else {
+ 		zwarnnam(name, "pid %d is not a child of this shell", pid);
+ 		/* presumably lastval2 doesn't tell us a heck of a lot? */
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.56
+diff -u -r1.56 signals.c
+--- Src/signals.c	20 Jul 2009 04:38:56 -0000	1.56
++++ Src/signals.c	30 Nov 2009 18:34:18 -0000
+@@ -530,6 +530,7 @@
+ 	     * Find the process and job containing this pid and
+ 	     * update it.
+ 	     */
++	    pn = NULL;
+ 	    if (findproc(pid, &jn, &pn, 0)) {
+ #if defined(HAVE_WAIT3) && defined(HAVE_GETRUSAGE)
+ 		struct timezone dummy_tz;
+@@ -551,6 +552,15 @@
+ 		 */
+ 		get_usage();
+ 	    }
++	    /*
++	     * Remember the status associated with $!, so we can
++	     * wait for it even if it's exited.  This value is
++	     * only used if we can't find the PID in the job table,
++	     * so it doesn't matter that the value we save here isn't
++	     * useful until the process has exited.
++	     */
++	    if (pn != NULL && pid == lastpid && lastpid_status != -1L)
++		lastpid_status = lastval2;
+ 	}
+         break;
+  
+
+
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

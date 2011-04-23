@@ -1,0 +1,507 @@
+From zsh-workers-return-13120-mason-zsh=primenet.com.au@sunsite.auc.dk Sun Nov 05 09:12:20 2000
+Return-Path: <zsh-workers-return-13120-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8121 invoked from network); 5 Nov 2000 09:12:18 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 5 Nov 2000 09:12:18 -0000
+Received: (qmail 14209 invoked by alias); 5 Nov 2000 09:12:12 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 13120
+Received: (qmail 14200 invoked from network); 5 Nov 2000 09:12:08 -0000
+From: "Bart Schaefer" <schaefer@candle.brasslantern.com>
+Message-Id: <1001105091202.ZM29322@candle.brasslantern.com>
+Date: Sun, 5 Nov 2000 09:12:02 +0000
+In-Reply-To: <1001105043558.ZM11099@candle.brasslantern.com>
+Comments: In reply to "Bart Schaefer" <schaefer@candle.brasslantern.com>
+        "Re: PATCH: Misc. zpty tweaks, plus commentary" (Nov  5,  4:35am)
+References: <1001104232950.ZM3561@candle.brasslantern.com> 
+	<1001105043558.ZM11099@candle.brasslantern.com>
+X-Mailer: Z-Mail (5.0.0 30July97)
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: Zpty cleanup (merge 13061 with 13116)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+On Nov 5,  4:35am, Bart Schaefer wrote:
+}
+} Oh, bother.  I just realized that Sven's 13061 has never been committed.
+} I'll try to resolve the conflict and post a modified 13061.
+
+OK, I've resolved the conflict, but I've also got some comments about
+read_poll() both before and after 13061.
+
+Sven wrote:
+
+> There were some things in [read_poll()] I think were really wrong,
+> like testing `select() > 1' and like trying all possible tests if the
+> first tests worked but returned zero.
+
+Yes, `select() > 1' was almost certainly wrong.  That test should always
+fail on a system that correctly implements select(), because there's only
+one descriptor in the `foofd' set; it returns the *number of* descriptors
+(*not* the number *of the* descriptor) for which the test succeeds.
+
+However, that does not mean that the rest of the tests should be skipped
+when select() returns 0.  A return of 0 means the select() timed out,
+which (apparently) might happen under Cygwin even if there actually are
+characters available to be read.  Peter/Andrej, is that the case?
+
+On the other hand (hmm, does that make three hands?), reading from the
+master side of a pty is not the same as reading from a tty.  Setting
+VMIN to 0 doesn't cause read() to behave in a non-blocking fashion in
+that case -- which is implied by the big comment in read_poll() that
+mentions isatty(): isatty() is false on the master side of a pty, and
+(IIRC) calling ioctl() on the master side actually changes the settings
+on the slave side, which is entirely not what we want.  So I'm pretty
+sure that if zpty is going to use read_poll() at all, it should always
+pass polltty=0, not =1 as it presently does.  (The 13116 patch partly
+changed that, but 13061 adds other calls to read_poll().)
+
+[Late-breaking note:  *Somebody* should have noticed that read_poll()
+calls gettyinfo() and settyinfo(), which of course affects SHTTY, and
+has nothing whatever to do with the pty.  So polltty=1 is just a very
+expensive no-op for zpty, and it really must pass 0.]
+
+Finally, I note that read_poll() always sets VMIN to 1 at the end, which
+is also wrong: it should remember the original setting and restore it.
+
+Other stuff:
+
+FIONREAD is compiled in only when not HAVE_SELECT, so the `if (ret < 0)'
+test around the ioctl() in 13061 will always succeed; I removed the test.
+On the other hand, the success of ioctl() should be tested before the
+value it stores in `val' can be trusted.
+
+The master side of the pty should be closed before sending the HUP to
+the child process, not after.
+
+I haven't done anything about it, but this code clearly expects that
+no '\0' bytes will ever be sent to or received from the pty.  That's
+obviously a fallacy; we shouldn't be treating this data as C strings.
+
+It would appear from the documentation that, with a blocking pty,
+`zpty -r' must always return either 0 or 2.  Is this really the case?
+(On my RH5.2 linux system, select() always returns 1 after the pty's
+command has exited, so read_poll() also returns 1 and cmd->fin never
+gets set.  read(), however, gets an I/O error (errno == 5), so `zpty -r'
+returns 1 and it's not possible to detect that the command has finished.
+I haven't attempted to fix this yet; it may be that doing a true non-
+blocking read is the only way even when not under cygwin -- either that,
+or actually treat the pty command as a job and notice the SIGCHLD when
+it exits.)
+
+There didn't seem to be any reason not to break up the documentation a
+bit.  I think it's clearer this way.
+
+Here's the resulting patch.  I no longer see any reason not to commit it;
+the completion and compmatch tests still work, so I must not have broken
+zpty in any especially horrible way.  The only thing that makes me a bit
+uncomfortable is reversing the meaning of `-b' ... I've left it, but I
+wonder if we shouldn't use a different option instead.
+
+Index: Doc/Zsh/mod_zpty.yo
+===================================================================
+@@ -5,42 +5,73 @@
+ 
+ startitem()
+ findex(zpty)
+-xitem(tt(zpty) [ tt(-e) ] [ tt(-b) ] var(name) var(command) [ var(args ...) ])
+-xitem(tt(zpty) tt(-d) [ var(names) ... ])
+-xitem(tt(zpty) tt(-w) [ tt(-n) ] var(name) var(strings ...))
+-xitem(tt(zpty) tt(-r) var(name) [ var(param) [ var(pattern) ] ])
+-xitem(tt(zpty) tt(-t) var(name))
+-item(tt(zpty) [ tt(-L) ])(
++item(tt(zpty) [ tt(-e) ] [ tt(-b) ] var(name) var(command) [ var(args ...) ])(
+ In the first form, the var(command) is started with the var(args) as
+ arguments.  The command runs under a newly assigned pseudo-terminal; this
+ is useful for running commands non-interactively which expect an
+-interactive environment.  The var(name) given is used to refer to this
+-command in later calls to tt(pty).  With the tt(-e) option given, the
+-pseudo-terminal will be set up so that input characters are echoed and 
+-with the tt(-b) option given, input and output from and to the
+-pseudo-terminal will be blocking.
++interactive environment.  The var(name) is used to refer to this command
++in later calls to tt(zpty).
++
++With the tt(-e) option, the pseudo-terminal is set up so that input
++characters are echoed.
+ 
+-The second form with the tt(-d) option is used to delete commands
+-previously started by supplying a list of their var(name)s.  If no
++With the tt(-b) option, input to and output from the pseudo-terminal are
++made non-blocking.
++)
++item(tt(zpty) tt(-d) [ var(names) ... ])(
++The second form, with the tt(-d) option, is used to delete commands
++previously started, by supplying a list of their var(name)s.  If no
+ var(names) are given, all commands are deleted.  Deleting a command causes
+ the HUP signal to be sent to the corresponding process.
+-
+-The tt(-w) option can be used to send the command var(name) the given
++)
++item(tt(zpty) tt(-w) [ tt(-n) ] var(name) [ var(strings ...) ])(
++The tt(-w) option can be used to send the to command var(name) the given
+ var(strings) as input (separated by spaces).  If the tt(-n) option is
+-not given, a newline will be added at the end.
++em(not) given, a newline is added at the end.
++
++If no var(strings) are provided, the standard input is copied to the
++pseudo-terminal; this may stop before copying the full input if the
++pseudo-terminal is non-blocking.
+ 
+-The tt(-r) option can be used to read the output of the command
+-var(name).  Without a var(param) argument, the string read will be
+-printed to standard output.  With a var(param) argument, the string
+-read will be put in the parameter named var(param).  If the
+-var(pattern) is also given, output will be read until the whole string 
+-read matches the var(pattern).
+-
+-The tt(-t) option can be used to test whether the command var(name) is 
+-still running.  It returns a zero value if the command is running and
+-a non-zero value otherwise.
++Note that the command under the pseudo-terminal sees this input as if it
++were typed, so beware when sending special tty driver characters such as
++word-erase, line-kill, and end-of-file.
++)
++item(tt(zpty) tt(-r) [ tt(-t) ] var(name) [ var(param) [ var(pattern) ] ])(
++The tt(-r) option can be used to read the output of the command var(name).
++With only a var(name) argument, the output read is copied to the standard
++output.  Unless the pseudo-terminal is non-blocking, copying continues
++until the command under the pseudo-terminal exits; when non-blocking, only
++as much output as is immediately available is copied.  The return value is
++zero if any output is copied.
+ 
+-The last form without any arguments is used to list the commands
++When also given a var(param) argument, at most one line is read and stored
++in the parameter named var(param).  Less than a full line may be read if
++the pseudo-terminal is non-blocking.  The return value is zero if at least
++one character is stored in var(param).
++
++If a var(pattern) is given as well, output is read until the whole string
++read matches the var(pattern), even in the non-blocking case.  The return
++value is zero if the string read matches the pattern, or if the command
++has exited but at least one character could still be read.  As of this
++writing, a maximum of one megabyte of output can be consumed this way; if
++a full megabyte is read without matching the pattern, the return value is
++non-zero.
++
++In all cases, the return value is non-zero if nothing could be read, and
++is tt(2) if this is because the command has finished.
++
++If the tt(-r) option is combined with the tt(-t) option, tt(zpty) tests
++whether output is available before trying to read.  If no output is
++available, tt(zpty) immediately returns the value tt(1).
++)
++item(tt(zpty) tt(-t) var(name))(
++The tt(-t) option without the tt(-r) option can be used to test
++whether the command var(name) is still running.  It returns a zero
++value if the command is running and a non-zero value otherwise.
++)
++item(tt(zpty) [ tt(-L) ])(
++The last form, without any arguments, is used to list the commands
+ currently defined.  If the tt(-L) option is given, this is done in the
+ form of calls to the tt(zpty) builtin.
+ )
+Index: Functions/Misc/nslookup
+===================================================================
+@@ -24,7 +24,7 @@
+     [[ -z "$pager" ]] && pager="${opager:-more}"
+ (( $#pmpt )) || pmpt=(-p '> ')
+ 
+-zpty -b nslookup nslookup "$@"
++zpty nslookup nslookup "$@"
+ 
+ zpty -r nslookup line '*
+ > '
+Index: Src/utils.c
+===================================================================
+@@ -1315,7 +1315,7 @@
+ mod_export int
+ read_poll(int fd, int *readchar, int polltty)
+ {
+-    int ret = 0;
++    int ret = -1;
+     long mode = -1;
+     char c;
+ #ifdef HAVE_SELECT
+@@ -1353,38 +1353,32 @@
+      */
+     if (polltty) {
+ 	gettyinfo(&ti);
+-	ti.tio.c_cc[VMIN] = 0;
+-	settyinfo(&ti);
++	if ((polltty = ti.tio.c_cc[VMIN])) {
++	    ti.tio.c_cc[VMIN] = 0;
++	    settyinfo(&ti);
++	}
+     }
+ #else
+     polltty = 0;
+ #endif
+ #ifdef HAVE_SELECT
+-    if (!ret) {
+-	expire_tv.tv_sec = expire_tv.tv_usec = 0;
+-	FD_ZERO(&foofd);
+-	FD_SET(fd, &foofd);
+-	if (select(fd+1, (SELECT_ARG_2_T) &foofd, NULL, NULL, &expire_tv)
+-	    > 1)
+-	    ret = 1;
+-    }
++    expire_tv.tv_sec = expire_tv.tv_usec = 0;
++    FD_ZERO(&foofd);
++    FD_SET(fd, &foofd);
++    ret = select(fd+1, (SELECT_ARG_2_T) &foofd, NULL, NULL, &expire_tv);
+ #else
+ #ifdef FIONREAD
+-    if (!ret) {
+-	ioctl(fd, FIONREAD, (char *)&val);
+-	if (val)
+-	    ret = 1;
+-    }
++    if (ioctl(fd, FIONREAD, (char *) &val) == 0)
++	ret = (val > 0);
+ #endif
+ #endif
+ 
+-    if (!ret) {
++    if (ret <= 0) {
+ 	/*
+ 	 * Final attempt: set non-blocking read and try to read a character.
+ 	 * Praise Bill, this works under Cygwin (nothing else seems to).
+ 	 */
+-	if ((polltty || setblock_fd(0, fd, &mode))
+-	    && read(fd, &c, 1) > 0) {
++	if ((polltty || setblock_fd(0, fd, &mode)) && read(fd, &c, 1) > 0) {
+ 	    *readchar = STOUC(c);
+ 	    ret = 1;
+ 	}
+@@ -1397,7 +1391,7 @@
+ 	settyinfo(&ti);
+     }
+ #endif
+-    return ret;
++    return (ret > 0);
+ }
+ 
+ /**/
+Index: Src/Modules/zpty.c
+===================================================================
+@@ -34,7 +34,6 @@
+  * upper bound on the number of bytes we read (even if we are give a
+  * pattern). */
+ 
+-#define READ_LEN 1024
+ #define READ_MAX (1024 * 1024)
+ 
+ typedef struct ptycmd *Ptycmd;
+@@ -46,9 +45,10 @@
+     int fd;
+     int pid;
+     int echo;
+-    int block;
++    int nblock;
+     int fin;
+     int read;
++    char *old;
+ };
+ 
+ static Ptycmd ptycmds;
+@@ -264,7 +264,7 @@
+ #endif /* __SVR4 */
+ 
+ static int
+-newptycmd(char *nam, char *pname, char **args, int echo, int block)
++newptycmd(char *nam, char *pname, char **args, int echo, int nblock)
+ {
+     Ptycmd p;
+     int master, slave, pid;
+@@ -380,14 +380,15 @@
+     p->fd = master;
+     p->pid = pid;
+     p->echo = echo;
+-    p->block = block;
++    p->nblock = nblock;
+     p->fin = 0;
+     p->read = -1;
++    p->old = NULL;
+ 
+     p->next = ptycmds;
+     ptycmds = p;
+ 
+-    if (!block)
++    if (nblock)
+ 	ptynonblock(master);
+ 
+     return 0;
+@@ -411,12 +412,12 @@
+     zsfree(p->name);
+     freearray(p->args);
+ 
++    zclose(cmd->fd);
++
+     /* We kill the process group the command put itself in. */
+ 
+     kill(-(p->pid), SIGHUP);
+ 
+-    zclose(cmd->fd);
+-
+     zfree(p, sizeof(*p));
+ }
+ 
+@@ -438,7 +439,7 @@
+ {
+     if (cmd->read != -1)
+ 	return;
+-    if (!read_poll(cmd->fd, &cmd->read, !cmd->block) &&
++    if (!read_poll(cmd->fd, &cmd->read, 0) &&
+ 	kill(cmd->pid, 0) < 0) {
+ 	cmd->fin = 1;
+ 	zclose(cmd->fd);
+@@ -448,8 +449,8 @@
+ static int
+ ptyread(char *nam, Ptycmd cmd, char **args)
+ {
+-    int blen = 256, used = 0, seen = 0, ret = 1;
+-    char *buf = (char *) zhalloc((blen = 256) + 1);
++    int blen, used, seen = 0, ret = 0;
++    char *buf;
+     Patprog prog = NULL;
+ 
+     if (*args && args[1]) {
+@@ -469,10 +470,20 @@
+     } else
+ 	fflush(stdout);
+ 
++    if (cmd->old) {
++	used = strlen(cmd->old);
++	buf = (char *) zhalloc((blen = 256 + used) + 1);
++	strcpy(buf, cmd->old);
++	zsfree(cmd->old);
++	cmd->old = NULL;
++    } else {
++	used = 0;
++	buf = (char *) zhalloc((blen = 256) + 1);
++    }
+     if (cmd->read != -1) {
+-	buf[0] = (char) cmd->read;
+-	buf[1] = '\0';
+-	used = 1;
++	buf[used] = (char) cmd->read;
++	buf[used + 1] = '\0';
++	seen = used = 1;
+ 	cmd->read = -1;
+     }
+     do {
+@@ -495,36 +506,60 @@
+ 	}
+ 	buf[used] = '\0';
+ 
+-	if (!prog && ret <= 0)
++	if (!prog && (ret <= 0 || (*args && buf[used - 1] == '\n')))
+ 	    break;
+-    } while (!errflag && !breaks && !retflag && !contflag &&
+-	     (prog ? (used < READ_MAX && (!ret || !pattry(prog, buf))) :
+-	      (used < READ_LEN)));
++    } while (!(errflag || breaks || retflag || contflag) &&
++	     used < READ_MAX && !(prog && ret && pattry(prog, buf)));
++
++    if (prog && ret < 0 &&
++#ifdef EWOULDBLOCK
++	errno == EWOULDBLOCK
++#else
++#ifdef EAGAIN
++	errno == EAGAIN
++#endif
++#endif
++	) {
++	cmd->old = ztrdup(buf);
++	used = 0;
+ 
++	return 1;
++    }
+     if (*args)
+ 	setsparam(*args, ztrdup(metafy(buf, used, META_HREALLOC)));
+-    else
++    else if (used)
+ 	write(1, buf, used);
+ 
+-    return !seen;
++    return (seen ? 0 : cmd->fin + 1);
+ }
+ 
+ static int
+ ptywritestr(Ptycmd cmd, char *s, int len)
+ {
+-    int written;
++    int written, all = 0;
+ 
+-    for (; len; len -= written, s += written) {
+-	if ((written = write(cmd->fd, s, len)) < 0)
+-	    return 1;
++    for (; !errflag && !breaks && !retflag && !contflag && len;
++	 len -= written, s += written) {
++	if ((written = write(cmd->fd, s, len)) < 0 && cmd->nblock &&
++#ifdef EWOULDBLOCK
++	    errno == EWOULDBLOCK
++#else
++#ifdef EAGAIN
++	    errno == EAGAIN
++#endif
++#endif
++	    )
++	    return !all;
+ 	if (written < 0) {
+ 	    checkptycmd(cmd);
+ 	    if (cmd->fin)
+ 		break;
+ 	    written = 0;
+ 	}
++	if (written > 0)
++	    all += written;
+     }
+-    return 0;
++    return (all ? 0 : cmd->fin + 1);
+ }
+ 
+ static int
+@@ -559,8 +594,9 @@
+ bin_zpty(char *nam, char **args, char *ops, int func)
+ {
+     if ((ops['r'] && ops['w']) ||
+-	((ops['r'] || ops['w']) && (ops['d'] || ops['e'] || ops['t'] ||
++	((ops['r'] || ops['w']) && (ops['d'] || ops['e'] ||
+ 				    ops['b'] || ops['L'])) ||
++	(ops['w'] && ops['t']) ||
+ 	(ops['n'] && (ops['b'] || ops['e'] || ops['r'] || ops['t'] ||
+ 		      ops['d'] || ops['L'])) ||
+ 	(ops['d'] && (ops['b'] || ops['e'] || ops['L'] || ops['t'])) ||
+@@ -579,7 +615,10 @@
+ 	    return 1;
+ 	}
+ 	if (p->fin)
++	    return 2;
++	if (ops['t'] && p->read == -1 && !read_poll(p->fd, &p->read, 0))
+ 	    return 1;
++
+ 	return (ops['r'] ?
+ 		ptyread(nam, p, args + 1) :
+ 		ptywrite(p, args + 1, ops['n']));
+@@ -629,7 +668,7 @@
+ 	    checkptycmd(p);
+ 	    if (ops['L'])
+ 		printf("%s %s%s%s ", nam, (p->echo ? "-e " : ""),
+-		       (p->block ? "-b " : ""), p->name);
++		       (p->nblock ? "-b " : ""), p->name);
+ 	    else if (p->fin)
+ 		printf("(finished) %s: ", p->name);
+ 	    else
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+
+Zsh: http://www.zsh.org | PHPerl Project: http://phperl.sourceforge.net   
+

@@ -1,0 +1,155 @@
+From zsh-workers-return-5628-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Mar 03 16:17:51 1999
+Return-Path: <zsh-workers-return-5628-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12348 invoked from network); 3 Mar 1999 16:17:50 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 3 Mar 1999 16:17:50 -0000
+Received: (qmail 6366 invoked by alias); 3 Mar 1999 16:17:34 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5628
+Received: (qmail 6357 invoked from network); 3 Mar 1999 16:17:31 -0000
+Message-Id: <9903031601.AA42275@ibmth.df.unipi.it>
+To: zsh-workers@sunsite.auc.dk (Zsh hackers list)
+Subject: PATCH: 3.1.5-pws-10: more random completion widgetry
+Date: Wed, 03 Mar 1999 17:01:30 +0100
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Suppose I'd better try to keep doing my bit for future generations.  Here
+are some minor tweaks:
+
+- _builtin didn't handle the remaining arguments properly, it restricted
+them to the one after the builtin, so the nested completion didn't work
+
+- _cd now does alles mögliche: complete the second argument to cd (third
+word), handle + and - after pushd by listing $(dirs -v) and cycling through
+the numbers, so we lazy people can just change directory with lots of tabs
+(but you need to type the + or -, hope that's not too much like hard work).
+
+- _most_recent_file: I messed up the tilde checking last time; also, it now
+takes a numeric argument so that you can get the Nth most recent, or by
+judicious use of negative arguments, oldest file ( Esc - \C-x m).  I hope
+Zefram's not going to take exception to $NUMERIC, because it seems to work
+extremely well in practice.  I also stuck in a -U to compadd, so that you
+can do *.txt\C-xm to get the most recent .txt file.  (Not that much shorter
+than *.txt(om[1])<TAB>, I suppose.  But some people don't like arcane
+syntax, for some unaccountable reason.)
+
+--- Completion/Builtins/_builtin.bak	Mon Mar  1 13:50:31 1999
++++ Completion/Builtins/_builtin	Wed Mar  3 16:35:57 1999
+@@ -1,6 +1,8 @@
+ #defcomp builtin
+ 
+-if [[ -position 3 -1 ]]; then
++if (( $CURRENT > 2 )); then
++  shift words
++  (( CURRENT -- ))
+   _normal
+ else
+   compgen -eB
+--- Completion/Builtins/_cd.bak	Mon Mar  1 13:54:12 1999
++++ Completion/Builtins/_cd	Wed Mar  3 16:37:01 1999
+@@ -1,7 +1,62 @@
+-#defcomp cd
++#defcomp cd pushd
+ 
+-if (( $#cdpath )); then
+-  _files -W cdpath -/
++# Handling of cd.
++#  - Normally just completes directories.  Uses cdpath if that's set
++#    and the string doesn't begin with ~, /, ./ or ../.
++#  - In the second argument to cd for the form `cd old new', completes
++#    possible `new' strings by examining `old' and $PWD.
++#  - After pushd - or pushd +, completes numbers, but the listing
++#    gives you the list of directories to complete.  This turns on
++#    menu-completion and lists the possibilities automatically, otherwise
++#    it's not a lot of use.  If you don't type the + or - it will
++#    complete directories as normal.
++
++local pushdminus
++[[ -o pushdminus ]] && pushdminus=1
++
++emulate -LR zsh
++setopt extendedglob
++
++if [[ -position 3 ]]; then
++  # cd old new: look for old in $PWD and see what can replace it
++  local rep
++  # Get possible completions using word in position 2
++  rep=(${~PWD/$words[2]/*}~$PWD(-/N))
++  # Now remove all the common parts of $PWD and the completions from this
++  rep=(${${rep#${PWD%%$words[2]*}}%${PWD#*$words[2]}})
++  (( $#rep )) && compadd $rep
++elif [[ $words[1] = pu* && $PREFIX = [-+]* ]]; then
++  # pushd: just complete the numbers, but show the full directory list with
++  # numbers.
++  # For - we do the same thing, but reverse the numbering (other
++  # way round if pushdminus is set).
++  # The test is for pu* because I have an alias pu since I'm too
++  # lazy to type pushd.
++  IPREFIX=$PREFIX[1]
++  PREFIX=$PREFIX[2,-1]
++  local list lines
++  # get the list of directories with their canonical number
++  lines="$(dirs -v)"
++  # turn the lines into an array, removing the current directory
++  list=(${${(f)lines}##0*})
++  if [[ ( $IPREFIX = - && -z $pushdminus ) ||
++        ( $IPREFIX = + && -n $pushdminus ) ]]; then
++    # reverse the numbering: it counts the last one as -0, which
++    # is a little strange.
++    integer tot i
++    for (( i = 1, tot = $#list-1; tot >= 0; i++, tot-- )); do
++      list[$i]="$tot${list[$i]##[0-9]#}"
++    done
++  fi
++  # make sure -y treats this as a single string
++  lines="${(F)list}"
++  # get the array of numbers only
++  list=(${list%%[ 	]*})
++  compgen -y '$lines' -Q -k list
++  [[ -z $compstate[list] ]] && compstate[list]=list
++  [[ -n $compstate[insert] ]] && compstat[insert]=menu
++elif [[ $PREFIX != (\~|/|./|../)* && $#cdpath -ne 0 ]]; then
++  _path_files -W cdpath -/
+ else
+-  _files -/
++  _path_files -/
+ fi
+--- Completion/Commands/_most_recent_file.bak	Mon Mar  1 16:34:23 1999
++++ Completion/Commands/_most_recent_file	Wed Mar  3 16:57:51 1999
+@@ -1,11 +1,22 @@
+ #defkeycomp complete-word \C-xm
++
++# Complete the most recent file matching the pattern on the line so
++# far: globbing is active, i.e. *.txt will be expanded to the most recent
++# file ending in .txt
++#
++# With a prefix argument, select the Nth most recent matching file;
++# negative arguments work in the opposite direction, so for example
++# `Esc - \C-x m' gets you the oldest file.
++#
++# (`Most recent' means most recently modified.)
++
+ local file tilde etilde
+-if [[ $PREFIX = \~*/ ]]; then
++if [[ $PREFIX = \~*/* ]]; then
+   tilde=${PREFIX%%/*}
+   etilde=${~tilde}
+-  file=($~PREFIX*$~SUFFIX(om[1]N))
++  file=($~PREFIX*$~SUFFIX(om[$NUMERIC]N))
+   file=(${file/#$etilde/$tilde})
+ else
+-  file=($~PREFIX*$~SUFFIX(om[1]N))
++  file=($~PREFIX*$~SUFFIX(om[$NUMERIC]N))
+ fi
+-(( $#file )) && compadd -f -Q $file
++(( $#file )) && compadd -U -f -Q $file
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

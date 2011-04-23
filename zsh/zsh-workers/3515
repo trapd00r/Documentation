@@ -1,0 +1,201 @@
+From zsh-workers-request@math.gatech.edu Wed Sep 24 13:05:03 1997
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 13041 invoked from network); 24 Sep 1997 13:05:00 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 24 Sep 1997 13:05:00 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.8.5/8.8.5) id IAA26653;
+	Wed, 24 Sep 1997 08:53:40 -0400 (EDT)
+Resent-Date: Wed, 24 Sep 1997 08:53:40 -0400 (EDT)
+Message-Id: <199709241254.OAA25551@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: closures: #3
+Date: Wed, 24 Sep 1997 14:54:02 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"qgegF2.0.OW6.JrGAq"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/3515
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+I hope the lack of response about the previous patches is a good sign.
+Before I forget about this and do something else, there are three more
+issues taken care of in this patch.
+
+1) A further optimisation for simple *foo-like matches, where there is
+   a * followed by an ordinary character.  This cuts down my overall
+   shell initialisation by a factor two, largely due to long-winded
+   matches on $PATH, but this is certainly a big win worth a few extra
+   lines of code.
+
+2) I was overenthusiastic when backtracking within a particular
+   closure match:  you just need to knock a single character off the end,
+   and rely on the success or failure of that for the next attempt; if it
+   fails, there's no point shortening the match any further since it
+   didn't have to match to the end anyway.  In the same chunk, you
+   should also check when shortening the string that the last byte
+   isn't a Meta.
+
+3) I discovered an old, completely separate globbing bug while staring
+   at the code:
+
+     [[ foo = (*~anything)anything ]]
+
+   succeeds, because the first * is wrongly treated like a final *
+   which matches anything at all.  Luckily, it is now possible
+   to test for a match not at the outermost grouping level, so this
+   can be fixed easily.
+
+*** Src/glob.c.clos3	Tue Sep 23 18:50:44 1997
+--- Src/glob.c	Wed Sep 24 11:33:43 1997
+***************
+*** 481,488 ****
+  	    return c;
+  	}
+  	if (*pptr == Star && pptr[1] &&
+! 	    (unset(EXTENDEDGLOB) || pptr[1] != Tilde || !pptr[2] ||
+! 	     pptr[2] == Bar ||
+  	     pptr[2] == Outpar) && (mode || pptr[1] != '/')) {
+  	    /* Star followed by other patterns is treated like a closure
+  	     * (zero or more repetitions) of the single character pattern
+--- 481,488 ----
+  	    return c;
+  	}
+  	if (*pptr == Star && pptr[1] &&
+! 	    (unset(EXTENDEDGLOB) || !(gflag & GF_TOPLEV) ||
+! 	     pptr[1] != Tilde || !pptr[2] || pptr[2] == Bar ||
+  	     pptr[2] == Outpar) && (mode || pptr[1] != '/')) {
+  	    /* Star followed by other patterns is treated like a closure
+  	     * (zero or more repetitions) of the single character pattern
+***************
+*** 2007,2025 ****
+  	     * forward until we get a match.  At top level, we are bound
+  	     * to get there eventually, so this is OK.
+  	     */
+  
+! 	    for (done = 0; ; done++) {
+! 		saves = pptr;
+! 		if ((done || ONEHASHP(c)) &&
+! 		    ((!c->next && (!LASTP(c) || !*pptr)) ||
+! 		     (c->next && doesmatch(c->next))))
+! 		    return 1;
+! 		pptr = saves;
+! 		first = 0;
+! 		if (!matchonce(c) || pptr == saves)
+! 		    return 0;
+  	    }
+  	}
+  	inclosure++;
+  	closlist = newlinklist();
+  
+--- 2007,2052 ----
+  	     * forward until we get a match.  At top level, we are bound
+  	     * to get there eventually, so this is OK.
+  	     */
++ 	    char looka;
+  
+! 	    if (*c->str == Quest && !c->str[1] && c->next &&
+! 		!c->next->left && (looka = *c->next->str) &&
+! 		!itok(looka)) {
+! 		/* Another simple optimisation for a very common case:
+! 		 * we are processing a * (i.e. ?#) and there is
+! 		 * an ordinary character match next.  We look ahead for
+! 		 * that character, taking care of Meta bytes.
+! 		 */
+! 		while (*pptr) {
+! 		    for (; *pptr; pptr++) {
+! 			if (*pptr == Meta)
+! 			    pptr++;
+! 			else if (*pptr == looka)
+! 			    break;
+! 		    }
+! 		    if (!*(saves = pptr))
+! 			break;
+! 		    if (doesmatch(c->next))
+! 			return 1;
+! 		    pptr = saves+1;
+! 		}
+! 	    } else {
+! 		/* Standard track-forward code */
+! 		for (done = 0; ; done++) {
+! 		    saves = pptr;
+! 		    if ((done || ONEHASHP(c)) &&
+! 			((!c->next && (!LASTP(c) || !*pptr)) ||
+! 			 (c->next && doesmatch(c->next))))
+! 			return 1;
+! 		    pptr = saves;
+! 		    first = 0;
+! 		    if (!matchonce(c) || pptr == saves)
+! 			return 0;
+! 		}
+  	    }
++ 	    return 0;
+  	}
++ 	/* The full, gory backtracking code is now necessary. */
+  	inclosure++;
+  	closlist = newlinklist();
+  
+***************
+*** 2030,2036 ****
+  	done = 0;
+  	addclosures(c, closlist, &done);
+  	for (;;) {
+- 	    int mflag = 0;
+  	    if (TWOHASHP(c) && !done)
+  		break;
+  	    saves = pptr;
+--- 2057,2062 ----
+***************
+*** 2045,2064 ****
+  	     * shorten the match using the last pattern in the closure.
+  	     */
+  	    gcnode = firstnode(closlist) ? peekfirst(closlist) : NULL;
+! 	    while (gcnode && !mflag && --gcnode->end > gcnode->start) {
+  		char savec = *gcnode->end;
+  		*gcnode->end = '\0';
+  		pptr = gcnode->start;
+! 		if (matchonce(c))
+! 		    mflag = 1;
+  		*gcnode->end = savec;
+- 	    }
+- 	    if (mflag) {
+- 		/* Try again to construct a list based on
+- 		 * this new position
+- 		 */
+- 		addclosures(c, closlist, &done);
+- 		continue;
+  	    }
+  	    /* We've now exhausted the possibilities with that match,
+  	     * backtrack to the previous.
+--- 2071,2092 ----
+  	     * shorten the match using the last pattern in the closure.
+  	     */
+  	    gcnode = firstnode(closlist) ? peekfirst(closlist) : NULL;
+! 	    if (gcnode && --gcnode->end > gcnode->start
+! 		&& (gcnode->end[-1] != Meta ||
+! 		    --gcnode->end > gcnode->start)) {
+  		char savec = *gcnode->end;
+  		*gcnode->end = '\0';
+  		pptr = gcnode->start;
+! 		if (matchonce(c) && pptr != gcnode->start) {
+! 		    *gcnode->end = savec;
+! 		    gcnode->end = pptr;
+! 		    /* Try again to construct a list based on
+! 		     * this new position
+! 		     */
+! 		    addclosures(c, closlist, &done);
+! 		    continue;
+! 		}
+  		*gcnode->end = savec;
+  	    }
+  	    /* We've now exhausted the possibilities with that match,
+  	     * backtrack to the previous.
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77413
+Deutsches Elektronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, Platanenallee 6, 15738 Zeuthen, Germany.
+

@@ -1,0 +1,323 @@
+From zsh-workers-return-12952-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Oct 11 07:33:28 2000
+Return-Path: <zsh-workers-return-12952-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26411 invoked from network); 11 Oct 2000 07:33:18 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 11 Oct 2000 07:33:18 -0000
+Received: (qmail 23488 invoked by alias); 11 Oct 2000 07:32:27 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 12952
+Received: (qmail 23481 invoked from network); 11 Oct 2000 07:32:26 -0000
+Date: Wed, 11 Oct 2000 09:32:24 +0200 (MET DST)
+Message-Id: <200010110732.JAA26002@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: multiple-commands-functions
+
+
+[I've prepared some patches yesterday, I'm not sure about any of them, 
+so I'll just post them for further discussion, without committing them.]
+
+
+We were discussing ways to improve functions like _rlogin. The
+original request could be reduced to something like: is there a way to 
+make it easier to use one of the `services' of such functions?
+
+Then Bart and I more-or-less suggested to use those `services' as an
+abstraction so that functions could use `#compdef rsh remsh=rsh...'.
+The service name would then be given as an argument to the function
+and it could decide what to do with it.
+
+But that has an ugly side-effect: some of the functions already use
+the arguments, for options. For example, _pbm can be used as a
+top-level function and also calls itself to complete only appropriate
+files. Another problem of some of the solutions suggested is that they 
+modify $_comps which may make re-loading impossible.
+
+That made me think about ways to simplify it, or to report the service 
+somewhere else, in a (completion-system-)global parameter. From there
+it was only a small step to the patch below. It allows to define
+`completion aliases' (there it is again, `aliases' -- well, we could
+change that name, of course). For example, in an autoloaded function,
+`#compdef rsh remsh=rsh' defines the alias `remsh=rsh'. The code
+calling completion functions checks if $words[1] is equal to `remsh'
+and if it is, it will call the completion function for `rsh', but
+before that, it sets $words[1] to `rsh'. I.e. the function only has to 
+check for $words[1] = rsh. Put the other way, `rsh' is the `service'.
+
+It is also possible to define completion aliases directly with
+compdef, with the new option -A: `compdef -A krsh=rsh ...' says that
+completion for `krsh' should be done as for `rsh'. I like this,
+because it is independent of the function (and sub-function or
+case-branch) used for `rsh' -- users don't have to worry about that.
+
+The only thing we would have to worry about is functions that call the 
+command we are completing for. Since this is needed less often than
+finding the `service', it would probably make sense to put the
+original command name into a (completion-system-)global parameter and
+use that everywhere we need to call the command. I haven't implemented 
+that yet, though.
+
+Bye
+ Sven
+
+diff -u -r ../oz/Completion/Core/_compalso ./Completion/Core/_compalso
+--- ../oz/Completion/Core/_compalso	Tue Oct 10 19:36:47 2000
++++ ./Completion/Core/_compalso	Tue Oct 10 20:09:55 2000
+@@ -10,6 +10,7 @@
+ local i tmp ret=1
+ 
+ for i; do
++  (( $+_compaliases[$1] )) && 1="$_compaliases[$1]"
+   tmp="$_comps[$1]"
+   [[ -z "$tmp" ]] || "$tmp" && ret=0
+ done
+diff -u -r ../oz/Completion/Core/_normal ./Completion/Core/_normal
+--- ../oz/Completion/Core/_normal	Tue Oct 10 19:36:47 2000
++++ ./Completion/Core/_normal	Tue Oct 10 20:06:50 2000
+@@ -15,6 +15,11 @@
+ # a path and the last path name component).
+ 
+ command="$words[1]"
++if (( $+_compaliases[$command] )); then
++  command="$_compaliases[$command]"
++  words[1]="$command"
++fi
++
+ if [[ CURRENT -eq 1 ]]; then
+   curcontext="${curcontext%:*:*}:-command-:"
+ 
+diff -u -r ../oz/Completion/Core/compdump ./Completion/Core/compdump
+--- ../oz/Completion/Core/compdump	Tue Oct 10 19:36:47 2000
++++ ./Completion/Core/compdump	Tue Oct 10 20:21:45 2000
+@@ -35,12 +35,18 @@
+ 
+ print "#files: $#_d_files" > $_d_file
+ 
+-# First dump the arrays _comps and _patcomps.  The quoting hieroglyphyics
+-# ensure that a single quote inside a variable is itself correctly quoted.
++# First dump the arrays.  The quoting hieroglyphyics ensure that a single
++# quote inside a variable is itself correctly quoted.
+ 
+ print "_comps=(" >> $_d_file
+ for _d_f in ${(ok)_comps}; do
+     print -r - "${(q)_d_f}" "${(q)_comps[$_d_f]}"
++done  >> $_d_file
++print ")" >> $_d_file
++
++print "_compaliases=(" >> $_d_file
++for _d_f in ${(ok)_compaliases}; do
++    print -r - "${(q)_d_f}" "${(q)_compaliases[$_d_f]}"
+ done  >> $_d_file
+ print ")" >> $_d_file
+ 
+diff -u -r ../oz/Completion/Core/compinit ./Completion/Core/compinit
+--- ../oz/Completion/Core/compinit	Tue Oct 10 19:36:47 2000
++++ ./Completion/Core/compinit	Tue Oct 10 20:43:37 2000
+@@ -100,12 +100,13 @@
+   esac
+ done
+ 
+-# The associative array containing the definitions for the commands.
++# The associative arrays containing the definitions for the commands and
++# the completion aliases.
+ # Definitions for patterns will be stored in the associations `_patcomps'
+ # and `_postpatcomps'. `_compautos' contains the names and options
+ # for autoloaded functions that get options.
+ 
+-typeset -gA _comps _patcomps _postpatcomps _compautos
++typeset -gA _comps _compaliases _patcomps _postpatcomps _compautos
+ 
+ # The associative array use to report information about the last
+ # cmpletion to the outside.
+@@ -181,16 +182,16 @@
+ #   delete the definitions for the command names `bar' and `baz'
+ 
+ compdef() {
+-  local opt autol type func delete new i
++  local opt autol type func delete new i ali
+ 
+   # Get the options.
+ 
+-  if [[ $#* -eq 0 ]]; then
+-    echo "compdef needs parameters"
++  if (( ! $# )); then
++    echo "#0: I need arguments"
+     return 1
+   fi
+   
+-  while getopts "anpPkKd" opt; do
++  while getopts "anpPkKdA" opt; do
+     case "$opt" in
+     a)    autol=yes;;
+     n)    new=yes;;
+@@ -211,16 +212,44 @@
+ 	  fi
+ 	  ;;
+     d) delete=yes;;
++    A) ali=yes;;
+     esac
+   done
+   shift OPTIND-1
+ 
+-  if [[ $#* -eq 0 ]]; then
+-    echo "compdef needs parameters"
++  if (( ! $# )); then
++    echo "$0: I need arguments"
+     return 1
+   fi
+-  
+-  if [[ -z "$delete" ]]; then
++
++  if [[ -n "$ali" ]]; then
++    if [[ -n "$autol$type" ]]; then
++      echo "$0: -A can't be combined with other options"
++      return 1
++    fi
++    if [[ -z "$delete" ]]; then
++      ali=0
++      for i; do
++        if [[ "$i" != *\=* ]]; then
++	  echo "$0: invalid argument: \`$i'"
++	  ali=1
++        else
++          new="${i#*\=}"
++	  if (( $+_compaliases[$new] )); then
++	    _compaliases[${i%%\=*}]="$_compaliases[$new]"
++	    _comps[${i%%\=*}]="$_comps[$_compaliases[$new]]"
++	  else
++	    _compaliases[${i%%\=*}]="$new"
++	    _comps[${i%%\=*}]="$_comps[$new]"
++	  fi
++        fi
++      done
++      return ali
++    else
++      unset _compaliases\[${^*}\]
++      return
++    fi
++  elif [[ -z "$delete" ]]; then
+     # Adding definitions, first get the name of the function name
+     # and probably do autoloading.
+ 
+@@ -290,15 +319,15 @@
+     *)
+       # For commands store the function name in the `_comps'
+       # associative array, command names as keys.
+-      if [[ -z "$new" ]]; then
+-	for i; do
+-	  _comps[$i]="$func"
+-	done
+-      else
+-        for i; do
+-          [[ "${+_comps[$i]}" -eq 0 ]] && _comps[$i]="$func"
+-        done
+-      fi
++
++      for i; do
++        if [[ "$i" = *\=* ]]; then
++	  _compaliases[${i%%\=*}]="${i#*\=}"
++	  _comps[${i%%\=*}]="$_comps[${i#*\=}]"
++	else
++          [[ -z "$new" || "${+_comps[$i]}" -eq 0 ]] && _comps[$i]="$func"
++	fi
++      done
+       ;;
+     esac
+   else
+diff -u -r ../oz/Completion/User/_rlogin ./Completion/User/_rlogin
+--- ../oz/Completion/User/_rlogin	Tue Oct 10 19:36:48 2000
++++ ./Completion/User/_rlogin	Tue Oct 10 20:38:28 2000
+@@ -1,4 +1,4 @@
+-#compdef rlogin rsh remsh rcp
++#compdef rlogin rsh remsh=rsh rcp
+ 
+ _rlogin () {
+   case "${words[1]:t}" in
+@@ -9,7 +9,7 @@
+       '-l[specify login user name]:login as:_rlogin_users' \
+       ':remote host name:_rlogin_hosts'
+     ;;
+-  rsh|remsh)
++  rsh)
+     local context state line ret=1
+     typeset -A opt_args
+ 
+diff -u -r ../oz/Completion/User/_ssh ./Completion/User/_ssh
+--- ../oz/Completion/User/_ssh	Tue Oct 10 19:36:48 2000
++++ ./Completion/User/_ssh	Tue Oct 10 20:20:28 2000
+@@ -1,4 +1,4 @@
+-#compdef ssh slogin scp ssh-add ssh-agent ssh-keygen
++#compdef ssh slogin=ssh scp ssh-add ssh-agent ssh-keygen
+ 
+ _remote_files () {
+   local expl files
+@@ -18,7 +18,7 @@
+   # ssh-opt is a pseudo-command used to complete ssh options for `scp -o'.
+ 
+   case "${words[1]:t}" in
+-  ssh|slogin)
++  ssh)
+     args=(
+       ':remote host name:->userhost'
+       '(-):command: _command_names -e'
+diff -u -r ../oz/Doc/Zsh/compsys.yo ./Doc/Zsh/compsys.yo
+--- ../oz/Doc/Zsh/compsys.yo	Tue Oct 10 19:36:41 2000
++++ ./Doc/Zsh/compsys.yo	Tue Oct 10 21:11:20 2000
+@@ -164,6 +164,10 @@
+ either the name of a command whose arguments are to be completed or one of
+ a number of special contexts in the form tt(-)var(context)tt(-) described
+ below for the tt(_complete) function.
++
++Each var(name) may also be of the form `var(name1)tt(=)var(name2)'.
++This makes the function be used to complete arguments for var(name1)
++and ensures that the function treats it as if completing for var(name2).
+ )
+ item(tt(#compdef -p) var(pattern))(
+ The file will be made autoloadable and the function defined in it will be
+@@ -250,7 +254,8 @@
+ xitem(tt(compdef -p) [ tt(-a) ] var(function pattern))
+ xitem(tt(compdef -P) [ tt(-a) ] var(function pattern))
+ xitem(tt(compdef -k) [ tt(-an) ] var(function style key-sequences...))
+-item(tt(compdef -K) [ tt(-an) ] var(function name style key-sequences ...))(
++xitem(tt(compdef -K) [ tt(-an) ] var(function name style key-sequences...))
++item(tt(compdef -A) var(aliases...))(
+ The first form tells the completion system to call the given
+ var(function) when completing for the contexts or commands
+ whose var(names) are given:  this is like the tt(#compdef) tag.  If the
+@@ -285,6 +290,11 @@
+ for tt(-k) and the first must be a unique widget name beginning with an
+ underscore.
+ 
++The form with tt(-A) defines the completion var(aliases), each of
++which has to be of the form `var(command1)tt(=)var(command2)'.  Such an 
++alias makes the arguments of var(command1) be completed in the same
++way as those for var(command2).
++
+ In each of the forms supporting it the tt(-a) option makes the
+ var(function) autoloadable (exactly equivalent to
+ tt(autoload -U )var(function)).
+@@ -301,7 +311,15 @@
+ example(compdef _pids foo)
+ 
+ using the tt(_pids) function from the distribution to generate the
+-process identifiers.  Not also the tt(_use_lo) function described
++process identifiers.  Completion aliases are intended to express that
++completion for a command has to be done in the same way as for another 
++command, e.g.:
++
++example(compdef -A foo=rsh)
++
++says that completion for tt(foo) has to be done as for tt(rsh).
++
++Note also the tt(_use_lo) function described
+ below, which can be used to complete options for commands that
+ understand the `tt(-)tt(-help)' option.
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

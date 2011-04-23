@@ -1,0 +1,183 @@
+From zsh-workers-return-7978-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Sep 21 09:03:28 1999
+Return-Path: <zsh-workers-return-7978-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 11707 invoked from network); 21 Sep 1999 09:03:26 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 21 Sep 1999 09:03:26 -0000
+Received: (qmail 9114 invoked by alias); 21 Sep 1999 09:03:21 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7978
+Received: (qmail 9106 invoked from network); 21 Sep 1999 09:03:20 -0000
+Date: Tue, 21 Sep 1999 11:03:16 +0200 (MET DST)
+Message-Id: <199909210903.LAA14463@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Tanaka Akira's message of 21 Sep 1999 10:38:55 +0900
+Subject: Re: long string eval problem
+
+
+Tanaka Akira wrote:
+
+> Z(2):akr@localhost% Src/zsh -f
+> localhost% bindkey -e; fpath=($PWD/Completion/*(/)); autoload -U compinit; compinit -D; compdef _tst tst
+> localhost% _tst () { eval "$(perl -e 'print "_tst () {\n", "#" x 300000, "\n", "compadd xxx yyy\n}\n"')"; _tst "$@" }
+> localhost% tst <TAB><TAB>
+> 
+> This causes core dump.
+
+The problem was that the stack was filled up because `underscorelen'
+never was decremented. The patch finally makes this underscore stuff
+be done by a function with buffer enlargement and shrinking. Should
+still be more efficient than the original always-ztrdup()
+implementation.
+
+However, the saving/restoring in runshfunc() can still cause the stack 
+to fill up if we have a really large string in it and many functions
+are called (nested). I don't see how we could avoid this.
+
+Bye
+ Sven
+
+diff -u os/exec.c Src/exec.c
+--- os/exec.c	Tue Sep 21 10:25:45 1999
++++ Src/exec.c	Tue Sep 21 10:57:40 1999
+@@ -1413,6 +1413,27 @@
+ }
+ 
+ /**/
++void
++setunderscore(char *str)
++{
++    if (str && *str) {
++	int l = strlen(str) + 1;
++
++	if (l > underscorelen || l < (underscorelen >> 2)) {
++	    zfree(underscore, underscorelen);
++	    underscore = (char *) zalloc(underscorelen = l);
++	}
++	strcpy(underscore, str);
++	underscoreused = l;
++    } else {
++	zfree(underscore, underscorelen);
++	underscore = (char *) zalloc(underscorelen = 32);
++	*underscore = '\0';
++	underscoreused = 1;
++    }
++}
++
++/**/
+ static void
+ execcmd(Cmd cmd, int input, int output, int how, int last1)
+ {
+@@ -1629,21 +1650,8 @@
+ 	text = NULL;
+ 
+     /* Set up special parameter $_ */
+-    if (args && nonempty(args)) {
+-	char *u = (char *) getdata(lastnode(args));
+ 
+-	if (u) {
+-	    int ul = strlen(u);
+-
+-	    if (ul >= underscorelen) {
+-		zfree(underscore, underscorelen);
+-		underscore = (char *) zalloc(underscorelen = ul + 32);
+-	    }
+-	    strcpy(underscore, u);
+-	} else
+-	    *underscore = '\0';
+-    } else
+-	*underscore = '\0';
++    setunderscore((args && nonempty(args)) ? ((char *) getdata(lastnode(args))) : "");
+ 
+     /* Warn about "rm *" */
+     if (type == SIMPLE && interact && unset(RMSTARSILENT)
+@@ -3016,7 +3024,9 @@
+ runshfunc(List list, FuncWrap wrap, char *name)
+ {
+     int cont;
+-    VARARR(char, ou, underscorelen);
++    VARARR(char, ou, underscoreused);
++
++    memcpy(ou, underscore, underscoreused);
+ 
+     while (wrap) {
+ 	wrap->module->wrapper++;
+@@ -3032,9 +3042,8 @@
+ 	wrap = wrap->next;
+     }
+     startparamscope();
+-    strcpy(ou, underscore);
+     execlist(list, 1, 0);
+-    strcpy(underscore, ou);
++    setunderscore(ou);
+     endparamscope();
+ }
+ 
+@@ -3233,7 +3242,7 @@
+     trapreturn = exstack->trapreturn;
+     noerrs = exstack->noerrs;
+     subsh_close = exstack->subsh_close;
+-    strcpy(underscore, exstack->underscore);
++    setunderscore(exstack->underscore);
+     zsfree(exstack->underscore);
+     en = exstack->next;
+     free(exstack);
+diff -u os/init.c Src/init.c
+--- os/init.c	Tue Sep 21 10:25:45 1999
++++ Src/init.c	Tue Sep 21 10:54:13 1999
+@@ -43,7 +43,7 @@
+ char *underscore;
+ 
+ /**/
+-int underscorelen;
++int underscorelen, underscoreused;
+ 
+ /* what level of sourcing we are at */
+  
+@@ -625,6 +625,7 @@
+     wordchars   = ztrdup(DEFAULT_WORDCHARS);
+     postedit    = ztrdup("");
+     underscore  = (char *) zalloc(underscorelen = 32);
++    underscoreused = 1;
+     *underscore = '\0';
+ 
+     zoptarg = ztrdup("");
+diff -u os/utils.c Src/utils.c
+--- os/utils.c	Tue Sep 21 10:25:47 1999
++++ Src/utils.c	Tue Sep 21 10:57:15 1999
+@@ -752,14 +752,11 @@
+ 		    fprintf(shout, "You have new mail.\n");
+ 		    fflush(shout);
+ 		} else {
+-		    VARARR(char, usav, underscorelen);
+-		    int sl = strlen(*s);
++		    VARARR(char, usav, underscoreused);
+ 
+-		    if (sl >= underscorelen) {
+-			zfree(underscore, underscorelen);
+-			underscore = (char *) zalloc(underscorelen = sl + 32);
+-		    }
+-		    strcpy(underscore, *s);
++		    memcpy(usav, underscore, underscoreused);
++
++		    setunderscore(*s);
+ 		    HEAPALLOC {
+ 			u = dupstring(u);
+ 			if (! parsestr(u)) {
+@@ -769,7 +766,7 @@
+ 			    fflush(shout);
+ 			}
+ 		    } LASTALLOC;
+-		    strcpy(underscore, usav);
++		    setunderscore(usav);
+ 		}
+ 	    }
+ 	    if (isset(MAILWARNING) && st.st_atime > st.st_mtime &&
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

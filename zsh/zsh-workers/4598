@@ -1,0 +1,552 @@
+From zsh-workers-request@math.gatech.edu Wed Nov 11 06:53:26 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 2590 invoked from network); 11 Nov 1998 06:53:22 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 11 Nov 1998 06:53:22 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id BAA20224;
+	Wed, 11 Nov 1998 01:46:17 -0500 (EST)
+Resent-Date: Wed, 11 Nov 1998 01:46:17 -0500 (EST)
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <981110224440.ZM29013@candle.brasslantern.com>
+Date: Tue, 10 Nov 1998 22:44:40 -0800
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: zsh-workers@math.gatech.edu
+Subject: PATCH: 3.1.5 - sample associative array implementation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"jvqUu2.0.ux4.vAJIs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4598
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+The intersection of our discussion about improved completion widgets with a
+debugging session to track down the PWD/chpwd problem helped me see a short
+path to associative arrays.  The following patch implements a new option to
+"typeset":
+
+zsh% typeset -H assoc	# create associative (`H'ashed) array `assoc'
+
+The syntax for referring to elements of an associative array is exactly the
+same as any other array:
+
+zsh% assoc[bread]=butter
+zsh% assoc[toast]=jam
+zsh% echo $assoc
+butter jam
+zsh% echo $assoc[bread]
+butter
+
+However, there are some caveats:  (1) You can't assign to multiple elements
+of an associative array in a single expression; you must always use the
+subscript syntax.  (2) The text inside the [] is not subject to arithmetic
+evaluation as it is with regular arrays.  (3) $assoc, $assoc[@], $assoc[*]
+all produce strings, not arrays.  (4) because of (3), subscript modifiers
+such as $assoc[(r)but*] (which should produce "butter") produce the whole
+string.  (5) $assoc[bread,3] produces "but" (the first 3 characters of the
+value) which I think is because getarg() doesn't return soon enough; it
+really ought to either ignore or gripe about what comes after the comma.
+
+(I'm not sure why (3) happens, as I thought I'd done the right things to
+produce array results, but I wanted to get this out tonight for review.)
+
+It's actually possible to do something very similar with ordinary arrays
+and scalars, if you don't mind cluttering the namespace:
+
+zsh% bread=1
+zsh% toast=2
+zsh% assoc[bread]=butter
+zsh% assoc[toast]=jam
+
+Which, of course, is exactly why it was so easy to make this patch.  It
+does mean that you must declare associative arrays before you begin to
+assign to them, because the default interpretation of the syntax is to
+create an ordinary array.
+
+This patch is not very "ready for prime time" and should be worked over by
+someone more familiar than I am with the parameter manipulation code.  In
+particular, I'm afraid there may be some memory leaks in the code to form
+arrays from the values.  Further, the syntax for referring to associative
+array elements should probably not be the same as that for regular arrays
+(perhaps $assoc[[bread]], for example, which now is a math error) but I
+didn't want to delve into the parsing.  You'll note there's a hunk of
+text.c where I had no idea what to do.  Lastly, "typeset -H" is messily
+implemented because I didn't want to renumber gobs of flags in zsh.h.
+
+The implementation is fairly straightforward:  I modified "struct param"
+and its component unions to allow parameters to point to hash tables.  I
+then ripped some pieces out of the paramtab code and made it re-usable
+so that I could create additional parameter hash tables on the fly.  An
+associative array is then nothing more than a struct param that refers to
+a hash table of other struct param.
+
+When an associative array element is referenced, it's hash table slot is
+created and initially marked PM_UNSET.  getarg() then plays a trick on
+the parameter expansion code: it substitutes the struct param from the
+"nested" hash table for the input one that refers to the entire array,
+and claims it was really expanding that scalar all along.
+
+Although the user-level assignment UI so far creates only associative
+arrays of scalars, an internally-constructed special associative array
+could conceivably contain elements that are themselves arrays or other
+associations -- and it should all pretty much just work.
+
+This patch should apply to a raw 3.1.5 distribution with only a few lines
+of offset here and there.
+
+Index: Src/builtin.c
+===================================================================
+--- builtin.c	1998/11/08 06:24:16	1.6
++++ builtin.c	1998/11/10 06:25:13
+@@ -50,7 +50,7 @@
+     BUILTIN("cd", 0, bin_cd, 0, 2, BIN_CD, NULL, NULL),
+     BUILTIN("chdir", 0, bin_cd, 0, 2, BIN_CD, NULL, NULL),
+     BUILTIN("continue", BINF_PSPECIAL, bin_break, 0, 1, BIN_CONTINUE, NULL, NULL),
+-    BUILTIN("declare", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "LRUZfilrtux", NULL),
++    BUILTIN("declare", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "HLRUZfilrtux", NULL),
+     BUILTIN("dirs", 0, bin_dirs, 0, -1, 0, "v", NULL),
+     BUILTIN("disable", 0, bin_enable, 0, -1, BIN_DISABLE, "afmr", NULL),
+     BUILTIN("disown", 0, bin_fg, 0, -1, BIN_DISOWN, NULL, NULL),
+@@ -78,7 +78,7 @@
+     BUILTIN("jobs", 0, bin_fg, 0, -1, BIN_JOBS, "dlpZrs", NULL),
+     BUILTIN("kill", 0, bin_kill, 0, -1, 0, NULL, NULL),
+     BUILTIN("let", 0, bin_let, 1, -1, 0, NULL, NULL),
+-    BUILTIN("local", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "LRUZilrtu", NULL),
++    BUILTIN("local", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "HLRUZilrtu", NULL),
+     BUILTIN("log", 0, bin_log, 0, 0, 0, NULL, NULL),
+     BUILTIN("logout", 0, bin_break, 0, 1, BIN_LOGOUT, NULL, NULL),
+ 
+@@ -107,7 +107,7 @@
+     BUILTIN("trap", BINF_PSPECIAL, bin_trap, 0, -1, 0, NULL, NULL),
+     BUILTIN("true", 0, bin_true, 0, -1, 0, NULL, NULL),
+     BUILTIN("type", 0, bin_whence, 0, -1, 0, "ampfsw", "v"),
+-    BUILTIN("typeset", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "LRUZfilrtuxm", NULL),
++    BUILTIN("typeset", BINF_TYPEOPTS | BINF_MAGICEQUALS | BINF_PSPECIAL, bin_typeset, 0, -1, 0, "HLRUZfilrtuxm", NULL),
+     BUILTIN("umask", 0, bin_umask, 0, 1, 0, "S", NULL),
+     BUILTIN("unalias", 0, bin_unhash, 1, -1, 0, "m", "a"),
+     BUILTIN("unfunction", 0, bin_unhash, 1, -1, 0, "m", "f"),
+@@ -947,7 +947,6 @@
+ static void
+ cd_new_pwd(int func, LinkNode dir, int chaselinks)
+ {
+-    Param pm;
+     List l;
+     char *new_pwd, *s;
+     int dirstacksize;
+@@ -1470,7 +1469,7 @@
+     Param pm;
+     Asgment asg;
+     Comp com;
+-    char *optstr = "iLRZlurtxU";
++    char *optstr = "iLRZlurtxU----H";
+     int on = 0, off = 0, roff, bit = PM_INTEGER;
+     int initon, initoff, of, i;
+     int returnval = 0, printflags = 0;
+@@ -1545,7 +1544,8 @@
+ 				!(pm->flags & PM_READONLY & ~off))
+ 				uniqarray((*pm->gets.afn) (pm));
+ 			    pm->flags = (pm->flags | on) & ~off;
+-			    if (PM_TYPE(pm->flags) != PM_ARRAY) {
++			    if (PM_TYPE(pm->flags) != PM_ARRAY &&
++				PM_TYPE(pm->flags) != PM_HASHED) {
+ 				if ((on & (PM_LEFT | PM_RIGHT_B | PM_RIGHT_Z | PM_INTEGER)) && auxlen)
+ 				    pm->ct = auxlen;
+ 				/* did we just export this? */
+@@ -1619,7 +1619,8 @@
+ 	    if ((on & (PM_LEFT | PM_RIGHT_B | PM_RIGHT_Z | PM_INTEGER)) &&
+ 		auxlen)
+ 		pm->ct = auxlen;
+-	    if (PM_TYPE(pm->flags) != PM_ARRAY) {
++	    if (PM_TYPE(pm->flags) != PM_ARRAY &&
++		PM_TYPE(pm->flags) != PM_HASHED) {
+ 		if (pm->flags & PM_EXPORTED) {
+ 		    if (!(pm->flags & PM_UNSET) && !pm->env && !asg->value)
+ 			pm->env = addenv(asg->name, getsparam(asg->name));
+Index: Src/exec.c
+===================================================================
+--- exec.c	1998/10/30 17:52:43	1.6
++++ exec.c	1998/11/10 20:07:09
+@@ -1923,23 +1923,8 @@
+ 	    } else if (!(pm->flags & PM_READONLY) &&
+ 		       (unset(RESTRICTED) || !(pm->flags & PM_RESTRICTED))) {
+ 		Param tpm = (Param) alloc(sizeof *tpm);
+-
+ 		tpm->nam = s;
+-		tpm->flags = pm->flags;
+-		switch (PM_TYPE(pm->flags)) {
+-		case PM_SCALAR:
+-		    tpm->u.str = ztrdup(pm->gets.cfn(pm));
+-		    break;
+-		case PM_INTEGER:
+-		    tpm->u.val = pm->gets.ifn(pm);
+-		    break;
+-		case PM_ARRAY:
+-		    PERMALLOC {
+-			tpm->u.arr = arrdup(pm->gets.afn(pm));
+-		    } LASTALLOC;
+-		    break;
+-		}
+-		pm = tpm;
++		copyparam(tpm, pm);
+ 	    }
+ 	    addlinknode(*remove_p, s);
+ 	    addlinknode(*restore_p, pm);
+@@ -1988,6 +1973,9 @@
+ 		    break;
+ 		case PM_ARRAY:
+ 		    tpm->sets.afn(tpm, pm->u.arr);
++		    break;
++		case PM_HASHED:
++		    tpm->sets.hfn(tpm, pm->u.hash);
+ 		    break;
+ 		}
+ 	    } else
+Index: Src/hashtable.c
+===================================================================
+--- hashtable.c	1998/10/30 17:52:44	1.3
++++ hashtable.c	1998/11/10 08:49:26
+@@ -1091,8 +1091,10 @@
+     if (printflags & PRINT_TYPE) {
+ 	if (p->flags & PM_INTEGER)
+ 	    printf("integer ");
+-	if (p->flags & PM_ARRAY)
++	else if (p->flags & PM_ARRAY)
+ 	    printf("array ");
++	else if (p->flags & PM_HASHED)
++	    printf("association ");
+ 	if (p->flags & PM_LEFT)
+ 	    printf("left justified %d ", p->ct);
+ 	if (p->flags & PM_RIGHT_B)
+@@ -1142,6 +1144,16 @@
+ 		putchar(' ');
+ 		quotedzputs(*u++, stdout);
+ 	    }
++	}
++	printf(")\n");
++	break;
++    case PM_HASHED:
++	/* association */
++	putchar('(');
++	{
++            HashTable ht = p->gets.hfn(p);
++            if (ht)
++		scanhashtable(ht, 0, 0, 0, ht->printnode, 0);
+ 	}
+ 	printf(")\n");
+ 	break;
+Index: Src/params.c
+===================================================================
+--- params.c	1998/10/30 17:52:46	1.3
++++ params.c	1998/11/11 03:41:38
+@@ -247,7 +247,94 @@
+  
+ /**/
+ HashTable paramtab;
+- 
++
++/**/
++HashTable
++newparamtable(int size, char const *name)
++{
++    HashTable ht = newhashtable(size, name, NULL);
++
++    ht->hash        = hasher;
++    ht->emptytable  = NULL;
++    ht->filltable   = NULL;
++    ht->addnode     = addhashnode;
++    ht->getnode     = gethashnode2;
++    ht->getnode2    = gethashnode2;
++    ht->removenode  = removehashnode;
++    ht->disablenode = NULL;
++    ht->enablenode  = NULL;
++    ht->freenode    = freeparamnode;
++    ht->printnode   = printparamnode;
++
++    return ht;
++}
++
++/* Copy a parameter hash table */
++
++static HashTable outtable;
++
++/**/
++static void
++scancopyparams(HashNode hn, int flags)
++{
++    Param pm = (Param)hn;
++    Param tpm = (Param) alloc(sizeof *tpm);
++    tpm->nam = ztrdup(pm->nam);
++    copyparam(tpm, pm);
++    addhashnode(outtable, tpm->nam, tpm);
++}
++
++/**/
++HashTable
++copyparamtable(HashTable ht, char *name)
++{
++    HashTable nht = newparamtable(ht->hsize, name);
++    outtable = nht;
++    scanhashtable(ht, 0, 0, 0, scancopyparams, 0);
++    outtable = NULL;
++    return nht;
++}
++
++static unsigned numparamvals;
++
++/**/
++static void
++scancountparams(HashNode hn, int flags)
++{
++    ++numparamvals;
++}
++
++static char **paramvals;
++
++/**/
++static void
++scanparamvals(HashNode hn, int flags)
++{
++    struct value v;
++    v.isarr = (flags & 1);
++    v.pm = (Param)hn;
++    v.inv = (flags & 2);
++    v.a = 0;
++    v.b = -1;
++    paramvals[numparamvals++] = getstrvalue(&v);
++}
++
++/**/
++char **
++paramvalarr(HashTable ht)
++{
++    numparamvals = 0;
++    if (ht)
++	scanhashtable(ht, 0, 0, 0, scancountparams, 0);
++    paramvals = (char **) alloc(numparamvals * sizeof(char **) + 1);
++    if (ht) {
++	numparamvals = 0;
++	scanhashtable(ht, 0, 0, 0, scanparamvals, 0);
++    }
++    paramvals[numparamvals] = 0;
++    return paramvals;
++}
++
+ /* Set up parameter hash table.  This will add predefined  *
+  * parameter entries as well as setting up parameter table *
+  * entries for environment variables we inherit.           */
+@@ -261,19 +348,7 @@
+     char buf[50], *str, *iname;
+     int num_env;
+ 
+-    paramtab = newhashtable(151, "paramtab", NULL);
+-
+-    paramtab->hash        = hasher;
+-    paramtab->emptytable  = NULL;
+-    paramtab->filltable   = NULL;
+-    paramtab->addnode     = addhashnode;
+-    paramtab->getnode     = gethashnode2;
+-    paramtab->getnode2    = gethashnode2;
+-    paramtab->removenode  = removehashnode;
+-    paramtab->disablenode = NULL;
+-    paramtab->enablenode  = NULL;
+-    paramtab->freenode    = freeparamnode;
+-    paramtab->printnode   = printparamnode;
++    paramtab = newparamtable(151, "paramtab");
+ 
+     /* Add the special parameters to the hash table */
+     for (ip = special_params; ip->nam; ip++)
+@@ -427,6 +502,10 @@
+ 	    pm->sets.afn = arrsetfn;
+ 	    pm->gets.afn = arrgetfn;
+ 	    break;
++	case PM_HASHED:
++	    pm->sets.hfn = hashsetfn;
++	    pm->gets.hfn = hashgetfn;
++	    break;
+ 	default:
+ 	    DPUTS(1, "BUG: tried to create param node without valid flag");
+ 	    break;
+@@ -436,6 +515,31 @@
+     return pm;
+ }
+ 
++/* Copy a parameter */
++
++/**/
++void
++copyparam(Param tpm, Param pm)
++{
++    PERMALLOC {
++	tpm->flags = pm->flags;
++	switch (PM_TYPE(pm->flags)) {
++	case PM_SCALAR:
++	    tpm->u.str = ztrdup(pm->gets.cfn(pm));
++	    break;
++	case PM_INTEGER:
++	    tpm->u.val = pm->gets.ifn(pm);
++	    break;
++	case PM_ARRAY:
++	    tpm->u.arr = arrdup(pm->gets.afn(pm));
++	    break;
++	case PM_HASHED:
++	    tpm->u.hash = copyparamtable(pm->gets.hfn(pm), pm->nam);
++	    break;
++	}
++    } LASTALLOC;
++}
++
+ /* Return 1 if the string s is a valid identifier, else return 0. */
+ 
+ /**/
+@@ -577,6 +681,23 @@
+     singsub(&s);
+ 
+     if (!rev) {
++	if (PM_TYPE(v->pm->flags) == PM_HASHED) {
++	    HashTable ht = v->pm->gets.hfn(v->pm);
++	    if (!ht) {
++		ht = newparamtable(17, v->pm->nam);
++		v->pm->sets.hfn(v->pm, ht);
++	    }
++	    if (!(v->pm = (Param) ht->getnode(ht, s))) {
++		HashTable tht = paramtab;
++		paramtab = ht;
++		v->pm = createparam(s, PM_SCALAR|PM_UNSET);
++		paramtab = tht;
++	    }
++	    v->isarr = 0;
++	    v->a = 0;
++	    *w = v->b = -1;
++	    r = isset(KSHARRAYS) ? 1 : 0;
++	} else
+ 	if (!(r = mathevalarg(s, &s)) || (isset(KSHARRAYS) && r >= 0))
+ 	    r++;
+ 	if (word && !v->isarr) {
+@@ -891,11 +1012,14 @@
+ 	}
+ 
+ 	switch(PM_TYPE(v->pm->flags)) {
++	case PM_HASHED:
++	    ss = paramvalarr(v->pm->gets.hfn(v->pm));	/* XXX Leaky? */
++	    LASTALLOC_RETURN sepjoin(ss, NULL);
+ 	case PM_ARRAY:
++	    ss = v->pm->gets.afn(v->pm);
+ 	    if (v->isarr)
+-		s = sepjoin(v->pm->gets.afn(v->pm), NULL);
++		s = sepjoin(ss, NULL);
+ 	    else {
+-		ss = v->pm->gets.afn(v->pm);
+ 		if (v->a < 0)
+ 		    v->a += arrlen(ss);
+ 		s = (v->a >= arrlen(ss) || v->a < 0) ? (char *) hcalloc(1) : ss[v->a];
+@@ -1181,9 +1305,12 @@
+ {
+     Value v;
+ 
+-    if (!idigit(*s) && (v = getvalue(&s, 0)) &&
+-	PM_TYPE(v->pm->flags) == PM_ARRAY)
+-	return v->pm->gets.afn(v->pm);
++    if (!idigit(*s) && (v = getvalue(&s, 0))) {
++	if (PM_TYPE(v->pm->flags) == PM_ARRAY)
++	    return v->pm->gets.afn(v->pm);
++	else if (PM_TYPE(v->pm->flags) == PM_HASHED)
++	    return paramvalarr(v->pm->gets.hfn(v->pm));	/* XXX Leaky? */
++    }
+     return NULL;
+ }
+ 
+@@ -1363,6 +1490,7 @@
+     switch (PM_TYPE(pm->flags)) {
+ 	case PM_SCALAR: pm->sets.cfn(pm, NULL); break;
+ 	case PM_ARRAY:  pm->sets.afn(pm, NULL); break;
++        case PM_HASHED: pm->sets.hfn(pm, NULL); break;
+     }
+     pm->flags |= PM_UNSET;
+ }
+@@ -1427,6 +1555,26 @@
+     if (pm->flags & PM_UNIQUE)
+ 	uniqarray(x);
+     pm->u.arr = x;
++}
++
++/* Function to get value of an association parameter */
++
++/**/
++static HashTable
++hashgetfn(Param pm)
++{
++    return pm->u.hash;
++}
++
++/* Function to set value of an association parameter */
++
++/**/
++static void
++hashsetfn(Param pm, HashTable x)
++{
++    if (pm->u.hash && pm->u.hash != x)
++	deletehashtable(pm->u.hash);
++    pm->u.hash = x;
+ }
+ 
+ /* This function is used as the set function for      *
+Index: Src/text.c
+===================================================================
+--- text.c	1998/06/01 17:08:45	1.1.1.1
++++ text.c	1998/11/10 05:33:22
+@@ -450,6 +450,8 @@
+ 	    taddchr('(');
+ 	    taddlist(v->arr);
+ 	    taddstr(") ");
++	} else if (PM_TYPE(v->type) == PM_HASHED) {
++	    /* XXX */
+ 	} else {
+ 	    taddstr(v->str);
+ 	    taddchr(' ');
+Index: Src/zsh.h
+===================================================================
+--- zsh.h	1998/11/04 17:13:55	1.3
++++ zsh.h	1998/11/10 08:49:41
+@@ -813,6 +813,7 @@
+ 	char **arr;		/* value if declared array   (PM_ARRAY)   */
+ 	char *str;		/* value if declared string  (PM_SCALAR)  */
+ 	long val;		/* value if declared integer (PM_INTEGER) */
++        HashTable hash;		/* value if declared assoc   (PM_HASHED)  */
+     } u;
+ 
+     /* pointer to function to set value of this parameter */
+@@ -820,6 +821,7 @@
+ 	void (*cfn) _((Param, char *));
+ 	void (*ifn) _((Param, long));
+ 	void (*afn) _((Param, char **));
++        void (*hfn) _((Param, HashTable));
+     } sets;
+ 
+     /* pointer to function to get value of this parameter */
+@@ -827,6 +829,7 @@
+ 	char *(*cfn) _((Param));
+ 	long (*ifn) _((Param));
+ 	char **(*afn) _((Param));
++        HashTable (*hfn) _((Param));
+     } gets;
+ 
+     /* pointer to function to unset this parameter */
+@@ -845,8 +848,9 @@
+ #define PM_SCALAR	0	/* scalar                                     */
+ #define PM_ARRAY	(1<<0)	/* array                                      */
+ #define PM_INTEGER	(1<<1)	/* integer                                    */
++#define PM_HASHED	(1<<15)	/* association                                */
+ 
+-#define PM_TYPE(X) (X & (PM_SCALAR|PM_INTEGER|PM_ARRAY))
++#define PM_TYPE(X) (X & (PM_SCALAR|PM_INTEGER|PM_ARRAY|PM_HASHED))
+ 
+ #define PM_LEFT		(1<<2)	/* left justify and remove leading blanks     */
+ #define PM_RIGHT_B	(1<<3)	/* right justify and fill with leading blanks */
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

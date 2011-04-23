@@ -1,0 +1,153 @@
+From zsh-workers-return-5598-mason-zsh=primenet.com.au@sunsite.auc.dk Tue Mar 02 09:15:04 1999
+Return-Path: <zsh-workers-return-5598-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16653 invoked from network); 2 Mar 1999 09:15:03 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 2 Mar 1999 09:15:03 -0000
+Received: (qmail 15949 invoked by alias); 2 Mar 1999 09:14:47 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 5598
+Received: (qmail 15942 invoked from network); 2 Mar 1999 09:14:46 -0000
+Date: Tue, 2 Mar 1999 10:14:00 +0100 (MET)
+Message-Id: <199903020914.KAA17645@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Sven Wischnowsky's message of Mon, 1 Mar 1999 18:10:07 +0100
+	(MET)
+Subject: Re: PATCH: Re: Don't understand compadd -p (or -P) any more
+
+
+I wrote:
+
+> I had played with this the weekend before the last one and wanted to
+> make the code automatically insert the `-p'-prefix.
+
+Thinking about this some more, I found a really easy way to get this
+(should have thought of this from the beginning...).
+
+The patch below makes `compadd' eagerly insert as much of the `-p' and 
+`-P' prefixes as possible. The problem with the older solution was
+that it required the `-p' prefix to be on the line. When comparing it
+with the old code this seemed to make sense, since the `-p' prefix is
+like an path prefix when completing files in the old code, where this
+prefix is *taken* from the line. With `compadd' it's the other way
+round: one *gives* such a prefix and suddenly this is completely
+independent of the contents of the line. With that I had some trouble
+finding out, what should be used for matching. Should the line match
+`<-p><match><-s>', or only `<match>'? The patch below makes the `-P'
+prefix be ignored as for `comp{gen,ctl}', then it sees if what's on
+the line matches the beginning of the `-p' prefix. If there is nothing 
+on the line, it just uses an empty string for matching, otherwise the
+`-p'-prefix-part from the line is *not* used for matching, only what's 
+after it.
+
+And the same for the suffix, of course.
+
+Bye
+ Sven
+
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Mon Mar  1 18:10:54 1999
++++ Src/Zle/zle_tricky.c	Tue Mar  2 08:49:24 1999
+@@ -3984,7 +3984,6 @@
+ 	   int flags, int aflags, Cmatcher match, char *exp, char **argv)
+ {
+     char *s, *t, *e, *me, *ms, *lipre = NULL, *lpre, *lsuf, **aign = NULL;
+-    char *tlsuf;
+     int lpl, lsl, i, pl, sl, test, bpl, bsl, llpl, llsl;
+     Aminfo ai;
+     Cline lc = NULL;
+@@ -4033,11 +4032,9 @@
+ 		llsl = strlen(lsuf);
+ 		/* Test if there is an existing -P prefix. */
+ 		if (pre && *pre) {
+-		    pl = strlen(pre);
+-		    if (pl <= llpl && !strncmp(lpre, pre, pl)) {
+-			llpl -= pl;
+-			lpre += pl;
+-		    }
++		    pl = pfxlen(pre, lpre);
++		    llpl -= pl;
++		    lpre += pl;
+ 		}
+ 		if (isset(GLOBCOMPLETE)) {
+ 		    char *tmp = (char *) zhalloc(2 + llpl + llsl);
+@@ -4070,15 +4067,27 @@
+ 		lsl = strlen(psuf);
+ 	    } else
+ 		lsl = 0;
+-	    if ((aflags & CAF_MATCH) &&
+-		((lpl && (llpl < lpl || strncmp(lpre, ppre, lpl))) ||
+-		 (lsl && (llsl < lsl || strncmp(lsuf + llsl - lsl, psuf, lsl)))))
+-		*argv = NULL;
+-	    else {
+-		if (aflags & CAF_MATCH) {
+-		    tlsuf = dupstring(lsuf);
+-		    tlsuf[llsl - lsl] = '\0';
+-		}
++	    if (aflags & CAF_MATCH) {
++		s = ppre ? ppre : "";
++		if (llpl <= lpl && strpfx(lpre, s)) {
++		    llpl = 0;
++		    lpre = "";
++		} else if (llpl > lpl && strpfx(s, lpre)) {
++		    llpl -= lpl;
++		    lpre += lpl;
++		} else
++		    *argv = NULL;
++		s = psuf ? psuf : "";
++		if (llsl <= lsl && strsfx(lsuf, s)) {
++		    llsl = 0;
++		    lsuf = "";
++		} else if (llsl > lsl && strsfx(s, lsuf)) {
++		    lsuf[llsl - lsl] = '\0';
++		    llsl -= lsl;
++		} else
++		    *argv = NULL;
++	    }
++	    if (*argv) {
+ 		if (pre)
+ 		    pre = dupstring(pre);
+ 		if (suf)
+@@ -4154,19 +4163,19 @@
+ 			else
+ 			    continue;
+ 		    } else {
+-			test = (sl >= llpl + llsl - lpl - lsl &&
+-				strpfx(lpre + lpl, s) && strsfx(tlsuf, s));
++			test = (sl >= llpl + llsl &&
++				strpfx(lpre, s) && strsfx(lsuf, s));
+ 			if (!test && mstack &&
+-			    (ms = comp_match(lpre + lpl, tlsuf, s,
++			    (ms = comp_match(lpre, lsuf, s,
+ 					     &lc, (aflags & CAF_QUOTE),
+ 					     &bpl, &bsl)))
+ 			    test = 1;
+ 
+ 			if (!test)
+ 			    continue;
+-			pl = sl - (llsl - lsl);
+-			me = s + sl - (llsl - lsl);
+-			e = s + (llpl - lpl);
++			pl = sl - llsl;
++			me = s + sl - llsl;
++			e = s + llpl;
+ 		    }
+ 		} else {
+ 		    e = s;
+@@ -4193,7 +4202,7 @@
+ 		if (ppre)
+ 		    t = dyncat(ppre, t);
+ 		if (!cp && !ms && mstack) {
+-		    int bl = ((aflags & CAF_MATCH) ? (llpl - lpl) : 0);
++		    int bl = ((aflags & CAF_MATCH) ? llpl : 0);
+ 		    Cline *clp = &lc, tlc;
+ 		    char *ss = dupstring(s), *ee = me + (ss - s);
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

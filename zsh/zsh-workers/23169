@@ -1,0 +1,142 @@
+From zsh-workers-return-23169-mason-zsh=primenet.com.au@sunsite.dk Tue Feb 13 17:13:45 2007
+Return-Path: <zsh-workers-return-23169-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28875 invoked from network); 13 Feb 2007 17:13:39 -0000
+X-Spam-Checker-Version: SpamAssassin 3.1.7 (2006-10-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=BAYES_00,FORGED_RCVD_HELO 
+	autolearn=ham version=3.1.7
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 13 Feb 2007 17:13:39 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 64018 invoked from network); 13 Feb 2007 17:13:32 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 13 Feb 2007 17:13:32 -0000
+Received: (qmail 23856 invoked by alias); 13 Feb 2007 17:13:29 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23169
+Received: (qmail 23847 invoked from network); 13 Feb 2007 17:13:28 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 13 Feb 2007 17:13:28 -0000
+Received: (qmail 63708 invoked from network); 13 Feb 2007 17:13:28 -0000
+Received: from vms046pub.verizon.net (206.46.252.46)
+  by a.mx.sunsite.dk with SMTP; 13 Feb 2007 17:13:22 -0000
+Received: from torch.brasslantern.com ([71.116.79.148])
+ by vms046.mailsrvcs.net (Sun Java System Messaging Server 6.2-6.01 (built Apr
+ 3 2006)) with ESMTPA id <0JDE00DCGVRAUHJ6@vms046.mailsrvcs.net> for
+ zsh-workers@sunsite.dk; Tue, 13 Feb 2007 11:11:36 -0600 (CST)
+Received: from torch.brasslantern.com (localhost.localdomain [127.0.0.1])
+	by torch.brasslantern.com (8.13.1/8.13.1) with ESMTP id l1DHBXM8004616	for
+ <zsh-workers@sunsite.dk>; Tue, 13 Feb 2007 09:11:34 -0800
+Received: (from schaefer@localhost)	by torch.brasslantern.com
+ (8.13.1/8.13.1/Submit) id l1DHBXqB004615	for zsh-workers@sunsite.dk; Tue,
+ 13 Feb 2007 09:11:33 -0800
+Date: Tue, 13 Feb 2007 09:11:33 -0800
+From: Bart Schaefer <schaefer@brasslantern.com>
+Subject: Re: echo > * and EMFILE
+In-reply-to: <200702131053.l1DArKoK003124@news01.csr.com>
+To: Zsh hackers list <zsh-workers@sunsite.dk>
+Message-id: <070213091133.ZM4614@torch.brasslantern.com>
+MIME-version: 1.0
+X-Mailer: OpenZMail Classic (0.9.2 24April2005)
+Content-type: text/plain; charset=us-ascii
+References: <20070212223239.GA4812@sc.homeunix.net>
+	<200702131053.l1DArKoK003124@news01.csr.com>
+Comments: In reply to Peter Stephenson <pws@csr.com>
+ "Re: echo > * and EMFILE" (Feb 13, 10:53am)
+
+On Feb 13, 10:53am, Peter Stephenson wrote:
+} Subject: Re: echo > * and EMFILE
+}
+} Stephane Chazelas wrote:
+} > zsh obviously couldn't open that many files, which is normal,
+} > 
+} > But the problem here is that zsh didn't output any error
+} > message.
+} 
+} There are lots and lots of unchecked system calls; it would be very
+} useful to handle them better.
+
+That may be true, but this is not a case of an unchecked system call.
+movefd(), which actually makes the system call, does check the result
+and do something appropriate, ending with returning -1 to propagate the
+error to the calling scope.
+
+Also, addfd() calls zerr() in some other circumstances, so I don't
+think there's an inherent problem with calling it in this case too.
+
+} Fixing them up as well as consistently handling the errors without,
+} for example, file descriptor leaks needs a lot of work.
+
+In fact I think the one place where addfd() does call zerr() is a file
+descriptor leak, because zerr() has the side-effect of stopping the
+command execution at that point and closemnodes() never gets called.
+
+The next question is what is best from the user's point of view.
+Suppose the example were something like
+
+	print $SECONDS > *
+
+If we call zerr() and closemnodes(), then an error message is printed
+once but the command never actually executes, so the files that it was
+possible to open are truncated to zero size.   If we call zwarn() and
+not closemnodes(), then hundreds of error messages are printed, the
+command goes ahead, some files get $SECONDS and some remain unchanged.
+Which is preferable?
+
+The patch for using zerr() would be something like this (line numbers
+may be off, and the error remains a bit cryptic because all we know at
+this point is the file descriptor number, not the file name):
+
+
+Index: Src/exec.c
+===================================================================
+diff -c -r1.32 exec.c
+--- Src/exec.c	1 Oct 2006 02:38:52 -0000	1.32
++++ Src/exec.c	13 Feb 2007 16:56:21 -0000
+@@ -1632,11 +1674,24 @@
+     } else {
+ 	if (mfds[fd1]->rflag != rflag) {
+ 	    zerr("file mode mismatch on fd %d", fd1);
++	    closemnodes(mfds);
+ 	    return;
+ 	}
+ 	if (mfds[fd1]->ct == 1) {	/* split the stream */
+-	    mfds[fd1]->fds[0] = movefd(fd1);
+-	    mfds[fd1]->fds[1] = movefd(fd2);
++	    int fdN = movefd(fd1);
++	    if (fdN < 0) {
++		zerr("multio failed for fd %d: %e", fd1, errno);
++		closemnodes(mfds);
++		return;
++	    }
++	    mfds[fd1]->fds[0] = fdN;
++	    fdN = movefd(fd2);
++	    if (fdN < 0) {
++		zerr("multio failed for fd %d: %e", fd2, errno);
++		closemnodes(mfds);
++		return;
++	    }
++	    mfds[fd1]->fds[1] = fdN;
+ 	    mpipe(pipes);
+ 	    mfds[fd1]->pipe = pipes[1 - rflag];
+ 	    redup(pipes[rflag], fd1);
+@@ -1647,7 +1702,13 @@
+ 		int old = new - sizeof(int) * MULTIOUNIT;
+ 		mfds[fd1] = hrealloc((char *)mfds[fd1], old, new);
+ 	    }
+-	    mfds[fd1]->fds[mfds[fd1]->ct++] = movefd(fd2);
++	    int fdN = movefd(fd2);
++	    if (fdN < 0) {
++		zerr("multio failed for fd %d: %e", fd2, errno);
++		closemnodes(mfds);
++		return;
++	    }
++	    mfds[fd1]->fds[mfds[fd1]->ct++] = fdN;
+ 	}
+     }
+     if (subsh_close >= 0 && fdtable[subsh_close] == FDT_UNUSED)
+

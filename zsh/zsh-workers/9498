@@ -1,0 +1,102 @@
+From zsh-workers-return-9498-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Jan 31 12:53:50 2000
+Return-Path: <zsh-workers-return-9498-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12378 invoked from network); 31 Jan 2000 12:53:49 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 31 Jan 2000 12:53:49 -0000
+Received: (qmail 11269 invoked by alias); 31 Jan 2000 12:53:42 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9498
+Received: (qmail 11261 invoked from network); 31 Jan 2000 12:53:41 -0000
+Date: Mon, 31 Jan 2000 13:53:36 +0100 (MET)
+Message-Id: <200001311253.NAA03367@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: "Bart Schaefer"'s message of Mon, 31 Jan 2000 10:47:48 +0000
+Subject: Re: PATCH: job-control
+
+
+Bart Schaefer wrote:
+
+> On Jan 31, 11:00am, Sven Wischnowsky wrote:
+> } Subject: Re: PATCH: job-control
+> }
+> } Bart Schaefer wrote:
+> } 
+> } > If it really is somehow the case the "it found out that the pipe-leader
+> } > was suspended too late," then it seems to me that the while() condition
+> } > in waitjob() is what needs fixing, or we still have a race condition:
+> } > the ^Z could suspend the pipe-leader between the child_block() and the
+> } > while() test within waitjob().  All that this change has done is shrink
+> } > the window.
+> } 
+> } No, the important bit is the child_unblock() which makes the signal
+> } handler be run for all pending signals (we are blocking child signals
+> } during most of the execution code), so that the job and process
+> } infos are updated.
+> 
+> Yes, that's exactly my point.  waitjob() should enter the body of the
+> while() loop -- thus calling child_suspend() and allowing the job and
+> process info to be updated -- when there are any jobs that the shell
+> "believes" are still in a runnable state.  It should never be the case
+> that the job info has to be updated by a signal handler in order for
+> the shell to discover that there may be runnable jobs; in that case it
+> can mean only that (a) the setup of the info for those jobs is wrong
+> to begin with, or (b) there's a condition in which the loop should be 
+> entered but that is not tested.
+> 
+> The other possibility is that child_suspend() isn't sufficient to get
+> the job info updated, but that would imply a much more serious problem.
+> 
+> } Without the patch this happened only when a
+> } execpline() finished (shortly before that). In the test case there
+> } were two of them active and we need to know that the leader was
+> } suspended in the inner one but since child-signals were only delivered 
+> } after the call to waitjobs(), we could see that only in the outer
+> } execpline().
+> 
+> When you say "we need to know that the leader was suspended in the
+> inner one," what does that mean code-wise?  What is it that we "see
+> only in the outer execpline()"?
+
+Ok, I've done some testing with the child_unblock() commented out
+again and now I remember...
+
+As a reminder, the problem was with this invocation:
+
+  foo() {
+    local a
+    while read a; do :; done
+    less "$@"
+  }
+  cat builtin.c | f glob.c
+
+and hitting ^Z while the cat is still running.
+
+In this case, when we hit the call to waitjobs() for the first time,
+the job tested below it (the one for the loop) has no processes and
+hence we don't even enter waitjob(). But some lines below the call to
+waitjobs() we need the updated job-entry for the list_pipe_job.
+
+Hm, efore I tried again, I was about to suggest to do the signal
+magic only if there are any processes because it's rather expensive,
+but obviously that would be wrong. But removing those two child_* and
+adding:
+
+  if (list_pipe_job && jobtab[list_pipe_job].procs &&
+      !(jobtab[list_pipe_job].stat & STAT_STOPPED))
+      child_suspend(0);
+
+before the if (!list_pipe_child && ...) fixes the problem, too and is
+almost certainly better. Can anyone see a problem with this?
+
+Bye
+ Sven
+
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

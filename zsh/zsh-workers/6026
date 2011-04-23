@@ -1,0 +1,167 @@
+From zsh-workers-return-6026-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Apr 14 07:32:15 1999
+Return-Path: <zsh-workers-return-6026-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23692 invoked from network); 14 Apr 1999 07:32:13 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Apr 1999 07:32:13 -0000
+Received: (qmail 3284 invoked by alias); 14 Apr 1999 06:19:32 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6026
+Received: (qmail 3277 invoked from network); 14 Apr 1999 06:19:31 -0000
+Date: Wed, 14 Apr 1999 08:19:31 +0200 (MET DST)
+Message-Id: <199904140619.IAA04978@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Tue, 13 Apr 1999 16:39:55 +0200
+Subject: Re: PATCH: matching in the new completion system
+
+
+Peter Stephenson wrote:
+
+> It's something to with the |'s.  It's trying to build a *huge* pattern like
+> that.  By the looks of it, it includes every single thing in the command
+> table.  It begins
+> 
+> */(XNSquery|XNSrouted|acct|adfutil|allocp|arp|audit|auditbin|auditcat|
+> auditpr|auditselect|auditstream|automount|autopush|backbyinode|backbyname|
+> backup|bffcreate|biod|bootexpand|bootinfo|bootpd|bootrec...
+> 
+> These are the tail ends of the files in /u*/s*/*. The trace of _path_files
+> finishes up with
+> 
+> + tmp1=( <all the files in /u*/s*/*, this looks reasonable> )
+> + compadd -O tmp2 -F fignore - <all the commands from the last part of that>
+> + [[ 423 -eq 0 ]]
+> + [[ /usr/sbin/XNSquery == */* ]]
+
+I already guessed that. The patch below should make things faster by
+avoiding the pattern matching if the string from the line is empty
+(for the component currently handled). It also improves the way the
+matches are added when there are no path suffixes. Finally, it
+re-introduces trying to use `compgen' first, bit slightly more
+restrictive than in previous versions: only if we are at the end of
+the word from the line. I had removed it because the function wasn't
+*that* slow for me and I had found a bug when completion was started
+with the cursor in the middle of the word. When the suffix was
+expanded by a previous completion and that turned it into an existing
+filename, this was accepted immediatly instead of moving the cursor to 
+the end and continuing with completion there.
+
+> It does seem to be due to speed.  In fact, it now takes 8 seconds just to
+> build all the files in the Src directory, irrespective of path completion,
+> which should be almost instantaneous.  I smell a rat somewhere.
+
+Ugh. 8 seconds??? Without xtrace?
+
+Bye
+ Sven
+
+diff -u oc/Core/_path_files Completion/Core/_path_files
+--- oc/Core/_path_files	Tue Apr 13 15:19:19 1999
++++ Completion/Core/_path_files	Wed Apr 14 08:13:52 1999
+@@ -110,6 +110,34 @@
+    ( $#compstate[pattern_match] -ne 0 &&
+      "${orig#\~}" != "${${orig#\~}:q}" ) ]] && menu=yes
+ 
++# We will first try normal completion called with `compgen', but only if we
++# weren't given a `-F', `-r', or `-R' option or we are in the string.
++
++if [[ -z "$suf" && $#ignore -eq 0 && $#remsfx -eq 0 &&
++      -z "$_comp_correct" ]]; then
++  # First build an array containing the `-W' option, if there is any and we
++  # want to use it. We don't want to use it if the string from the command line
++  # is a absolute path or relative to the current directory.
++
++  if [[ -z "$prepaths[1]" || "$pre[1]" = [~/] || "$pre" = (.|..)/* ]]; then
++    tmp1=()
++  else
++    tmp1=(-W "( $prepaths )")
++  fi
++
++  # Now call compgen.
++
++  if [[ -z "$gopt" ]]; then
++    compgen "$addpfx[@]" "$addsfx[@]" "$group[@]" "$expl[@]" "$tmp1[@]" $sopt
++  else
++    compgen "$addpfx[@]" "$addsfx[@]" "$group[@]" "$expl[@]" "$tmp1[@]" $sopt -g "$pats"
++  fi
++
++  # If this generated any matches, we don't want to do in-path completion.
++
++  [[ compstate[nmatches] -eq nm ]] || return 0
++fi
++
+ # If given no `-F' option, we want to use `fignore'.
+ 
+ (( $#ignore )) || ignore=(-F fignore)
+@@ -199,24 +227,31 @@
+       tmp1=( ${^tmp1}${^~pats} )
+     fi
+ 
+-    # See which of them match what's on the line.
++    if [[ -n "$PREFIX$SUFFIX" ]]; then
++      # See which of them match what's on the line.
+ 
+-    compadd -O tmp2 "$ignore[@]" - "${(@)tmp1##*/}"
++      compadd -O tmp2 "$ignore[@]" - "${(@)tmp1##*/}"
+ 
+-    # If no file matches, save the expanded path and continue with
+-    # the outer loop.
++      # If no file matches, save the expanded path and continue with
++      # the outer loop.
+ 
+-    if [[ $#tmp2 -eq 0 && "$tmp1[1]" = */* ]]; then
+-      exppaths=( "$exppaths[@]" ${^tmp1%/*}/${tpre}${tsuf} )
+-      continue 2
+-    fi
++      if [[ $#tmp2 -eq 0 ]]; then
++ 	[[ "$tmp1[1]" = */* ]] &&
++	    exppaths=( "$exppaths[@]" ${^tmp1%/*}/${tpre}${tsuf} )
++        continue 2
++      fi
+ 
+-    # Remove all files that weren't matched.
++      # Remove all files that weren't matched.
+ 
+-    if [[ "$tmp1[1]" = */* ]]; then
+-      tmp1=( "${(@M)tmp1:#*/(${(j:|:)~${(@)tmp2:q}})}" )
+-    else
+-      tmp1=( "${(@M)tmp1:#(${(j:|:)~${(@)tmp2:q}})}" )
++      if [[ "$tmp1[1]" = */* ]]; then
++        tmp1=( "${(@M)tmp1:#*/(${(j:|:)~${(@)tmp2:q}})}" )
++      else
++        tmp1=( "${(@M)tmp1:#(${(j:|:)~${(@)tmp2:q}})}" )
++      fi
++    elif (( ! $#tmp1 )); then
++      [[ "$tmp1[1]" = */* ]] &&
++          exppaths=( "$exppaths[@]" ${^tmp1%/*}/${tpre}${tsuf} )
++      continue 2
+     fi
+ 
+     # Step over to the next component, if any.
+@@ -295,13 +330,11 @@
+ 		    - "${i%%/*}"
+ 	  done
+         else
+-          for i in "$tmp1[@]"; do
+-	    compadd -Uf -p "$linepath$testpath" \
+-		    -W "$prepath$realpath$testpath" "$ignore[@]" \
+-		    "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
+-		    "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
+-		    - "$i"
+-	  done
++	  compadd -Uf -p "$linepath$testpath" \
++		  -W "$prepath$realpath$testpath" "$ignore[@]" \
++		  "$addpfx[@]" "$addsfx[@]" "$remsfx[@]" \
++		  "$group[@]" "$expl[@]" -i "$IPREFIX" -I "$ISUFFIX" \
++		  - "$tmp1[@]"
+         fi
+       fi
+       tmp4=-
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

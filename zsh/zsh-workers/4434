@@ -1,0 +1,136 @@
+From zsh-workers-request@math.gatech.edu Wed Oct 14 19:12:30 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 3252 invoked from network); 14 Oct 1998 19:12:28 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 14 Oct 1998 19:12:28 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id PAA06962;
+	Wed, 14 Oct 1998 15:04:02 -0400 (EDT)
+Resent-Date: Wed, 14 Oct 1998 15:04:02 -0400 (EDT)
+From: "Bart Schaefer" <schaefer@brasslantern.com>
+Message-Id: <981014120722.ZM19521@candle.brasslantern.com>
+Date: Wed, 14 Oct 1998 12:07:22 -0700
+In-Reply-To: <9810121218.AA21544@ibmth.df.unipi.it>
+Comments: In reply to Peter Stephenson <pws@ibmth.df.unipi.it>
+        "PATCH: 3.1.4: autocd to directory in $PATH (2)" (Oct 12,  2:18pm)
+References: <9810121218.AA21544@ibmth.df.unipi.it>
+X-Mailer: Z-Mail (4.0b.820 20aug96)
+To: Peter Stephenson <pws@ibmth.df.unipi.it>,
+        zsh-workers@math.gatech.edu (Zsh hackers list)
+Subject: PATCH: Re: PATCH: 3.1.4: autocd to directory in $PATH (2)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Resent-Message-ID: <"daj7d2.0.gi1.YMF9s"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4434
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+On Oct 12,  2:18pm, Peter Stephenson wrote:
+} Subject: PATCH: 3.1.4: autocd to directory in $PATH (2)
+}
+} The directory does get stat'ed twice, but it's hard to avoid without
+} more fiddling around with special cases.  The next fix does at least
+} mean it's restricted to twice altogether.
+
+It bothers me that this happens on every command execution.
+
+Here's a patch, which must be applied on top of Peter's patch, that
+restricts the two calls to stat to cases where an autocd might occur.
+Specifically, this means:
+    * autocd is set
+    * the shell is reading commands from stdin
+    * there are no I/O redirections to perform
+    * there are no command arguments to pass
+[I simply moved computation of these four conditions to the top of the
+function, then tested the result both in the original context and also
+before calling isreallycom().]
+
+Thus there should be no performance penalty (compared to previous zsh
+versions) for the great majority of commands, nor for any command if
+you don't set autocd.
+
+I did have two remarks about isreallycom():
+
+} + isreallycom(Cmdnam cn)
+} + {
+} +     char fullnam[MAXCMDLEN];
+
+Other places in the code use PATH_MAX size buffer for the same purpose.
+Which is better?
+
+There also seems to be inconsistency as to:
+
+} +     strcpy(fullnam, cn->u.name ? *(cn->u.name) : "");
+} +     strcat(fullnam, "/");
+} +     strcat(fullnam, cn->nam);
+
+as opposed to:
+                    z = buf;
+                    strucpy(&z, *pp);
+                    *z++ = '/';
+                    strcpy(z, arg0);
+
+My patch doesn't change any of that stuff, I'm just pointing it out.
+
+Index: Src/exec.c
+===================================================================
+*** exec.c	1998/10/14 18:19:05	1.4
+--- exec.c	1998/10/14 18:22:09
+***************
+*** 1495,1500 ****
+--- 1495,1504 ----
+  
+      if (type == SIMPLE && !nullexec) {
+  	char *s;
++ 	char trycd = (isset(AUTOCD) && isset(SHINSTDIN)
++ 		      && empty(cmd->redir) && !empty(args)
++ 		      && !nextnode(firstnode(args))
++ 		      && *(char *)peekfirst(args));
+  
+  	DPUTS(empty(args), "BUG: empty(args) in exec.c");
+  	if (!hn) {
+***************
+*** 1502,1508 ****
+  	    char *cmdarg = (char *) peekfirst(args);
+  
+  	    hn = cmdnamtab->getnode(cmdnamtab, cmdarg);
+! 	    if (hn && !isreallycom((Cmdnam)hn)) {
+  		cmdnamtab->removenode(cmdnamtab, cmdarg);
+  		cmdnamtab->freenode(hn);
+  		hn = NULL;
+--- 1506,1512 ----
+  	    char *cmdarg = (char *) peekfirst(args);
+  
+  	    hn = cmdnamtab->getnode(cmdnamtab, cmdarg);
+! 	    if (hn && trycd && !isreallycom((Cmdnam)hn)) {
+  		cmdnamtab->removenode(cmdnamtab, cmdarg);
+  		cmdnamtab->freenode(hn);
+  		hn = NULL;
+***************
+*** 1516,1524 ****
+  
+  	/* If no command found yet, see if it  *
+  	 * is a directory we should AUTOCD to. */
+! 	if (!hn && isset(AUTOCD) && isset(SHINSTDIN) && empty(cmd->redir)
+! 	    && !nextnode(firstnode(args)) && *(char *)peekfirst(args)
+! 	    && (s = cancd(peekfirst(args)))) {
+  	    peekfirst(args) = (void *) s;
+  	    pushnode(args, dupstring("cd"));
+  	    if ((hn = builtintab->getnode(builtintab, "cd")))
+--- 1520,1526 ----
+  
+  	/* If no command found yet, see if it  *
+  	 * is a directory we should AUTOCD to. */
+! 	if (!hn && trycd && (s = cancd(peekfirst(args)))) {
+  	    peekfirst(args) = (void *) s;
+  	    pushnode(args, dupstring("cd"));
+  	    if ((hn = builtintab->getnode(builtintab, "cd")))
+
+
+-- 
+Bart Schaefer                                 Brass Lantern Enterprises
+http://www.well.com/user/barts              http://www.brasslantern.com
+

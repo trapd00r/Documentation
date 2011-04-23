@@ -1,0 +1,189 @@
+From zsh-workers-return-6318-mason-zsh=primenet.com.au@sunsite.auc.dk Thu May 20 06:54:00 1999
+Return-Path: <zsh-workers-return-6318-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26158 invoked from network); 20 May 1999 06:53:58 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 20 May 1999 06:53:58 -0000
+Received: (qmail 14242 invoked by alias); 20 May 1999 06:53:46 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6318
+Received: (qmail 14235 invoked from network); 20 May 1999 06:53:46 -0000
+Date: Thu, 20 May 1999 08:53:44 +0200 (MET DST)
+Message-Id: <199905200653.IAA30775@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Wed, 19 May 1999 17:34:31 +0200
+Subject: Re: parameter module again
+
+
+Peter Stephenson wrote:
+
+> I was just looking at the parameter module for nefarious purposes of my
+> own, and I think there may be memory leaks in it.  The zsh convention is
+> that the setting functions for parameters are passed permanently allocated
+> memory
+
+Ugh. Sorry. And: thanks.
+
+To simplify this for hashes, I took the delete-part out of hashsetfn() 
+and put it into its own function deleteparamtable() in params.c.
+
+You will notice a hunk compctl.c...
+
+Bye
+ Sven
+
+diff -u os/params.c Src/params.c
+--- os/params.c	Thu May 20 08:32:38 1999
++++ Src/params.c	Thu May 20 08:46:50 1999
+@@ -331,6 +331,24 @@
+     return nht;
+ }
+ 
++/* Flag to freeparamnode to unset the struct */
++
++static int delunset;
++
++/* Function to delete a parameter table. */
++
++/**/
++void
++deleteparamtable(HashTable t)
++{
++    /* The parameters in the hash table need to be unset *
++     * before being deleted.                             */
++    int odelunset = delunset;
++    delunset = 1;
++    deletehashtable(t);
++    delunset = odelunset;
++}
++
+ static unsigned numparamvals;
+ 
+ /**/
+@@ -1867,24 +1885,14 @@
+     return pm->u.hash;
+ }
+ 
+-/* Flag to freeparamnode to unset the struct */
+-
+-static int delunset;
+-
+ /* Function to set value of an association parameter */
+ 
+ /**/
+ void
+ hashsetfn(Param pm, HashTable x)
+ {
+-    if (pm->u.hash && pm->u.hash != x) {
+-	/* The parameters in the hash table need to be unset *
+-	 * before being deleted.                             */
+-	int odelunset = delunset;
+-	delunset = 1;
+-	deletehashtable(pm->u.hash);
+-	delunset = odelunset;
+-    }
++    if (pm->u.hash && pm->u.hash != x)
++	deleteparamtable(pm->u.hash);
+     pm->u.hash = x;
+ }
+ 
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Thu May 20 08:32:45 1999
++++ Src/Zle/compctl.c	Thu May 20 08:45:12 1999
+@@ -2279,6 +2279,7 @@
+ 
+ 		    break;
+ 		}
++    deleteparamtable(ht);
+ }
+ 
+ /**/
+diff -u os/Modules/parameter.c Src/Modules/parameter.c
+--- os/Modules/parameter.c	Thu May 20 08:32:56 1999
++++ Src/Modules/parameter.c	Thu May 20 08:44:18 1999
+@@ -184,7 +184,7 @@
+ 	Cmdnam cn = zcalloc(sizeof(*cn));
+ 
+ 	cn->flags = HASHED;
+-	cn->u.cmd = ztrdup(value);
++	cn->u.cmd = value;
+ 
+ 	cmdnamtab->addnode(cmdnamtab, ztrdup(pm->nam), (HashNode) cn);
+     }
+@@ -222,6 +222,7 @@
+ 
+ 	    cmdnamtab->addnode(cmdnamtab, ztrdup(hn->nam), (HashNode) cn);
+ 	}
++    deleteparamtable(ht);
+ }
+ 
+ /**/
+@@ -312,14 +313,13 @@
+ 
+ /**/
+ static void
+-setfunction(char *name, char *value)
++setfunction(char *name, char *val)
+ {
+-    char *val;
++    char *value = dupstring(val);
+     Shfunc shf;
+     List list;
+     int sn;
+ 
+-    val = ztrdup(value);
+     val = metafy(val, strlen(val), META_REALLOC);
+ 
+     HEAPALLOC {
+@@ -327,7 +327,7 @@
+     } LASTALLOC;
+ 
+     if (!list || list == &dummy_list) {
+-	zwarnnam(NULL, "invalid function definition", val, 0);
++	zwarnnam(NULL, "invalid function definition", value, 0);
+ 	zsfree(val);
+ 	return;
+     }
+@@ -348,7 +348,6 @@
+ 	}
+ 	shfunctab->addnode(shfunctab, ztrdup(name), shf);
+     } LASTALLOC;
+-
+     zsfree(val);
+ }
+ 
+@@ -385,8 +384,9 @@
+ 	    v.arr = NULL;
+ 	    v.pm = (Param) hn;
+ 
+-	    setfunction(hn->nam, getstrvalue(&v));
++	    setfunction(hn->nam, ztrdup(getstrvalue(&v)));
+ 	}
++    deleteparamtable(ht);
+ }
+ 
+ /**/
+@@ -483,6 +483,7 @@
+ 	zwarnnam(NULL, "no such option: %s", pm->nam, 0);
+     else if (dosetopt(n, (value && strcmp(value, "off")), 0))
+ 	zwarnnam(NULL, "can't change option: %s", pm->nam, 0);
++    zsfree(value);
+ }
+ 
+ /**/
+@@ -521,6 +522,7 @@
+ 			      (val && strcmp(val, "off")), 0))
+ 		zwarnnam(NULL, "can't change option: %s", hn->nam, 0);
+ 	}
++    deleteparamtable(ht);
+ }
+ 
+ /**/
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

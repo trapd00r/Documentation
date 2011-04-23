@@ -1,0 +1,150 @@
+From zsh-workers-return-16861-mason-zsh=primenet.com.au@sunsite.dk Tue Mar 19 11:27:49 2002
+Return-Path: <zsh-workers-return-16861-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 22763 invoked from network); 19 Mar 2002 11:27:47 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 19 Mar 2002 11:27:47 -0000
+Received: (qmail 13523 invoked by alias); 19 Mar 2002 11:27:37 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 16861
+Received: (qmail 13512 invoked from network); 19 Mar 2002 11:27:36 -0000
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: special/readonly variables in sh emulation 
+In-reply-to: "Oliver Kiddle"'s message of "Mon, 18 Mar 2002 15:41:19 GMT."
+             <20020318154119.GA11181@logica.com> 
+Date: Tue, 19 Mar 2002 11:27:03 +0000
+Message-ID: <24763.1016537223@csr.com>
+From: Peter Stephenson <pws@csr.com>
+
+Oliver Kiddle wrote:
+> So to start this off, if we start by getting together a list of:
+> 1. what we think is wrong with the current implementation
+> 2. what it has got right and should be preserved,
+> 3. what new features we might want to support
+> 4. any ideas for the implementation, in particular on the data
+> structure and the interface.
+> 5. anything else
+
+What's wrong is that it's all very messy; there is a dense hierarchy of
+functions in params.c, plus code to handle typeset in builtin.c which
+interacts in a non-trivial way with the core code, plus extra code to
+handle function scoping, plus quite a lot of duplication of parameter
+functionality elsewhere when we need to do something special with
+functions, in particular in the special parameter modules.
+
+What we need is a small number of uniformly defined entry points to the
+parameter system which hide the workings of the structure.  That way we
+can implement particular special parameters any way we like, and can
+easily trap all entry points for special handling of discipline
+functions.
+
+Ideally --- I don't know if this is feasible --- the parameter type as
+well as the representation should be irrelevant to code outside the
+parameter system.  It should be possible to change an existing
+parameter's type by an assignment, or create a new one at a new scoping
+level, by supplying flags to indicate that is allowed or wanted, but the
+actual decision about whether to do that should be inside the parameter
+system.  This puts the horrible logic in typeset_single() where it
+should be.
+
+Unfortunately there are dozens of different things you can do with
+parameters:
+  When assigning
+   - create a new parameter
+     - overriding an existing one
+       - maybe taking account of whether or not it's special
+     - hiding an existing one in a higher function scope
+     - converting an old one
+       - maybe inheriting some of its properties (for example,
+         keeping the value but changing the floating point output format)
+  - pass down an input which may be scalar, array, numeric
+    (it depends on the type of parameter what it will do with each)
+  - handle array slices
+  - handle operations on array slices as given by subscript flags
+  - handle quoting, e.g. what a scalar does with an array slice may
+    depend on whether it is in quotes
+  When retrieving
+   ... same sort of thing ...
+
+Much of this is currently done by ad hoc code in places like
+typeset_single() and paramsubst() which looks at the parameter type and
+alters the value accodingly before passing it down for assignment.  It
+may be we can't get around all this, and as the type is likely to remain
+exposed maybe we can continue to handle it but still keep a neater
+interface to the core parameter code.
+
+Maybe we can help things along by introducing contexts.  The arguments
+of an array assignment or substitution with explicit word-splitting
+would retrieve a parameter in an array context, although the parameter
+could be a scalar, or an integer.  (We would need extra flags for types
+of associative array substitution, subscripts --- also required in
+scalar contexts --- etc.)  This would always return an array, but that
+might be a single word.  Similarly, a numeric context would always
+return an mnumber, and the parameter code itself would be responsible
+for converting the parameter to an mnumber.
+
+This is already roughly what happens, but the interface isn't by any
+stretch of the imagination simple or uniform --- sometimes we call the
+parameters `gets.?fn' directly, sometimes we use get?param(), sometimes
+we have calls to getvalue() to generate intermediate values for
+tinkering with.  As far as the `value' struct goes, I would suggest
+either we get rid of it, or we use it only inside the parameter system,
+or we always use it as part of the parameter interface --- anyway, the
+current hybrid is rather a mess.
+
+Also, I don't know what to do about word-splitting.  It might be neater
+to make that internal to the parameter system, passing information down
+into it.  However, this may be unnecessary.
+
+Very likely any consistent system would mean revisiting the rules on
+parameter susbstitution, unfortunately.  I suspect however hard we try
+to keep it the same there will be occasions where it doesn't fit.
+
+One other point:  I became aware when writing the map that calls to the
+system are inefficient.  Even if you're assigning a parameter, there are
+cases when you currently read the value.  So maybe too naive a system of
+encapsulation (assuming there's always a real parameter value sitting
+there which you can access at any point) isn't the best way of doing
+it.  Or maybe (I haven't looked in any detail) it's good enough to be
+more careful about separating the retrieval of information about the
+parameter from retrieval of its value.
+
+Here's one other idea: suppose we extend the heap system so that anyone
+using a heap can test whether the memory is still valid.  Then we can
+have a transparent way of caching information for a short time inside
+the parameter code --- next time it looks for a value, it can tell if
+the cache is valid, and if it is, we are still in the same operation
+(because otherwise the heap would have been popped) and it can use
+whatever it cached.  I'm not sure how efficiently we can implement the
+validity test, however: the first thing that comes to mind is having
+heaps `marked' with a single integer which is always incremented and
+which eventually simply wraps.  But that's not good enough, since a heap
+is still valid when another one is pushed, so it would probably have to
+be a linked list of heap ids.  Maybe this idea doesn't gain very much,
+but the hope is that you can do repeated operations on parameters in a
+simple fashion and rely on them being efficiently implemented
+underneath.
+
+I expect you're now as confused as I am.
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR Ltd., Science Park, Milton Road,
+Cambridge, CB4 0WH, UK                          Tel: +44 (0)1223 392070
+
+
+**********************************************************************
+The information transmitted is intended only for the person or
+entity to which it is addressed and may contain confidential 
+and/or privileged material. 
+Any review, retransmission, dissemination or other use of, or
+taking of any action in reliance upon, this information by 
+persons or entities other than the intended recipient is 
+prohibited.  
+If you received this in error, please contact the sender and 
+delete the material from any computer.
+**********************************************************************
+

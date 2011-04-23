@@ -1,0 +1,134 @@
+From zsh-workers-return-15315-mason-zsh=primenet.com.au@sunsite.dk Mon Jul 09 02:49:32 2001
+Return-Path: <zsh-workers-return-15315-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1079 invoked from network); 9 Jul 2001 02:49:31 -0000
+Received: from sunsite.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 9 Jul 2001 02:49:31 -0000
+Received: (qmail 23004 invoked by alias); 9 Jul 2001 02:49:20 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 15315
+Received: (qmail 22993 invoked from network); 9 Jul 2001 02:49:19 -0000
+Date: Sun, 8 Jul 2001 22:49:15 -0400
+From: Clint Adams <schizo@debian.org>
+To: zsh-workers@sunsite.dk
+Subject: [phil@fifi.org: Bug#104001: Zsh should clean up its signals on startup]
+Message-ID: <20010708224915.A29399@dman.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.2.5i
+
+----- Forwarded message from Philippe Troin <phil@fifi.org> -----
+
+Background:
+
+  Since I've upgraded to woody, my system has been behaving
+  strangely. Amongst other problems, dpkg-source was failing all the
+  time.
+
+  After quite a bit of investigation, I found out that:
+
+    - windowmaker was ignoring SIGPIPEs via SIG_IGN.
+
+    - all children of windowmaker were inheriting this signal
+      disposition (SIGPIPE -> SIG_IGN) (as strange as it seems, this
+      is a POSIX requirement).
+
+    - dpkg-source was invoking gunzip which was not getting SIGPIPE
+      and was exit()ing with error codes instead of being killed by
+      SIGPIPE.
+
+  I also found out that if I ran bash as a shell, dpkg-source would
+  work. Bash cleans up the signal dispositions when starting an
+  interactive shell.
+
+Bug:
+
+I would suggest that zsh behaves the same as bash:
+
+ - for interactive shells, all the signal dispositions should be
+   set to their default.
+
+ - you might also want to clear the signal mask via sigprocmask().
+
+Enclosed is a patch that does the above. Please send it upstream.
+
+Here are some trivial scripts to check what I'm talking about:
+
+ ~/ignsigpipe:
+
+   #!/usr/bin/perl -w
+   $SIG{PIPE} = 'IGNORE';
+   exec @ARGV or die "can't exec $ARGV[0]\n";
+
+ ~/sigpipetest:
+
+   #!/usr/bin/perl -w
+   pipe PIPER, PIPEW or die;
+   close PIPER or die;
+   syswrite PIPEW, "X", 1;
+   print "ERROR: did not get SIGPIPE\n";
+   exit(1);
+
+ Some tests:
+
+    [1]    phil@ceramic:~% ~/sigpipetest
+    [2]    phil@ceramic:~% ~/ignsigpipe ~/sigpipetest 
+           ERROR: did not get SIGPIPE
+           zsh: 16647 exit 1     ~/ignsigpipe ~/sigpipetest
+    [3]    phil@ceramic:~% ~/ignsigpipe bash -c ~/sigpipetest
+           ERROR: did not get SIGPIPE
+           zsh: 16648 exit 1     ~/ignsigpipe bash -c ~/sigpipetest
+    [4]    phil@ceramic:~% ~/ignsigpipe bash -ic ~/sigpipetest
+           phil@ceramic:~% ~/ignsigpipe zsh -c ~/sigpipetest
+           ERROR: did not get SIGPIPE
+           zsh: 16650 exit 1     ~/ignsigpipe zsh -c ~/sigpipetest
+    [5]    phil@ceramic:~% ~/ignsigpipe zsh -ic ~/sigpipetest
+           ERROR: did not get SIGPIPE
+           zsh: 16651 exit 1     ~/ignsigpipe zsh -ic ~/sigpipetest
+
+    1. normally sigpipetest does not have time to print anything and
+       gets killed by sigpipe.
+
+    2. if a parent process SIG_IGNores SIGPIPE, then sigpipetest
+       completes and prints the message
+
+    3. bash in non-interactive mode does not fix the signal
+       disposition
+
+    4. but when ran interactively, is clears the signal disposition
+
+    5. zsh nevers cleans the signal disposition interactive or
+       not. The enclosed patch makes it behave like bash.
+
+Phil.
+
+///// attachment forwarded inline /////
+
+diff -ruN zsh-4.0.2.maint/Src/init.c zsh-4.0.2/Src/init.c
+--- zsh-4.0.2.maint/Src/init.c	Tue Apr 10 22:26:26 2001
++++ zsh-4.0.2/Src/init.c	Sun Jul  8 18:34:54 2001
+@@ -816,6 +816,19 @@
+ void
+ init_signals(void)
+ {
++    if (interact) {
++        /* Cleanup absolutely everything signal related which could have
++	   been inherited from parent */
++        sigset_t emptyset = signal_mask(0);
++        int sig;
++	signal_setmask(emptyset);
++	for (sig=1; /*empty*/; sig++) {
++	    if (sig != SIGKILL && sig != SIGSTOP) {
++	        if (signal_default(sig) == SIG_ERR) break;
++	    }
++	}
++    }
++      
+     sigchld_mask = signal_mask(SIGCHLD);
+ 
+     intr();
+

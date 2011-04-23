@@ -1,0 +1,660 @@
+From zsh-workers-return-18492-mason-zsh=primenet.com.au@sunsite.dk Wed Apr 30 20:03:49 2003
+Return-Path: <zsh-workers-return-18492-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 107 invoked from network); 30 Apr 2003 20:03:48 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by ns1.primenet.com.au with SMTP; 30 Apr 2003 20:03:48 -0000
+Received: (qmail 21041 invoked by alias); 30 Apr 2003 20:03:41 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 18492
+Received: (qmail 21032 invoked from network); 30 Apr 2003 20:03:41 -0000
+Received: from localhost (HELO sunsite.dk) (127.0.0.1)
+  by localhost with SMTP; 30 Apr 2003 20:03:41 -0000
+X-MessageWall-Score: 0 (sunsite.dk)
+Received: from [195.92.195.173] by sunsite.dk (MessageWall 1.0.8) with SMTP; 30 Apr 2003 20:3:40 -0000
+Received: from modem-77.clown-tang.dialup.pol.co.uk ([62.136.249.77] helo=pwstephenson.fsnet.co.uk)
+	by cmailg3.svr.pol.co.uk with esmtp (Exim 4.14)
+	id 19Axnf-00016v-Bj
+	for zsh-workers@sunsite.dk; Wed, 30 Apr 2003 21:03:32 +0100
+Received: by pwstephenson.fsnet.co.uk (Postfix, from userid 501)
+	id 841A61B76D; Wed, 30 Apr 2003 20:08:25 +0100 (BST)
+Received: from pwstephenson.fsnet.co.uk (localhost [127.0.0.1])
+	by pwstephenson.fsnet.co.uk (Postfix) with ESMTP id 130031B76C
+	for <zsh-workers@sunsite.dk>; Wed, 30 Apr 2003 20:08:24 +0100 (BST)
+To: zsh-workers@sunsite.dk
+Subject: PATCH: wait for auxiliary processes
+In-reply-to: "Peter Stephenson"'s message of "Sat, 26 Apr 2003 20:27:11 BST."
+             <20030426192717.12ACB1B76D@pwstephenson.fsnet.co.uk> 
+Date: Wed, 30 Apr 2003 20:08:19 +0100
+From: Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Message-Id: <20030430190825.841A61B76D@pwstephenson.fsnet.co.uk>
+
+Peter Stephenson wrote:
+> > I'm also getting random failures with multios tests which I haven't seen
+> > before.  I don't think the underlying problem is new, I think it's the
+> > same issue as this comment:
+> > 
+> > # Following two tests have to be separated since in
+> > #   print bar >foo >bar && print "$(<foo) $(<bar)"
+> > # the multios aren't flushed until after the substitutions take
+> > # place.  This can't be right.
+> 
+> I can partially fix this by storing a list of auxiliary processes
+> for which the job should wait.
+>
+> Anyway, it
+> seems to work from the command line, and for the multios tests, but it
+> doesn't work for this test in D03procsubst.ztst:
+> 
+> # slightly desperate hack to force >(...) to be synchronous
+>   { paste <(cut -f2 FILE1) <(cut -f4 FILE2) } > >(sed 's/e/E/g' >OUTFILE)
+>   cat OUTFILE
+> 0:>(...) substitution
+> >SEcond	ViErtE
+
+I've traced the problem here.  The function execcursh() which handles `{
+... }' executes a `deletejob()' at the start.  I think (does anyone
+know?) this is simply to avoid the job table being filled up with
+unnecessary entries, and hence not deleting the job when there are
+processes to tidy up is unobjectionable.  I was protected from the
+consesquences of this when executing the same code from the command line
+by the `list_pipe' test.
+
+I'm now confident enough to publish the code and document the fact that
+it works only for builtins and the workaround shown in the test code.
+Please tell me if you think I'm off my trolley... let me rephrase
+that... please tell me if you think this is a bad idea.
+
+
+Index: Doc/Zsh/expn.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/expn.yo,v
+retrieving revision 1.44
+diff -u -r1.44 expn.yo
+--- Doc/Zsh/expn.yo	3 Apr 2003 10:24:55 -0000	1.44
++++ Doc/Zsh/expn.yo	30 Apr 2003 20:01:30 -0000
+@@ -332,7 +332,16 @@
+ pastes the results together, and sends it to the processes
+ var(process1) and var(process2).
+ 
+-Both the tt(/dev/fd) and the named pipe implementation have drawbacks.  In
++If tt(=LPAR())var(...)tt(RPAR()) is used instead of
++tt(<LPAR())var(...)tt(RPAR()),
++then the file passed as an argument will be the name
++of a temporary file containing the output of the var(list)
++process.  This may be used instead of the tt(<)
++form for a program that expects to lseek (see manref(lseek)(2))
++on the input file.
++
++The tt(=) form is useful as both the tt(/dev/fd) and the named pipe
++implementation of tt(<LPAR())var(...)tt(RPAR()) have drawbacks.  In 
+ the former case, some programmes may automatically close the file
+ descriptor in question before examining the file on the command line,
+ particularly if this is necessary for security reasons such as when the
+@@ -353,12 +362,25 @@
+ The shell uses pipes instead of FIFOs to implement the latter
+ two process substitutions in the above example.
+ 
+-If tt(=) is used,
+-then the file passed as an argument will be the name
+-of a temporary file containing the output of the var(list)
+-process.  This may be used instead of the tt(<)
+-form for a program that expects to lseek (see manref(lseek)(2))
+-on the input file.
++There is an additional problem with tt(>LPAR())var(process)tt(RPAR()); when
++this is attached to an external command, the parent shell does not wait
++for var(process) to finish and hence an immediately following command
++cannot rely on the results being complete.  The problem and solution are
++the same as described in the section em(MULTIOS) in
++ifzman(zmanref(zshmisc))\
++ifnzman(noderef(Redirection)).  Hence in a simplified
++version of the example above:
++
++example(tt(paste <LPAR()cut -f1) var(file1)tt(RPAR() <LPAR()cut -f3) var(file2)tt(RPAR()) tt(> >LPAR())var(process)tt(RPAR()))
++
++(note that no tt(MULTIOS) are involved), var(process) will be run
++asynchronsously.  The workaround is:
++
++example(tt({ paste <LPAR()cut -f1) var(file1)tt(RPAR() <LPAR()cut -f3) var(file2)tt(RPAR() }) tt(> >LPAR())var(process)tt(RPAR()))
++
++The extra processes here are
++spawned from the parent shell which will wait for their completion.
++
+ texinode(Parameter Expansion)(Command Substitution)(Process Substitution)(Expansion)
+ sect(Parameter Expansion)
+ cindex(parameter expansion)
+Index: Doc/Zsh/redirect.yo
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Doc/Zsh/redirect.yo,v
+retrieving revision 1.5
+diff -u -r1.5 redirect.yo
+--- Doc/Zsh/redirect.yo	28 Mar 2002 04:22:04 -0000	1.5
++++ Doc/Zsh/redirect.yo	30 Apr 2003 20:01:30 -0000
+@@ -209,6 +209,28 @@
+ 
+ when tt(MULTIOS) is unset will truncate bar, and write `tt(foo)' into baz.
+ 
++There is a problem when an output multio is attached to an external
++program.  A simple example shows this:
++
++example(cat file >file1 >file2
++cat file1 file2)
++
++Here, it is possible that the second `tt(cat)' will not display the full
++contents of tt(file1) and tt(file2) (i.e. the original contents of
++tt(file) repeated twice).
++
++The reason for this is that the multios are spawned before the tt(cat)
++process is forked from the parent shell, so the parent shell does not
++wait for the multios to finish writing data.  This means the command as
++shown can exit before tt(file1) and tt(file2) are completely written.
++As a workaround, it is possible to run the tt(cat) process as part of a
++job in the current shell:
++
++example({ cat file } >file >file2)
++
++Here, the tt({)var(...)tt(}) job will pause to wait for both files to be
++written.
++
+ sect(Redirections with no command)
+ When a simple command consists of one or more redirection operators
+ and zero or more parameter assignments, but no command name, zsh can
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.49
+diff -u -r1.49 exec.c
+--- Src/exec.c	7 Mar 2003 12:17:54 -0000	1.49
++++ Src/exec.c	30 Apr 2003 20:01:42 -0000
+@@ -318,7 +318,7 @@
+ {
+     Wordcode end = state->pc + WC_CURSH_SKIP(state->pc[-1]);
+ 
+-    if (!list_pipe && thisjob != list_pipe_job)
++    if (!list_pipe && thisjob != list_pipe_job && !hasprocs(thisjob))
+ 	deletejob(jobtab + thisjob);
+     cmdpush(CS_CURSH);
+     execlist(state, 1, do_exec);
+@@ -1054,7 +1054,7 @@
+ 
+ 		    curjob = newjob;
+ 		    DPUTS(!list_pipe_pid, "invalid list_pipe_pid");
+-		    addproc(list_pipe_pid, list_pipe_text);
++		    addproc(list_pipe_pid, list_pipe_text, 0);
+ 
+ 		    /* If the super-job contains only the sub-shell, the
+ 		       sub-shell is the group leader. */
+@@ -1088,13 +1088,13 @@
+ 		    makerunning(jn);
+ 		}
+ 		if (!(jn->stat & STAT_LOCKED)) {
+-		    updated = !!jobtab[thisjob].procs;
++		    updated = hasprocs(thisjob);
+ 		    waitjobs();
+ 		    child_block();
+ 		} else
+ 		    updated = 0;
+ 		if (!updated &&
+-		    list_pipe_job && jobtab[list_pipe_job].procs &&
++		    list_pipe_job && hasprocs(list_pipe_job) &&
+ 		    !(jobtab[list_pipe_job].stat & STAT_STOPPED)) {
+ 		    child_unblock();
+ 		    child_block();
+@@ -1143,7 +1143,7 @@
+ 			    jn->stat |= STAT_SUBJOB | STAT_NOPRINT;
+ 			    jn->other = pid;
+ 			}
+-			if ((list_pipe || last1) && jobtab[list_pipe_job].procs)
++			if ((list_pipe || last1) && hasprocs(list_pipe_job))
+ 			    killpg(jobtab[list_pipe_job].gleader, SIGSTOP);
+ 			break;
+ 		    }
+@@ -1251,7 +1251,7 @@
+ 		char dummy, *text;
+ 
+ 		text = getjobtext(state->prog, state->pc);
+-		addproc(pid, text);
++		addproc(pid, text, 0);
+ 		close(synch[1]);
+ 		read(synch[0], &dummy, 1);
+ 		close(synch[0]);
+@@ -1388,13 +1388,19 @@
+ 	struct multio *mn = mfds[fd];
+ 	char buf[TCBUFSIZE];
+ 	int len, i;
++	pid_t pid;
+ 
+-	if (zfork()) {
++	if ((pid = zfork())) {
+ 	    for (i = 0; i < mn->ct; i++)
+ 		zclose(mn->fds[i]);
+ 	    zclose(mn->pipe);
++	    if (pid == -1) { 
++		mfds[fd] = NULL;
++		return;
++	    }
+ 	    mn->ct = 1;
+ 	    mn->fds[0] = fd;
++	    addproc(pid, NULL, 1);
+ 	    return;
+ 	}
+ 	/* pid == 0 */
+@@ -2054,7 +2060,7 @@
+ 			  3 : WC_ASSIGN_NUM(ac) + 2);
+ 		}
+ 	    }
+-	    addproc(pid, text);
++	    addproc(pid, text, 0);
+             opts[AUTOCONTINUE] = oautocont;
+ 	    return;
+ 	}
+@@ -2946,38 +2952,28 @@
+     Eprog prog;
+     int out = *cmd == Inang;
+     char *pnam;
++    pid_t pid;
++
+ #ifndef PATH_DEV_FD
+     int fd;
+-#else
+-    int pipes[2];
+-#endif
+ 
+     if (thisjob == -1)
+ 	return NULL;
+-#ifndef PATH_DEV_FD
+     if (!(pnam = namedpipe()))
+ 	return NULL;
+-#else
+-    pnam = hcalloc(strlen(PATH_DEV_FD) + 6);
+-#endif
+     if (!(prog = parsecmd(cmd)))
+ 	return NULL;
+-#ifndef PATH_DEV_FD
+     if (!jobtab[thisjob].filelist)
+ 	jobtab[thisjob].filelist = znewlinklist();
+     zaddlinknode(jobtab[thisjob].filelist, ztrdup(pnam));
+ 
+-    if (zfork()) {
+-#else
+-    mpipe(pipes);
+-    if (zfork()) {
+-	sprintf(pnam, "%s/%d", PATH_DEV_FD, pipes[!out]);
+-	zclose(pipes[out]);
+-	fdtable[pipes[!out]] = 2;
+-#endif
++    if ((pid = zfork())) {
++	if (pid == -1)
++	    return NULL;
++	if (!out)
++	    addproc(pid, NULL, 1);
+ 	return pnam;
+     }
+-#ifndef PATH_DEV_FD
+     closem(0);
+     fd = open(pnam, out ? O_WRONLY | O_NOCTTY : O_RDONLY | O_NOCTTY);
+     if (fd == -1) {
+@@ -2986,11 +2982,37 @@
+     }
+     entersubsh(Z_ASYNC, 1, 0, 0);
+     redup(fd, out);
+-#else
++#else /* PATH_DEV_FD */
++    int pipes[2];
++
++    if (thisjob == -1)
++	return NULL;
++    pnam = hcalloc(strlen(PATH_DEV_FD) + 6);
++    if (!(prog = parsecmd(cmd)))
++	return NULL;
++    mpipe(pipes);
++    if ((pid = zfork())) {
++	sprintf(pnam, "%s/%d", PATH_DEV_FD, pipes[!out]);
++	zclose(pipes[out]);
++	if (pid == -1)
++	{
++	    zclose(pipes[!out]);
++	    return NULL;
++	}
++	fdtable[pipes[!out]] = 2;
++	if (!out)
++	{
++	    addproc(pid, NULL, 1);
++	    fprintf(stderr, "Proc %d added\n", pid);
++	    fflush(stderr);
++	}
++	return pnam;
++    }
+     entersubsh(Z_ASYNC, 1, 0, 0);
+     redup(pipes[out], out);
+     closem(0);   /* this closes pipes[!out] as well */
+-#endif
++#endif /* PATH_DEV_FD */
++
+     cmdpush(CS_CMDSUBST);
+     execode(prog, 0, 1);
+     cmdpop();
+@@ -3008,12 +3030,18 @@
+ {
+     Eprog prog;
+     int pipes[2], out = *cmd == Inang;
++    pid_t pid;
+ 
+     if (!(prog = parsecmd(cmd)))
+ 	return -1;
+     mpipe(pipes);
+-    if (zfork()) {
++    if ((pid = zfork())) {
+ 	zclose(pipes[out]);
++	if (pid == -1) {
++	    zclose(pipes[!out]);
++	    return -1;
++	}
++	addproc(pid, NULL, 1);
+ 	return pipes[!out];
+     }
+     entersubsh(Z_ASYNC, 1, 0, 0);
+@@ -3226,13 +3254,14 @@
+     if (errflag)
+ 	return;
+ 
+-    if (!list_pipe && thisjob != list_pipe_job) {
++    if (!list_pipe && thisjob != list_pipe_job && !hasprocs(thisjob)) {
+ 	/* Without this deletejob the process table *
+ 	 * would be filled by a recursive function. */
+ 	last_file_list = jobtab[thisjob].filelist;
+ 	jobtab[thisjob].filelist = NULL;
+ 	deletejob(jobtab + thisjob);
+     }
++
+     if (isset(XTRACE)) {
+ 	LinkNode lptr;
+ 	printprompt4();
+Index: Src/jobs.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/jobs.c,v
+retrieving revision 1.20
+diff -u -r1.20 jobs.c
+--- Src/jobs.c	7 Mar 2003 12:17:54 -0000	1.20
++++ Src/jobs.c	30 Apr 2003 20:01:47 -0000
+@@ -130,22 +130,36 @@
+ 
+ /**/
+ int
+-findproc(pid_t pid, Job *jptr, Process *pptr)
++findproc(pid_t pid, Job *jptr, Process *pptr, int aux)
+ {
+     Process pn;
+     int i;
+ 
+     for (i = 1; i < MAXJOB; i++)
+-	for (pn = jobtab[i].procs; pn; pn = pn->next)
++    {
++	for (pn = aux ? jobtab[i].auxprocs : jobtab[i].procs;
++	     pn; pn = pn->next)
+ 	    if (pn->pid == pid) {
+ 		*pptr = pn;
+ 		*jptr = jobtab + i;
+ 		return 1;
+ 	    }
++    }
+ 
+     return 0;
+ }
+ 
++/* Does the given job number have any processes? */
++
++/**/
++int
++hasprocs(int job)
++{
++    Job jn = jobtab + job;
++
++    return jn->procs || jn->auxprocs;
++}
++
+ /* Find the super-job of a sub-job. */
+ 
+ /**/
+@@ -168,7 +182,7 @@
+ {
+     Job jn = jobtab + job, sj = jobtab + jn->other;
+ 
+-    if ((sj->stat & STAT_DONE) || !sj->procs) {
++    if ((sj->stat & STAT_DONE) || (!sj->procs && !sj->auxprocs)) {
+ 	struct process *p;
+ 		    
+ 	for (p = sj->procs; p; p = p->next)
+@@ -257,6 +271,10 @@
+     int val = 0, status = 0;
+     int somestopped = 0, inforeground = 0;
+ 
++    for (pn = jn->auxprocs; pn; pn = pn->next)
++	if (pn->status == SP_RUNNING)
++	    return;
++
+     for (pn = jn->procs; pn; pn = pn->next) {
+ 	if (pn->status == SP_RUNNING)      /* some processes in this job are running       */
+ 	    return;                        /* so no need to update job table entry         */
+@@ -806,6 +824,13 @@
+ 	zfree(pn, sizeof(struct process));
+     }
+ 
++    pn = jn->auxprocs;
++    jn->auxprocs = NULL;
++    for (; pn; pn = nx) {
++	nx = pn->next;
++	zfree(pn, sizeof(struct process));
++    }
++
+     if (jn->ty)
+ 	zfree(jn->ty, sizeof(struct ttyinfo));
+     if (jn->pwd)
+@@ -819,7 +844,6 @@
+     }
+     jn->gleader = jn->other = 0;
+     jn->stat = jn->stty_in_env = 0;
+-    jn->procs = NULL;
+     jn->filelist = NULL;
+     jn->ty = NULL;
+ }
+@@ -842,13 +866,19 @@
+     freejob(jn, 1);
+ }
+ 
+-/* add a process to the current job */
++/*
++ * Add a process to the current job.
++ * The third argument is 1 if we are adding a process which is not
++ * part of the main pipeline but an auxiliary process used for
++ * handling MULTIOS or process substitution.  We will wait for it
++ * but not display job information about it.
++ */
+ 
+ /**/
+ void
+-addproc(pid_t pid, char *text)
++addproc(pid_t pid, char *text, int aux)
+ {
+-    Process pn;
++    Process pn, *pnlist;
+     struct timezone dummy_tz;
+ 
+     pn = (Process) zcalloc(sizeof *pn);
+@@ -857,25 +887,30 @@
+ 	strcpy(pn->text, text);
+     else
+ 	*pn->text = '\0';
+-    gettimeofday(&pn->bgtime, &dummy_tz);
+     pn->status = SP_RUNNING;
+     pn->next = NULL;
+ 
+-    /* if this is the first process we are adding to *
+-     * the job, then it's the group leader.          */
+-    if (!jobtab[thisjob].gleader)
+-	jobtab[thisjob].gleader = pid;
++    if (!aux)
++    {
++	gettimeofday(&pn->bgtime, &dummy_tz);
++	/* if this is the first process we are adding to *
++	 * the job, then it's the group leader.          */
++	if (!jobtab[thisjob].gleader)
++	    jobtab[thisjob].gleader = pid;
++	/* attach this process to end of process list of current job */
++	pnlist = &jobtab[thisjob].procs;
++    }
++    else
++	pnlist = &jobtab[thisjob].auxprocs;
+ 
+-    /* attach this process to end of process list of current job */
+-    if (jobtab[thisjob].procs) {
++    if (*pnlist) {
+ 	Process n;
+ 
+-	for (n = jobtab[thisjob].procs; n->next; n = n->next);
+-	pn->next = NULL;
++	for (n = *pnlist; n->next; n = n->next);
+ 	n->next = pn;
+     } else {
+ 	/* first process for this job */
+-	jobtab[thisjob].procs = pn;
++	*pnlist = pn;
+     }
+     /* If the first process in the job finished before any others were *
+      * added, maybe STAT_DONE got set incorrectly.  This can happen if *
+@@ -938,7 +973,7 @@
+ 
+     dont_queue_signals();
+     child_block();		 /* unblocked during child_suspend() */
+-    if (jn->procs) {		 /* if any forks were done         */
++    if (jn->procs || jn->auxprocs) { /* if any forks were done         */
+ 	jn->stat |= STAT_LOCKED;
+ 	if (jn->stat & STAT_CHANGED)
+ 	    printjob(jn, !!isset(LONGLISTJOBS), 1);
+@@ -978,7 +1013,7 @@
+ {
+     Job jn = jobtab + thisjob;
+ 
+-    if (jn->procs)
++    if (jn->procs || jn->auxprocs)
+ 	zwaitjob(thisjob, 0);
+     else {
+ 	deletejob(jn);
+@@ -1075,7 +1110,7 @@
+ 	    fflush(stderr);
+ 	}
+     }
+-    if (!jobtab[thisjob].procs)
++    if (!hasprocs(thisjob))
+ 	deletejob(jobtab + thisjob);
+     else
+ 	jobtab[thisjob].stat |= STAT_LOCKED;
+@@ -1373,7 +1408,7 @@
+ 	    Job j;
+ 	    Process p;
+ 
+-	    if (findproc(pid, &j, &p))
++	    if (findproc(pid, &j, &p, 0))
+ 		waitforpid(pid);
+ 	    else
+ 		zwarnnam(name, "pid %d is not a child of this shell", 0, pid);
+Index: Src/signals.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/signals.c,v
+retrieving revision 1.21
+diff -u -r1.21 signals.c
+--- Src/signals.c	29 May 2002 14:28:14 -0000	1.21
++++ Src/signals.c	30 Apr 2003 20:01:50 -0000
+@@ -487,8 +487,11 @@
+             }
+ 
+ 	    /* Find the process and job containing this pid and update it. */
+-	    if (findproc(pid, &jn, &pn)) {
++	    if (findproc(pid, &jn, &pn, 0)) {
+ 		update_process(pn, status);
++		update_job(jn);
++	    } else if (findproc(pid, &jn, &pn, 1)) {
++		pn->status = status;
+ 		update_job(jn);
+ 	    } else {
+ 		/* If not found, update the shell record of time spent by
+Index: Src/zsh.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/zsh.h,v
+retrieving revision 1.45
+diff -u -r1.45 zsh.h
+--- Src/zsh.h	25 Apr 2003 11:19:10 -0000	1.45
++++ Src/zsh.h	30 Apr 2003 20:01:57 -0000
+@@ -697,6 +697,7 @@
+     char *pwd;			/* current working dir of shell when *
+ 				 * this job was spawned              */
+     struct process *procs;	/* list of processes                 */
++    struct process *auxprocs;	/* auxiliary processes e.g multios   */
+     LinkList filelist;		/* list of files to delete when done */
+     int stty_in_env;		/* if STTY=... is present            */
+     struct ttyinfo *ty;		/* the modes specified by STTY       */
+Index: Test/A04redirect.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/A04redirect.ztst,v
+retrieving revision 1.3
+diff -u -r1.3 A04redirect.ztst
+--- Test/A04redirect.ztst	9 Jul 2001 18:31:25 -0000	1.3
++++ Test/A04redirect.ztst	30 Apr 2003 20:01:57 -0000
+@@ -137,16 +137,10 @@
+ >errout:
+ >Output
+ 
+-# Following two tests have to be separated since in
+-#   print bar >foo >bar && print "$(<foo) $(<bar)"
+-# the multios aren't flushed until after the substitutions take
+-# place.  This can't be right.
+   rm -f errout
+   print doo be doo be doo >foo >bar 
+-0:setup 2-file multio
+-
+   print "foo: $(<foo)\nbar: $(<bar)"
+-0:read 2-file multio
++0:2-file multio
+ >foo: doo be doo be doo
+ >bar: doo be doo be doo
+ 
+@@ -162,11 +156,9 @@
+   rm -f *
+   touch out1 out2
+   print All files >*
+-0:setup multio with globbing
+-
+   print *
+   print "out1: $(<out1)\nout2: $(<out2)"
+-0:read multio with globbing
++0:multio with globbing
+ >out1 out2
+ >out1: All files
+ >out2: All files
+Index: Test/D03procsubst.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D03procsubst.ztst,v
+retrieving revision 1.2
+diff -u -r1.2 D03procsubst.ztst
+--- Test/D03procsubst.ztst	26 Jun 2001 15:02:34 -0000	1.2
++++ Test/D03procsubst.ztst	30 Apr 2003 20:01:57 -0000
+@@ -17,8 +17,8 @@
+ 0:<(...) substitution
+ >First	Dritte
+ 
+-  paste <(cut -f2 FILE1) <(cut -f4 FILE2) > >(sed 's/e/E/g' >OUTFILE)
+-  sleep 1	# since the sed is asynchronous
++# slightly desperate hack to force >(...) to be synchronous
++  { paste <(cut -f2 FILE1) <(cut -f4 FILE2) } > >(sed 's/e/E/g' >OUTFILE)
+   cat OUTFILE
+ 0:>(...) substitution
+ >SEcond	ViErtE
+
+-- 
+Peter Stephenson <pws@pwstephenson.fsnet.co.uk>
+Work: pws@csr.com
+Web: http://www.pwstephenson.fsnet.co.uk
+

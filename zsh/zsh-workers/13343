@@ -1,0 +1,166 @@
+From zsh-workers-return-13343-mason-zsh=primenet.com.au@sunsite.dk Fri Jan 12 13:48:20 2001
+Return-Path: <zsh-workers-return-13343-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 564 invoked from network); 12 Jan 2001 13:48:18 -0000
+Received: from sunsite.dk (HELO sunsite.auc.dk) (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 12 Jan 2001 13:48:18 -0000
+Received: (qmail 18251 invoked by alias); 12 Jan 2001 13:48:08 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 13343
+Received: (qmail 18240 invoked from network); 12 Jan 2001 13:48:08 -0000
+Date: Fri, 12 Jan 2001 14:48:02 +0100 (MET)
+Message-Id: <200101121348.OAA29613@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Felix Rosencrantz's message of Thu, 11 Jan 2001 20:47:37 -0800
+	(PST)
+Subject: PATCH: Re: Bug w/matching control + feature request
+
+
+Felix Rosencrantz wrote:
+
+> Thanks for adding the cycle-completion-positions code, Sven! 
+
+Thanks for helping to debug it.
+
+> Though, there
+> seems to be a problem with it.
+> 
+> Check out
+> % zsh -f
+> host% autoload -U compinit cycle-completion-positions ; compinit -D 
+> host% compdef _tst tst
+> host% _tst () {compadd -M 'r:|[.,_-]=** r:[^0-9]||[0-9]=**' _cd a_c ab_c
+> _b_cde_c}
+> host% zle -N cycle cycle-completion-positions
+> host% bindkey "^T" cycle
+> host% tst _c<TAB><^T>
+> 
+> After the tab it lists the possible completions.  But the value of
+> $_lastcomp[insert_positions] is 4:6:6, which causes the
+> cycle-completion-positions to get stuck at cursor position 6.  Not sure
+> if there should be unique values or cycle-completion-positions should
+> be able to deal with the duplicate values.
+
+In this case it was because the position after the word is always
+unconditionally added (that seemed sensible, even if there may be
+cases when there is nothing missing at the end).
+
+I've added code to make sure every position is added only once.
+
+> There are other cases, where there is only one value but there should be
+> multiple positions.  But I wasn't sure if it would be possible to list all the
+> positions. (Use same input but with
+> 	_tst () {compadd -M 'r:|[.,_-]=** r:[^0-9]||[0-9]=**' _cd a_c ab_c }
+> 
+> and the positions are 6:6, and there should be two positions.)
+
+This was actually caused by a flaw deeper down in the engine room. The 
+code didn't mark the first cline as having missing characters. With
+the patch below this also means that by default the cursor is placed
+there (at the beginning) because it looks friendlier to the code in
+cline_str().
+
+
+Bye
+ Sven
+
+Index: Src/Zle/compmatch.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compmatch.c,v
+retrieving revision 1.28
+diff -u -r1.28 compmatch.c
+--- Src/Zle/compmatch.c	2001/01/10 09:24:46	1.28
++++ Src/Zle/compmatch.c	2001/01/12 13:47:34
+@@ -1627,6 +1627,8 @@
+ 	    *orest = NULL;
+ 	if (nrest)
+ 	    *nrest = n;
++	if (n)
++	    ot->flags |= CLF_MISS;
+ 
+ 	return;
+     }
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.30
+diff -u -r1.30 compresult.c
+--- Src/Zle/compresult.c	2001/01/11 10:06:50	1.30
++++ Src/Zle/compresult.c	2001/01/12 13:47:35
+@@ -165,7 +165,7 @@
+ cline_str(Cline l, int ins, int *csp, LinkList posl)
+ {
+     Cline s;
+-    int ocs = cs, ncs, pcs, scs;
++    int ocs = cs, ncs, pcs, scs, opos, npos;
+     int pm, pmax, pmm, pma, sm, smax, smm, sma, d, dm, mid;
+     int i, j, li = 0, cbr, padd = (ins ? wb - ocs : -ocs);
+     Brinfo brp, brs;
+@@ -224,8 +224,10 @@
+ 
+ 		if ((s->flags & CLF_DIFF) && (!dm || (s->flags & CLF_MATCHED))) {
+ 		    d = cs; dm = s->flags & CLF_MATCHED;
+-		    if (posl)
+-			addlinknode(posl, (void *) ((long) (cs + padd)));
++		    if (posl && (npos = cs + padd) != opos) {
++			opos = npos;
++			addlinknode(posl, (void *) ((long) npos));
++		    }
+ 		}
+ 		li += s->llen;
+ 	    }
+@@ -247,8 +249,10 @@
+ 	/* Remember the position if this is the first prefix with
+ 	 * missing characters. */
+ 	if ((l->flags & CLF_MISS) && !(l->flags & CLF_SUF)) {
+-	    if (posl && l->min != l->max)
+-		addlinknode(posl, (void *) ((long) (cs + padd)));
++	    if (posl && l->min != l->max && (npos = cs + padd) != opos) {
++		opos = npos;
++		addlinknode(posl, (void *) ((long) npos));
++	    }
+ 	    if (((pmax < (l->max - l->min) || (pma && l->max != l->min)) &&
+ 		 (!pmm || (l->flags & CLF_MATCHED))) ||
+ 		((l->flags & CLF_MATCHED) && !pmm)) {
+@@ -299,8 +303,10 @@
+ 	    if (l->flags & CLF_MID)
+ 		mid = cs;
+ 	    else if (l->flags & CLF_SUF) {
+-		if (posl && l->min != l->max)
+-		    addlinknode(posl, (void *) ((long) (cs + padd)));
++		if (posl && l->min != l->max && (npos = cs + padd) != opos) {
++		    opos = npos;
++		    addlinknode(posl, (void *) ((long) npos));
++		}
+ 		if (((smax < (l->min - l->max) || (sma && l->max != l->min)) &&
+ 		     (!smm || (l->flags & CLF_MATCHED))) ||
+ 		    ((l->flags & CLF_MATCHED) && !smm)) {
+@@ -399,14 +405,16 @@
+ 	    cs += i;
+ 	    if (j >= 0 && (!dm || (js->flags & CLF_MATCHED))) {
+ 		d = cs - j; dm = js->flags & CLF_MATCHED;
+-		if (posl)
+-		    addlinknode(posl, (void *) ((long) (cs - j + padd)));
++		if (posl && (npos = cs - j + padd) != opos) {
++		    opos = npos;
++		    addlinknode(posl, (void *) ((long) npos));
++		}
+ 	    }
+ 	}
+ 	l = l->next;
+     }
+-    if (posl)
+-	addlinknode(posl, (void *) ((long) (cs + padd)));
++    if (posl && (npos = cs + padd) != opos)
++	addlinknode(posl, (void *) ((long) npos));
+     if (ins) {
+ 	int ocs = cs;
+ 
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

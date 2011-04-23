@@ -1,0 +1,184 @@
+From zsh-workers-return-27345-mason-zsh=primenet.com.au@zsh.org Tue Nov 03 19:04:55 2009
+Return-Path: <zsh-workers-return-27345-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7726 invoked by alias); 3 Nov 2009 19:04:55 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27345
+Received: (qmail 12720 invoked from network); 3 Nov 2009 19:04:52 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.4 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received-SPF: pass (ns1.primenet.com.au: SPF record at _spf.google.com designates 209.85.219.209 as permitted sender)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+        d=gmail.com; s=gamma;
+        h=domainkey-signature:received:received:date:from:to:subject
+         :in-reply-to:message-id:references:user-agent:mime-version
+         :content-type;
+        bh=TUHAhh2YAAQVev4A7RJXTMEQuxMOIu/ms3YMLswjJrQ=;
+        b=oupn6DwV3Mi+ITmhcyQRhk7ZQMn6p4gLhveWNwUHG9r85nO22lOkE+j1BLOpn7c7Gm
+         fFcPuUSLTKnIooR1qYpM64dDh0jVs/y+yaB5lfV+PQqTHDtNnShcF5QL4NV/Y/qG7I8l
+         GllTxl3Xybs9BtZDug1cG99PCCiEWJGoDGSls=
+DomainKey-Signature: a=rsa-sha1; c=nofws;
+        d=gmail.com; s=gamma;
+        h=date:from:to:subject:in-reply-to:message-id:references:user-agent
+         :mime-version:content-type;
+        b=gHTWfifamVq1t7G8pCq1nITeH+v/co439+DxdcI+Q+AYZy3vOknyVLHvA+n5qFGqwa
+         BLe0rgnyEd9425hvp3p4XgWFVLODZNrPoDMsQu0yIOFLoSeNj+baLXtzd/xF/qmyPNGO
+         nzymrLLOtGiSwYVgsTdWwzZX/bZc15ot76qOQ=
+Date: Tue, 3 Nov 2009 19:57:06 +0100 (CET)
+From: Mikael Magnusson <mikachu@gmail.com>
+To: zsh workers <zsh-workers@zsh.org>
+Subject: [PATCH 3/4] attr: dynamically allocate memory for attributes
+In-Reply-To: <alpine.LNX.2.00.0911031951480.3519@localhost>
+Message-ID: <alpine.LNX.2.00.0911031956240.3783@localhost>
+References: <alpine.LNX.2.00.0902262245590.27571@localhost> <20090303121253.61f5e2ec@news01> <alpine.LNX.2.00.0903031455360.10365@localhost> <20090303163526.533995be@news01> <237967ef0903030851gc26620ficfc908628a4b3be2@mail.gmail.com>
+ <alpine.LNX.2.00.0911031951480.3519@localhost>
+User-Agent: Alpine 2.00 (LNX )
+MIME-Version: 1.0
+Content-Type: TEXT/PLAIN; format=flowed; charset=US-ASCII
+
+If there is a race condition and the attribute grows between the two
+calls, we return an error instead of trying again.
+---
+  Doc/Zsh/mod_attr.yo |    5 ++++
+  Src/Modules/attr.c  |   63 ++++++++++++++++++++++++++++++++++-----------------
+  2 files changed, 47 insertions(+), 21 deletions(-)
+
+diff --git a/Doc/Zsh/mod_attr.yo b/Doc/Zsh/mod_attr.yo
+index ed444d0..517bb63 100644
+--- a/Doc/Zsh/mod_attr.yo
++++ b/Doc/Zsh/mod_attr.yo
+@@ -32,3 +32,8 @@ var(filename). If the optional argument var(parameter) is given, the
+  list of attributes is set on that parameter instead of being printed to stdout.
+  )
+  enditem()
++
++tt(zgetattr) and tt(zlistattr) allocate memory dynamically. If the attribute or
++list of attributes grows between the allocation and the call to get them, they
++return 2. On all other errors, 1 is returned. This way, the calling function can
++check for this case and try again for as long as they want.
+diff --git a/Src/Modules/attr.c b/Src/Modules/attr.c
+index 1a9c323..bb30ebb 100644
+--- a/Src/Modules/attr.c
++++ b/Src/Modules/attr.c
+@@ -98,26 +98,37 @@ static int
+  bin_getattr(char *nam, char **argv, Options ops, UNUSED(int func))
+  {
+      int ret = 0;
+-    int len, slen;
+-    char value[256];
++    int list_len, val_len, attr_len, slen;
++    char *value;
+      int symlink = OPT_ISSET(ops, 'h');
+
+      unmetafy(*argv, &slen);
+      unmetafy(*(argv+1), NULL);
+-    if (xlistxattr(*argv, NULL, 0, symlink) > 0) {
+-        if (0 < (len = xgetxattr(*argv, *(argv+1), value, 255, symlink))) {
+-            if (len < 256) {
+-                value[len] = '\0';
++    list_len = xlistxattr(*argv, NULL, 0, symlink);
++    if (list_len > 0) {
++        val_len = xgetxattr(*argv, *(argv+1), NULL, 0, symlink);
++        if (val_len == 0) {
++            if (*(argv+2))
++                unsetparam(*(argv+2));
++            return 0;
++        }
++        if (val_len > 0) {
++            value = (char *)zalloc(val_len+1);
++            attr_len = xgetxattr(*argv, *(argv+1), value, val_len, symlink);
++            if (attr_len > 0 && attr_len <= val_len) {
++                value[attr_len] = '\0';
+                  if (*(argv+2))
+-                    setsparam(*(argv+2), metafy(value, len, META_DUP));
++                    setsparam(*(argv+2), metafy(value, attr_len, META_DUP));
+                  else
+                      printf("%s\n", value);
+              }
+-        } else if (len < 0) {
+-            zwarnnam(nam, "%s: %e", metafy(*argv, slen, META_NOALLOC), errno);
+-            ret = 1;
++            zfree(value, val_len+1);
+          }
+      }
++    if (list_len < 0 || val_len < 0 || attr_len < 0)  {
++        zwarnnam(nam, "%s: %e", metafy(*argv, slen, META_NOALLOC), errno);
++        ret = 1 + (attr_len > val_len);
++    }
+      return ret;
+  }
+
+@@ -160,41 +171,51 @@ static int
+  bin_listattr(char *nam, char **argv, Options ops, UNUSED(int func))
+  {
+      int ret = 0;
+-    int len, slen;
+-    char value[256];
++    int val_len, list_len, slen;
++    char *value;
+      int symlink = OPT_ISSET(ops, 'h');
+
+      unmetafy(*argv, &slen);
+-    if (0 < (len = xlistxattr(*argv, value, 256, symlink))) {
+-        if (len < 256) {
++    val_len = xlistxattr(*argv, NULL, 0, symlink);
++    if (val_len == 0) {
++        if (*(argv+1))
++            unsetparam(*(argv+1));
++        return 0;
++    }
++    if (val_len > 0) {
++        value = (char *)zalloc(val_len+1);
++        list_len = xlistxattr(*argv, value, val_len, symlink);
++        if (list_len > 0 && list_len <= val_len) {
+              char *p = value;
+              if (*(argv+1)) {
+-                if (strlen(value) + 1 == len)
+-                    setsparam(*(argv+1), metafy(value, len-1, META_DUP));
++                if (strlen(value) + 1 == list_len)
++                    setsparam(*(argv+1), metafy(value, list_len-1, META_DUP));
+                  else {
+                      int arrlen = 0;
+                      char **array = NULL, **arrptr = NULL;
+
+-                    while (p < &value[len]) {
++                    while (p < &value[list_len]) {
+                          arrlen++;
+                          p += strlen(p) + 1;
+                      }
+                      arrptr = array = (char **)zshcalloc((arrlen+1) * sizeof(char *));
+                      p = value;
+-                    while (p < &value[len]) {
++                    while (p < &value[list_len]) {
+                          *arrptr++ = metafy(p, -1, META_DUP);
+                          p += strlen(p) + 1;
+                      }
+                      setaparam(*(argv+1), array);
+                  }
+-            } else while (p < &value[len]) {
++            } else while (p < &value[list_len]) {
+                  printf("%s\n", p);
+                  p += strlen(p) + 1;
+              }
+          }
+-    } else if (len < 0) {
++        zfree(value, val_len+1);
++    }
++    if (val_len < 0 || list_len < 0) {
+          zwarnnam(nam, "%s: %e", metafy(*argv, slen, META_NOALLOC), errno);
+-        ret = 1;
++        ret = 1 + (list_len > val_len);
+      }
+      return ret;
+  }
+-- 
+1.6.5
+

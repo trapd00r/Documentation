@@ -1,0 +1,251 @@
+From zsh-workers-return-27721-mason-zsh=primenet.com.au@zsh.org Fri Feb 19 10:47:32 2010
+Return-Path: <zsh-workers-return-27721-mason-zsh=primenet.com.au@zsh.org>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 20555 invoked by alias); 19 Feb 2010 10:47:32 -0000
+Mailing-List: contact zsh-workers-help@zsh.org; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+List-Id: Zsh Workers List <zsh-workers.zsh.org>
+List-Post: <mailto:zsh-workers@zsh.org>
+List-Help: <mailto:zsh-workers-help@zsh.org>
+Delivered-To: mailing list zsh-workers@zsh.org
+X-Seq: 27721
+Received: (qmail 4996 invoked from network); 19 Feb 2010 10:47:17 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00,SPF_HELO_PASS
+	autolearn=ham version=3.2.5
+Received-SPF: none (proxy.melb.primenet.com.au: domain at csr.com does not designate permitted sender hosts)
+Message-Id: <201002191045.o1JAjlgg014360@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@zsh.org
+Subject: Re: Hugh number of file descriptor checks
+In-reply-to: <20100219022710.GA71015@redoubt.spodhuis.org>
+References: <201002190000.27806.joke@seiken.de> <20100219022710.GA71015@redoubt.spodhuis.org>
+Comments: In-reply-to Phil Pennock <zsh-workers+phil.pennock@spodhuis.org>
+   message dated "Fri, 19 Feb 2010 03:27:10 +0100."
+Date: Fri, 19 Feb 2010 10:45:47 +0000
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 19 Feb 2010 10:45:49.0490 (UTC) FILETIME=[B32AB120:01CAB150]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A-09-22-10 (www.mailcontrol.com) on 10.68.0.152
+
+(Moved to zsh-workers.  This is definitely not a user issue.)
+
+Phil Pennock wrote:
+> Meanwhile, max_zsh_fd is the largest fd that has been allocated by the
+> shell itself, rather than inherited.
+> 
+> zopenmax() is used to close all file-descriptors except some which are
+> being kept, and to determine the size of the fdtable which is nominally
+> what sets max_zsh_fd.  zopenmax() returns OPEN_MAX in the event that
+> sysconf() isn't available.
+> 
+> 
+> Questions for the list:
+>  Why not just pick a magic value like 64 or 32 and, if
+>  sysconf(_SC_OPEN_MAX) is larger than that, use the magic value?
+
+Given that this is basically there to determine fdtable_size, and in
+fact we'll try to reallocate that if needed (so trying too hard to work
+out what it should be seems a bit pointless) that sounds perfectly
+workable to me.
+
+>  Why do
+>  we need to know the largest fd already in use?  Does fdtable have to be
+>  able to handle the largest fd already open, if not opened by zsh?
+
+Well, unless I'm missing something fdtable doesn't get initialised to
+take account of anything already open anyway, so I don't see how this
+can be important to the code as written.  I think the shell generally is
+written to use whatever fd's the system gives it above 9.
+
+I think it would also make more sense for closeallelse() to use
+fdtable_size rather than call zopenmax(), and for zopenmax() not to
+bother caching openmax.  It seems to me that's one parameter too many
+and it's not really what it claims to be anyway... and if we increase
+fdtable_size, surely using openmax in closeallelse() is plain wrong?
+
+How about the following?  I also tried to tidy up the rellocation of
+fdtable a bit.
+
+Index: Src/compat.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/compat.c,v
+retrieving revision 1.18
+diff -p -u -r1.18 compat.c
+--- Src/compat.c	19 Mar 2009 15:00:22 -0000	1.18
++++ Src/compat.c	19 Feb 2010 09:57:17 -0000
+@@ -187,18 +187,23 @@ zpathmax(char *dir)
+ #endif /* 0 */
+ 
+ #ifdef HAVE_SYSCONF
+-/* This is replaced by a macro from system.h if not HAVE_SYSCONF.    *
+- * 0 is returned by sysconf if _SC_OPEN_MAX is unavailable;          *
+- * -1 is returned on error                                           *
+- *                                                                   *
+- * Neither of these should happen, but resort to OPEN_MAX rather     *
+- * than return 0 or -1 just in case.                                 */
++/*
++ * This is replaced by a macro from system.h if not HAVE_SYSCONF.
++ * 0 is returned by sysconf if _SC_OPEN_MAX is unavailable;
++ * -1 is returned on error
++ *
++ * Neither of these should happen, but resort to OPEN_MAX rather
++ * than return 0 or -1 just in case.
++ *
++ * We'll limit the open maximum to ZSH_INITIAL_OPEN_MAX to
++ * avoid probing ridiculous numbers of file descriptors.
++ */
+ 
+ /**/
+ mod_export long
+ zopenmax(void)
+ {
+-    static long openmax = 0;
++    long openmax = 0;
+ 
+     if (openmax < 1) {
+ 	if ((openmax = sysconf(_SC_OPEN_MAX)) < 1) {
+@@ -212,6 +217,8 @@ zopenmax(void)
+ 	     * So, report the maximum of OPEN_MAX or the largest open *
+ 	     * descriptor (is there a better way to find that?).      */
+ 	    long i, j = OPEN_MAX;
++	    if (openmax > ZSH_INITIAL_OPEN_MAX)
++		openmax = ZSH_INITIAL_OPEN_MAX;
+ 	    for (i = j; i < openmax; i += (errno != EINTR)) {
+ 		errno = 0;
+ 		if (fcntl(i, F_GETFL, 0) < 0 &&
+@@ -771,7 +778,7 @@ mk_wcwidth(wchar_t ucs)
+ 
+   /* if we arrive here, ucs is not a combining or C0/C1 control character */
+ 
+-  return 1 + 
++  return 1 +
+     (ucs >= 0x1100 &&
+      (ucs <= 0x115f ||                    /* Hangul Jamo init. consonants */
+       ucs == 0x2329 || ucs == 0x232a ||
+Index: Src/exec.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/exec.c,v
+retrieving revision 1.175
+diff -p -u -r1.175 exec.c
+--- Src/exec.c	9 Feb 2010 13:58:33 -0000	1.175
++++ Src/exec.c	19 Feb 2010 09:57:17 -0000
+@@ -1928,7 +1928,7 @@ closeallelse(struct multio *mn)
+     int i, j;
+     long openmax;
+ 
+-    openmax = zopenmax();
++    openmax = fdtable_size;
+ 
+     for (i = 0; i < openmax; i++)
+ 	if (mn->pipe != i) {
+Index: Src/system.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/system.h,v
+retrieving revision 1.55
+diff -p -u -r1.55 system.h
+--- Src/system.h	1 Aug 2009 04:20:35 -0000	1.55
++++ Src/system.h	19 Feb 2010 09:57:17 -0000
+@@ -304,16 +304,22 @@ struct timezone {
+ # endif
+ #endif
+ 
++/*
++ * The number of file descriptors we'll allocate initially.
++ * We will reallocate later if necessary.
++ */
++#define ZSH_INITIAL_OPEN_MAX 64
+ #ifndef OPEN_MAX
+ # ifdef NOFILE
+ #  define OPEN_MAX NOFILE
+ # else
+    /* so we will just pick something */
+-#  define OPEN_MAX 64
++#  define OPEN_MAX ZSH_INITIAL_OPEN_MAX
+ # endif
+ #endif
+ #ifndef HAVE_SYSCONF
+-# define zopenmax() ((long) OPEN_MAX)
++# define zopenmax() ((long) (OPEN_MAX > ZSH_INITIAL_OPEN_MAX ? \
++			     ZSH_INITIAL_OPEN_MAX : OPEN_MAX))
+ #endif
+ 
+ #ifdef HAVE_FCNTL_H
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.237
+diff -p -u -r1.237 utils.c
+--- Src/utils.c	9 Feb 2010 14:24:01 -0000	1.237
++++ Src/utils.c	19 Feb 2010 09:57:17 -0000
+@@ -1621,6 +1621,27 @@ adjustwinsize(int from)
+     }
+ }
+ 
++/*
++ * Ensure the fdtable is large enough for fd, and that the
++ * maximum fd is set appropriately.
++ */
++static void
++check_fd_table(int fd)
++{
++    if (fd <= max_zsh_fd)
++	return;
++
++    if (fd >= fdtable_size) {
++	int old_size = fdtable_size;
++	while (fd >= fdtable_size)
++	    fdtable = zrealloc(fdtable,
++			       (fdtable_size *= 2)*sizeof(*fdtable));
++	memset(fdtable + old_size, 0,
++	       (fdtable_size - old_size) * sizeof(*fdtable));
++    }
++    max_zsh_fd = fd;
++}
++
+ /* Move a fd to a place >= 10 and mark the new fd in fdtable.  If the fd *
+  * is already >= 10, it is not moved.  If it is invalid, -1 is returned. */
+ 
+@@ -1644,12 +1665,7 @@ movefd(int fd)
+ 	fd = fe;
+     }
+     if(fd != -1) {
+-	if (fd > max_zsh_fd) {
+-	    while (fd >= fdtable_size)
+-		fdtable = zrealloc(fdtable,
+-				   (fdtable_size *= 2)*sizeof(*fdtable));
+-	    max_zsh_fd = fd;
+-	}
++	check_fd_table(fd);
+ 	fdtable[fd] = FDT_INTERNAL;
+     }
+     return fd;
+@@ -1669,12 +1685,12 @@ redup(int x, int y)
+     if(x < 0)
+ 	zclose(y);
+     else if (x != y) {
+-	while (y >= fdtable_size)
+-	    fdtable = zrealloc(fdtable, (fdtable_size *= 2)*sizeof(*fdtable));
+-	if (dup2(x, y) == -1)
++	if (dup2(x, y) == -1) {
+ 	    ret = -1;
+-	if ((fdtable[y] = fdtable[x]) && y > max_zsh_fd)
+-	    max_zsh_fd = y;
++	} else {
++	    check_fd_table(y);
++	    fdtable[y] = fdtable[x];
++	}
+ 	zclose(x);
+     }
+ 
+-- 
+Peter Stephenson <pws@csr.com>            Software Engineer
+Tel: +44 (0)1223 692070                   Cambridge Silicon Radio Limited
+Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, UK
+
+
+Member of the CSR plc group of companies. CSR plc registered in England and Wales, registered number 4187346, registered office Churchill House, Cambridge Business Park, Cowley Road, Cambridge, CB4 0WZ, United Kingdom
+

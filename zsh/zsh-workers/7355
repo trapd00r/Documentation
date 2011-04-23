@@ -1,0 +1,207 @@
+From zsh-workers-return-7355-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Aug 04 09:37:59 1999
+Return-Path: <zsh-workers-return-7355-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 28171 invoked from network); 4 Aug 1999 09:37:56 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 4 Aug 1999 09:37:56 -0000
+Received: (qmail 9611 invoked by alias); 4 Aug 1999 09:37:35 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7355
+Received: (qmail 9604 invoked from network); 4 Aug 1999 09:37:35 -0000
+Date: Wed, 4 Aug 1999 11:37:32 +0200 (MET DST)
+Message-Id: <199908040937.LAA15313@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Tanaka Akira's message of 03 Aug 1999 03:03:05 +0900
+Subject: Re: Completion problems.
+
+
+Tanaka Akira wrote:
+
+> In article <199908021058.MAA12713@beta.informatik.hu-berlin.de>,
+>   Sven Wischnowsky <wischnow@informatik.hu-berlin.de> writes:
+> 
+> > That's wrong, too. Again, this is a problem with the recently changed
+> > quoting behaviour. The prefix is reported in quoted form and appended
+> > and prepended to IPREFIX/ISUFFIX -- which will be quoted again when it 
+> > is inserted.
+> 
+> Thanks. It is fixed.  But such a unquoting/re-quoting seems bit
+> problematic with variables.
+> 
+> Z(3):akr@is27e1u11% Src/zsh -f
+> is27e1u11% fpath=($PWD/Completion/*(/)); autoload -U compinit; compinit -D; compdef _tst tst
+> is27e1u11% _tst () { compset -P '*/'; compadd tst }
+> is27e1u11% var=val
+> is27e1u11% tst $var/<TAB>
+> 
+> Then, the last line is changed to:
+> 
+> is27e1u11% tst \$var/tst 
+
+Ugh. Hm. Since compgen doesn't quote I{PRE,SUF}FIX, compadd shouldn't
+do it, either (especially since the strings given with -[iI] aren't
+quoted).
+This patch tries to make the code use I*FIX as is in all cases.
+
+(...and I still have to look into this multi-quoting thing for
+compset-q/compctl-h, sigh.)
+
+> I think automatic unquoting/re-quoting is dangerous.
+> 
+> Since the completion code works on quoted form and unquoted form is
+> only interesting to usual completers, definitely the conversion
+> between these forms is required. But it is sometimes very difficult or
+> even impossible.
+> 
+> In following examples, unquoted forms are not known until runtime.
+> 
+> % if some-complex-command; then var=xxx; else var=yyy; fi; tst $var/<TAB>
+> % tst $(some-complex-command)/<TAB>
+> 
+> So, I think that it is dangerous decision to embed the quoting stuff
+> into the completion code.
+
+(I'm not sure what you mean by `embed'.) The problem, err, one of the
+problems with quoting and completion is that we have to call the lexer 
+to get at the words from the line and then we have to live with what
+the lexer gives us -- which is quoted. But for special contexts (such
+as parameter expansions) we need to unquote (and probably tokenize) it 
+to find out what's going on. Then we have to decide what we give to
+the user, which currently is (or should be) the form from the
+line. This is also important when it comes to comparing or matching
+such strings, of course, and the globcomplete-behaviour comes into
+play, too (where we even want the stuff from the line in tokenized
+form).
+We already had too much trouble with quoting in completion, so I'm
+reluctant to change a state which has worked for some time.
+
+I see two ways to go: 1) completely change the completion code to
+report strings in unquoted form or 2) add a parameter expansion
+modifier which does something like the opposite of `:q'.
+Unfortunately, 1) is extremly hard and error-prone.
+
+> I think that it is right way to separate the quoting stuff to builtin
+> or variable expansion.
+
+I don't understand you here, sorry. Oh, after reading further: do you
+suggest something like the `opposite-of-:q'-thing or a builtin to work 
+on quoted/unquoted strings?
+
+> Also, I don't like re-quoting such as:
+> 
+> % tst a'#'/<TAB>
+> ->
+> % tst a\#/...
+> 
+> My expectation to completion is simply inserting something into cursor
+> position. So re-quoting surprise me.  If the quoting stuff is
+> separated, customizing these behaviours may be easier.
+
+We can't really separate the quoting stuff, see above.
+
+Also: changing a'#' to a\# is intentional and was discussed -- see
+6400 and follow-ups (especially 6460 for this example). Even if
+completion just inserts something new at the cursor position, this is
+not necessarily the case. With completion functions like _path_files
+and with match specs using `*'-patterns new stuff can be inserted
+anywhere in the word. To retain the single quotes the completion code
+would have to keep track of the original positions and would have to
+calculate the new positions for every single or double quote inside
+the word. This is extremly difficult, expensive (i.e. slow), and at
+least I wouldn't implement it (if anyone else is interested: try to
+find out how the completion code now handles completion inside braces
+-- you would have to do something similar, but not only for two
+places, but for a whole list of positions).
+
+> Also, making the quoting stuff usable from completers is useful for
+> checking the array words. For example, currentry, following does not
+> work because contents of words are quoted form and $words[2] is
+> "'-d'".
+> 
+> % cvs '-d' <TAB>
+> 
+> If _cvs can unquote the word safely, _cvs can determin options more
+> precisely.
+
+Yes, see above.
+
+Bye
+ Sven
+
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Mon Aug  2 14:38:03 1999
++++ Src/Zle/compctl.c	Wed Aug  4 10:49:58 1999
+@@ -1888,7 +1888,7 @@
+     char *tmp, sav = compprefix[l];
+ 
+     compprefix[l] = '\0';
+-    tmp = tricat(compiprefix, rembslash(compprefix), "");
++    tmp = tricat(compiprefix, compprefix, "");
+     zsfree(compiprefix);
+     compiprefix = tmp;
+     compprefix[l] = sav;
+@@ -1903,7 +1903,7 @@
+     char *tmp, sav;
+ 
+     l = strlen(compsuffix) - l;
+-    tmp = tricat(rembslash(compsuffix + l), compisuffix, "");
++    tmp = tricat(compsuffix + l, compisuffix, "");
+     zsfree(compisuffix);
+     compisuffix = tmp;
+     sav = compsuffix[l];
+@@ -2126,9 +2126,11 @@
+     case CVT_RANGEPAT:
+ 	tokenize(sa);
+ 	sa = rembslash(sa);
++	remnulargs(sa);
+ 	if (sb) {
+ 	    tokenize(sb);
+ 	    sb = rembslash(sb);
++	    remnulargs(sb);
+ 	}
+ 	break;
+     case CVT_PRENUM:
+@@ -2144,6 +2146,7 @@
+ 	    na = -1;
+ 	tokenize(sa);
+ 	sa = rembslash(sa);
++	remnulargs(sa);
+ 	break;
+     }
+     return !do_comp_vars(test, na, sa, nb, sb, 1);
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Mon Aug  2 14:38:04 1999
++++ Src/Zle/zle_tricky.c	Wed Aug  4 11:00:31 1999
+@@ -3811,13 +3811,8 @@
+ 	    /* Get the contents of the completion variables if we have
+ 	     * to perform matching. */
+ 	    if (dat->aflags & CAF_MATCH) {
+-		if (dat->aflags & CAF_QUOTE) {
+-		    lipre = dupstring(compiprefix);
+-		    lisuf = dupstring(compisuffix);
+-		} else {
+-		    lipre = quotename(compiprefix, NULL);
+-		    lisuf = quotename(compisuffix, NULL);
+-		}
++		lipre = dupstring(compiprefix);
++		lisuf = dupstring(compisuffix);
+ 		lpre = dupstring(compprefix);
+ 		lsuf = dupstring(compsuffix);
+ 		llpl = strlen(lpre);
+@@ -5030,8 +5025,6 @@
+ 	remnulargs(p);
+ 	ctokenize(s);
+ 	remnulargs(s);
+-	ctokenize(ip);
+-	remnulargs(ip);
+     }
+     lp = strlen(p);
+     ls = strlen(s);
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

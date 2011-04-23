@@ -1,0 +1,666 @@
+From zsh-workers-return-6113-mason-zsh=primenet.com.au@sunsite.auc.dk Mon Apr 26 13:40:13 1999
+Return-Path: <zsh-workers-return-6113-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 26403 invoked from network); 26 Apr 1999 13:40:11 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 26 Apr 1999 13:40:11 -0000
+Received: (qmail 12282 invoked by alias); 26 Apr 1999 13:39:52 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6113
+Received: (qmail 12271 invoked from network); 26 Apr 1999 13:39:51 -0000
+Date: Mon, 26 Apr 1999 15:39:45 +0200 (MET DST)
+Message-Id: <199904261339.PAA08495@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Wed, 14 Apr 1999 09:50:59 +0200
+Subject: Re: PATCH: matching in the new completion system
+
+
+About the problem that completion functions might use `compadd -[OA]'
+to test for matching strings but may need to do some parameter magic
+to remove the unmatched strings from a set of possible completions (if 
+only parts of the strings have been tested with `compadd'),
+
+Peter Stephenson wrote:
+
+> I was thinking about having compadd prepare the final list, i.e. you
+> give it a list of prefixes and maybe suffixes when you use the -O option so
+> that you don't have to do any filtering on the pattern later on.  But at
+> the moment it doesn't seem to be necessary.
+
+As I already said, I'd like to have a solution where one can give the
+possible completions unaltered to `compadd' and then tell it which
+parts of these strings are to be taken as prefixes or suffixes. What
+I'm thinking of is an option that says that the strings given with
+`-p' and `-s' describe how to take the prefix/suffix from the
+words. But the only way to do this I could think of was to give
+patterns with `-[ps]' and let the completion code call the matching
+code, which wouldn't be any better, since the matching code was what I 
+wanted to avoid.
+
+So I searched in a slightly different direction. An optimisation like
+this would be interesting to have in cases where we have a list of
+strings to give to `compadd' and where we need to get back a list of
+matching strings. Now, we can easily add another option, say `-D'
+which is a bit like `-[OA]' in that it gets the name of an array as
+argument. But instead of just setting this array, it makes `compadd'
+use pairs of strings from the words given to it and the elements of
+this array. And for every word that couldn't be matched, the
+corresponding element in the array is removed (if the n'th word
+doesn't match, the n'th element is removed).
+All this is a bit like saying `hey, compadd, this is the list of
+strings I'm working on (the array) and here are the parts of the
+strings you should try to match (the words), modify the list for me'.
+Since we will (almost?) always be able to put the possible completions 
+in an array, this should be powerful enough for most (or all) cases.
+
+And it's easy to implement, see the patch below (which looks big
+mostly because I finally got too annoyed about the ever-growing
+argument list of addmatches() and finally put almost everything into a 
+struct for it).
+
+So, what do you think? Is this worth including? Should we continue to
+search for a better way? Any suggestions?
+
+Bye
+ Sven
+
+P.S.:   This was only interesting to have in `_path_files' for now...
+P.P.S.: Any better character than `D'? (I thought about `delete', of course.)
+
+
+diff -u os/Zle/comp.h Src/Zle/comp.h
+--- os/Zle/comp.h	Tue Apr 13 09:57:25 1999
++++ Src/Zle/comp.h	Mon Apr 26 15:08:19 1999
+@@ -270,6 +270,31 @@
+ #define CAF_ALT      4
+ #define CAF_MATCH    8
+ 
++/* Data for compadd and addmatches() */
++
++typedef struct cadata *Cadata;
++
++struct cadata {
++    char *ipre;
++    char *isuf;
++    char *ppre;
++    char *psuf;
++    char *prpre;
++    char *pre;
++    char *suf;
++    char *group;
++    char *rems;
++    char *remf;
++    char *ign;
++    int flags;
++    int aflags;
++    Cmatcher match;
++    char *exp;
++    char *apar;
++    char *opar;
++    char *dpar;
++};
++
+ /* Flags for special parameters. */
+ 
+ #define CP_WORDS      (1 <<  0)
+diff -u os/Zle/comp1.c Src/Zle/comp1.c
+--- os/Zle/comp1.c	Tue Apr 13 10:32:14 1999
++++ Src/Zle/comp1.c	Mon Apr 26 15:08:19 1999
+@@ -52,7 +52,7 @@
+ /* pointers to functions required by compctl and defined by zle */
+ 
+ /**/
+-int (*addmatchesptr) _((char *, char *, char *, char *, char *, char *, char *, char *, char *, char *, char *, int, int, Cmatcher, char *, char *, char *, char **));
++int (*addmatchesptr) _((Cadata, char **));
+ 
+ /**/
+ char *(*comp_strptr) _((int *, int *, int));
+diff -u os/Zle/compctl.c Src/Zle/compctl.c
+--- os/Zle/compctl.c	Tue Apr 13 10:35:14 1999
++++ Src/Zle/compctl.c	Mon Apr 26 15:08:19 1999
+@@ -1691,17 +1691,22 @@
+ static int
+ bin_compadd(char *name, char **argv, char *ops, int func)
+ {
+-    char *p, **sp, *e;
+-    char *ipre = NULL, *isuf = NULL, *ppre = NULL, *psuf = NULL, *prpre = NULL;
+-    char *pre = NULL, *suf = NULL, *group = NULL, *m = NULL, *rs = NULL;
+-    char *ign = NULL, *rf = NULL, *expl = NULL, *apar = NULL, *opar = NULL;
+-    int f = 0, a = CAF_MATCH, dm;
++    struct cadata dat;
++    char *p, **sp, *e, *m;
++    int dm;
+     Cmatcher match = NULL;
+ 
+     if (incompfunc != 1) {
+ 	zerrnam(name, "can only be called from completion function", NULL, 0);
+ 	return 1;
+     }
++    dat.ipre = dat.isuf = dat.ppre = dat.psuf = dat.prpre =
++	dat.pre = dat.suf = dat.group = dat.rems = dat.remf =
++	dat.ign = dat.exp = dat.apar = dat.opar = dat.dpar = NULL;
++    dat.match = NULL;
++    dat.flags = 0;
++    dat.aflags = CAF_MATCH;
++
+     for (; *argv && **argv ==  '-'; argv++) {
+ 	if (!(*argv)[1]) {
+ 	    argv++;
+@@ -1713,64 +1718,64 @@
+ 	    dm = 0;
+ 	    switch (*p) {
+ 	    case 'q':
+-		f |= CMF_REMOVE;
++		dat.flags |= CMF_REMOVE;
+ 		break;
+ 	    case 'Q':
+-		a |= CAF_QUOTE;
++		dat.aflags |= CAF_QUOTE;
+ 		break;
+ 	    case 'f':
+-		f |= CMF_FILE;
++		dat.flags |= CMF_FILE;
+ 		break;
+ 	    case 'F':
+-		sp = &ign;
++		sp = &(dat.ign);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'n':
+-		f |= CMF_NOLIST;
++		dat.flags |= CMF_NOLIST;
+ 		break;
+ 	    case 'U':
+-		a &= ~CAF_MATCH;
++		dat.aflags &= ~CAF_MATCH;
+ 		break;
+ 	    case 'P':
+-		sp = &pre;
++		sp = &(dat.pre);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'S':
+-		sp = &suf;
++		sp = &(dat.suf);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'J':
+-		sp = &group;
++		sp = &(dat.group);
+ 		e = "group name expected after -%c";
+ 		break;
+ 	    case 'V':
+-		if (!group)
+-		    a |= CAF_NOSORT;
+-		sp = &group;
++		if (!dat.group)
++		    dat.aflags |= CAF_NOSORT;
++		sp = &(dat.group);
+ 		e = "group name expected after -%c";
+ 		break;
+ 	    case 'i':
+-		sp = &ipre;
++		sp = &(dat.ipre);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'I':
+-		sp = &isuf;
++		sp = &(dat.isuf);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'p':
+-		sp = &ppre;
++		sp = &(dat.ppre);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 's':
+-		sp = &psuf;
++		sp = &(dat.psuf);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'W':
+-		sp = &prpre;
++		sp = &(dat.prpre);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'a':
+-		a |= CAF_ALT;
++		dat.aflags |= CAF_ALT;
+ 		break;
+ 	    case 'M':
+ 		sp = &m;
+@@ -1778,25 +1783,29 @@
+ 		dm = 1;
+ 		break;
+ 	    case 'X':
+-		sp = &expl;
++		sp = &(dat.exp);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'r':
+-		f |= CMF_REMOVE;
+-		sp = &rs;
++		dat.flags |= CMF_REMOVE;
++		sp = &(dat.rems);
+ 		e = "string expected after -%c";
+ 		break;
+ 	    case 'R':
+-		f |= CMF_REMOVE;
+-		sp = &rf;
++		dat.flags |= CMF_REMOVE;
++		sp = &(dat.remf);
+ 		e = "function name expected after -%c";
+ 		break;
+ 	    case 'A':
+-		sp = &apar;
++		sp = &(dat.apar);
+ 		e = "parameter name expected after -%c";
+ 		break;
+ 	    case 'O':
+-		sp = &opar;
++		sp = &(dat.opar);
++		e = "parameter name expected after -%c";
++		break;
++	    case 'D':
++		sp = &(dat.dpar);
+ 		e = "parameter name expected after -%c";
+ 		break;
+ 	    case '-':
+@@ -1831,11 +1840,10 @@
+ 	return 1;
+ 
+     match = cpcmatcher(match);
+-    a = addmatchesptr(ipre, isuf, ppre, psuf, prpre, pre, suf, group,
+-		      rs, rf, ign, f, a, match, expl, apar, opar, argv);
++    dm = addmatchesptr(&dat, argv);
+     freecmatcher(match);
+ 
+-    return a;
++    return dm;
+ }
+ 
+ #define CVT_RANGENUM 0
+diff -u os/Zle/zle_tricky.c Src/Zle/zle_tricky.c
+--- os/Zle/zle_tricky.c	Mon Apr 26 10:27:02 1999
++++ Src/Zle/zle_tricky.c	Mon Apr 26 15:08:20 1999
+@@ -3472,14 +3472,10 @@
+ 
+ /**/
+ int
+-addmatches(char *ipre, char *isuf,
+-	   char *ppre, char *psuf, char *prpre, char *pre,
+-	   char *suf, char *group, char *rems, char *remf, char *ign,
+-	   int flags, int aflags, Cmatcher match, char *exp, 
+-	   char *apar, char *opar, char **argv)
++addmatches(Cadata dat, char **argv)
+ {
+     char *s, *ms, *lipre = NULL, *lisuf = NULL, *lpre = NULL, *lsuf = NULL;
+-    char **aign = NULL;
++    char **aign = NULL, **dparr;
+     int lpl, lsl, pl, sl, bpl, bsl, llpl = 0, llsl = 0, nm = mnum;
+     int oisalt = 0, isalt, isexact, doadd;
+     Cline lc = NULL;
+@@ -3487,45 +3483,52 @@
+     struct cmlist mst;
+     Cmlist oms = mstack;
+     Comp cp = NULL;
+-    LinkList aparl = NULL, oparl = NULL;
++    LinkList aparl = NULL, oparl = NULL, dparl = NULL;
+ 
+     /* Switch back to the heap that was used when the completion widget
+      * was invoked. */
+     SWITCHHEAPS(compheap) {
+ 	HEAPALLOC {
+-	    doadd = (!apar && !opar);
+-	    if (apar)
++	    doadd = (!dat->apar && !dat->opar && !dat->dpar);
++	    if (dat->apar)
+ 		aparl = newlinklist();
+-	    if (opar)
++	    if (dat->opar)
+ 		oparl = newlinklist();
+-	    if (exp) {
++	    if (dat->dpar) {
++		if (*(dat->dpar) == '(')
++		    dparr = NULL;
++		else if ((dparr = get_user_var(dat->dpar)) && !*dparr)
++		    dparr = NULL;
++		dparl = newlinklist();
++	    }
++	    if (dat->exp) {
+ 		expl = (Cexpl) zhalloc(sizeof(struct cexpl));
+ 		expl->count = expl->fcount = 0;
+-		expl->str = dupstring(exp);
++		expl->str = dupstring(dat->exp);
+ 	    } else
+ 		expl = NULL;
+ 
+ 	    /* Store the matcher in our stack of matchers. */
+-	    if (match) {
++	    if (dat->match) {
+ 		mst.next = mstack;
+-		mst.matcher = match;
++		mst.matcher = dat->match;
+ 		mstack = &mst;
+ 
+ 		if (!mnum)
+-		    add_bmatchers(match);
++		    add_bmatchers(dat->match);
+ 
+-		addlinknode(matchers, match);
+-		match->refc++;
++		addlinknode(matchers, dat->match);
++		dat->match->refc++;
+ 	    }
+ 	    if (mnum && (mstack || bmatchers))
+ 		update_bmatchers();
+ 
+ 	    /* Get the suffixes to ignore. */
+-	    if (ign)
+-		aign = get_user_var(ign);
++	    if (dat->ign)
++		aign = get_user_var(dat->ign);
+ 	    /* Get the contents of the completion variables if we have
+ 	     * to perform matching. */
+-	    if (aflags & CAF_MATCH) {
++	    if (dat->aflags & CAF_MATCH) {
+ 		lipre = dupstring(compiprefix);
+ 		lisuf = dupstring(compisuffix);
+ 		lpre = dupstring(compprefix);
+@@ -3533,8 +3536,8 @@
+ 		llpl = strlen(lpre);
+ 		llsl = strlen(lsuf);
+ 		/* Test if there is an existing -P prefix. */
+-		if (pre && *pre) {
+-		    pl = pfxlen(pre, lpre);
++		if (dat->pre && *dat->pre) {
++		    pl = pfxlen(dat->pre, lpre);
+ 		    llpl -= pl;
+ 		    lpre += pl;
+ 		}
+@@ -3557,79 +3560,76 @@
+ 		}
+ 	    }
+ 	    /* Now duplicate the strings we have from the command line. */
+-	    if (ipre)
+-		ipre = (lipre ? dyncat(lipre, ipre) : dupstring(ipre));
++	    if (dat->ipre)
++		dat->ipre = (lipre ? dyncat(lipre, dat->ipre) :
++			     dupstring(dat->ipre));
+ 	    else if (lipre)
+-		ipre = lipre;
+-	    if (isuf)
+-		isuf = (lisuf ? dyncat(lisuf, isuf) : dupstring(isuf));
++		dat->ipre = lipre;
++	    if (dat->isuf)
++		dat->isuf = (lisuf ? dyncat(lisuf, dat->isuf) :
++			     dupstring(dat->isuf));
+ 	    else if (lisuf)
+-		isuf = lisuf;
+-	    if (ppre) {
+-		ppre = dupstring(ppre);
+-		lpl = strlen(ppre);
++		dat->isuf = lisuf;
++	    if (dat->ppre) {
++		dat->ppre = dupstring(dat->ppre);
++		lpl = strlen(dat->ppre);
+ 	    } else
+ 		lpl = 0;
+-	    if (psuf) {
+-		psuf = dupstring(psuf);
+-		lsl = strlen(psuf);
++	    if (dat->psuf) {
++		dat->psuf = dupstring(dat->psuf);
++		lsl = strlen(dat->psuf);
+ 	    } else
+ 		lsl = 0;
+-	    if (aflags & CAF_MATCH) {
+-		s = ppre ? ppre : "";
+-		if (llpl <= lpl && strpfx(lpre, s)) {
+-		    llpl = 0;
++	    if (dat->aflags & CAF_MATCH) {
++		s = dat->ppre ? dat->ppre : "";
++		if (llpl <= lpl && strpfx(lpre, s))
+ 		    lpre = "";
+-		} else if (llpl > lpl && strpfx(s, lpre)) {
+-		    llpl -= lpl;
++		else if (llpl > lpl && strpfx(s, lpre))
+ 		    lpre += lpl;
+-		} else
++		else
+ 		    *argv = NULL;
+-		s = psuf ? psuf : "";
+-		if (llsl <= lsl && strsfx(lsuf, s)) {
+-		    llsl = 0;
++		s = dat->psuf ? dat->psuf : "";
++		if (llsl <= lsl && strsfx(lsuf, s))
+ 		    lsuf = "";
+-		} else if (llsl > lsl && strsfx(s, lsuf)) {
++		else if (llsl > lsl && strsfx(s, lsuf))
+ 		    lsuf[llsl - lsl] = '\0';
+-		    llsl -= lsl;
+-		} else
++		else
+ 		    *argv = NULL;
+ 	    }
+ 	    if (*argv) {
+-		if (pre)
+-		    pre = dupstring(pre);
+-		if (suf)
+-		    suf = dupstring(suf);
+-		if (!prpre && (prpre = ppre)) {
+-		    singsub(&prpre);
+-		    untokenize(prpre);
++		if (dat->pre)
++		    dat->pre = dupstring(dat->pre);
++		if (dat->suf)
++		    dat->suf = dupstring(dat->suf);
++		if (!dat->prpre && (dat->prpre = dat->ppre)) {
++		    singsub(&(dat->prpre));
++		    untokenize(dat->prpre);
+ 		} else
+-		    prpre = dupstring(prpre);
++		    dat->prpre = dupstring(dat->prpre);
+ 		/* Select the group in which to store the matches. */
+-		if (group) {
++		if (dat->group) {
+ 		    endcmgroup(NULL);
+-		    begcmgroup(group, (aflags & CAF_NOSORT));
+-		    if (aflags & CAF_NOSORT)
++		    begcmgroup(dat->group, (dat->aflags & CAF_NOSORT));
++		    if (dat->aflags & CAF_NOSORT)
+ 			mgroup->flags |= CGF_NOSORT;
+ 		} else {
+ 		    endcmgroup(NULL);
+ 		    begcmgroup("default", 0);
+ 		}
+ 		/* Select the set of matches. */
+-		oisalt = (aflags & CAF_ALT);
++		oisalt = (dat->aflags & CAF_ALT);
+ 
+-		if (remf) {
+-		    remf = dupstring(remf);
+-		    rems = NULL;
+-		} else if (rems)
+-		    rems = dupstring(rems);
++		if (dat->remf) {
++		    dat->remf = dupstring(dat->remf);
++		    dat->rems = NULL;
++		} else if (dat->rems)
++		    dat->rems = dupstring(dat->rems);
+ 
+ 		/* Probably quote the prefix and suffix for testing. */
+-		if (!cp && (aflags & CAF_MATCH) && !(aflags & CAF_QUOTE)) {
++		if (!cp && (dat->aflags & CAF_MATCH) &&
++		    !(dat->aflags & CAF_QUOTE)) {
+ 		    lpre = quotename(lpre, NULL);
+ 		    lsuf = quotename(lsuf, NULL);
+-		    llpl = strlen(lpre);
+-		    llsl = strlen(lsuf);
+ 		}
+ 	    }
+ 	    /* Walk through the matches given. */
+@@ -3638,7 +3638,7 @@
+ 		bpl = brpl;
+ 		bsl = brsl;
+ 		isalt = oisalt;
+-		if ((!psuf || !*psuf) && aign) {
++		if ((!dat->psuf || !*(dat->psuf)) && aign) {
+ 		    /* Do the suffix-test. If the match has one of the
+ 		     * suffixes from ign, we put it in the alternate set. */
+ 		    char **pt = aign;
+@@ -3649,39 +3649,52 @@
+ 			    && !strcmp(*pt, s + sl - filell))
+ 			    isalt = 1;
+ 
+-		    if (isalt && !doadd)
++		    if (isalt && !doadd) {
++			if (dparr && !*++dparr)
++			    dparr = NULL;
+ 			continue;
++		    }
+ 		}
+-		if (!(aflags & CAF_MATCH)) {
++		if (!(dat->aflags & CAF_MATCH)) {
+ 		    ms = dupstring(s);
+ 		    lc = bld_parts(ms, sl, -1, NULL);
+ 		    isexact = 0;
+ 		} else if (!(ms = comp_match(lpre, lsuf, s, cp, &lc,
+-					     !(aflags & CAF_QUOTE),
+-					     &bpl, &bsl, &isexact)))
++					     !(dat->aflags & CAF_QUOTE),
++					     &bpl, &bsl, &isexact))) {
++		    if (dparr && !*++dparr)
++			dparr = NULL;
+ 		    continue;
+-
++		}
+ 		if (doadd) {
+-		    cm = add_match_data(isalt, ms, lc, ipre, ipre, isuf, pre, 
+-					prpre, ppre, psuf, suf, bpl, bsl,
+-					flags, isexact);
+-		    cm->rems = rems;
+-		    cm->remf = remf;
++		    cm = add_match_data(isalt, ms, lc, dat->ipre, dat->ipre,
++					dat->isuf, dat->pre, dat->prpre,
++					dat->ppre, dat->psuf, dat->suf,
++					bpl, bsl, dat->flags, isexact);
++		    cm->rems = dat->rems;
++		    cm->remf = dat->remf;
+ 		} else {
+-		    if (apar)
++		    if (dat->apar)
+ 			addlinknode(aparl, ms);
+-		    if (opar)
++		    if (dat->opar)
+ 			addlinknode(oparl, s);
++		    if (dat->dpar && dparr) {
++			addlinknode(dparl, *dparr);
++			if (!*++dparr)
++			    dparr = NULL;
++		    }
+ 		    free_cline(lc);
+ 		}
+ 	    }
+ 	    compnmatches = mnum;
+-	    if (exp)
++	    if (dat->exp)
+ 		addexpl();
+-	    if (apar)
+-		set_param(apar, aparl);
+-	    if (opar)
+-		set_param(opar, oparl);
++	    if (dat->apar)
++		set_param(dat->apar, aparl);
++	    if (dat->opar)
++		set_param(dat->opar, oparl);
++	    if (dat->dpar)
++		set_param(dat->dpar, dparl);
+ 	} LASTALLOC;
+     } SWITCHBACKHEAPS;
+ 
+diff -u od/Zsh/compwid.yo Doc/Zsh/compwid.yo
+--- od/Zsh/compwid.yo	Fri Apr 23 13:38:41 1999
++++ Doc/Zsh/compwid.yo	Mon Apr 26 15:08:21 1999
+@@ -340,7 +340,7 @@
+ xitem([ tt(-J) var(name) ] [ tt(-V) var(name) ] [ tt(-X) var(explanation) ])
+ xitem([ tt(-r) var(remove-chars) ] [ tt(-R) var(remove-func) ])
+ xitem([ tt(-M) var(match-spec) ] [ tt(-O) var(array) ] [ tt(-A) var(array) ])
+-item([ tt(--) ] [ var(words) ... ])(
++item([ tt(-D) var(array) ] [ tt(--) ] [ var(words) ... ])(
+ 
+ This builtin command can be used to add matches directly and control
+ all the information the completion code stores with each possible
+@@ -517,6 +517,13 @@
+ on the command line and the string `tt(foo)' as one of the var(words), this
+ option stores the string `tt(nofoo)' in the array, whereas the tt(-O)
+ option stores the `tt(foo)' originally given.
++)
++item(tt(-D) var(array))(
++As with tt(-O), the var(words) are not added to the set of possible
++completions. Instead, the completion code tests every var(word) if 
++it matches what is on the line. If the var(n)'th var(word) does not
++match, the var(n)'th element of the var(array) is removed. Elements
++for which the corresponding var(word) is matched are retained.
+ )
+ item(tt(-), tt(--))(
+ This flag ends the list of flags and options. All arguments after it
+diff -u oc/Core/_multi_parts Completion/Core/_multi_parts
+--- oc/Core/_multi_parts	Tue Apr 13 10:32:15 1999
++++ Completion/Core/_multi_parts	Mon Apr 26 15:08:20 1999
+@@ -83,8 +83,7 @@
+   else
+     # No exact match, see how many strings match what's on the line.
+ 
+-    tmp2=( "${(@)matches%%${sep}*}" )
+-    compadd -O tmp1 - "$tmp2[@]"
++    compadd -O tmp1 - "${(@)matches%%${sep}*}"
+ 
+     if [[ $#tmp1 -eq 1 ]]; then
+ 
+diff -u oc/Core/_path_files Completion/Core/_path_files
+--- oc/Core/_path_files	Mon Apr 19 10:33:53 1999
++++ Completion/Core/_path_files	Mon Apr 26 15:09:32 1999
+@@ -230,14 +230,15 @@
+     if [[ -n "$PREFIX$SUFFIX" ]]; then
+       # See which of them match what's on the line.
+ 
+-      compadd -O tmp2 "$ignore[@]" - "${(@)tmp1##*/}"
++      tmp2=("$tmp1[@]")
++      compadd -D tmp1 "$ignore[@]" - "${(@)tmp1##*/}"
+ 
+       # If no file matches, save the expanded path and continue with
+       # the outer loop.
+ 
+-      if [[ $#tmp2 -eq 0 ]]; then
+- 	if [[ "$tmp1[1]" = */* ]]; then
+-	  tmp2=( "${(@)tmp1#${prepath}${realpath}}" )
++      if [[ $#tmp1 -eq 0 ]]; then
++ 	if [[ "$tmp2[1]" = */* ]]; then
++	  tmp2=( "${(@)tmp2#${prepath}${realpath}}" )
+ 	  if [[ "$tmp2[1]" = */* ]]; then
+ 	    exppaths=( "$exppaths[@]" ${^tmp2%/*}/${tpre}${tsuf} )
+           else
+@@ -245,14 +246,6 @@
+ 	  fi
+         fi
+         continue 2
+-      fi
+-
+-      # Remove all files that weren't matched.
+-
+-      if [[ "$tmp1[1]" = */* ]]; then
+-        tmp1=( "${(@M)tmp1:#*/(${(j:|:)~${(@)tmp2:q}})}" )
+-      else
+-        tmp1=( "${(@M)tmp1:#(${(j:|:)~${(@)tmp2:q}})}" )
+       fi
+     elif (( ! $#tmp1 )); then
+       continue 2
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

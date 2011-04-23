@@ -1,0 +1,1019 @@
+From zsh-workers-return-21784-mason-zsh=primenet.com.au@sunsite.dk Thu Sep 29 17:28:42 2005
+Return-Path: <zsh-workers-return-21784-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 23882 invoked from network); 29 Sep 2005 17:28:37 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 29 Sep 2005 17:28:37 -0000
+Received: (qmail 92325 invoked from network); 29 Sep 2005 17:28:31 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 29 Sep 2005 17:28:31 -0000
+Received: (qmail 2237 invoked by alias); 29 Sep 2005 17:28:28 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 21784
+Received: (qmail 2226 invoked from network); 29 Sep 2005 17:28:28 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 29 Sep 2005 17:28:28 -0000
+Received: (qmail 91907 invoked from network); 29 Sep 2005 17:28:27 -0000
+Received: from cluster-c.mailcontrol.com (HELO rly07c.srv.mailcontrol.com) (168.143.177.190)
+  by a.mx.sunsite.dk with SMTP; 29 Sep 2005 17:28:25 -0000
+Received: from exchange03.csr.com (mailhost1.csr.com [81.105.217.43])
+	by rly07c.srv.mailcontrol.com (MailControl) with ESMTP id j8THSFUE009441
+	for <zsh-workers@sunsite.dk>; Thu, 29 Sep 2005 18:28:21 +0100
+Received: from news01.csr.com ([10.103.143.38]) by exchange03.csr.com with Microsoft SMTPSVC(5.0.2195.6713);
+	 Thu, 29 Sep 2005 18:29:47 +0100
+Received: from news01.csr.com (localhost.localdomain [127.0.0.1])
+	by news01.csr.com (8.13.1/8.12.11) with ESMTP id j8THRnsf026050
+	for <zsh-workers@sunsite.dk>; Thu, 29 Sep 2005 18:27:49 +0100
+Received: from csr.com (pws@localhost)
+	by news01.csr.com (8.13.1/8.13.1/Submit) with ESMTP id j8THRk1o026046
+	for <zsh-workers@sunsite.dk>; Thu, 29 Sep 2005 18:27:46 +0100
+Message-Id: <200509291727.j8THRk1o026046@news01.csr.com>
+X-Authentication-Warning: news01.csr.com: pws owned process doing -bs
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: PATCH: multibyte character widths
+Date: Thu, 29 Sep 2005 18:27:46 +0100
+From: Peter Stephenson <pws@csr.com>
+X-OriginalArrivalTime: 29 Sep 2005 17:29:47.0659 (UTC) FILETIME=[63A6C5B0:01C5C51B]
+Content-Type: text/plain
+MIME-Version: 1.0
+X-Scanned-By: MailControl A-05-40-00 (www.mailcontrol.com) on 10.67.0.117
+X-Spam-Checker-Version: SpamAssassin 3.0.4 (2005-06-05) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham 
+	version=3.0.4
+
+This puts in calculations for multibyte character widths in various
+places in zle, including completion but not zle_refresh.c (which is OK
+as long as each wide character is width 1).  Looking at completion
+listings for Andrej's photographii and muzika suggests it's not
+completely broken.
+
+One thing I know is still broken is that the code that calculates common
+prefixes for strings can stop in the middle of multibyte characters:
+someone will run up against this sooner or later.
+
+Index: Src/utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/utils.c,v
+retrieving revision 1.95
+diff -u -r1.95 utils.c
+--- Src/utils.c	27 Sep 2005 14:30:32 -0000	1.95
++++ Src/utils.c	29 Sep 2005 17:21:07 -0000
+@@ -271,39 +271,111 @@
+ 
+ /**/
+ #ifdef ZLE_UNICODE_SUPPORT
++/*
++ * The number of bytes we need to allocate for a "nice" representation
++ * of a multibyte character.
++ *
++ * We double MB_CUR_MAX to take account of the fact that
++ * we may need to metafy.  In fact the representation probably
++ * doesn't allow every character to be in the meta range, but
++ * we don't need to be too pedantic.
++ *
++ * The 12 is for the output of a UCS-4 code; we don't actually
++ * need this at the same time as MB_CUR_MAX, but again it's
++ * not worth calculating more exactly.
++ */
++#define NICECHAR_MAX (12 + 2*MB_CUR_MAX)
++/*
++ * Input a wide character.  Output a printable representation,
++ * which is a metafied multibyte string.   With widthp return
++ * the printing width.
++ *
++ * swide, if non-NULL, is used to help the completion code, which needs
++ * to know the printing width of the each part of the representation.
++ * *swide is set to the part of the returned string where the wide
++ * character starts.  Any string up to that point is ASCII characters,
++ * so the width of it is (*swide - <return_value>).  Anything left is
++ * a single wide character corresponding to the remaining width.
++ * Either the initial ASCII part or the wide character part may be empty
++ * (but not both).  (Note the complication that the wide character
++ * part may contain metafied characters.)
++ */
++
+ /**/
+-mod_export wchar_t *
+-wcs_nicechar(wint_t c)
++mod_export char *
++wcs_nicechar(wchar_t c, size_t *widthp, char **swidep)
+ {
+-    static wchar_t buf[6];
+-    wchar_t *s = buf;
+-    if (iswprint(c))
+-	goto done;
+-    if (c > 0x80) {
+-	if (isset(PRINTEIGHTBIT))
+-	    goto done;
+-	*s++ = '\\';
+-	*s++ = 'M';
+-	*s++ = '-';
+-	c &= 0x7f;
+-	if(iswprint(c))
+-	    goto done;
+-    }
+-    if (c == 0x7f) {
+-	*s++ = '^';
+-	c = '?';
+-    } else if (c == '\n') {
+-	*s++ = '\\';
+-	c = 'n';
+-    } else if (c == '\t') {
+-	*s++ = '\\';
+-	c = 't';
+-    } else if (c < 0x20) {
+-	*s++ = '^';
+-	c += 0x40;
++    static char *buf;
++    static int bufalloc = 0, newalloc;
++    char *s, *mbptr;
++    int ret = 0;
++    VARARR(char, mbstr, MB_CUR_MAX);
++
++    /*
++     * We want buf to persist beyond the return.  MB_CUR_MAX and hence
++     * NICECHAR_MAX may not be constant, so we have to allocate this at
++     * run time.  (We could probably get away with just allocating a
++     * large buffer, in practice.)  For efficiency, only reallocate if
++     * we really need to, since this function will be called frequently.
++     */
++    newalloc = NICECHAR_MAX;
++    if (bufalloc != newalloc)
++    {
++	bufalloc = newalloc;
++	buf = (char *)zrealloc(buf, bufalloc);
++    }
++
++    s = buf;
++    if (!iswprint(c) && (c < 0x80 || !isset(PRINTEIGHTBIT))) {
++	if (c == 0x7f) {
++	    *s++ = '^';
++	    c = '?';
++	} else if (c == L'\n') {
++	    *s++ = '\\';
++	    c = 'n';
++	} else if (c == L'\t') {
++	    *s++ = '\\';
++	    c = 't';
++	} else if (c < 0x20) {
++	    *s++ = '^';
++	    c += 0x40;
++	} else if (c >= 0x80) {
++	    ret = -1;
++	}
++    }
++
++    if (ret == -1 ||
++	(ret = wctomb(mbstr, c)) == -1) {
++	/*
++	 * Can't or don't want to convert character: use UCS-2 or
++	 * UCS-4 code in print escape format.
++	 */
++	if (c >=  0x10000) {
++	    sprintf(buf, "\\U%.8x", (unsigned int)c);
++	    if (widthp)
++		*widthp = 10;
++	} else {
++	    sprintf(buf, "\\u%.4x", (unsigned int)c);
++	    if (widthp)
++		*widthp = 6;
++	}
++	if (swidep)
++	    *swidep = buf + *widthp;
++	return buf;
++    }
++
++    if (widthp)
++	*widthp = (s - buf) + wcswidth(&c, 1);
++    if (swidep)
++	*swidep = s;
++    for (mbptr = mbstr; ret; s++, mbptr++, ret--) {
++	if (imeta(*mbptr)) {
++	    *s++ = Meta;
++	    *s = *mbptr ^ 32;
++	} else {
++	    *s = *mbptr;
++	}
+     }
+-    done:
+-    *s++ = c;
+     *s = 0;
+     return buf;
+ }
+@@ -1228,7 +1300,7 @@
+ 	ret = dyncat(unmeta(prefix), suffix);
+     else
+ 	ret = bicat(unmeta(prefix), suffix);
+- 
++
+ #ifdef HAVE__MKTEMP
+     /* Zsh uses mktemp() safely, so silence the warnings */
+     ret = (char *) _mktemp(ret);
+@@ -3255,31 +3327,6 @@
+     return 0;
+ }
+ 
+-/**/
+-#ifdef ZLE_UNICODE_SUPPORT
+-/**/
+-mod_export int
+-wcs_zputs(wchar_t const *s, FILE *stream)
+-{
+-    wint_t c;
+-
+-    while (*s) {
+-	if (*s == Meta)
+-	    c = *++s ^ 32;
+-	else if(itok(*s)) {
+-	    s++;
+-	    continue;
+-	} else
+-	    c = *s;
+-	s++;
+-	if (fputwc(c, stream) == WEOF)
+-	    return EOF;
+-    }
+-    return 0;
+-}
+-/**/
+-#endif /* ZLE_UNICODE_SUPPORT */
+-
+ /* Create a visibly-represented duplicate of a string. */
+ 
+ /**/
+@@ -3294,7 +3341,7 @@
+ 	if (itok(c)) {
+ 	    if (c <= Comma)
+ 		c = ztokens[c - Pound];
+-	    else 
++	    else
+ 		continue;
+ 	}
+ 	if (c == Meta)
+@@ -3310,13 +3357,6 @@
+ 
+ /**/
+ mod_export char *
+-niceztrdup(char const *s)
+-{
+-    return nicedup(s, 0);
+-}
+-
+-/**/
+-mod_export char *
+ nicedupstring(char const *s)
+ {
+     return nicedup(s, 1);
+@@ -3370,26 +3410,114 @@
+ 
+ /**/
+ #ifdef ZLE_UNICODE_SUPPORT
++/*
++ * Version of both nicezputs() and niceztrlen() for use with multibyte
++ * characters.  Input is a metafied string; output is the screen width of
++ * the string.
++ *
++ * If the FILE * is not NULL, output to that, too.
++ *
++ * If outstrp is not NULL, set *outstrp to a zalloc'd version of
++ * the output (still metafied).
++ */
++
+ /**/
+ mod_export size_t
+-wcs_nicewidth(wchar_t const *s)
++mb_niceformat(const char *s, FILE *stream, char **outstrp)
+ {
+-    size_t l = 0;
+-    wint_t c;
++    size_t l = 0, newl, ret;
++    int umlen, outalloc, outleft;
++    wchar_t c;
++    char *ums, *ptr, *fmt, *outstr, *outptr;
++    mbstate_t ps;
++
++    if (outstrp) {
++	outleft = outalloc = 5 * strlen(s);
++	outptr = outstr = zalloc(outalloc);
++    } else {
++	outleft = outalloc = 0;
++	outptr = outstr = NULL;
++    }
+ 
+-    while ((c = *s++)) {
+-	if (itok(c)) {
+-	    if (c <= (wint_t)Comma)
+-		c = ztokens[c - Pound];
+-	    else 
+-		continue;
++    ums = ztrdup(s);
++    /*
++     * is this necessary at this point? niceztrlen does this
++     * but it's used in lots of places.  however, one day this may
++     * be, too.
++     */
++    untokenize(ums);
++    ptr = unmetafy(ums, &umlen);
++
++    memset(&ps, 0, sizeof(ps));
++    while (umlen > 0) {
++	ret = mbrtowc(&c, ptr, umlen, &ps);
++
++	if (ret == (size_t)-1 || ret == (size_t)-2)
++	{
++	    /*
++	     * We're a bit stuck here.  I suppose we could
++	     * just stick with \M-... for the individual bytes.
++	     */
++	    break;
++	}
++	/*
++	 * careful in case converting NULL returned 0: NULLs are real
++	 * characters for us.
++	 */
++	if (c == L'\0' && ret == 0)
++	    ret = 1;
++	umlen -= ret;
++	ptr += ret;
++
++	fmt = wcs_nicechar(c, &newl, NULL);
++	l += newl;
++
++	if (stream)
++	    zputs(fmt, stream);
++	if (outstr) {
++	    /* Append to output string */
++	    int outlen = strlen(fmt);
++	    if (outlen >= outleft) {
++		/* Reallocate to twice the length */
++		int outoffset = outptr - outstr;
++
++		outleft += outalloc;
++		outalloc *= 2;
++		outstr = zrealloc(outstr, outalloc);
++		outptr = outstr + outoffset;
++	    }
++	    memcpy(outptr, fmt, outlen);
++	    /* Update start position */
++	    outptr += outlen;
++	    /* Update available bytes */
++	    outleft -= outlen;
+ 	}
+-	if (c == Meta)
+-	    c = *s++ ^ 32;
+-	l += wcswidth(wcs_nicechar(c), 6);
+     }
++
++    free(ums);
++    if (outstrp) {
++	*outptr = '\0';
++	/* Use more efficient storage for returned string */
++	*outstrp = ztrdup(outstr);
++	free(outstr);
++    }
++
+     return l;
+ }
++
++/* ztrdup multibyte string with nice formatting */
++
++/**/
++mod_export char *
++mb_niceztrdup(const char *s)
++{
++    char *retstr;
++
++    (void)mb_niceformat(s, NULL, &retstr);
++
++    return retstr;
++}
++
+ /**/
+ #endif /* ZLE_UNICODE_SUPPORT */
+ 
+Index: Src/Zle/complist.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/complist.c,v
+retrieving revision 1.72
+diff -u -r1.72 complist.c
+--- Src/Zle/complist.c	27 Sep 2005 14:30:33 -0000	1.72
++++ Src/Zle/complist.c	29 Sep 2005 17:21:08 -0000
+@@ -548,22 +548,136 @@
+     return 0;
+ }
+ 
+-/* Local version of nicezputs() with in-string colouring. */
++/*
++ * Local version of nicezputs() with in-string colouring
++ * and scrolling.
++ */
+ 
+ static int
+-clnicezputs(Listcols c, char *s, int ml)
++clnicezputs(Listcols colors, char *s, int ml)
+ {
+-    int cc, i = 0, col = 0, ask, oml = ml;
++    int i = 0, col = 0, ask, oml = ml;
+     char *t;
++    ZLE_CHAR_T cc;
++#ifdef ZLE_UNICODE_SUPPORT
++    /*
++     * ums is the untokenized, unmetafied string (length umlen)
++     * uptr is a pointer into it
++     * sptr is the start of the nice character representation
++     * wptr is the point at which the wide character itself starts
++     *  (but may be the end of the string if the character was fully
++     *  prettified).
++     * ret is the return status from the conversion to a wide character
++     * umleft is the remaining length of the unmetafied string to output
++     * umlen is the full length of the unmetafied string
++     * width is the full printing width of a prettified character,
++     *  including both ASCII prettification and the wide character itself.
++     * ps is the shift state of the conversion to wide characters.
++     */
++    char *ums, *uptr, *sptr, *wptr;
++    int ret, umleft, umlen, width;
++    mbstate_t ps;
++
++    memset(&ps, 0, sizeof(ps));
++    ums = ztrdup(s);
++    untokenize(ums);
++    uptr = unmetafy(ums, &umlen);
++    umleft = umlen;
++
++    if (colors)
++	initiscol(colors);
++
++    while (umleft > 0) {
++	ret = mbrtowc(&cc, uptr, umleft, &ps);
++
++	if (ret <= 0)
++	{
++	    /*
++	     * Eek!  Now we're stuffed.  I'm just going to
++	     * make this up...  Note that this may also handle
++	     * an input NULL, which we want to be a real character
++	     * rather than terminator.
++	     */
++	    sptr = nicechar(*s);
++	    /* everything here is ASCII... */
++	    width = strlen(sptr);
++	    wptr = sptr + width;
++	    ret = 1;
++	}
++	else
++	{
++	    sptr = wcs_nicechar(cc, &width, &wptr);
++	}
++
++	umleft -= ret;
++	uptr += ret;
++	if (colors) {
++	    /*
++	     * The code for the colo[u]ri[s/z]ation is obscure (surprised?)
++	     * but if we do it for every input character, as we do in
++	     * the simple case, we shouldn't go too far wrong.
++	     */
++	    while (ret--)
++		doiscol(colors, i++);
++	}
++
++	/*
++	 * Loop over characters in the output of the nice
++	 * representation.  This will often correspond to one input
++	 * (possibly multibyte) character.
++	 */
++	for (t = sptr; *t; t++) {
++	    /* Input is metafied... */
++	    int nc = (*t == Meta) ? STOUC(*++t ^ 32) : STOUC(*t);
++	    /* Is the screen full? */
++	    if (ml == mlend - 1 && col == columns - 1) {
++		mlprinted = ml - oml;
++		return 0;
++	    }
++	    if (t < wptr) {
++		/* outputting ASCII, so single-width */
++		putc(nc, shout);
++		col++;
++		width--;
++	    } else {
++		/* outputting a single wide character, do the lot */
++		putc(nc, shout);
++		/* don't check column until finished */
++		if (t[1])
++		    continue;
++		/* now we've done the entire rest of the representation */
++		col += width;
++	    }
++	    /*
++	     * There might be problems with characters of printing width
++	     * greater than one here.
++	     */
++	    if (col >= columns) {
++		ml++;
++		if (mscroll && !--mrestlines && (ask = asklistscroll(ml))) {
++		    mlprinted = ml - oml;
++		    return ask;
++		}
++		col -= columns;
++		if (colors)
++		    fputs(" \010", shout);
++	    }
++	}
++    }
+ 
+-    initiscol(c);
++    free(ums);
++#else
+ 
+-    while ((cc = *s++)) {
+-	doiscol(c, i++);
++    if (colors)
++	initiscol(colors);
++
++    while ((cc = *s)) {
++	if (colors)
++	    doiscol(colors, i++);
+ 	if (itok(cc)) {
+ 	    if (cc <= Comma)
+ 		cc = ztokens[cc - Pound];
+-	    else 
++	    else
+ 		continue;
+ 	}
+ 	if (cc == Meta)
+@@ -583,10 +697,12 @@
+ 		    return ask;
+ 		}
+ 		col = 0;
+-                fputs(" \010", shout);
++		if (colors)
++		    fputs(" \010", shout);
+ 	    }
+ 	}
+     }
++#endif
+     mlprinted = ml - oml;
+     return 0;
+ }
+@@ -959,46 +1075,6 @@
+     return 0;
+ }
+ 
+-/* This is like nicezputs(), but allows scrolling. */
+-
+-/**/
+-static int
+-compnicezputs(char *s, int ml)
+-{
+-    int c, col = 0, ask, oml = ml;
+-    char *t;
+-
+-    while ((c = *s++)) {
+-	if (itok(c)) {
+-	    if (c <= Comma)
+-		c = ztokens[c - Pound];
+-	    else 
+-		continue;
+-	}
+-	if (c == Meta)
+-	    c = *s++ ^ 32;
+-
+-	for (t = nicechar(c); *t; t++) {
+-	    int nc = (*t == Meta) ? STOUC(*++t ^ 32) : STOUC(*t);
+-	    if (ml == mlend - 1 && col == columns - 1) {
+-		mlprinted = ml - oml;
+-		return 0;
+-	    }
+-	    putc(nc, shout);
+-	    if (++col == columns) {
+-		ml++;
+-		if (mscroll && !--mrestlines && (ask = asklistscroll(ml))) {
+-		    mlprinted = ml - oml;
+-		    return ask;
+-		}
+-		col = 0;
+-	    }
+-	}
+-    }
+-    mlprinted = ml - oml;
+-    return 0;
+-}
+-
+ /**/
+ static int
+ compprintlist(int showall)
+@@ -1458,7 +1534,7 @@
+             }
+ 	}
+ 	if (!dolist(ml)) {
+-	    mlprinted = niceztrlen(m->disp ? m->disp : m->str) / columns;
++	    mlprinted = ZMB_nicewidth(m->disp ? m->disp : m->str) / columns;
+ 	    return 0;
+ 	}
+ 	if (m->gnum == mselect) {
+@@ -1479,15 +1555,13 @@
+ 	else
+ 	    subcols = putmatchcol(&mcolors, g->name, (m->disp ? m->disp : m->str));
+ 
+-	if (subcols)
+-	    ret = clnicezputs(&mcolors, (m->disp ? m->disp : m->str), ml);
+-	else
+-	    ret = compnicezputs((m->disp ? m->disp : m->str), ml);
++	ret = clnicezputs(subcols ? &mcolors : NULL,
++			  (m->disp ? m->disp : m->str), ml);
+ 	if (ret) {
+ 	    zcoff();
+ 	    return 1;
+ 	}
+-	len = niceztrlen(m->disp ? m->disp : m->str);
++	len = ZMB_nicewidth(m->disp ? m->disp : m->str);
+ 	mlprinted = len / columns;
+ 
+ 	if ((g->flags & CGF_FILES) && m->modec) {
+Index: Src/Zle/compresult.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/compresult.c,v
+retrieving revision 1.57
+diff -u -r1.57 compresult.c
+--- Src/Zle/compresult.c	18 Aug 2005 18:19:29 -0000	1.57
++++ Src/Zle/compresult.c	29 Sep 2005 17:21:08 -0000
+@@ -1509,7 +1509,7 @@
+                             nlines += 1 + printfmt(m->disp, 0, 0, 0);
+                             g->flags |= CGF_HASDL;
+                         } else {
+-                            l = niceztrlen(m->disp);
++                            l = ZMB_nicewidth(m->disp);
+                             ndisp++;
+                             if (l > glong)
+                                 glong = l;
+@@ -1524,7 +1524,7 @@
+                         if (!(m->flags & CMF_ROWS))
+                             g->flags &= ~CGF_ROWS;
+                     } else {
+-                        l = niceztrlen(m->str) + !!m->modec;
++                        l = ZMB_nicewidth(m->str) + !!m->modec;
+                         ndisp++;
+                         if (l > glong)
+                             glong = l;
+@@ -2146,11 +2146,19 @@
+ 	    printfmt(m->disp, 0, 1, 0);
+ 	    return;
+ 	}
++#ifdef ZLE_UNICODE_SUPPORT
++	len = mb_niceformat(m->disp, shout, NULL);
++#else
+ 	nicezputs(m->disp, shout);
+ 	len = niceztrlen(m->disp);
++#endif
+     } else {
++#ifdef ZLE_UNICODE_SUPPORT
++	len = mb_niceformat(m->str, shout, NULL);
++#else
+ 	nicezputs(m->str, shout);
+ 	len = niceztrlen(m->str);
++#endif
+ 
+ 	if ((g->flags & CGF_FILES) && m->modec) {
+ 	    putc(m->modec, shout);
+Index: Src/Zle/zle.h
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle.h,v
+retrieving revision 1.19
+diff -u -r1.19 zle.h
+--- Src/Zle/zle.h	20 Sep 2005 15:10:28 -0000	1.19
++++ Src/Zle/zle.h	29 Sep 2005 17:21:08 -0000
+@@ -50,6 +50,7 @@
+ 
+ #define ZLEEOF	WEOF
+ 
++/* Functions that operate on a ZLE_STRING_T. */
+ #define ZS_memcpy wmemcpy
+ #define ZS_memmove wmemmove
+ #define ZS_memset wmemset
+@@ -61,9 +62,16 @@
+ #define ZS_zarrdup wcs_zarrdup
+ #define ZS_width wcslen
+ #define ZS_strchr wcschr
+-#define ZS_zputs wcs_zputs
+-#define ZS_nicewidth wcs_niceztrlen
+ 
++/*
++ * Functions that operate on a metafied string.
++ * These versions handle multibyte characters.
++ */
++#define ZMB_nicewidth(s)	mb_niceformat(s, NULL, NULL)
++#define ZMB_niceputs(s, stream)	(void)mb_niceformat(s, stream, NULL)
++#define ZMB_niceztrdup(s)	mb_niceztrdup(s)
++
++/* Functions that operate on ZLE_CHAR_T. */
+ #define ZC_iblank iswspace
+ #define ZC_icntrl iswcntrl
+ #define ZC_iident wcsiident
+@@ -72,6 +80,8 @@
+ #define ZC_toupper towupper
+ #define ZC_iword  wcsiword
+ 
++#define ZC_nicechar(c) wcs_nicechar(c, NULL, NULL)
++
+ #define LASTFULLCHAR	lastchar_wide
+ 
+ #else  /* Not ZLE_UNICODE_SUPPORT: old single-byte code */
+@@ -87,6 +97,7 @@
+ 
+ #define ZLEEOF	EOF
+ 
++/* Functions that operate on a ZLE_STRING_T. */
+ #define ZS_memcpy memcpy
+ #define ZS_memmove memmove
+ #define ZS_memset memset
+@@ -94,8 +105,16 @@
+ #define ZS_zarrdup zarrdup
+ #define ZS_width ztrlen
+ #define ZS_strchr strchr
+-#define ZS_zputs zputs
+-#define ZS_nicewidth niceztrlen
++
++/*
++ * Functions that operate on a metafied string.
++ * These versions don't handle multibyte characters.
++ */
++#define ZMB_nicewidth	niceztrlen
++#define ZMB_niceputs	nicezputs
++#define ZMB_niceztrdup(s)	nicedup(s, 0)
++
++#define ZC_nicechar nicechar
+ 
+ #ifdef __GNUC__
+ static inline size_t ZS_strlen(ZLE_STRING_T s)
+@@ -113,6 +132,7 @@
+ #define ZS_strncmp(s1,s2,l) strncmp((char*)(s1),(char*)(s2),(l))
+ #endif
+ 
++/* Functions that operate on ZLE_CHAR_T. */
+ #define ZC_iblank iblank
+ #define ZC_icntrl icntrl
+ #define ZC_iident iident
+Index: Src/Zle/zle_keymap.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_keymap.c,v
+retrieving revision 1.19
+diff -u -r1.19 zle_keymap.c
+--- Src/Zle/zle_keymap.c	24 Sep 2005 18:49:42 -0000	1.19
++++ Src/Zle/zle_keymap.c	29 Sep 2005 17:21:08 -0000
+@@ -389,7 +389,7 @@
+     Keymap km = openkeymap(name);
+ 
+     if(!km) {
+-	char *nm = niceztrdup(name);
++	char *nm = ZMB_niceztrdup(name);
+ 	char *msg = tricat("No such keymap `", nm, "'");
+ 
+ 	zsfree(nm);
+@@ -725,7 +725,7 @@
+ 	    fputs("-- ", stdout);
+ 	quotedzputs(n->nam, stdout);
+     } else
+-	nicezputs(n->nam, stdout);
++	ZMB_niceputs(n->nam, stdout);
+     putchar('\n');
+ }
+ 
+@@ -1048,8 +1048,10 @@
+     }
+     putchar(' ');
+     if(bs->bind) {
+-	((bs->flags & BS_LIST) ? quotedzputs : nicezputs)
+-	    (bs->bind->nam, stdout);
++	if (bs->flags & BS_LIST)
++	    quotedzputs(bs->bind->nam, stdout);
++	else
++	    ZMB_niceputs(bs->bind->nam, stdout);
+     } else
+ 	printbind(bs->str, stdout);
+     putchar('\n');
+Index: Src/Zle/zle_main.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_main.c,v
+retrieving revision 1.76
+diff -u -r1.76 zle_main.c
+--- Src/Zle/zle_main.c	20 Sep 2005 15:10:28 -0000	1.76
++++ Src/Zle/zle_main.c	29 Sep 2005 17:21:08 -0000
+@@ -1049,7 +1049,7 @@
+ 
+     if(func->flags & DISABLED) {
+ 	/* this thingy is not the name of a widget */
+-	char *nm = niceztrdup(func->nam);
++	char *nm = ZMB_niceztrdup(func->nam);
+ 	char *msg = tricat("No such widget `", nm, "'");
+ 
+ 	zsfree(nm);
+@@ -1105,7 +1105,7 @@
+ 
+ 	if(prog == &dummy_eprog) {
+ 	    /* the shell function doesn't exist */
+-	    char *nm = niceztrdup(w->u.fnnam);
++	    char *nm = ZMB_niceztrdup(w->u.fnnam);
+ 	    char *msg = tricat("No such shell function `", nm, "'");
+ 
+ 	    zsfree(nm);
+@@ -1423,7 +1423,7 @@
+     if (!func)
+ 	is = bindztrdup(str);
+     else
+-	is = niceztrdup(func->nam);
++	is = ZMB_niceztrdup(func->nam);
+     msg = appstr(msg, is);
+     zsfree(is);
+     showmsg(msg);
+@@ -1467,7 +1467,7 @@
+     if (!(ff.func = executenamedcommand("Where is: ")))
+ 	return 1;
+     ff.found = 0;
+-    ff.msg = niceztrdup(ff.func->nam);
++    ff.msg = ZMB_niceztrdup(ff.func->nam);
+     scankeymap(curkeymap, 1, scanfindfunc, &ff);
+     if (!ff.found)
+ 	ff.msg = appstr(ff.msg, " is not bound to any key");
+Index: Src/Zle/zle_thingy.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_thingy.c,v
+retrieving revision 1.18
+diff -u -r1.18 zle_thingy.c
+--- Src/Zle/zle_thingy.c	10 Aug 2005 10:56:41 -0000	1.18
++++ Src/Zle/zle_thingy.c	29 Sep 2005 17:21:08 -0000
+@@ -519,15 +519,15 @@
+ 	    quotedzputs(w->u.fnnam, stdout);
+ 	}
+     } else {
+-	nicezputs(t->nam, stdout);
++	ZMB_niceputs(t->nam, stdout);
+ 	if (w->flags & WIDGET_NCOMP) {
+ 	    fputs(" -C ", stdout);
+-	    nicezputs(w->u.comp.wid, stdout);
++	    ZMB_niceputs(w->u.comp.wid, stdout);
+ 	    fputc(' ', stdout);
+-	    nicezputs(w->u.comp.func, stdout);
++	    ZMB_niceputs(w->u.comp.func, stdout);
+ 	} else if(strcmp(t->nam, w->u.fnnam)) {
+ 	    fputs(" (", stdout);
+-	    nicezputs(w->u.fnnam, stdout);
++	    ZMB_niceputs(w->u.fnnam, stdout);
+ 	    fputc(')', stdout);
+ 	}
+     }
+Index: Src/Zle/zle_tricky.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_tricky.c,v
+retrieving revision 1.55
+diff -u -r1.55 zle_tricky.c
+--- Src/Zle/zle_tricky.c	10 Aug 2005 19:51:30 -0000	1.55
++++ Src/Zle/zle_tricky.c	29 Sep 2005 17:21:09 -0000
+@@ -2120,7 +2120,7 @@
+ 	  (int (*) _((const void *, const void *))) strbpcmp);
+ 
+     for (p = data, lenp = lens; *p; p++, lenp++) {
+-	len = *lenp = niceztrlen(*p) + 2;
++	len = *lenp = ZMB_nicewidth(*p) + 2;
+ 	if (len > longest)
+ 	    longest = len;
+ 	if (len < shortest)
+@@ -2244,7 +2244,7 @@
+ 	if (isset(LISTROWSFIRST)) {
+ 	    for (col = 1, p = data, lenp = lens; *p;
+ 		 p++, lenp++, col++) {
+-		nicezputs(*p, shout);
++		ZMB_niceputs(*p, shout);
+ 		if (col == ncols) {
+ 		    col = 0;
+ 		    if (p[1])
+@@ -2262,7 +2262,7 @@
+ 	    for (f = data, fl = lens, line = 0; line < nlines;
+ 		 f++, fl++, line++) {
+ 		for (col = 1, p = f, lenp = fl; *p; col++) {
+-		    nicezputs(*p, shout);
++		    ZMB_niceputs(*p, shout);
+ 		    if (col == ncols)
+ 			break;
+ 		    if ((i = (pack ? widths[col - 1] : longest) - *lenp + 2) > 0)
+@@ -2276,7 +2276,7 @@
+ 	}
+     } else {
+ 	for (p = data; *p; p++) {
+-	    nicezputs(*p, shout);
++	    ZMB_niceputs(*p, shout);
+ 	    putc('\n', shout);
+ 	}
+     }
+Index: Src/Zle/zle_utils.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/Zle/zle_utils.c,v
+retrieving revision 1.27
+diff -u -r1.27 zle_utils.c
+--- Src/Zle/zle_utils.c	12 Aug 2005 10:24:24 -0000	1.27
++++ Src/Zle/zle_utils.c	29 Sep 2005 17:21:09 -0000
+@@ -769,19 +769,75 @@
+     return ret;
+ }
+ 
+-/* Display a message where the completion list normally goes. *
+- * The message must be metafied.                              */
++/*
++ * Display a message where the completion list normally goes.
++ * The message must be metafied.
++ *
++ * TODO: there's some advantage in using a ZLE_STRING_T array here,
++ * together with improvements in other places, but messages don't
++ * need to be particularly efficient.
++ */
+ 
+ /**/
+ mod_export void
+ showmsg(char const *msg)
+ {
+     char const *p;
+-    int up = 0, cc = 0, c;
++    int up = 0, cc = 0;
++    ZLE_CHAR_T c;
++#ifdef ZLE_UNICODE_SUPPORT
++    char *umsg;
++    int ulen, ret, width;
++    mbstate_t ps;
++#endif
+ 
+     trashzle();
+     clearflag = isset(USEZLE) && !termflags && isset(ALWAYSLASTPROMPT);
+ 
++#ifdef ZLE_UNICODE_SUPPORT
++    umsg = ztrdup(msg);
++    p = unmetafy(umsg, &ulen);
++    memset(&ps, 0, sizeof(ps));
++
++    while (ulen > 0) {
++	char const *n;
++	if (*p == '\n') {
++	    ulen--;
++	    p++;
++
++	    putc('\n', shout);
++	    up += 1 + cc / columns;
++	    cc = 0;
++	} else {
++	    /*
++	     * Extract the next wide character from the multibyte string.
++	     */
++	    ret = mbrtowc(&c, p, ulen, &ps);
++
++	    if (ret <= 0) {
++		/*
++		 * This really shouldn't be happening here, but...
++		 * Treat it as a single byte character; it may get
++		 * prettified.
++		 */
++		n = nicechar(*p);
++		ret = 1;
++		width = strlen(n);
++	    }
++	    else
++	    {
++		n = wcs_nicechar(c, &width, NULL);
++	    }
++	    ulen -= ret;
++	    p += ret;
++
++	    zputs(n, shout);
++	    cc += width;
++	}
++    }
++
++    free(umsg);
++#else
+     for(p = msg; (c = *p); p++) {
+ 	if(c == Meta)
+ 	    c = *++p ^ 32;
+@@ -791,10 +847,11 @@
+ 	    cc = 0;
+ 	} else {
+ 	    char const *n = nicechar(c);
+-	    fputs(n, shout);
++	    zputs(n, shout);
+ 	    cc += strlen(n);
+ 	}
+     }
++#endif
+     up += cc / columns;
+ 
+     if (clearflag) {
+
+-- 
+Peter Stephenson <pws@csr.com>                  Software Engineer
+CSR PLC, Churchill House, Cambridge Business Park, Cowley Road
+Cambridge, CB4 0WZ, UK                          Tel: +44 (0)1223 692070
+
+
+This message has been scanned for viruses by BlackSpider MailControl - www.blackspider.com
+

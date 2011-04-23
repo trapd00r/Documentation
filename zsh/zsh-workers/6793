@@ -1,0 +1,315 @@
+From zsh-workers-return-6793-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jun 23 07:50:26 1999
+Return-Path: <zsh-workers-return-6793-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 8693 invoked from network); 23 Jun 1999 07:50:24 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 23 Jun 1999 07:50:24 -0000
+Received: (qmail 23105 invoked by alias); 23 Jun 1999 07:50:07 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6793
+Received: (qmail 23095 invoked from network); 23 Jun 1999 07:50:05 -0000
+Date: Wed, 23 Jun 1999 09:50:03 +0200 (MET DST)
+Message-Id: <199906230750.JAA05790@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: local keymaps
+
+
+This allows one to set a local keymap that (partly) overrides the
+current keymap. It is done by defining such a keymap, doing some
+binkey()s in it and then install it with selectlocalmap(map). When it
+isn't used any more selectlocalmap(NULL) de-installs the local map.
+
+Currently this is only used for complist, which uses a local map with
+bindings for \t, \r, \n, and the default cursor key sequences. But the
+keymap is user-visible (named `menuselect' -- jusging from the names
+of the builtin keymaps I probably should have named it `menusel' but I 
+didn't feel like that), and can be modified using `bindkey'.
+
+Maybe we should define other local keymaps for execute-named-command,
+the incremental search functions, and so on (probably leaving them
+empty by default).
+
+
+Bye
+ Sven
+
+P.S.: Most of this patch is changing calls to (|un)linkkeymap() which
+      I have given new arguments.
+P.P.S.: I you have trouble applying this patch it's because it patches 
+        files named *complist* instead of *collist*.
+
+diff -u oos/Zle/complist.c Src/Zle/complist.c
+--- oos/Zle/complist.c	Wed Jun 23 09:19:34 1999
++++ Src/Zle/complist.c	Wed Jun 23 09:19:04 1999
+@@ -31,6 +31,7 @@
+ #include "complist.pro"
+ 
+ static Widget w_menuselect;
++static Keymap mskeymap;
+ 
+ /* We use the parameters ZLS_COLORS and ZLS_COLOURS in the same way as
+  * the color ls does. It's just that we don't support the `or' file
+@@ -629,6 +630,7 @@
+     if (getcols(NULL) || (dummy && !getsparam("ZLS_SELECT")))
+ 	return 1;
+ 
++    selectlocalmap(mskeymap);
+     noselect = 0;
+     mselect = (*(minfo.cur))->gnum;
+     for (;;) {
+@@ -813,6 +815,7 @@
+ 	do_single(**p);
+ 	mselect = (**p)->gnum;
+     }
++    selectlocalmap(NULL);
+     mselect = -1;
+     inselect = 0;
+     if (!noselect) {
+@@ -866,6 +869,19 @@
+     }
+     addhookfunc("list_matches", (Hookfn) complistmatches);
+     addhookfunc("menu_start", (Hookfn) domenuselect);
++    mskeymap = newkeymap(NULL, "menuselect");
++    linkkeymap(mskeymap, "menuselect", 1);
++    bindkey(mskeymap, "\t", refthingy(t_completeword), NULL);
++    bindkey(mskeymap, "\n", refthingy(t_acceptline), NULL);
++    bindkey(mskeymap, "\r", refthingy(t_acceptline), NULL);
++    bindkey(mskeymap, "\33[A",  refthingy(t_uplineorhistory), NULL);
++    bindkey(mskeymap, "\33[B",  refthingy(t_downlineorhistory), NULL);
++    bindkey(mskeymap, "\33[C",  refthingy(t_forwardchar), NULL);
++    bindkey(mskeymap, "\33[D",  refthingy(t_backwardchar), NULL);
++    bindkey(mskeymap, "\33OA",  refthingy(t_uplineorhistory), NULL);
++    bindkey(mskeymap, "\33OB",  refthingy(t_downlineorhistory), NULL);
++    bindkey(mskeymap, "\33OC",  refthingy(t_forwardchar), NULL);
++    bindkey(mskeymap, "\33OD",  refthingy(t_backwardchar), NULL);
+     return 0;
+ }
+ 
+@@ -881,6 +897,7 @@
+     deletezlefunction(w_menuselect);
+     deletehookfunc("list_matches", (Hookfn) complistmatches);
+     deletehookfunc("menu_start", (Hookfn) domenuselect);
++    unlinkkeymap("menuselect", 1);
+     return 0;
+ }
+ 
+diff -u oos/Zle/zle_keymap.c Src/Zle/zle_keymap.c
+--- oos/Zle/zle_keymap.c	Tue Jun 22 15:31:36 1999
++++ Src/Zle/zle_keymap.c	Wed Jun 23 09:02:56 1999
+@@ -98,7 +98,7 @@
+ /* currently selected keymap, and its name */
+ 
+ /**/
+-Keymap curkeymap;
++Keymap curkeymap, localkeymap;
+ /**/
+ char *curkeymapname;
+ 
+@@ -216,7 +216,7 @@
+ static HashTable copyto;
+ 
+ /**/
+-static Keymap
++Keymap
+ newkeymap(Keymap tocopy, char *kmname)
+ {
+     Keymap km = zcalloc(sizeof(*km));
+@@ -250,7 +250,7 @@
+ }
+ 
+ /**/
+-static void
++void
+ deletekeymap(Keymap km)
+ {
+     int i;
+@@ -322,21 +322,21 @@
+ }
+ 
+ /**/
+-static int
+-unlinkkeymap(char *name)
++int
++unlinkkeymap(char *name, int ignm)
+ {
+     KeymapName n = (KeymapName) keymapnamtab->getnode(keymapnamtab, name);
+     if(!n)
+ 	return 2;
+-    if(n->flags & KMN_IMMORTAL)
++    if(!ignm && (n->flags & KMN_IMMORTAL))
+ 	return 1;
+     keymapnamtab->freenode(keymapnamtab->removenode(keymapnamtab, name));
+     return 0;
+ }
+ 
+ /**/
+-static int
+-linkkeymap(Keymap km, char *name)
++int
++linkkeymap(Keymap km, char *name, int imm)
+ {
+     KeymapName n = (KeymapName) keymapnamtab->getnode(keymapnamtab, name);
+     if(n) {
+@@ -347,9 +347,12 @@
+ 	if(!--n->keymap->rc)
+ 	    deletekeymap(n->keymap);
+ 	n->keymap = km;
+-    } else
+-	keymapnamtab->addnode(keymapnamtab, ztrdup(name),
+-	    makekeymapnamnode(km));
++    } else {
++	n = makekeymapnamnode(km);
++	if (imm)
++	    n->flags |= KMN_IMMORTAL;
++	keymapnamtab->addnode(keymapnamtab, ztrdup(name), n);
++    }
+     km->rc++;
+     return 0;
+ }
+@@ -379,6 +382,15 @@
+     return 0;
+ }
+ 
++/* Select a local key map. */
++
++/**/
++void
++selectlocalmap(Keymap m)
++{
++    localkeymap = m;
++}
++
+ /* Reopen the currently selected keymap, in case it got deleted.  This *
+  * should be called after doing anything that might have run an        *
+  * arbitrary user-specified command.                                   */
+@@ -642,7 +654,7 @@
+ 	    return 1;
+ 	}
+ 	if(ops['e'] || ops['v'])
+-	    linkkeymap(km, "main");
++	    linkkeymap(km, "main", 0);
+     } else {
+ 	kmname = NULL;
+ 	km = NULL;
+@@ -715,7 +727,7 @@
+     int ret = 0;
+ 
+     do {
+-	int r = unlinkkeymap(*argv);
++	int r = unlinkkeymap(*argv, 0);
+ 	if(r == 1)
+ 	    zwarnnam(name, "keymap name `%s' is protected", *argv, 0);
+ 	else if(r == 2)
+@@ -735,7 +747,7 @@
+     if(!km) {
+ 	zwarnnam(name, "no such keymap `%s'", argv[0], 0);
+ 	return 1;
+-    } else if(linkkeymap(km, argv[1])) {
++    } else if(linkkeymap(km, argv[1], 0)) {
+ 	zwarnnam(name, "keymap name `%s' is protected", argv[1], 0);
+ 	return 1;
+     }
+@@ -762,7 +774,7 @@
+ 	}
+     } else
+ 	km = NULL;
+-    linkkeymap(newkeymap(km, argv[0]), argv[0]);
++    linkkeymap(newkeymap(km, argv[0]), argv[0], 0);
+     return 0;
+ }
+ 
+@@ -1108,20 +1120,18 @@
+      * will be linked to the "emacs" keymap, except that if VISUAL *
+      * or EDITOR contain the string "vi" then it will be linked to *
+      * the "viins" keymap.                                         */
+-    linkkeymap(vmap, "viins");
+-    linkkeymap(emap, "emacs");
+-    linkkeymap(amap, "vicmd");
+-    linkkeymap(smap, ".safe");
++    linkkeymap(vmap, "viins", 0);
++    linkkeymap(emap, "emacs", 0);
++    linkkeymap(amap, "vicmd", 0);
++    linkkeymap(smap, ".safe", 1);
+     if (((ed = zgetenv("VISUAL")) && strstr(ed, "vi")) ||
+ 	((ed = zgetenv("EDITOR")) && strstr(ed, "vi")))
+-	linkkeymap(vmap, "main");
++	linkkeymap(vmap, "main", 0);
+     else
+-	linkkeymap(emap, "main");
++	linkkeymap(emap, "main", 0);
+ 
+     /* the .safe map cannot be modified or deleted */
+     smap->flags |= KM_IMMUTABLE;
+-    ((KeymapName) keymapnamtab->getnode(keymapnamtab, ".safe"))->flags
+-	|= KMN_IMMORTAL;
+ }
+ 
+ /*************************/
+@@ -1142,7 +1152,12 @@
+     keybuf[0] = 0;
+     while((c = getkeybuf(!!lastlen)) != EOF) {
+ 	char *s;
+-	Thingy f = keybind(km, keybuf, &s);
++	Thingy f;
++	int loc = 1;
++
++	if (!localkeymap ||
++	    (f = keybind(localkeymap, keybuf, &s)) == t_undefinedkey)
++	    loc = 0, f = keybind(km, keybuf, &s);
+ 
+ 	if(f != t_undefinedkey) {
+ 	    lastlen = keybuflen;
+@@ -1150,7 +1165,7 @@
+ 	    str = s;
+ 	    lastc = c;
+ 	}
+-	if(!keyisprefix(km, keybuf))
++	if(!keyisprefix((loc ? localkeymap : km), keybuf))
+ 	    break;
+     }
+     if(!lastlen && keybuflen)
+diff -u oos/Zle/zle_main.c Src/Zle/zle_main.c
+--- oos/Zle/zle_main.c	Tue Jun 22 15:31:37 1999
++++ Src/Zle/zle_main.c	Wed Jun 23 09:02:57 1999
+@@ -507,6 +507,7 @@
+ 	viinsbegin = 0;
+ 	statusline = NULL;
+ 	selectkeymap("main", 1);
++	selectlocalmap(NULL);
+ 	fixsuffix();
+ 	if ((s = (unsigned char *)getlinknode(bufstack))) {
+ 	    setline((char *)s);
+@@ -542,6 +543,7 @@
+ 	    statusline = NULL;
+ 	    vilinerange = 0;
+ 	    reselectkeymap();
++	    selectlocalmap(NULL);
+ 	    bindk = getkeycmd();
+ 	    if (!ll && isfirstln && c == eofchar) {
+ 		eofsent = 1;
+diff -u ood/Zsh/mod_complist.yo Doc/Zsh/mod_complist.yo
+--- ood/Zsh/mod_complist.yo	Tue Jun 22 15:31:43 1999
++++ Doc/Zsh/mod_complist.yo	Wed Jun 23 09:02:57 1999
+@@ -102,3 +102,14 @@
+ match be inserted and the tt(redisplay) and tt(clear-screen) functions 
+ work as usual without leaving menu-selection. Any other zle function
+ leaves menu-selection and makes that function be executed.
++
++During this selection the widget uses the keymap tt(menuselect). Any
++key that is not defined in this keymap or that is bound to
++tt(undefined-key) is looked up in the keymap currently selected. This
++is used to ensure that the most important keys used during selection
++have sensible default (namely the cursor keys, return, and TAB). But
++the tt(menuselect) is user-visible and other keys can be defined in it 
++using the tt(bindkey) builtin command (see
++ifzman(zmanref(zshmodules))\
++ifnzman(noderef(The zle Module))\
++).
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

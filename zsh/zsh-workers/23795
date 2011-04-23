@@ -1,0 +1,155 @@
+From zsh-workers-return-23795-mason-zsh=primenet.com.au@sunsite.dk Thu Aug 23 22:00:23 2007
+Return-Path: <zsh-workers-return-23795-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 27841 invoked from network); 23 Aug 2007 22:00:21 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.1 (2007-05-02) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.5 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.1
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 23 Aug 2007 22:00:21 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 12849 invoked from network); 23 Aug 2007 22:00:13 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 23 Aug 2007 22:00:13 -0000
+Received: (qmail 27265 invoked by alias); 23 Aug 2007 22:00:09 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 23795
+Received: (qmail 27255 invoked from network); 23 Aug 2007 22:00:08 -0000
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by sunsite.dk with SMTP; 23 Aug 2007 22:00:08 -0000
+Received: (qmail 12367 invoked from network); 23 Aug 2007 22:00:08 -0000
+Received: from mtaout01-winn.ispmail.ntl.com (81.103.221.47)
+  by a.mx.sunsite.dk with SMTP; 23 Aug 2007 22:00:01 -0000
+Received: from aamtaout01-winn.ispmail.ntl.com ([81.103.221.35])
+          by mtaout01-winn.ispmail.ntl.com with ESMTP
+          id <20070823215959.PSLV1783.mtaout01-winn.ispmail.ntl.com@aamtaout01-winn.ispmail.ntl.com>
+          for <zsh-workers@sunsite.dk>; Thu, 23 Aug 2007 22:59:59 +0100
+Received: from pws-pc.ntlworld.com ([81.107.45.67])
+          by aamtaout01-winn.ispmail.ntl.com with SMTP
+          id <20070823215959.OBPK219.aamtaout01-winn.ispmail.ntl.com@pws-pc.ntlworld.com>
+          for <zsh-workers@sunsite.dk>; Thu, 23 Aug 2007 22:59:59 +0100
+Date: Thu, 23 Aug 2007 22:59:31 +0100
+From: Peter Stephenson <p.w.stephenson@ntlworld.com>
+To: zsh-workers@sunsite.dk (Zsh hackers list)
+Subject: Re: PATCH: test of improved backslash quoting
+Message-Id: <20070823225931.4da52ab7.p.w.stephenson@ntlworld.com>
+In-Reply-To: <200708221035.l7MAZrrC009415@news01.csr.com>
+References: <200708221035.l7MAZrrC009415@news01.csr.com>
+X-Mailer: Sylpheed 2.3.1 (GTK+ 2.10.14; x86_64-redhat-linux-gnu)
+Mime-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+
+On Wed, 22 Aug 2007 11:35:53 +0100
+Peter Stephenson <pws@csr.com> wrote:
+> Note that removal of $'...' quotes is not currently well handled: this
+> applies both to the (Q) parameter flag and to completion, where already
+> added $'\...' quoting isn't properly parsed for further handling.
+
+I was right about that.
+
+> This is part of the hairy patch I've been trying to do to improve
+> completion with nested quotes; however, the (Q) part is useful
+> separately and a bit more tractable, so I'll try and drag it out since
+> it's likely to be several orders of magnitude quicker than trying to
+> complete the full patch.
+
+I was wrong about that.  It's yet another separate special case.
+However, it's not too hard to do with one caveat:  it assumes the result
+of $'...' is shorter than the original.  That's usually the case, but
+I'm worried there are pathological cases with metafied multibyte
+strings.  If someone wants to fix parse_subst_string() or prove it's OK
+as it is that would be splendid.  The difficulty with fixing
+parse_subst_string() is that currently it acts in place and so no memory
+management is necessary.  It would need some fiddling to allocate a new
+string from the right memory and avoid leaks.
+
+Index: Src/lex.c
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Src/lex.c,v
+retrieving revision 1.40
+diff -u -r1.40 lex.c
+--- Src/lex.c	14 Aug 2007 11:51:18 -0000	1.40
++++ Src/lex.c	23 Aug 2007 21:53:04 -0000
+@@ -1556,6 +1556,7 @@
+ parse_subst_string(char *s)
+ {
+     int c, l = strlen(s), err, olen, lexstop_ret;
++    char *ptr;
+ 
+     if (!*s || !strcmp(s, nulstring))
+ 	return 0;
+@@ -1593,6 +1594,43 @@
+ 	return 1;
+     }
+ #endif
++    /* Check for $'...' quoting.  This needs special handling. */
++    for (ptr = s; *ptr; )
++    {
++	if (*ptr == String && ptr[1] == Snull)
++	{
++	    char *t;
++	    int len, tlen, diff;
++	    t = getkeystring(ptr + 2, &len, GETKEYS_DOLLARS_QUOTE, NULL);
++	    len += 2;
++	    tlen = strlen(t);
++	    diff = len - tlen;
++	    /*
++	     * Yuk.
++	     * parse_subst_string() currently handles strings in-place.
++	     * That's not so easy to fix without knowing whether
++	     * additional memory should come off the heap or
++	     * otherwise.  So we cheat by copying the unquoted string
++	     * into place, unless it's too long.  That's not the
++	     * normal case, but I'm worried there are are pathological
++	     * cases with converting metafied multibyte strings.
++	     * If someone can prove there aren't I will be very happy.
++	     */
++	    if (diff < 0) {
++		DPUTS(1, "$'...' subst too long: fix get_parse_string()");
++		return 1;
++	    }
++	    memcpy(ptr, t, tlen);
++	    ptr += tlen;
++	    if (diff > 0) {
++		char *dptr = ptr;
++		char *sptr = ptr + diff;
++		while ((*dptr++ = *sptr++))
++		    ;
++	    }
++	} else
++	    ptr++;
++    }
+     return 0;
+ }
+ 
+Index: Test/D04parameter.ztst
+===================================================================
+RCS file: /cvsroot/zsh/zsh/Test/D04parameter.ztst,v
+retrieving revision 1.27
+diff -u -r1.27 D04parameter.ztst
+--- Test/D04parameter.ztst	25 Jul 2007 09:26:52 -0000	1.27
++++ Test/D04parameter.ztst	23 Aug 2007 21:53:04 -0000
+@@ -320,6 +320,11 @@
+ 0:${(Q)...}
+ >and now even the pubs are shut.
+ 
++  foo="X$'\x41'$'\x42'Y"
++  print -r ${(Q)foo}
++0:${(Q)...} with handling of $'...'
++>XABY
++
+   psvar=(dog)
+   setopt promptsubst
+   foo='It shouldn'\''t $(happen) to a %1v.'
+
+
+
+-- 
+Peter Stephenson <p.w.stephenson@ntlworld.com>
+Web page now at http://homepage.ntlworld.com/p.w.stephenson/
+

@@ -1,0 +1,142 @@
+From zsh-workers-return-7139-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Jul 14 13:03:51 1999
+Return-Path: <zsh-workers-return-7139-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 1922 invoked from network); 14 Jul 1999 13:03:49 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 14 Jul 1999 13:03:49 -0000
+Received: (qmail 6094 invoked by alias); 14 Jul 1999 13:03:40 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 7139
+Received: (qmail 5931 invoked from network); 14 Jul 1999 13:03:34 -0000
+Message-Id: <9907141232.AA36925@ibmth.df.unipi.it>
+To: "ZSH workers mailing list" <zsh-workers@sunsite.auc.dk>
+Subject: PATCH: 3.1.6-test-1: strange cd behaviour 
+In-Reply-To: "Peter Stephenson"'s message of "Wed, 14 Jul 1999 11:15:49 DFT."
+             <9907140915.AA13464@ibmth.df.unipi.it> 
+Date: Wed, 14 Jul 1999 14:32:39 +0200
+From: Peter Stephenson <pws@ibmth.df.unipi.it>
+
+Peter Stephenson wrote:
+> This is a story of horror.
+>
+> Without restoring the 3.0
+> behaviour, the fix would be to do something clever when pwd is a prefix of
+> the path --- i.e., $PWD/.. is automatically turned into $PWD:h, whether the
+> directory exists or not, but $PWD/../dummy/.. becomes
+> ${PWD:h}/dummy/.. which is weighed in the balance and found wanting.  This
+> would get all the advantages and none of the disadvantages of the 3.0
+> method (I hope).  The rule would be something like
+> 
+> - If $PWD is a prefix, rationalize away any immediately following ..'s
+>   (and .'s, to be on the safe side) before doing any testing.
+> - At that point, even if $PWD is a prefix, look at the path and see if it
+>   contains any /../ or finishes with /.. . If so, stat() it and check
+>   that it exists.  If not, return and let the chdir code handle errors.
+> - If everything's OK so far (i.e. no ..'s, or the directory exists)
+>   rationalize the rest of the path.
+
+This does it:  as you see it's a significant chunk of extra code with no
+other aim than making sure cd foo/.. doesn't work if foo doesn't exist
+without preventing you from changing back up to directories that still
+exist if yours doesn't.  But life is non-optimal.  If anybody has any
+better suggestions...?
+
+Please test this, since people tend to get cross if they can't change
+directories properly.
+
+Note that this has the effect that `cd $PWD/<relative>' is tested in
+exactly the same way as `cd <relative>', where <relative> is any relative
+path.  So `cd $PWD/..' will also always work if $PWD doesn't exist but its
+parent does, regardless (obviously) of whether you use the variable $PWD or
+the full directory name.  That's the effect of the code change between 3.0
+and 3.1.  (Of course, if you're somewhere else in cdpath, none of this
+matters.)
+
+--- Src/builtin.c.cd	Tue Jul 13 14:31:03 1999
++++ Src/builtin.c	Wed Jul 14 14:26:38 1999
+@@ -1045,11 +1045,41 @@
+ static void
+ fixdir(char *src)
+ {
+-    char *dest = src;
+-    char *d0 = dest;
+-#ifdef __CYGWIN__
++    char *dest = src, *d0 = dest, *chks = src, *ptrp;
++#ifdef __CYGWIN
+     char *s0 = src;
+ #endif
++    int donecheck = 0, len;
++
++    /*
++     * Normally, we should not rationalize away path segments foo/.. if
++     * the directory foo does not exist.  However, if foo was part of
++     * pwd then we should allow it, because we know the current
++     * directory was once valid, although may have been deleted, and `cd
++     * ..' should always work as long as the parent directory exists.
++     * Hence we find an initial portion of the path consisting of pwd
++     * followed by any number of .. or . segments, and don't check
++     * that the original path exists.  After this point (given by
++     * chks), if there are any remaining ..'s in the path we
++     * check that the directory with the remaining portion
++     * unrationalized really exists, and return if it doesn't.
++     *
++     * Bug:  this is ridiculously heavy handed.
++     */
++    len = strlen(pwd);
++    if (!strncmp(src, pwd, len) && src[len] == '/') {
++	chks = src + len;
++	while (*chks == '/')
++	    chks++;
++	while (*chks == '.' &&
++	       (!chks[1] || chks[1] == '/' ||
++		(chks[1] == '.' && (!chks[2] || chks[2] == '/')))) {
++	    while (*chks == '.')
++		chks++;
++	    while (*chks == '/')
++		chks++;
++	}
++    }
+ 
+ /*** if have RFS superroot directory ***/
+ #ifdef HAVE_SUPERROOT
+@@ -1085,6 +1115,31 @@
+ 	}
+ 	if (src[0] == '.' && src[1] == '.' &&
+ 	  (src[2] == '\0' || src[2] == '/')) {
++	    if (!donecheck && src >= chks) {
++		/*
++		 * We need to check the original path exists, to catch
++		 * problems like 'cd nonexistent/..'.  We use dest
++		 * as far as we've got, plus the rest of src.
++		 * We only need to do this once, as any later ..'s
++		 * will automatically be tested here.
++		 */
++		struct stat st;
++		char *testdir;
++		if (dest == src)
++		    testdir = dupstring(d0);
++		else {
++		    *dest = '\0';
++		    testdir = dyncat(d0, src);
++		}
++		for (chks = src, ptrp = testdir + (dest - d0); *chks;
++		     chks++, ptrp++)
++		    *ptrp = (*chks == Meta) ? (*++chks ^ 32) : *chks;
++		if (stat(testdir, &st) < 0 || !S_ISDIR(st.st_mode)) {
++		    strcpy(d0, testdir);
++		    return;
++		}
++		donecheck = 1;
++	    }
+ 	    if (dest > d0 + 1) {
+ 		/* remove a foo/.. combination */
+ 		for (dest--; dest > d0 + 1 && dest[-1] != '/'; dest--);
+
+-- 
+Peter Stephenson <pws@ibmth.df.unipi.it>       Tel: +39 050 844536
+WWW:  http://www.ifh.de/~pws/
+Dipartimento di Fisica, Via Buonarroti 2, 56127 Pisa, Italy
+

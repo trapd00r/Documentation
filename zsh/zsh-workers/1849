@@ -1,0 +1,126 @@
+From zsh-workers-request@euclid.skiles.gatech.edu  Wed Jul 31 21:58:29 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by coral.primenet.com.au (8.7.5/8.7.3) with ESMTP id VAA06161 for <mason@primenet.com.au>; Wed, 31 Jul 1996 21:58:21 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id HAA21699; Wed, 31 Jul 1996 07:49:25 -0400 (EDT)
+Resent-Date: Wed, 31 Jul 1996 07:49:25 -0400 (EDT)
+Message-Id: <199607311145.NAA04933@hydra.ifh.de>
+To: zsh-workers@math.gatech.edu (Zsh hackers list),
+        Carl Edman <cedman@lynx.ps.uci.edu>
+Subject: Re: Something fishy in process timing 
+In-reply-to: "cedman@lynx.ps.uci.edu"'s message of "Sun, 28 Jul 1996 14:52:12 MET."
+             <Pine.LNX.3.95.960727201411.192B-100000@localhost> 
+Date: Wed, 31 Jul 1996 13:45:57 +0200
+From: Peter Stephenson <pws@ifh.de>
+Resent-Message-ID: <"g17Ck1.0.zI5.4Xq_n"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1849
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+cedman@lynx.ps.uci.edu wrote:
+> Have a look at this paste from my xterm:
+
+I'm looking.  (I presume that's a fish paste :-):-).)
+
+> /tmp% xjig -file /tmp/a.gif -ts 50 &|                              7:03pm
+> /tmp%                                                              7:04pm
+> xjig V2.4, by Helmut Hoenig, July-24-96
+> 
+>   Imported from TIFF image: 09320028.tif
+> X connection to :0.0 broken (explicit kill or server shutdown).
+> 
+> /tmp% ~/ftp                                                        8:11pm
+> ~/ftp% ls                                                          8:12pm
+> [ ... ]
+> ls  133.68s user 37.81s system 100% cpu 0.312 total
+> 
+> What it looks like is that the user and system timings for the disowned
+> xjig process got added to the reported timings for the ls.  That doesn't
+> seem the right thing to do.
+
+That is what happened and it isn't right.  This patch seems to fix it.
+The bug is that zsh handles SIGCHLD for disowned processes
+(unavoidably), but doesn't bother calculating the usage, so it doesn't
+get updated into the total shell times in shtms until the next
+non-disowned process is reaped.  The patch simply updates shtms even
+if the process wasn't found in the table.  This is the last hunk.
+
+The second hunk below simply does the same thing when a process
+substitution process is finished.  Otherwise, it's impossible to tell
+what process the times for that will tack themselves onto.
+
+> PS:  If this really were a parallel machine in which user+system time
+> legitimately exceeds wall clock time, wouldn't the right thing be to
+> report more than 100% CPU usage ? 
+
+I agree: nowadays there's less excuse than there used to be to massage
+the CPU percentage --- and in fact I've relied on the accuracy of this
+myself when running programmes on parallel machines.  The first hunk
+below removes the limitation.  (Testing for a real parallel machine
+would probably be taking things a bit far.)  I wrapped a nearby line
+round as well.
+
+By the way, my time reports look like this:
+
+./usetime 2 1000000: 1.37s(r) 1.35s(u) 0.02s(s) (99%): %K kb, max %M kb, %F pf
+
+I still haven't worked out what happened to %K, %M and %F.
+
+
+*** Src/jobs.c.time	Mon Jul 22 22:32:14 1996
+--- Src/jobs.c	Wed Jul 31 13:03:39 1996
+***************
+*** 725,733 ****
+      elapsed_time = real->tv_sec + real->tv_usec / 1000000.0;
+      user_time    = ti->ut / (double) clktck;
+      system_time  = ti->st / (double) clktck;
+!     percent      =  100.0 * (ti->ut + ti->st) / (clktck * real->tv_sec + clktck * real->tv_usec / 1000000.0);
+!     if (percent > 100)
+!         percent = 100;   /* just to make it look right */
+  
+      if (!(s = getsparam("TIMEFMT")))
+  	s = DEFAULT_TIMEFMT;
+--- 725,732 ----
+      elapsed_time = real->tv_sec + real->tv_usec / 1000000.0;
+      user_time    = ti->ut / (double) clktck;
+      system_time  = ti->st / (double) clktck;
+!     percent      =  100.0 * (ti->ut + ti->st)
+! 	/ (clktck * real->tv_sec + clktck * real->tv_usec / 1000000.0);
+  
+      if (!(s = getsparam("TIMEFMT")))
+  	s = DEFAULT_TIMEFMT;
+*** Src/signals.c.time	Wed Jul 31 13:10:59 1996
+--- Src/signals.c	Wed Jul 31 13:31:13 1996
+***************
+*** 479,484 ****
+--- 479,485 ----
+  			    dotrap(WTERMSIG(status));
+  		    } else
+  			*procsubval = WEXITSTATUS(status);
++ 		    times(&shtms);
+  		    goto cont;
+  		}
+  		if (!es)
+***************
+*** 500,505 ****
+--- 501,512 ----
+  	    if (findproc(pid, &jn, &pn)) {
+  		update_process(pn, status);
+  		update_job(jn);
++ 	    } else {
++ 		/* If not found, update the shell record of time spent by
++ 		 * children in sub processes anyway:  otherwise, this
++ 		 * will get added on to the next found process that terminates.
++ 		 */
++ 		times(&shtms);
+  	    }
+          }
+          break;
+
+
+-- 
+Peter Stephenson <pws@ifh.de>       Tel: +49 33762 77366
+WWW:  http://www.ifh.de/~pws/       Fax: +49 33762 77330
+Deutches Electronen-Synchrotron --- Institut fuer Hochenergiephysik Zeuthen
+DESY-IfH, 15735 Zeuthen, Germany.
+

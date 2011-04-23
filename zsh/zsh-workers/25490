@@ -1,0 +1,216 @@
+From zsh-workers-return-25490-mason-zsh=primenet.com.au@sunsite.dk Tue Aug 19 11:58:22 2008
+Return-Path: <zsh-workers-return-25490-mason-zsh=primenet.com.au@sunsite.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 12932 invoked from network); 19 Aug 2008 11:58:18 -0000
+X-Spam-Checker-Version: SpamAssassin 3.2.5 (2008-06-10) on f.primenet.com.au
+X-Spam-Level: 
+X-Spam-Status: No, score=-2.6 required=5.0 tests=AWL,BAYES_00 autolearn=ham
+	version=3.2.5
+Received: from news.dotsrc.org (HELO a.mx.sunsite.dk) (130.225.247.88)
+  by ns1.primenet.com.au with SMTP; 19 Aug 2008 11:58:18 -0000
+Received-SPF: none (ns1.primenet.com.au: domain at sunsite.dk does not designate permitted sender hosts)
+Received: (qmail 83390 invoked from network); 19 Aug 2008 11:57:52 -0000
+Received: from sunsite.dk (130.225.247.90)
+  by a.mx.sunsite.dk with SMTP; 19 Aug 2008 11:57:52 -0000
+Received: (qmail 28673 invoked by alias); 19 Aug 2008 11:57:43 -0000
+Mailing-List: contact zsh-workers-help@sunsite.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.dk
+X-Seq: 25490
+Received: (qmail 28656 invoked from network); 19 Aug 2008 11:57:42 -0000
+Received: from bifrost.dotsrc.org (130.225.254.106)
+  by sunsite.dk with SMTP; 19 Aug 2008 11:57:42 -0000
+Received: from cork.scru.org (cork.scru.org [209.20.67.2])
+	by bifrost.dotsrc.org (Postfix) with ESMTPS id 621268058F37
+	for <zsh-workers@sunsite.dk>; Tue, 19 Aug 2008 13:57:18 +0200 (CEST)
+Received: by cork.scru.org (Postfix, from userid 1000)
+	id 77DA010408A; Tue, 19 Aug 2008 11:57:16 +0000 (UTC)
+Date: Tue, 19 Aug 2008 11:57:16 +0000
+From: Clint Adams <clint@zsh.org>
+To: zsh-workers@sunsite.dk
+Subject: dynamic gdbm handles
+Message-ID: <20080819115716.GA21930@scru.org>
+Mail-Followup-To: zsh-workers@sunsite.dk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+User-Agent: Mutt/1.5.18 (2008-05-17)
+X-Virus-Scanned: ClamAV 0.92.1/8057/Tue Aug 19 05:23:31 2008 on bifrost
+X-Virus-Status: Clean
+
+I tried to do this with a new PM_ type and not co-opting struct
+hashtable, but it ended in a fiery display of segfaults.
+
+Thoughts on what to do with tmpdata or where ztie/zuntie should go?
+
+diff --git a/Src/Modules/db_gdbm.c b/Src/Modules/db_gdbm.c
+index 9cc9648..2b06719 100644
+--- a/Src/Modules/db_gdbm.c
++++ b/Src/Modules/db_gdbm.c
+@@ -39,6 +39,8 @@
+ 
+ #include <gdbm.h>
+ 
++static char *backtype = "db/gdbm";
++
+ static const struct gsu_scalar gdbm_gsu =
+ { gdbmgetfn, gdbmsetfn, gdbmunsetfn };
+ 
+@@ -47,14 +49,13 @@ static struct builtin bintab[] = {
+     BUILTIN("zuntie", 0, bin_zuntie, 1, -1, 0, NULL, NULL),
+ };
+ 
+-GDBM_FILE dbf = NULL;
+-Param tied_param;
+-
+ /**/
+ static int
+ bin_ztie(char *nam, char **args, Options ops, UNUSED(int func))
+ {
+     char *resource_name, *pmname;
++    GDBM_FILE dbf = NULL;
++    Param tied_param;
+ 
+     if(!OPT_ISSET(ops,'d')) {
+         zwarnnam(nam, "you must pass `-d db/gdbm' to ztie", NULL);
+@@ -69,16 +70,11 @@ bin_ztie(char *nam, char **args, Options ops, UNUSED(int func))
+      * a registry.
+      */
+ 
+-    if(dbf) {
+-        zwarnnam(nam, "something is already ztied and this implementation is flawed", NULL);
+-	return 1;
+-    }
+-
+     pmname = ztrdup(*args);
+ 
+     resource_name = OPT_ARG(ops, 'f');
+ 
+-    if (!(tied_param = createspecialhash(pmname, &getgdbmnode, &scangdbmkeys, PM_SPECIAL | PM_HASHED))) {
++    if (!(tied_param = createspecialhash(pmname, &getgdbmnode, &scangdbmkeys, 0))) {
+         zwarnnam(nam, "cannot create the requested parameter name", NULL);
+ 	return 1;
+     }
+@@ -89,6 +85,8 @@ bin_ztie(char *nam, char **args, Options ops, UNUSED(int func))
+ 	return 1;
+     }
+ 
++    tied_param->u.hash->tmpdata = (void *)dbf;
++
+     return 0;
+ }
+ 
+@@ -96,11 +94,19 @@ bin_ztie(char *nam, char **args, Options ops, UNUSED(int func))
+ static int
+ bin_zuntie(char *nam, char **args, Options ops, UNUSED(int func))
+ {
+-    paramtab->removenode(paramtab, tied_param->node.nam);
+-    free(tied_param);
+-    tied_param = NULL;
++    Param pm;
++    GDBM_FILE dbf;
++
++    pm = (Param) paramtab->getnode(paramtab, args[0]);
++    if(!pm) {
++        zwarnnam(nam, "cannot untie %s", args[0]);
++	return 1;
++    }
++
++    dbf = (GDBM_FILE)(pm->u.hash->tmpdata);
+     gdbm_close(dbf);
+-    dbf = NULL;
++/*    free(pm->u.hash->tmpdata); */
++    paramtab->removenode(paramtab, pm->node.nam);
+ 
+     return 0;
+ }
+@@ -111,10 +117,12 @@ gdbmgetfn(Param pm)
+ {
+     datum key, content;
+     int ret;
++    GDBM_FILE dbf;
+ 
+     key.dptr = pm->node.nam;
+     key.dsize = strlen(key.dptr) + 1;
+ 
++    dbf = (GDBM_FILE)(pm->u.hash->tmpdata);
+     ret = gdbm_exists(dbf, key);
+     if(ret) {
+         content = gdbm_fetch(dbf, key);
+@@ -131,12 +139,14 @@ gdbmsetfn(Param pm, char **val)
+ {
+     datum key, content;
+     int ret;
++    GDBM_FILE dbf;
+ 
+     key.dptr = pm->node.nam;
+     key.dsize = strlen(key.dptr) + 1;
+     content.dptr = val;
+     content.dsize = strlen(content.dptr) + 1;
+ 
++    dbf = (GDBM_FILE)(pm->u.hash->tmpdata);
+     ret = gdbm_store(dbf, key, content, GDBM_REPLACE);
+ }
+ 
+@@ -146,20 +156,22 @@ gdbmunsetfn(Param pm, int um)
+ {
+     datum key;
+     int ret;
++    GDBM_FILE dbf;
+ 
+     key.dptr = pm->node.nam;
+     key.dsize = strlen(key.dptr) + 1;
+ 
++    dbf = (GDBM_FILE)(pm->u.hash->tmpdata);
+     ret = gdbm_delete(dbf, key);
+ }
+ 
+ /**/
+ static HashNode
+-getgdbmnode(UNUSED(HashTable ht), const char *name)
++getgdbmnode(HashTable ht, const char *name)
+ {
+-    int len, ret;
++    int len;
+     char *nameu;
+-    datum content, key;
++    datum key;
+     Param pm = NULL;
+ 
+     nameu = dupstring(name);
+@@ -170,16 +182,20 @@ getgdbmnode(UNUSED(HashTable ht), const char *name)
+     pm->node.nam = nameu;
+     pm->node.flags = PM_SCALAR;
+     pm->gsu.s = &gdbm_gsu;
++    pm->u.hash = ht;
+ 
+     return &pm->node;
+ }
+ 
+ /**/
+ static void
+-scangdbmkeys(UNUSED(HashTable ht), ScanFunc func, int flags)
++scangdbmkeys(HashTable ht, ScanFunc func, int flags)
+ {
+     Param pm = NULL;
+     datum key, content;
++    GDBM_FILE dbf;
++
++    dbf = (GDBM_FILE)(ht->tmpdata);
+ 
+     pm = (Param) hcalloc(sizeof(struct param));
+ 
+diff --git a/Src/zsh.h b/Src/zsh.h
+index 173b891..47b903a 100644
+--- a/Src/zsh.h
++++ b/Src/zsh.h
+@@ -979,6 +979,7 @@ struct hashtable {
+     int hsize;			/* size of nodes[]  (number of hash values)   */
+     int ct;			/* number of elements                         */
+     HashNode *nodes;		/* array of size hsize                        */
++    void *tmpdata;
+ 
+     /* HASHTABLE METHODS */
+     HashFunc hash;		/* pointer to hash function for this table    */
+

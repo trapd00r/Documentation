@@ -1,0 +1,118 @@
+From zsh-workers-return-6824-mason-zsh=primenet.com.au@sunsite.auc.dk Thu Jun 24 11:55:35 1999
+Return-Path: <zsh-workers-return-6824-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 17550 invoked from network); 24 Jun 1999 11:55:34 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 24 Jun 1999 11:55:34 -0000
+Received: (qmail 3203 invoked by alias); 24 Jun 1999 11:55:09 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 6824
+Received: (qmail 3195 invoked from network); 24 Jun 1999 11:55:07 -0000
+Date: Thu, 24 Jun 1999 13:55:04 +0200 (MET DST)
+Message-Id: <199906241155.NAA00996@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Thu, 24 Jun 1999 11:00:53 +0200
+Subject: Re: PATCH: loop killing
+
+
+Peter Stephenson wrote:
+
+> Sven Wischnowsky wrote:
+> > This is the solution which executes commands in a loop in the same
+> > process group as the parent shell.
+> 
+> This seems to be the neatest solution, covering most of the common things
+> you want to do without any fuss.  But at the moment something nasty is
+> happening with shell functions.
+> 
+> % fn() { less $*; }
+> % fn glob.c
+> ^Z
+> <job disappears completely>
+
+execshfunc() deleted the job before the function was executed,
+stealing us the information about it. I'm not too sure about the test
+I changed this to... (but it seems to work).
+
+> Hmmm, that didn't seem to be working properly even before, except the
+> problem then was that when I tried to continue it I got the message 
+>   zsh: 39221 suspended (tty output)  l glob.c
+> so it looks like the process groups were already getting messed up.
+> So maybe the new problem is just the old one appearing in a different
+> place.
+
+Right. The sub-shell for the shell (the super-job) put itself
+unconditionally into the group of the gleader of the list_pipe_job --
+but in cases like this one the sub-shell itself is the first job that
+is entered into it, so gleader wasn't set and the sub-shell ended in
+its own little process group which gave us the problem above when the
+parent shell tried to foreground the job and used gleader of the
+super-job for that.
+
+Bye
+ Sven
+
+diff -u os/exec.c Src/exec.c
+--- os/exec.c	Thu Jun 24 11:47:25 1999
++++ Src/exec.c	Thu Jun 24 13:40:28 1999
+@@ -901,6 +901,9 @@
+ 		    DPUTS(!list_pipe_pid, "invalid list_pipe_pid");
+ 		    addproc(list_pipe_pid, list_pipe_text);
+ 
++		    if (!jn->procs->next)
++			jn->gleader = mypgrp;
++
+ 		    for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+ 			if (WIFSTOPPED(pn->status))
+ 			    break;
+@@ -977,11 +980,13 @@
+ 		    else {
+ 			close(synch[0]);
+ 			entersubsh(Z_ASYNC, 0, 0);
+-			setpgrp(0L, mypgrp = jobtab[list_pipe_job].gleader);
++			if (jobtab[list_pipe_job].procs)
++			    setpgrp(0L, mypgrp = jobtab[list_pipe_job].gleader);
+ 			close(synch[1]);
+ 			kill(getpid(), SIGSTOP);
+ 			list_pipe = 0;
+ 			list_pipe_child = 1;
++			opts[INTERACTIVE] = 0;
+ 			break;
+ 		    }
+ 		}
+@@ -2793,14 +2798,13 @@
+     if (errflag)
+ 	return;
+ 
+-    if (!list_pipe) {
++    if (!list_pipe && thisjob != list_pipe_job) {
+ 	/* Without this deletejob the process table *
+ 	 * would be filled by a recursive function. */
+ 	last_file_list = jobtab[thisjob].filelist;
+ 	jobtab[thisjob].filelist = NULL;
+ 	deletejob(jobtab + thisjob);
+     }
+-
+     if (isset(XTRACE)) {
+ 	LinkNode lptr;
+ 	printprompt4();
+diff -u os/signals.c Src/signals.c
+--- os/signals.c	Thu Jun 24 11:47:28 1999
++++ Src/signals.c	Thu Jun 24 13:44:36 1999
+@@ -584,7 +584,7 @@
+                 for (pn = jobtab[jn->other].procs; pn; pn = pn->next)
+                     kill(pn->pid, sig);
+  
+-                for (pn = jn->procs; pn; pn = pn->next)
++                for (pn = jn->procs; pn->next; pn = pn->next)
+                     err = kill(pn->pid, sig);
+  
+                 return err;
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

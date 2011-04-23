@@ -1,0 +1,395 @@
+From wayne@tenor.clarinet.com Thu May  9 04:19:59 1996
+Received: from euclid.skiles.gatech.edu (list@euclid.skiles.gatech.edu [130.207.146.50]) by melb.werple.net.au (8.7.5/8.7.3) with ESMTP id EAA09005 for <mason@werple.mira.net.au>; Thu, 9 May 1996 04:19:55 +1000 (EST)
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id NAA10186; Wed, 8 May 1996 13:41:22 -0400 (EDT)
+Resent-Date: Wed, 8 May 1996 13:41:22 -0400 (EDT)
+Message-Id: <199605081740.KAA24518@tenor.clari.net>
+To: zsh-workers@math.gatech.edu
+Subject: Enhanced search functions for zsh
+Date: Wed, 08 May 1996 10:40:38 -0700
+From: Wayne Davison <wayne@tenor.clarinet.com>
+Resent-Message-ID: <"pzS0v1.0.1V2.1pDan"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/1014
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+Content-Length: 10338
+Status: O
+
+Here's some improvements for zle's search functions.  This patch is
+based on beta 17.
+
+I changed history-incremental-search-{backward,forward} to behave more
+like regular emacs incremental searches.  This means that:
+
+ +  Reverse searches start searching at the current position backwards
+    (i.e. it finds the last match on the line first).
+
+ +  Forward and backward searches find multiple matches on a line.
+
+ +  The cursor in a backward search is positioned at the start of the
+    search string's match, not the end.
+
+ +  Backspace takes you back through the list of the places you've
+    visited on your search, allowing you to refine it without missing
+    any potential matches.
+
+ +  I even made the code beep less often once a search has already
+    failed, but since the search string doesn't change to "Failing
+    i-search", perhaps I made it too quiet.
+
+I changed history-beginning-search-{backward,forward}:
+
+ +  Don't ever stop at a line that is as short as the search string.
+    (If searching for a "ps" command, no one wants to stop at a line
+    that has just "ps" on it.)
+
+I also changed the history-search-{backward,forward} functions:
+
+ +  Ditto change mentioned above for history-beginning-*.
+
+ +  Include the first whitespace character in the search if it was
+    specified on the command line.  (This lets you type "set <esc>p"
+    and not have it visit any "setenv" lines, for instance.)
+
+What do people think of these changes?  If they are controversial,
+I suppose they could be implemented via options -- suggestions are
+welcomed.
+
+Technical comments:
+
+I modified the function hstrnstr() to take a current position and a
+direction for the search.  This allows it to find the next match on a
+line in either direction.  It was only called twice, and I made the call
+from the vi code compatible with the old function.
+
+I eliminated the "oldl" variable in doisearch() since it doesn't seem to
+be needed any more to restore the current line.  The existing code
+already set curhistline to the value of "line", so I didn't see any need
+to malloc another copy in oldl.
+
+I added a local structure directly to the file zle_hist.c for the search
+stack (that lets backspace take you back through the list).  Someone more
+familiar with zsh's coding style can move this, if needed.
+
+Some functions in zle_hist.c use UTOSCP(line) and others use just plain
+(char *)line -- shouldn't these be changed to use one method or the other?
+I was tempted to do this, but I didn't want to make the patch that
+large.
+
+I don't know how these changes affect vi incremental searching because I
+don't know if vi mode even supports incremental searching.  There are a
+couple case statements in doisearch() that handle various vi bindings in
+the code, so it looks like it is possible.  Let me know if there is a
+conflict.
+
+..wayne..
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+Index: Src/zle_hist.c
+@@ -326,8 +326,11 @@
+     }
+     if (lastcmd & ZLE_HISTSEARCH)
+ 	t0 = histpos;
+-    else
++    else {
+ 	for (t0 = 0; line[t0] && !iblank(line[t0]); t0++);
++	if (line[t0])
++	    t0++;
++    }
+     histpos = t0;
+     for (;;) {
+ 	histline--;
+@@ -336,7 +339,8 @@
+ 	    histline = ohistline;
+ 	    return;
+ 	}
+-	if (!strncmp(s, UTOSCP(line), t0) && strcmp(s, UTOSCP(line)))
++	if (strlen(UTOSCP(s)) > t0
++	 && !strncmp(s, UTOSCP(line), t0) && strcmp(s, UTOSCP(line)))
+ 	    break;
+     }
+     setline(s);
+@@ -355,8 +359,11 @@
+     }
+     if (lastcmd & ZLE_HISTSEARCH)
+ 	t0 = histpos;
+-    else
++    else {
+ 	for (t0 = 0; line[t0] && !iblank(line[t0]); t0++);
++	if (line[t0])
++	    t0++;
++    }
+     histpos = t0;
+     for (;;) {
+ 	histline++;
+@@ -365,7 +372,8 @@
+ 	    histline = ohistline;
+ 	    return;
+ 	}
+-	if (!strncmp(s, UTOSCP(line), t0) && strcmp(s, UTOSCP(line)))
++	if (strlen(UTOSCP(s)) > t0
++	 && !strncmp(s, UTOSCP(line), t0) && strcmp(s, UTOSCP(line)))
+ 	    break;
+     }
+     setline(s);
+@@ -563,19 +571,57 @@
+ 
+ extern int ungetok;
+ 
++struct isrch_spot {
++    int hl;		/* This spot's histline */
++    int pos;		/* The search position on the line */
++    int len;		/* How long the search string was */
++    int dir;		/* The direction we're searching */
++} *isrch_spots;
++
++static int max_spot = 0;
++
++/**/
++void
++set_isrch_spot(int num, int hl, int pos, int len, int dir)
++{
++    if (num >= max_spot) {
++	if (!isrch_spots) {
++	    isrch_spots = (struct isrch_spot*)
++			    zalloc((max_spot = 64) * sizeof *isrch_spots);
++	} else {
++	    isrch_spots = (struct isrch_spot*)realloc((char*)isrch_spots,
++			    (max_spot += 64) * sizeof *isrch_spots);
++	}
++    }
++
++    isrch_spots[num].hl = hl;
++    isrch_spots[num].pos = pos;
++    isrch_spots[num].len = len;
++    isrch_spots[num].dir = dir;
++}
++
++/**/
++void
++get_isrch_spot(int num, int *hlp, int *posp, int *lenp, int *dirp)
++{
++    *hlp = isrch_spots[num].hl;
++    *posp = isrch_spots[num].pos;
++    *lenp = isrch_spots[num].len;
++    *dirp = isrch_spots[num].dir;
++}
++
+ /**/
+ void
+ doisearch(int dir)
+ {
+-    char *s, *oldl;
++    char *s = UTOSCP(line);
+     char *ibuf = halloc(80), *sbuf = ibuf + 14;
+-    int sbptr = 0, cmd, ohl = histline, ocs = cs, sibuf = 80;
+-    int nomatch, chequiv = 0;
++    int sbptr = 0, cmd, top_spot = 0, pos = cs, sibuf = 80;
++    int nomatch = 0, skip_line = 0, skip_pos = 0;
+     int odir = dir, *obindtab = bindtab;
+ 
+     strcpy(ibuf, (dir == -1) ? "bck-i-search: " : "fwd-i-search: ");
+     statusline = ibuf;
+-    oldl = ztrdup(UTOSCP(line));
+     if (histline == curhist) {
+ 	zsfree(curhistline);
+ 	curhistline = ztrdup(UTOSCP(line));
+@@ -583,39 +629,58 @@
+     bindtab = mainbindtab;
+     for (;;) {
+ 	sbuf[sbptr] = '\0';
+-	nomatch = 0;
+-	if (sbptr > 1 || (sbptr == 1 && sbuf[0] != '^')) {
+-	    int ohistline = histline;
+-
++	/* Remember the current values in case search fails (doesn't push). */
++	set_isrch_spot(top_spot, histline, pos, sbptr, dir);
++	if (sbptr == 1 && sbuf[0] == '^')
++	    cs = 0;
++	else if (sbptr > 0) {
+ 	    for (;;) {
+ 		char *t;
+ 
+-		if (!(s = qgetevent(histline))) {
+-		    feep();
+-		    nomatch = 1;
+-		    histline = ohistline;
+-		    break;
++		if (skip_pos) {
++		    pos += dir;
++		    if (pos < 0 || sbuf[0] == '^' || pos >= strlen(s))
++			skip_line = 1;
++		    skip_pos = 0;
+ 		}
+-		if ((sbuf[0] == '^') ?
++		if (!skip_line && ((sbuf[0] == '^') ?
+ 		    (t = (strncmp(s, sbuf + 1, sbptr - 1)) ? NULL : s) :
+-		    (t = hstrnstr(s, sbuf, sbptr)))
+-		    if (!(chequiv && !strcmp(UTOSCP(line), s))) {
+-			setline(s);
+-			cs = t - s + sbptr - (sbuf[0] == '^');
+-			break;
+-		    }
++		    (t = hstrnstr(s, pos,  sbuf, sbptr, dir)))) {
++		    setline(s);
++		    pos = cs = t - s;
++		    if (dir == 1)
++			cs += sbptr - (sbuf[0] == '^');
++	    	    nomatch = 0;
++		    break;
++		}
+ 		histline += dir;
++		if (!(s = qgetevent(histline))) {
++		    if (!nomatch) {
++			feep();
++			nomatch = 1;
++		    }
++		    if (sbptr == isrch_spots[top_spot-1].len)
++			top_spot--;
++		    get_isrch_spot(top_spot, &histline, &pos, &sbptr, &dir);
++		    s = UTOSCP(line);
++		    skip_line = 0;
++		    break;
++		}
++		pos = dir == 1? 0 : strlen(s) - sbptr + (sbuf[0] == '^');
++		skip_line = (pos < 0 || strcmp(UTOSCP(line), s) == 0);
+ 	    }
+-	    chequiv = 0;
+ 	}
++	else
++	    top_spot = 0;
+ 	sbuf[sbptr] = '_';
+ 	sbuf[sbptr + 1] = 0;
+     ref:
+ 	refresh();
+ 	if ((cmd = getkeycmd()) < 0 || cmd == z_sendbreak) {
+-	    setline(oldl);
+-	    cs = ocs;
+-	    histline = ohl;
++	    get_isrch_spot(0, &histline, &pos, &sbptr, &dir);
++	    s = qgetevent(histline);
++	    setline(s);
++	    cs = pos;
+ 	    break;
+ 	}
+ 	switch (cmd) {
+@@ -630,11 +695,16 @@
+ 	    goto ref;
+ 	case z_vibackwarddeletechar:
+ 	case z_backwarddeletechar:
+-	    if (sbptr)
+-		sbptr--;
++	    if (top_spot)
++		get_isrch_spot(--top_spot, &histline, &pos, &sbptr, &dir);
+ 	    else
+ 		feep();
+-	    histline = ohl;
++	    s = qgetevent(histline);
++	    if (!sbptr || (sbptr == 1 && sbuf[0] == '^')) {
++		setline(s);
++		cs = pos;
++	    }
++	    memcpy(ibuf, (dir == 1) ? "fwd" : "bck", 3);
+ 	    continue;
+ 	case z_acceptandhold:
+ 	    acceptandhold();
+@@ -649,19 +719,29 @@
+ 	    acceptline();
+ 	    goto brk;
+ 	case z_historyincrementalsearchbackward:
+-	    dir = -1;
++	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
++	    if (dir != -1)
++		dir = -1;
++	    else
++		skip_pos = 1;
+ 	    goto rpt;
+ 	case z_historyincrementalsearchforward:
+-	    dir = 1;
++	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
++	    if (dir != 1)
++		dir = 1;
++	    else
++		skip_pos = 1;
+ 	    goto rpt;
+ 	case z_virevrepeatsearch:
++	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
+ 	    dir = -odir;
++	    skip_pos = 1;
+ 	    goto rpt;
+ 	case z_virepeatsearch:
++	    set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
+ 	    dir = odir;
++	    skip_pos = 1;
+ 	rpt:
+-	    ohl = (histline += dir);
+-	    chequiv = 1;
+ 	    memcpy(ibuf, (dir == 1) ? "fwd" : "bck", 3);
+ 	    refresh();
+ 	    continue;
+@@ -700,6 +780,7 @@
+ 	    }
+ 	ins:
+ 	    if (c) {
++		set_isrch_spot(top_spot++, histline, pos, sbptr, dir);
+ 		if(sbptr == sibuf - 16) {
+ 		    sbuf = halloc(sibuf *= 2);
+ 		    strcpy(sbuf, ibuf);
+@@ -712,7 +793,6 @@
+ 	}
+     }
+   brk:
+-    free(oldl);
+     statusline = NULL;
+     bindtab = obindtab;
+ }
+@@ -938,7 +1018,7 @@
+ 	if (*visrchstr == '^') {
+ 	    if (!strncmp(s, visrchstr + 1, t0 - 1))
+ 		break;
+-	} else if (hstrnstr(s, visrchstr, t0))
++	} else if (hstrnstr(s, 0, visrchstr, t0, 1))
+ 	    break;
+     }
+     setline(s);
+@@ -976,7 +1056,8 @@
+ 	    histline = ohistline;
+ 	    return;
+ 	}
+-	if (!strncmp(s, (char *)line, cs) && strcmp(s, (char *)line))
++	if (strlen((char *)s) > cs
++	 && !strncmp(s, (char *)line, cs) && strcmp(s, (char *)line))
+ 	    break;
+     }
+ 
+@@ -1006,7 +1087,8 @@
+ 	    histline = ohistline;
+ 	    return;
+ 	}
+-	if (!strncmp(s, (char *)line, cs) && strcmp(s, (char *)line))
++	if (strlen((char *)s) > cs
++	 && !strncmp(s, (char *)line, cs) && strcmp(s, (char *)line))
+ 	    break;
+     }
+ 
+Index: Src/zle_utils.c
+@@ -244,11 +244,14 @@
+ 
+ /**/
+ char *
+-hstrnstr(char *s, char *t, int len)
++hstrnstr(char *str, int pos, char *t, int len, int dir)
+ {
+-    for (; *s; s++)
++    char *s;
++
++    for (s = str + pos; dir == 1? *s : s >= str; s += dir) {
+ 	if (!strncmp(t, s, len))
+ 	    return s;
++    }
+     return NULL;
+ }
+ 
+---8<------8<------8<------8<---cut here--->8------>8------>8------>8---
+
+

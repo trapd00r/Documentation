@@ -1,0 +1,238 @@
+From zsh-workers-return-9764-mason-zsh=primenet.com.au@sunsite.auc.dk Wed Feb 16 16:27:54 2000
+Return-Path: <zsh-workers-return-9764-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 7541 invoked from network); 16 Feb 2000 16:27:53 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 16 Feb 2000 16:27:53 -0000
+Received: (qmail 965 invoked by alias); 16 Feb 2000 16:27:36 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9764
+Received: (qmail 466 invoked from network); 16 Feb 2000 16:26:00 -0000
+Date: Wed, 16 Feb 2000 17:25:59 +0100 (MET)
+Message-Id: <200002161625.RAA19864@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@sunsite.auc.dk
+In-reply-to: Peter Stephenson's message of Tue, 15 Feb 2000 21:58:30 +0000
+Subject: Re: Still bugs completing .files; _multi_parts
+
+
+Peter Stephenson wrote:
+
+> Firstly, I did
+> 
+> % less ~/.<TAB>
+> 
+> and got a list of files not beginning with a dot amongst those which did.
+
+I don't get that. Let me guess: somehow you ended up with your
+'r:|[.,_-]=* r:|=*' match spec being tried immediatly or used always
+(as would happen with your setup from 9700, because the matcher style
+is tested for every tag).
+
+> Secondly and unrelatedly, I was trying out _multi_parts for the user guide
+> and did (you can see where this is coming from):
+> 
+> _foo () {
+>   local groups
+>   groups=(news.announce.newuser
+>           news.groups.questions
+>           gnu.emacs.gnus
+>           comp.unix.shell
+>           rec.arts.sf.written
+>           freeserve.test) 
+>   _multi_parts . groups
+> }
+> compdef _foo foo
+> 
+> Hitting ^D, everything was fine: I get the list
+>   comp.        freeserve.   gnu.         news.        rec.       
+> as expected.  Now hitting tab, which causes menu completion and menu
+> selection to start up, things start to go wrong.  First, the list is
+> expanded to show both `news.', instead of pruning the duplicate.  Second,
+> the value inserted is the full whack, e.g. `comp.unix.shell'; I can't
+> simply cycle through the top level and select the next one down.  I'm
+> puzzled about this because as far as I can see the only existing call to
+> _multi_parts in _tar works just the same way, except with / as the
+> separator.  The clue seems to be that if I go straight into completion
+> without doing ^D things work as expected (except that I don't see a final
+> `.' if the part isn't the final one, as I would expect to do in the tar
+> case).
+
+Second guess: _oldlist. The ^D makes _multi_parts call compadd in
+non-menu mode and then _oldlist makes the same list be used again (in
+non-menu mode _multi_parts, like _path_files, adds the whole possible
+matches to get at the longest unambiguous string). And menu-selection
+shows both `news' because for it these *are* different matches and it
+has to give access to them.
+
+Ok. The patch hopefully fixes this by making menu-mode compadd's be
+used for ^D. It also changes the way the matches are added then to be
+able to show the separators in menu-completion.
+
+But maybe we should make _multi_parts use the `expand=suffix'
+style/value to decide if the whole matches should be used at all. The
+same way _path_files does that. I would prefer to make it use an empty 
+tag then (because _multi_parts doesn't always complete paths and the
+style is tested for the paths tag in _path_files). Because of that I
+thought, I should ask first. Or maybe making it use the paths tag in
+_path_files and no tag in _multi_parts is ok? (I find that a bit
+confusing).
+
+And while playing with it I decided I don't like that a simple
+`g<TAB>' doesn't give me the whole `gnu.emacs.gnus', so I added the -i 
+option (to _multi_parts). If that is given a single match is inserted
+completely instead of just the next component. In other words: if you
+want pathname-like completion: don't use it, but for simple strings as 
+in this example, it is probably better.
+
+Bye
+ Sven
+
+diff -ru ../z.old/Completion/Core/_multi_parts Completion/Core/_multi_parts
+--- ../z.old/Completion/Core/_multi_parts	Wed Feb 16 12:40:33 2000
++++ Completion/Core/_multi_parts	Wed Feb 16 17:09:51 2000
+@@ -8,14 +8,14 @@
+ # separator character are then completed independently.
+ 
+ local sep matches pref npref i tmp1 group expl menu pre suf opre osuf cpre
+-local opts sopts match
++local opts sopts match imm
+ typeset -U tmp2
+ 
+ # Get the options.
+ 
+ zparseopts -D -a sopts \
+     'J:=group' 'V:=group' 'X:=expl' 'P:=opts' 'F:=opts' \
+-    S: r: R: q 1 2 n 'M+:=match'
++    S: r: R: q 1 2 n 'M+:=match' 'i=imm'
+ 
+ sopts=( "$sopts[@]" "$opts[@]" )
+ if (( $#match )); then
+@@ -93,7 +93,6 @@
+       compadd -O tmp1 - "${(@)matches%%${sep}*}"
+ 
+     tmp2=( "$tmp1[@]" )
+-    tmp1=( "$tmp2[@]" )
+ 
+     if [[ $#tmp1 -eq 1 ]]; then
+ 
+@@ -106,17 +105,23 @@
+         npref="${tmp1[1]}${sep}"
+       else
+         matches=( "${(@M)matches:#${tmp1[1]}*}" )
+-	tmp2=( "${(@M)matches:#${tmp1[1]}${sep}*}" )
+ 
+ 	PREFIX="${cpre}${pre}"
+ 	SUFFIX="$suf"
+ 
+-	if (( $#tmp2 )); then
+-	  compadd "$group[@]" "$expl[@]" -p "$pref" -qS "$sep" "$opts[@]" \
+-                  -M "r:|${sep}=* r:|=* $match" - "$tmp1[1]"
++	if [[ $#imm -ne 0 && $#matches -eq 1 ]]; then
++	  compadd "$group[@]" "$expl[@]" "$opts[@]" \
++                  -M "r:|${sep}=* r:|=* $match" - "$pref$matches[1]"
+         else
+-	  compadd "$group[@]" "$expl[@]" -p "$pref" "$sopts[@]" \
+-                  -M "r:|${sep}=* r:|=* $match" - "$tmp1[1]"
++	  tmp2=( "${(@M)matches:#${tmp1[1]}${sep}*}" )
++
++	  if (( $#tmp2 )); then
++	    compadd "$group[@]" "$expl[@]" -p "$pref" -qS "$sep" "$opts[@]" \
++                    -M "r:|${sep}=* r:|=* $match" - "$tmp1[1]"
++          else
++	    compadd "$group[@]" "$expl[@]" -p "$pref" "$sopts[@]" \
++                    -M "r:|${sep}=* r:|=* $match" - "$tmp1[1]"
++          fi
+         fi
+ 	return 0
+       fi
+@@ -137,20 +142,44 @@
+ 	SUFFIX="$suf"
+       fi
+ 
+-      if [[ -n "$menu" ]]; then
+-        # With menucompletion we just add matches for the matching
+-        # components with the prefix we collected and the rest from the
+-        # line as a suffix.
++      if [[ -n "$menu" || -z "$compstate[insert]" ]]; then
++
++        # With menucompletion we add only the ambiguous component with
++        # the prefix collected and a spearator for the matches that
++        # have more components.
+ 
+         tmp2="$pre$suf"
+         if [[ "$tmp2" = *${sep}* ]]; then
+-          compadd "$group[@]" "$expl[@]" "$sopts[@]" \
+-                  -p "$pref" -s "${sep}${tmp2#*${sep}}" \
+-                  -M "r:|${sep}=* r:|=* $match" - "$tmp1[@]"
++          tmp2=(-s "${sep}${tmp2#*${sep}}")
+         else
+-          compadd "$group[@]" "$expl[@]" -p "$pref" "$sopts[@]" \
+-                  -M "r:|${sep}=* r:|=* $match" - "$tmp1[@]"
++	  tmp2=()
+         fi
++        for i in "${(@M)matches:#(${(j:|:)~tmp1})*}"; do
++	  if [[ "$i" = *${sep}* ]]; then
++            compadd "$group[@]" "$expl[@]" -S '' "$opts[@]" \
++	            -p "$pref" \
++                    -M "r:|${sep}=* r:|=* $match" - "${i%%${sep}*}${sep}"
++          else
++            compadd "$group[@]" "$expl[@]" -S '' "$opts[@]" -p "$pref" \
++                    -M "r:|${sep}=* r:|=* $match" - "$i"
++          fi
++        done
++
++# The old code and its comment:
++
++        # With menucompletion we just add matches for the matching
++        # components with the prefix we collected and the rest from the
++        # line as a suffix.
++
++#        tmp2="$pre$suf"
++#        if [[ "$tmp2" = *${sep}* ]]; then
++#          compadd "$group[@]" "$expl[@]" "$sopts[@]" \
++#                  -p "$pref" -s "${sep}${tmp2#*${sep}}" \
++#                  -M "r:|${sep}=* r:|=* $match" - "$tmp1[@]"
++#        else
++#          compadd "$group[@]" "$expl[@]" -p "$pref" "$sopts[@]" \
++#                  -M "r:|${sep}=* r:|=* $match" - "$tmp1[@]"
++#        fi
+       else
+         # With normal completion we add all matches one-by-one with
+ 	# the unmatched part as a suffix. This will insert the longest
+diff -ru ../z.old/Completion/Core/_path_files Completion/Core/_path_files
+--- ../z.old/Completion/Core/_path_files	Wed Feb 16 12:40:34 2000
++++ Completion/Core/_path_files	Wed Feb 16 16:56:44 2000
+@@ -439,7 +439,7 @@
+       tmp2="$testpath"
+       compquote tmp1 tmp2
+ 
+-      if [[ -n $menu ]] ||
++      if [[ -n $menu || -z "$compstate[insert]" ]] ||
+          ! zstyle -t ":completion:${curcontext}:paths" expand suffix; then
+         (( tmp4 )) && zstyle -t ":completion:${curcontext}:paths" cursor &&
+             compstate[to_end]=''
+diff -ru ../z.old/Doc/Zsh/compsys.yo Doc/Zsh/compsys.yo
+--- ../z.old/Doc/Zsh/compsys.yo	Wed Feb 16 12:40:15 2000
++++ Doc/Zsh/compsys.yo	Wed Feb 16 17:13:42 2000
+@@ -2082,6 +2082,13 @@
+ names in the way normal filenames are completed by the
+ tt(_path_files) function.
+ 
++If given the tt(-i) option a single match left will be accepted
++immediatly even if that means that additional parts for which no
++separators were on the line are to be inserted. When completing from a 
++fixed set of possible completions which are really words, this is
++often the expected behaviour. But if tt(_multi_parts) should behave
++like completing pathnames, the tt(-i) option should not be used.
++
+ Like other utility functions, this function accepts the `tt(-V)',
+ `tt(-J)', `tt(-1)', `tt(-2)', `tt(-n)', `tt(-X)', `tt(-M)', `tt(-P)',
+ `tt(-S)', `tt(-r)', `tt(-R)', and `tt(-q)' options and passes them to
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+

@@ -1,0 +1,266 @@
+From zsh-workers-request@euclid.skiles.gatech.edu Thu Jan 02 04:39:53 1997
+Return-Path: <zsh-workers-request@euclid.skiles.gatech.edu>
+Delivered-To: mason@primenet.com.au
+Received: (qmail 13393 invoked from network); 2 Jan 1997 04:39:50 -0000
+Received: from euclid.skiles.gatech.edu (list@130.207.146.50)
+  by coral.primenet.com.au with SMTP; 2 Jan 1997 04:39:50 -0000
+Received: (from list@localhost) by euclid.skiles.gatech.edu (8.7.3/8.7.3) id XAA24321; Wed, 1 Jan 1997 23:44:38 -0500 (EST)
+Resent-Date: Wed, 1 Jan 1997 23:44:38 -0500 (EST)
+From: Zoltan Hidvegi <hzoli@cs.elte.hu>
+Message-Id: <199701020352.EAA05348@hzoli.ppp.cs.elte.hu>
+Subject: Re: files module improvements
+To: zefram@dcs.warwick.ac.uk (Zefram)
+Date: Thu, 2 Jan 1997 04:52:58 +0100 (MET)
+Cc: zsh-workers@math.gatech.edu
+In-Reply-To: <29389.199612311251@stone.dcs.warwick.ac.uk> from Zefram at "Dec 31, 96 12:51:43 pm"
+X-Mailer: ELM [version 2.4ME+ PL17 (25)]
+MIME-Version: 1.0
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: 7bit
+Resent-Message-ID: <"LVsOO2.0.yx5.rqpoo"@euclid>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/2695
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+Zefram wrote:
+> * rm -r can run out of file descriptors in deep trees.  Fixing this would
+>   require going back up the tree with chdir("..") and then checking that
+>   the tree wasn't moved while we were deleting it; it makes it easier for
+>   rm to fail.  I think this needs to be done, but I don't like it.
+
+If chdir("..") succeeds it always go back where you started so it is as
+safe to use as fchdir.  chdir(..) fails only if the current directory has
+been unlinked or if there is a non-executable directory in the chain of
+parents.  The patch below uses chdir("..") if possible.
+
+It fixes an other more serious bug: the output of zreaddir was passed to
+dorm (calling unmeta first).  But readdir (and zreaddir) uses a static
+buffer which may be overwritten by subsequent calls.
+
+And a less serious bug: rm -r non_readable_dir did not remove that
+directory.
+
+Zoltan
+
+
+*** Src/utils.c	1997/01/02 01:48:28	3.1.1.9
+--- Src/utils.c	1997/01/02 03:49:21
+***************
+*** 3306,3311 ****
+--- 3306,3328 ----
+      return r;
+  }
+  
++ /**/
++ int
++ upchdir(int n)
++ {
++     char buf[PATH_MAX];
++     char *s;
++ 
++     while (n > 0) {
++ 	for (s = buf; s < buf + PATH_MAX - 4 && n--; )
++ 	    *s++ = '.', *s++ = '.', *s++ = '/';
++ 	s[-1] = '\0';
++ 	if (chdir(buf))
++ 	    return -1;
++     }
++     return 0;
++ }
++ 
+  /* Change directory, without following symlinks.  Returns 0 on success, -1 *
+   * on failure.  Sets errno to ENOTDIR if any symlinks are encountered.  If *
+   * fchdir() fails, or the current directory is unreadable, we might end up *
+***************
+*** 3320,3330 ****
+  #else /* HAVE_LSTAT */
+      char buf[PATH_MAX + 1], *ptr;
+      char const *pptr;
+!     int olddir = open(".", O_RDONLY), err;
+      struct stat st1, st2;
+  
+!     if(*path == '/')
+  	chdir("/");
+      for(;;) {
+  	while(*path == '/')
+  	    path++;
+--- 3337,3350 ----
+  #else /* HAVE_LSTAT */
+      char buf[PATH_MAX + 1], *ptr;
+      char const *pptr;
+!     int olddir = open(".", O_RDONLY), level, err;
+      struct stat st1, st2;
+  
+!     if(*path == '/') {
+  	chdir("/");
++ 	level = -1;
++     } else
++ 	level = 0;
+      for(;;) {
+  	while(*path == '/')
+  	    path++;
+***************
+*** 3348,3354 ****
+  	    err = ENOTDIR;
+  	    break;
+  	}
+! 	if(chdir(buf) || lstat(".", &st2)) {
+  	    err = errno;
+  	    break;
+  	}
+--- 3368,3380 ----
+  	    err = ENOTDIR;
+  	    break;
+  	}
+! 	if(chdir(buf)) {
+! 	    err = errno;
+! 	    break;
+! 	}
+! 	if (level >= 0)
+! 	    level++;
+! 	if(lstat(".", &st2)) {
+  	    err = errno;
+  	    break;
+  	}
+***************
+*** 3357,3364 ****
+  	    break;
+  	}
+      }
+!     fchdir(olddir);
+!     close(olddir);
+      errno = err;
+      return -1;
+  #endif /* HAVE_LSTAT */
+--- 3383,3393 ----
+  	    break;
+  	}
+      }
+!     if (olddir >= 0) {
+! 	fchdir(olddir);
+! 	close(olddir);
+!     } else
+! 	upchdir(level);
+      errno = err;
+      return -1;
+  #endif /* HAVE_LSTAT */
+*** Src/Modules/files.c	1997/01/02 01:49:56	3.1.1.2
+--- Src/Modules/files.c	1997/01/02 03:15:42
+***************
+*** 311,320 ****
+  
+      for(; !(err & 2) && *args; args++) {
+  	rp = ztrdup(*args);
+! 	len = strlen(rp + 1);
+! 	unmetafy(rp, NULL);
+  	err |= dorm(nam, *args, rp, ops, 1);
+! 	zfree(rp, len);
+      }
+      return ops['f'] ? 0 : !!err;
+  }
+--- 311,319 ----
+  
+      for(; !(err & 2) && *args; args++) {
+  	rp = ztrdup(*args);
+! 	unmetafy(rp, &len);
+  	err |= dorm(nam, *args, rp, ops, 1);
+! 	zfree(rp, len + 1);
+      }
+      return ops['f'] ? 0 : !!err;
+  }
+***************
+*** 365,371 ****
+      char *fn;
+      DIR *d;
+      int err = 0;
+!     int pwd = open(".", O_RDONLY);
+  
+      if(first ? zchdir(rp) : lchdir(rp)) {
+  	if(!ops['f'])
+--- 364,370 ----
+      char *fn;
+      DIR *d;
+      int err = 0;
+!     int pwd = *rp == '/' ? open(".", O_RDONLY) : -1;
+  
+      if(first ? zchdir(rp) : lchdir(rp)) {
+  	if(!ops['f'])
+***************
+*** 377,404 ****
+      if(!d) {
+  	if(!ops['f'])
+  	    zwarnnam(nam, "%s: %e", arg, errno);
+! 	return 1 - fchdir(pwd);
+      }
+!     while((fn = zreaddir(d, 1))) {
+! 	char *narg = tricat(arg, "/", fn);
+  
+! 	err |= dorm(nam, narg, unmeta(fn), ops, 0);
+! 	zsfree(narg);
+! 	if(err & 2) {
+! 	    closedir(d);
+  	    close(pwd);
+  	    return 2;
+  	}
+!     }
+!     closedir(d);
+!     if(fchdir(pwd)) {
+  	close(pwd);
+- 	if(!ops['f'])
+- 	    zwarnnam(nam, "failed to return to previous directory: %e",
+- 		NULL, errno);
+- 	return 2;
+-     }
+-     close(pwd);
+      if(!ops['f'] && ops['i']) {
+  	nicezputs(nam, stderr);
+  	fputs(": remove `", stderr);
+--- 376,420 ----
+      if(!d) {
+  	if(!ops['f'])
+  	    zwarnnam(nam, "%s: %e", arg, errno);
+! 	err = 1;
+!     } else {
+! 	while((fn = zreaddir(d, 1))) {
+! 	    char *narg = tricat(arg, "/", fn);
+! 	    int len;
+! 
+! 	    fn = ztrdup(unmetafy(fn, &len));
+! 	    err |= dorm(nam, narg, fn, ops, 0);
+! 	    zsfree(narg);
+! 	    zfree(fn, len + 1);
+! 	    if(err & 2) {
+! 		closedir(d);
+! 		close(pwd);
+! 		return 2;
+! 	    }
+! 	}
+! 	closedir(d);
+      }
+!     if (pwd < 0 || fchdir(pwd)) {
+! 	int level = 0;
+  
+! 	if (pwd >= 0)
+  	    close(pwd);
++ 	if (*rp != '/') {
++ 	    for (fn = rp; *fn; level++) {
++ 		while (*fn && *fn++ != '/');
++ 		while (*fn == '/')
++ 		    fn++;
++ 	    }
++ 	    level = !upchdir(level);
++ 	}
++ 	if (!level) {
++ 	    if(!ops['f'])
++ 		zwarnnam(nam, "failed to return to previous directory: %e",
++ 			 NULL, errno);
+  	    return 2;
+  	}
+!     } else
+  	close(pwd);
+      if(!ops['f'] && ops['i']) {
+  	nicezputs(nam, stderr);
+  	fputs(": remove `", stderr);
+

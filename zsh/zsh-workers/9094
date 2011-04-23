@@ -1,0 +1,159 @@
+From zsh-workers-return-9094-mason-zsh=primenet.com.au@sunsite.auc.dk Fri Dec 17 04:39:47 1999
+Return-Path: <zsh-workers-return-9094-mason-zsh=primenet.com.au@sunsite.auc.dk>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 15009 invoked from network); 17 Dec 1999 04:39:45 -0000
+Received: from sunsite.auc.dk (130.225.51.30)
+  by ns1.primenet.com.au with SMTP; 17 Dec 1999 04:39:45 -0000
+Received: (qmail 24964 invoked by alias); 17 Dec 1999 04:39:36 -0000
+Mailing-List: contact zsh-workers-help@sunsite.auc.dk; run by ezmlm
+Precedence: bulk
+X-No-Archive: yes
+Delivered-To: mailing list zsh-workers@sunsite.auc.dk
+X-Seq: 9094
+Received: (qmail 24956 invoked from network); 17 Dec 1999 04:39:35 -0000
+Date: Thu, 16 Dec 1999 23:39:33 -0500
+From: Clint Adams <schizo@debian.org>
+To: zsh-workers@sunsite.auc.dk
+Subject: PATCH: some tar problems fixed
+Message-ID: <19991216233933.B4787@dman.com>
+References: <19991216171634.A2131@dman.com>
+Mime-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+User-Agent: Mutt/1.0i
+In-Reply-To: <19991216171634.A2131@dman.com>; from schizo@debian.org on Thu, Dec 16, 1999 at 05:16:34PM -0500
+
+> tar --directory=/tmp xvzf archiv<TAB>, on the other hand,
+> will work, but it is merely doing a _path_files -W /tmp,
+> thus losing all the smarts it would have without the
+> --directory.  This should also be calling _tar_archive
+> which in turn should do a -W /tmp.
+
+Either I'm confused now or I was mislead before,
+since GNU tar here doesn't seem to be behaving this way... so
+I'm leaving a useless parser for --directory (excluding -C still)
+in even though I've removed its application.  
+
+This should handle -Cf now, but not -fC, which, of course, requires
+the positions of directory and tarfile to be reversed.
+
+Index: Completion/User/_tar
+===================================================================
+RCS file: /cvs/zsh/zsh/Completion/User/_tar,v
+retrieving revision 1.1.1.13
+diff -u -r1.1.1.13 _tar
+--- Completion/User/_tar	1999/11/16 13:08:21	1.1.1.13
++++ Completion/User/_tar	1999/12/17 04:32:10
+@@ -47,14 +47,21 @@
+ # is searched after a `--file=' long option, in the third word if the
+ # second one didn't start with a hyphen but contained a `f', and after 
+ # an option argument starting with only one hyphen and containing a `f'.
++# unless that option argument also contains a `C'.
+ 
+ tmp="$words[(I)--file=*]"
++tmpb="$words[(I)-*Cf*~--*]}"
++
+ if (( tmp )); then
+   tf=${~words[tmp][8,-1]}
+   _tar_cmd="f$_tar_cmd"
+ elif [[ "$words[2]" != -* && "$words[2]" = *f* ]]; then
+   tf=${~words[3]}
+   _tar_cmd="f$_tar_cmd"
++elif (( tmpb )); then
++  tf=${~words[tmpb+2]}
++  wdir=${~words[tmpb+1]}
++  _tar_cmd="Cf$_tar_cmd"
+ else
+   tmp="${words[(I)-*f*~--*]}"
+   if (( tmp )); then
+@@ -63,6 +70,18 @@
+   fi
+ fi
+ 
++# See if we should use a path prefix.  We have to use eval as the dir can
++# be any unevaluated thing which appears on the command line, including a
++# parameter.
++
++# This isn't used right now.
++
++tmp=${words[(r)--dir[a-z]#=*]}
++
++if [[ -n $tmp ]]; then
++  eval "wdir=(${tmp#*=})"
++fi
++
+ # Now we complete...
+ 
+ if [[ "$PREFIX" = --* ]]; then
+@@ -73,22 +92,34 @@
+                  '*=(PROG|COMMAND)*:program:_command_names -e' \
+ 		 '*=ARCHIVE*:archive: _tar_archive' \
+ 		 '*=NAME*:file:_files' \
++		 '*=DIR*:directory:_files -/' \
+ 		 '*=CONTROL*::version control:(t numbered nil existing never simple)'
+ 
+ elif [[ ( CURRENT -gt 2 && "$words[CURRENT-1]" = -*f* &&
+-          "$words[CURRENT-1]" != --* ) ||
+-        ( CURRENT -eq 3 && "$words[2]" = *f* && "$words[2]" != -* ) ]]; then
++          "$words[CURRENT-1]" != --* && "$words[CURRENT-1]" != -*Cf* ) ||
++        ( CURRENT -eq 3 && "$words[2]" = *f* && "$words[2]" != -* &&
++          "$words[2]" != *Cf* ) ||
++        ( CURRENT -gt 2 && "$words[CURRENT-2]" = -*Cf* &&
++          "$words[CURRENT-2]" != --* && "$words[CURRENT-1]" != --* ) ||
++        ( CURRENT -eq 4 && "$words[2]" = *Cf* && "$words[2]" != -* ) ]]; then
+ 
+   # ...archive files if we think they are wanted here.
+ 
+   _tar_archive
+ 
++elif [[ ( CURRENT -gt 2 && "$words[CURRENT-1]" = -*Cf*) ||
++        ( CURRENT -eq 3 && "$words[2]" = *Cf* ) ]]; then
++
++  # a directory for -C
++
++  _files -/
++
+ elif [[ ( "$_tar_cmd" = *[xt]* || -n $del ) && -n "$tf" ]]; then
+ 
+   # ...and files from the archive if we found an archive name and tar
+   # commands. We run `tar t...' on the file, keeping the list of
+   # filenames cached, plus the name of the tarfile so we know if it
+-  # changes.
++  # changes.  We skip this test if the alleged archive is not a file.
+ 
+   local largs=-tf expl
+ 
+@@ -96,13 +127,15 @@
+     largs=-tzf
+   elif [[ $_tar_cmd = *Z* ]]; then
+     largs=-tZf
++  elif [[ $_tar_cmd = *I* ]]; then
++    largs=-tIf
+   else
+-    # Some random compression program e.g. bzip2
++    # Some random compression program
+     tmp="${words[(r)--use-comp*]}"
+     [[ -n $tmp ]] && largs=($tmp -tf)
+   fi
+ 
+-  if [[ $tf != $_tar_cache_name ]]; then
++  if [[ $tf != $_tar_cache_name && -f $tf ]]; then
+     _tar_cache_list=("${(@f)$($words[1] $largs $tf)}")
+     _tar_cache_name=$tf
+   fi
+@@ -110,15 +143,5 @@
+   _wanted files expl 'file from archive' &&
+       _multi_parts "$expl[@]" / _tar_cache_list
+ else
+-  
+-  # See if we should use a path prefix.  We have to use eval as the dir can
+-  # be any unevaluated thing which appears on the command line, including a
+-  # parameter.
+-  tmp=${words[(r)--dir[a-z]#=*]}
+-  if [[ -n $tmp ]]; then
+-    eval "tmp=(${tmp#*=})"
+-    _path_files -W tmp
+-  else
+     _files
+-  fi
+ fi
+

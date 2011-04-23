@@ -1,0 +1,248 @@
+From zsh-workers-request@math.gatech.edu Wed Dec 16 10:43:18 1998
+Return-Path: <zsh-workers-request@math.gatech.edu>
+Delivered-To: mason-zsh@primenet.com.au
+Received: (qmail 16052 invoked from network); 16 Dec 1998 10:43:15 -0000
+Received: from math.gatech.edu (list@130.207.146.50)
+  by ns1.primenet.com.au with SMTP; 16 Dec 1998 10:43:15 -0000
+Received: (from list@localhost)
+	by math.gatech.edu (8.9.1/8.9.1) id FAA06056;
+	Wed, 16 Dec 1998 05:41:01 -0500 (EST)
+Resent-Date: Wed, 16 Dec 1998 05:41:01 -0500 (EST)
+Date: Wed, 16 Dec 1998 11:39:25 +0100 (MET)
+Message-Id: <199812161039.LAA01405@beta.informatik.hu-berlin.de>
+From: Sven Wischnowsky <wischnow@informatik.hu-berlin.de>
+To: zsh-workers@math.gatech.edu
+Subject: PATCH: wrappers, unloading, and dependencies
+Resent-Message-ID: <"DZYJ51.0.ZU1.zuuTs"@math>
+Resent-From: zsh-workers@math.gatech.edu
+X-Mailing-List: <zsh-workers@math.gatech.edu> archive/latest/4820
+X-Loop: zsh-workers@math.gatech.edu
+Precedence: list
+Resent-Sender: zsh-workers-request@math.gatech.edu
+
+
+Hello
+
+Another thing I forgot to mention yesterday is how dependencies are
+handled when unloading modules which can't be unloaded immediately.
+
+With the patch I send modules on which modules whose unloading is
+currently delayed may be unloaded immediatly. This means that if the
+wrapper function uses data or functions of the module depended upon
+may fail if the access appears after the execution of the shell
+function and the lower level module was unloaded (and could be
+unloaded immediately).
+
+We could make unloading of modules depended upon by modules which are 
+delayed-unloaded be delayed, too. But of course that wouldn't be fully 
+secure either, we would also have to enforce that modules
+initialize/finalize all data other modules might be interested in in
+the setup and finish functions, *not* in the boot/cleanup functions.
+And that, of course, can't be guarenteed since module writers are free 
+to do what they want.
+Making the implementation of setup/finish mandatory might help here
+but doesn't ensure the right behavior either. Side comment: without
+some serious changes with modentry.c and friends we will need to make
+them mandatory for AIX although I wanted to keep them optional to keep 
+simple modules simple.
+
+So we can either make find_module() be accessible from modules and add 
+a comment in the documentation the this can be used in the wrapper to
+test if the modules needed are still loaded or we use the patch below
+to delay unloading of modules depended upon and to change the
+documentation.
+
+Which also reminds me that we still need some documentation about the
+`.mdd' files...
+
+Bye
+ Sven
+
+diff -c os/module.c Src/module.c
+*** os/module.c	Wed Dec 16 10:07:35 1998
+--- Src/module.c	Wed Dec 16 11:27:20 1998
+***************
+*** 494,520 ****
+  	return m;
+      } 
+      m = (Module) getdata(node);
+!     if (m->flags & MOD_UNLOAD) {
+! 	if (init_module(m))
+! 	    return NULL;
+  	m->flags &= ~MOD_UNLOAD;
+!     } else if (m->handle)
+  	return m;
+      if (m->flags & MOD_BUSY) {
+  	zerr("circular dependencies for module %s", name, 0);
+  	return NULL;
+      }
+      m->flags |= MOD_BUSY;
+!     for (n = firstnode(m->deps); n; incnode(n))
+! 	if (!load_module((char *) getdata(n))) {
+! 	    m->flags &= ~MOD_BUSY;
+! 	    return NULL;
+! 	}
+      m->flags &= ~MOD_BUSY;
+!     if (!(m->handle = do_load_module(name)))
+! 	return NULL;
+      if (init_module(m)) {
+! 	dlclose(m->handle);
+  	m->handle = NULL;
+  	return NULL;
+      }
+--- 494,522 ----
+  	return m;
+      } 
+      m = (Module) getdata(node);
+!     if (m->flags & MOD_UNLOAD)
+  	m->flags &= ~MOD_UNLOAD;
+!     else if (m->handle)
+  	return m;
+      if (m->flags & MOD_BUSY) {
+  	zerr("circular dependencies for module %s", name, 0);
+  	return NULL;
+      }
+      m->flags |= MOD_BUSY;
+!     if (m->deps)
+! 	for (n = firstnode(m->deps); n; incnode(n))
+! 	    if (!load_module((char *) getdata(n))) {
+! 		m->flags &= ~MOD_BUSY;
+! 		return NULL;
+! 	    }
+      m->flags &= ~MOD_BUSY;
+!     if (!m->handle) {
+! 	if (!(m->handle = do_load_module(name)))
+! 	    return NULL;
+! 	setup_module(m);
+!     }
+      if (init_module(m)) {
+! 	finish_module(m->handle);
+  	m->handle = NULL;
+  	return NULL;
+      }
+***************
+*** 796,801 ****
+--- 798,805 ----
+      if (m->handle && !(m->flags & MOD_UNLOAD) && cleanup_module(m))
+  	return 1;
+      else {
++ 	int del = (m->flags & MOD_UNLOAD);
++ 
+  	if (m->wrapper) {
+  	    m->flags |= MOD_UNLOAD;
+  	    return 0;
+***************
+*** 804,809 ****
+--- 808,847 ----
+  	if (m->handle)
+  	    finish_module(m);
+  	m->handle = NULL;
++ 	if (del && m->deps) {
++ 	    /* The module was unloaded delayed, unload all modules *
++ 	     * on which it depended. */
++ 	    LinkNode n;
++ 
++ 	    for (n = firstnode(m->deps); n; incnode(n)) {
++ 		LinkNode dn = find_module((char *) getdata(n));
++ 		Module dm;
++ 
++ 		if (dn && (dm = (Module) getdata(dn)) &&
++ 		    (dm->flags & MOD_UNLOAD)) {
++ 		    /* See if this is the only module depending on it. */
++ 
++ 		    LinkNode an;
++ 		    Module am;
++ 		    int du = 1;
++ 
++ 		    for (an = firstnode(modules); du && an; incnode(an)) {
++ 			am = (Module) getdata(an);
++ 			if (am != m && am->handle && am->deps) {
++ 			    LinkNode sn;
++ 
++ 			    for (sn = firstnode(am->deps); du && sn;
++ 				 incnode(sn)) {
++ 				if (!strcmp((char *) getdata(sn), dm->nam))
++ 				    du = 0;
++ 			    }
++ 			}
++ 		    }
++ 		    if (du)
++ 			unload_module(dm, NULL);
++ 		}
++ 	    }
++ 	}
+  	if(!m->deps) {
+  	    if (!node) {
+  		for (node = firstnode(modules); node; incnode(node))
+***************
+*** 833,852 ****
+  	    node = find_module(*args);
+  	    if (node) {
+  		LinkNode mn, dn;
+  
+  		for (mn = firstnode(modules); mn; incnode(mn)) {
+  		    m = (Module) getdata(mn);
+! 		    if (!(m->flags & MOD_UNLOAD) && m->deps && m->handle)
+  			for (dn = firstnode(m->deps); dn; incnode(dn))
+  			    if (!strcmp((char *) getdata(dn), *args)) {
+! 				zwarnnam(nam, "module %s is in use by another module and cannot be unloaded", *args, 0);
+! 				ret = 1;
+! 				goto cont;
+  			    }
+  		}
+  		m = (Module) getdata(node);
+  		if (unload_module(m, node))
+  		    ret = 1;
+  	    } else if (!ops['i']) {
+  		zwarnnam(nam, "no such module %s", *args, 0);
+  		ret = 1;
+--- 871,899 ----
+  	    node = find_module(*args);
+  	    if (node) {
+  		LinkNode mn, dn;
++ 		int del = 0;
+  
+  		for (mn = firstnode(modules); mn; incnode(mn)) {
+  		    m = (Module) getdata(mn);
+! 		    if (m->deps && m->handle)
+  			for (dn = firstnode(m->deps); dn; incnode(dn))
+  			    if (!strcmp((char *) getdata(dn), *args)) {
+! 				if (m->flags & MOD_UNLOAD)
+! 				    del = 1;
+! 				else {
+! 				    zwarnnam(nam, "module %s is in use by another module and cannot be unloaded", *args, 0);
+! 				    ret = 1;
+! 				    goto cont;
+! 				}
+  			    }
+  		}
+  		m = (Module) getdata(node);
++ 		if (del)
++ 		    m->wrapper++;
+  		if (unload_module(m, node))
+  		    ret = 1;
++ 		if (del)
++ 		    m->wrapper--;
+  	    } else if (!ops['i']) {
+  		zwarnnam(nam, "no such module %s", *args, 0);
+  		ret = 1;
+*** Util/zsh-development-guide.old	Wed Dec 16 10:22:11 1998
+--- Util/zsh-development-guide	Wed Dec 16 11:38:39 1998
+***************
+*** 362,367 ****
+--- 362,372 ----
+  guaranteed that the data needed by the wrapper function is still valid 
+  when wrappers are active and that the user-visible interface defined
+  by the module disappears as soon as the user tries to unload a module.
++ Modules other modules which are currently delayed unloaded depend upon 
++ are unloaded delayed, too. This means that whenever you write a module 
++ that exports some data or functions which might be interesting to
++ other modules you make sure that they are initialized and finalized in 
++ the setup- und finish-functions, not in the boot- and cleanup-functions.
+  
+  Documentation
+  -------------
+
+--
+Sven Wischnowsky                         wischnow@informatik.hu-berlin.de
+
