@@ -1,0 +1,357 @@
+### vim:ft=zsh:foldmethod=marker
+###
+### This is "atag 2.0" so to speak.
+### It's a reimplementation from scratch. Unlike the old implementation,
+### which was based on many backend tools (id3v2, vorbiscomment, metaflac
+### and ataglist from arename) this relies solely on `taggit', which is
+### a program that transparently handles setting meta-information in
+### audio files. It's based on KDE's `taglib. It also features robust
+### machine-readable output for scripts to gather meta-information
+### from audio files. See the `atag__licence()' function below for
+### licensing information.
+###
+
+# TODO:
+#   + dryrun.
+#   + force-clean (taggit needs to clean out taggin
+#     information properly first).
+#   + configurable read and write mappings for `taggit'.
+
+emulate -L zsh
+setopt warn_create_global no_ksh_arrays
+local bin
+zstyle -s ':atag:-init-:-all-' taggit bin || bin='taggit'
+[[ ${bin} != /* ]] && bin=${commands[$bin]}
+if [[ -z ${bin} ]] || [[ ! -x ${bin} ]]; then
+    printf 'Cannot find `taggit'\''; atag needs it, abort.\n'
+    return 1
+fi
+unset bin
+
+function atag__licence() {
+    emulate -L zsh #{{{
+    cat << __EOF__
+  Copyright (c) 2010 Frank Terbeck <ft@bewatermyfriend.org>
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions
+  are met:
+
+  1. Redistributions of source code must retain the above copyright
+     notice, this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+  INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+  AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
+  THE AUTHOR OR CONTRIBUTORS OF THE PROJECT BE LIABLE FOR ANY DIRECT,
+  INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+  STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+  IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+__EOF__
+} #}}}
+
+function atag__help() {
+    emulate -L zsh #{{{
+    local what="$1"
+
+    if [[ ${what} == usage ]]; then
+        #{{{
+        cat << __EOF__
+  = Usage =
+
+atag [-h [<section>]|-l|-L] <file> [-d,-e,-f] <tag-definition(s)>
+  Where <file> is of a type, which taggit supports.
+
+  The following set of common tags are supported:
+    + al(bum)
+    + ar(tist)
+    + tn|tracknumber
+    + tt|tracktitle
+    + y(ear)
+    + comp(ilation)
+    + g(enre)
+
+  Example:
+    atag foo.ogg album='Bar Baz' ar='Fearless Fo'
+
+  The '-h' option prints this help text; an argument to '-h' specifies
+  which help section the user wants to see. '-l' lists those sections.
+  If called with the '-L' option, atag prints out licencing information.
+
+  If the '-f' option is given, all tags will be removed, then the tags
+  given on the command line will be added to the file. If the '-d'
+  options is given, the real commands are really run. If '-e' is given,
+  atag sets a few shell variables to the tag values in the given file:
+
+    the file name -> \$_af
+    tracknumber   -> \$_tn
+                     \$_tnp
+                        Same as tracknumber, but padded to two digits
+                        Thus 5 becomes 05, 10 stays 10; Numbers higher
+                        than 99 will be printed out unchanged.
+    tracktitle    -> \$_tt
+    album         -> \$_al
+    artist        -> \$_ar
+    year          -> \$_yr
+    compilation   -> \$_comp
+    genre         -> \$_gr
+
+        Expample:
+            % atag foo.ogg -f ar="Zappa, Frank"
+            % atag foo.ogg -e
+            % atag foo.ogg atag foo.ogg \\
+                   ar=\${_ar/(#b)(*), (*)/\${match[2]} \${match[1]}}
+
+    The example requires 'extendedglob' on and 'ksharrays' off.
+
+  In order to avoid atag's utility functions in compsys, you'll probably
+  want to use a style such as this:
+
+    % zstyle ':completion:*:*:*:*:functions' ignored-patterns 'atag__*'
+
+  See also: taggit(1), "styles"
+__EOF__
+        #}}}
+    elif [[ ${what} == styles ]]; then
+        cat << __EOF__
+  = Styles =
+
+Atag can be configured via zsh's zstyles facility. This section documents
+all of atag's styles. With styles, it is important to know how an active
+context is structured; that is also documented here.
+
+Context:
+    :atag:<action>:<extension>
+
+':atag:' is the common namespace prefix used by atag. '<action>' is an
+indentifier for the current action being taken by atag. Valid actions
+are listed below. '<extension>' is the file-name extension of the
+processed file (e.g.: 'flac' for 'foo.bar-baz.flac'). There is a special
+extension value called '-all-' that is active when the extension is not
+yet known.
+
+Contexts:
+
+    -init-      |   active when atag is called for the first time after
+                |   being marked for autoloading.
+    read        |   active when tags are being read with the '-e' option.
+    write       |   active when tags are being set in a file.
+
+Styles:
+
+    taggit      |   configures which taggit binary is used.
+
+__EOF__
+    else
+        printf 'Unknown help section `%s'\''.\n' ${what}
+        printf 'See `-l'\'' output for a list of valid ones.\n'
+        return 1
+    fi
+    return 0
+} #}}}
+
+function atag__pre_file_options() {
+    emulate -L zsh #{{{
+    setopt extendedglob nullglob noksharrays
+
+    retval=0
+    case "$1" in
+    (-h)
+        local what="$2"
+        [[ -n ${what} ]] || what='usage'
+        atag__help ${what} || retval=1
+        return 1
+        ;;
+    (-l)
+        printf 'List of valid help sections:\n'
+        printf '  styles\n'
+        printf '  usage\n'
+        printf 'The default section used by `-h'\'' is `usage'\''.\n'
+        return 1
+        ;;
+    (-L)
+        atag__licence
+        return 1
+        ;;
+    esac
+    return 0
+} #}}}
+
+function atag__post_file_options() {
+    emulate -L zsh #{{{
+    setopt extendedglob nullglob noksharrays
+
+    retval=0
+    opts[setvars]=0
+    opts[force]=0
+    opts[dryrun]=0
+    while [[ "${argv[$(( retval + 1 ))]}" == -* ]] ; do
+        case "${argv[$(( retval + 1 ))]}" in
+        (-d) opts[dryrun]=1; (( retval++ )) ;;
+        (-e) opts[setvars]=1; (( retval++ )) ;;
+        (-f) opts[force]=1; (( retval++ )) ;;
+        (*) printf 'unknown option `%s'\''\n' "$1"
+            atag__help "usage"
+            return 1;;
+        esac
+    done
+    return 0
+} #}}}
+
+function atag__set_tags() {
+    emulate -L zsh #{{{
+    setopt extendedglob nullglob noksharrays
+    local -i i
+    local arg
+
+    while [[ -n "${argv[$(( i + 1 ))]}" ]] ; do
+        arg="${argv[$(( i + 1 ))]}"
+        case "${arg}" in
+        ((#b)ar(|tist)=(*))
+            tags[artist]="$match[2]" ;;
+        ((#b)al(|bum)=(*))
+            tags[album]="$match[2]"  ;;
+        ((#b)(tt|tracktitle)=(*))
+            tags[tracktitle]="$match[2]" ;;
+        ((#b)(tn|tracknumber)=(*))
+            tags[tracknumber]="$match[2]" ;;
+        ((#b)y(|ear)=(*))
+            tags[year]="$match[2]" ;;
+        ((#b)comp(|ilation)=(*))
+            tags[compilation]="$match[2]" ;;
+        ((#b)g(|enre)=(*))
+            tags[genre]="$match[2]" ;;
+        (*)
+            printf 'unknown argument `%s'\''\n' "${arg}"
+            return 1
+            ;;
+        esac
+        (( i++ ))
+    done
+    return 0
+} #}}}
+
+function atag__taggit_tag() {
+    emulate -L zsh #{{{
+    local actx bin file opt
+    local -a opts
+
+    file="$1"
+    actx="write:${file:e}"
+    opts=()
+    for opt in ${(k)tags}; do
+        opts+=( -t "${opt}=${tags[$opt]}" )
+    done
+
+    zstyle -s ":atag:${actx}" taggit bin || bin='taggit'
+    if (( ${#opts} == 0 )); then
+        command ${bin} -l ${file}
+        return $?
+    fi
+    command ${bin} "${opts[@]}" ${file}
+    return $?
+} #}}}
+
+function atag__taggit_read_tags() {
+    emulate -L zsh #{{{
+    # This function is based on the `process-m.zsh' example code
+    # from `taggit'; with the difference, that it assumes that we
+    # will be working with a single file per run only.
+    setopt noksharrays
+    local actx ti
+    local -a taggit tags info
+
+    actx="read:${file:e}"
+    zstyle -s ":atag:${actx}" taggit bin || bin='taggit'
+    taggit=( ${(ps:\x04:)"$(command "$bin" -m "$file")"} )
+    if (( ${#taggit} > 1 )); then
+        printf 'More than one file field from taggit? Abort.\n'
+        return 1
+    fi
+    tags=( ${(ps:\x03:)taggit} )
+    for ti in ${tags}; do
+        info=( ${(ps:\x02:)ti} )
+        read_tags[${info[1]}]=${info[2]}
+    done
+    return 0
+} #}}}
+
+function atag__set_variables() {
+    emulate -L zsh #{{{
+    local file="$1"
+    local tag
+    local -xA read_tags
+    local -A mapping
+
+    mapping=(
+        tracktitle  tt
+        tracknumber tn
+        album       al
+        artist      ar
+        year        yr
+        compilation comp
+        genre       gr
+    )
+
+    for tag in ${(k)mapping} ; do
+        typeset -g _${mapping[$tag]}=''
+    done
+    typeset -g _af=''
+    typeset -g _tnp=''
+
+    atag__taggit_read_tags ${file} || return 1
+
+    typeset -g _af=${file}
+    for tag in ${(k)read_tags} ; do
+        [[ -z ${mapping[$tag]} ]] && continue
+        typeset -g _${mapping[$tag]}=${read_tags[$tag]}
+    done
+    if [[ -n ${read_tags[tracknumber]} ]]; then
+        if (( ${read_tags[tracknumber]} < 100 )); then
+            typeset -g _tnp=${(l:2::0::0:)${read_tags[tracknumber]}}
+        else
+            typeset -g _tnp=${read_tags[tracknumber]}
+        fi
+    fi
+    return 0
+} #}}}
+
+function atag() {
+    emulate -L zsh #{{{
+    setopt extendedglob nullglob noksharrays
+    local file
+    local -xi retval
+    local -xA tags opts
+
+    if (( $# < 1 )); then
+        printf 'Try "atag -h" for help.\n'
+        return 1
+    fi
+    atag__pre_file_options "$@" || return ${retval}
+    [[ -n "$1" ]] && { file="$1"; shift; }
+    if [[ -n ${file} ]] && [[ ! -e ${file} ]] ; then
+        printf 'Cannot access `%s'\'': file does not exist.\n' "$file"
+        return 1
+    fi
+    atag__post_file_options "$@" || return 1
+    (( retval > 0 )) && shift ${retval}
+
+    if (( ${opts[setvars]} > 0 )) ; then
+        atag__set_variables ${file}
+        return $?
+    fi
+
+    atag__set_tags "$@" || return 1
+    atag__taggit_tag ${file}
+    return $?
+} #}}}
+
+atag "$@"

@@ -1,0 +1,260 @@
+### vim:ft=zsh:foldmethod=marker
+
+if ! zis_31 "atleast"; then
+    zprintf 2 'No zle support; Skipping additional widgets.\n'
+    return
+fi
+
+# A powerful `accept-line' wrapper.
+zis_317 "atleast" && zrcautoload accept-line && accept-line
+
+# Put the command line buffer into a real editor.
+zrcautoload edit-command-line && zle -N edit-command-line
+
+### load a number of smarter drop-in replacements for word actions
+zstyle ':zle:*' word-style shell
+for i in \
+        kill-word-match       \
+        forward-word-match    \
+        backward-word-match   \
+        transpose-words-match \
+        delete-whole-word-match
+do
+    zrcautoload $i
+    zle -N $i
+done; unset i
+zle -N kill-whole-word-match delete-whole-word-match
+
+### string replacements in the current command buffer
+zstyle ':zle:replace-pattern' edit-previous false
+zrcautoload replace-string
+zrcautoload replace-string-again
+zle -N replace-pattern replace-string
+zle -N replace-string-again
+
+### complete words from history, and force filename completion
+if zis_317 "atleast" ; then
+    zle -C complete-history complete-word _generic
+    zstyle ':completion:complete-history:*' completer _history
+    zle -C complete-files complete-word _generic
+    zstyle ':completion:complete-files:*' completer _files
+fi
+
+### Insert slashes in a "smart" way (well, not really all that smart...).
+zrcautoload smart-slash && zle -N smart-slash
+
+### backward clear from cursor to the next '/'
+if zis_317 "atleast" ; then
+    function backward-kill-to-slash() {
+        local WORDCHARS="${WORDCHARS:s,/,} \\\'"
+        [[ $BUFFER != */* ]] && return
+        [[ $LBUFFER == [^/]##/ ]] && return
+        zle backward-kill-word
+    }
+    zle -N backward-kill-to-slash
+fi
+
+### clear screen and reset prompt
+function ft-clear-screen() {
+    zle clear-screen
+    zle reset-prompt
+}
+zle -N ft-clear-screen
+
+### jump behind the Nth word on the cmdline.
+if zis_317 "atleast" ; then
+
+    function jump_after_wordN() {
+        setopt localoptions noksharrays extendedglob
+        local words
+        local -i i num=$1
+
+        (( num == 0 )) && (( num = 10 ))
+        words=(${(z)BUFFER})
+        if (( ${#words} <= num )) ; then
+            CURSOR=${#BUFFER}
+        else
+            if (( num == 1 )) ; then
+                CURSOR=${#${words[${num}]}}
+                return
+            fi
+
+            (( CURSOR = 1 ))
+            (( i = 1 ))
+            while [[ ${i} -le ${num} ]] ; do
+                (( CURSOR += ${#${words[$(( i ))]}} ))
+                (( i == num )) && break
+
+                while [[ ${BUFFER[$(( CURSOR + 1 ))]} == [[:space:]] ]] ; do
+                    (( CURSOR++ ))
+                done
+                (( ++i ))
+            done
+        fi
+    }
+
+    zle -N jump_after_wordN
+
+    for i in {0..9} ; do
+        eval "function jump_after_word${i} () { jump_after_wordN ${i} }"
+        zle -N jump_after_word${i}
+    done
+fi
+
+### history-search-end, similar to history-beginning-search-{back,for}ward
+
+if zrcautoload history-search-end ; then
+    zle -N history-beginning-search-backward-end history-search-end
+    zle -N history-beginning-search-forward-end  history-search-end
+fi
+
+### a zle widget to trigger completion
+
+if zis_317 "atleast"; then
+    function ft-complete() {
+        setopt extendedglob localoptions
+        local action context widget word
+        local -a cmdline
+
+        if [[ -z ${BUFFER} ]]; then
+            context=empty
+            zstyle -s ":zle:ft-complete:${context}" action action || action=empty
+            zstyle -s ":zle:ft-complete:${context}" widget widget || widget=complete-word
+            case ${action} in
+                dot-slash-complete)
+                    BUFFER='./'
+                    CURSOR=2
+                    zle ${widget} -w
+                    ;;
+                empty)
+                    ;;
+                *)
+                    zle ${widget} -w
+                    ;;
+            esac
+
+            return 0
+        fi
+
+        cmdline=( ${(z)BUFFER} )
+        if (( ${#cmdline} == 1 )); then
+            case ${cmdline[1]} in
+            (.#)
+                context=dots
+                ;;
+            ((-|+)(|<->))
+                context=dirstack
+                ;;
+            (*)
+                context=oneword
+                ;;
+            esac
+            if [[ ${context} != oneword ]]; then
+                zstyle -s ":zle:ft-complete:${context}" widget widget || widget=complete-word
+                zle ${widget} -w
+                return 0
+            fi
+        fi
+
+        word=${LBUFFER##* }
+        if [[ ${word} == \~* ]] ; then
+            context=tilde
+            zstyle -s ":zle:ft-complete:${context}" widget widget || widget=complete-word
+            zle ${widget} -w
+            return 0
+        fi
+        context=default
+        zstyle -s ":zle:ft-complete:${context}" widget widget || widget=complete-word
+        zle ${widget} -w
+        return 0
+    }
+    zle -N ft-complete
+fi
+
+### vi-mode widgets
+
+# Since I killed `^d' for quickly escaping from a shell, this enables me
+# to do `:q' in vi-cmd mode.
+function ft-zshexit {
+    [[ -o hist_ignore_space ]] && BUFFER=' '
+    BUFFER="${BUFFER}exit"
+    zle .accept-line
+}
+zle -N q ft-zshexit
+
+# First the ones that change the input method directly; namely cmd mode,
+# insert mode and replace mode.
+function ft-vi-replace() {
+    ft_zle_state[overwrite]=yes
+    zle vi-replace
+    ft-psv1
+}
+
+function ft-vi-insert() {
+    ft_zle_state[overwrite]=no
+    zle vi-insert
+}
+
+# Since I want to bind `vi-cmd-mode' to Ctrl-D (which is what I'm doing in
+# vim and emacs-viper, too) I need to wrap this widget into a user-widget,
+# because only those have an effect with empty command buffers and bindings
+# to the key, which sends `EOF'. This also needs the ignore_eof option set.
+function ft-vi-cmd() {
+    ft_zle_state[overwrite]=no
+    zle vi-cmd-mode
+}
+
+function ft-vi-cmd-cmd() {
+    zle -M 'Use `:q<RET>'\'' to exit the shell.'
+}
+
+# ...and now the widgets that open minibuffers...
+# Oh, yeah. You cannot wrap `execute-named-cmd', so no minibuffer-signaling
+# for that. See <http://www.zsh.org/mla/workers/2005/msg00384.html>.
+function ft-markminibuf() {
+    ft_zle_state[minibuffer]=yes
+    ft-psv1
+    zle "$1"
+    ft_zle_state[minibuffer]=no
+    ft-psv1
+}
+
+if (( ${+widgets[.history-incremental-pattern-search-backward]} )); then
+    function history-incremental-pattern-search-backward() {
+        ft-markminibuf .history-incremental-pattern-search-backward
+    }
+else
+    function history-incremental-search-backward() {
+        ft-markminibuf .history-incremental-search-backward
+    }
+fi
+
+if (( ${+widgets[.history-incremental-pattern-search-forward]} )); then
+    function history-incremental-pattern-search-forward() {
+        ft-markminibuf .history-incremental-pattern-search-forward
+    }
+else
+    function history-incremental-search-forward() {
+        ft-markminibuf .history-incremental-search-forward
+    }
+fi
+
+function ft-vi-search-back() {
+    ft-markminibuf vi-history-search-backward
+}
+
+function ft-vi-search-fwd() {
+    ft-markminibuf vi-history-search-forward
+}
+
+function ft-replace-pattern() {
+    ft-markminibuf replace-pattern
+}
+
+# register the created widgets
+for w in \
+    ft-replace-pattern \
+    ft-vi-{cmd,cmd-cmd,replace,insert,search-back,search-fwd}
+do
+    zle -N "$w"
+done; unset w

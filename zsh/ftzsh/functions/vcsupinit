@@ -1,0 +1,544 @@
+##########
+#
+# This is based on an idea by Junio C Hamano on the git mailing list
+# in <7vd3mchumz.fsf@alter.siamese.dyndns.org>:
+#
+#   <http://article.gmane.org/gmane.comp.version-control.git/168132>
+#
+# I want that, too, but not just for `git'. With `vcs_info' we can do
+# quite a bit better, since all the information is already there. We
+# just need to export it.
+#
+# To use this code, copy this file somewhere into `$fpath' and call:
+#    % autoload -Uz vcsupinit; vcsupinit;
+#
+# Please make sure to do this *after* calling `compinit', if you want
+# the included completion functions to work.
+#
+##########
+#
+# REQUIREMENTS:
+#
+#   - A fairly recent zsh; I think most 4.3.* versions and newer should do.
+#   - A very new `vcs_info'. The one that will be included in 4.3.12 will do.
+#
+# It's probably easiest to build a current `zsh' snapshot from CVS or git
+# to use with this. If you don't want to do that, you'll have to wait for
+# zsh-4.3.12 to be released.
+#
+##########
+#
+# Here is how it works:
+#
+# When a short command is called from a directory within a vcs repository,
+# zsh should cd to the base directory of the repository and push the old
+# directory to a stack. Calling that short command from the base directory
+# should cd back to the topmost directory on the stack. Say that short
+# command is a comma `,'.
+#
+##########
+#
+# So much for basic operation. Here is a list of other actions possible:
+#
+# # Change to the top-most directory on the stack (this is basically the
+# # same as calling the command without options):
+#    % , -0
+#    % , -
+#
+# # Change to the directory at the bottom of the stack:
+#    % , +0
+#    % , +
+#
+# # If you exchange the `0' for any integer `N', you can pick directories
+# # other than the top-most directory or the one at the bottom of the
+# # stack. For example, the following call picks the directory two steps
+# # down the stack from the top-most stack entry (this works the same from
+# # the bottom with a plus instead of a minus):
+#    % , -2
+#
+# # If you would like to jump the repository's root directory without
+# # pushing the current directory onto the stack (or any other side-effects
+# # for that matter), do:
+#    % , --
+#
+# # Finally, you can use the command instead of the `cd' builtin to chpwd
+# # around. Side-effects with repect to the stack are configurable.
+#    % , foobar/baz
+#
+##########
+#
+# There is also a utility, which grants full control over the directory
+# stack. It is called `vcsuptool' and can be called in several ways:
+#
+# # Push one or more items onto the stack:
+#    % vcsuptool push item0 item1 item2 ...
+#
+# # Pop the top-most entry off the stack and put it into `$REPLY':
+#    % vcsuptool pop
+#
+# # Pop the entry at a given index off the stack and put it into `$REPLY':
+#    % vcsuptool pop 4
+#
+# # Show the current contents of the stack:
+#    % vcsuptool list
+#
+# # Delete an entry from the stack by name:
+#    % vcsuptool del /foo/bar/baz
+#
+# # Delete all entries of a certain name from the stack:
+#    % vcsuptool del -a /foo/bar/baz
+#
+# # Clear the stack entirely:
+#    % vcsuptool clear
+#
+##########
+#
+# Both, the comma command and the `vcsuptool' utility, come with a decent
+# compsys completion.
+#
+##########
+#
+# The following styles are recognised in the ":vcsup:settings:<cntxt>"
+# context:
+#
+#   always-to-root      (boolean) If called without argument, make sure
+#                       to go the the repository's base directory, even
+#                       if already in it. If `false', jump back to the
+#                       top-most directory on the stack. (default: false)
+#   stack-auto-push     (boolean) Every directory change pushes the
+#                       old directory onto the stack. (default: false)
+#   stack-auto-push-cd  (boolean) Let even ordinary cd-builtin invocations
+#                       push directories onto the stack. (default: false)
+#   stack-push-home     (boolean) If called without argument leads to a
+#                       jump to the repository's base directory, auto-
+#                       matically push the current directory onto the
+#                       stack. (default: true)
+#   stack-minus         (boolean) Like the `PUSHD_MINUS' option, but
+#                       for the stack. (default: false)
+#   stack-no-dups       (boolean) Like the `PUSHD_IGNORE_DUPS' option,
+#                        but for the stack. (default: false)
+#   stack-size          (integer) The size of the stack. (default: 10)
+#
+# ...and `<cntxt>' is one of:
+#
+#   chpwd               Used in the `chpwd' hook. Primarily interesting for
+#                       the `stack-auto-push-cd' style.
+#   argless             Used if the comma command is called without arguments.
+#   plus                Used if the command is called with a +N argument.
+#   minus               Ditto for a -N argument.
+#   vcsuptool           Used if the `vcsuptool' utility is used.
+#   default             Used when none of the above apply.
+#
+# If in doubt just use ":vcsup:settings:*" as the context for your styles.
+#
+##########
+#
+# If you don't like the comma as the vcsup command, call `vcsupinit()'
+# like this:
+#
+#   % vcsupinit foo
+#
+# ...and `foo' will be used instead of the comma.
+#
+##########
+
+emulate -L zsh
+
+local cmd
+cmd=${1:-,}
+
+typeset -gA vcsupdata
+typeset -ga vcsupstack
+
+(( ${+functions[vcs_info_hookadd]} )) || autoload -Uz vcs_info_hookadd
+vcs_info_hookadd post-backend vcsup-setup
+vcs_info_hookadd no-vcs vcsup-destroy
+add-zsh-hook chpwd VCSUP_CHPWD_HOOK
+
+function +vi-vcsup-setup() {
+    vcsupdata[lastbasedir]=${vcsupdata[currentbasedir]}
+    vcsupdata[currentbasedir]=${hook_com[base]}
+    if [[ -n "${vcsupdata[lastbasedir]}" ]] && \
+       [[ "${vcsupdata[lastbasedir]}" != "${vcsupdata[currentbasedir]}" ]]
+    then
+        # If we're here, we switched repos without triggering the
+        # `no-vcs' hook. Clean up manually.
+        vcsupstack=()
+    fi
+}
+
+function +vi-vcsup-destroy() {
+    vcsupdata=()
+    vcsupstack=()
+}
+
+function VCSUP_CHPWD_HOOK() {
+    local context=':vcsup:settings:chpwd'
+    [[ x${VCSUPGUARD} == x ]] && return
+    zstyle -t "${context}" stack-auto-push-cd || return
+    VCSUP_push "${PWD}"
+}
+
+function VCSUP_del() {
+    local i
+    local -i all
+
+    if [[ "$1" == '-a' ]]; then
+        all=1
+        shift
+    fi
+    (( ${#argv} == 0 )) && usage=1
+    for i in "$@"; do
+        if [[ -n ${(M)vcsupstack:#$i} ]]; then
+            vcsupstack[(re)$i]=()
+        else
+            printf 'Not a stack member: "%s"\n' "$i" >&2
+            continue
+        fi
+        if (( all )); then
+            while [[ -n ${(M)vcsupstack:#$i} ]]; do
+                vcsupstack[(re)$i]=()
+            done
+        fi
+    done
+
+    return 0
+}
+
+function VCSUP_list() {
+    local -i i
+    local fmt
+
+    if (( ${#argv} )); then
+        return 1
+    elif (( ${#vcsupstack} == 0 )); then
+        printf 'vcsupstack empty\n' >&2
+    else
+        zstyle -s $context list-format fmt || fmt=' %3s  %s\n'
+        for (( i = 1; i <= ${#vcsupstack}; i++ )); do
+            printf $fmt $(( i - 1 )) ${vcsupstack[$i]}
+        done
+    fi
+}
+
+function VCSUP_pop() {
+    local -i num
+
+    if (( ${#argv} == 1 )); then
+        num=$(( $1 + 1 ))
+    elif (( ${#argv} )); then
+        return 1
+    else
+        num=1
+    fi
+    if (( ${#vcsupstack} > 0 )); then
+        REPLY=${vcsupstack[$num]}
+        vcsupstack[$num]=()
+    else
+        return 2
+    fi
+    return 0
+}
+
+function VCSUP_push() {
+    local maxsize
+    local -i nodups
+    if (( ${#argv} == 0 )); then
+        return 1
+    fi
+
+    vcsupstack=( "${(Oa)argv[@]}" "${vcsupstack[@]}" )
+    nodups=0
+    zstyle -t ${context} stack-no-dups && nodups=1
+    if (( nodups )) && [[ ${(t)vcsupstack} != *unique* ]]; then
+        typeset -gU vcsupstack
+    fi
+    if ! (( nodups )) && [[ ${(t)vcsupstack} == *unique* ]]; then
+        typeset -g +U vcsupstack
+    fi
+    zstyle -s ${context} stack-size maxsize
+    if (( $? != 0 )) || [[ ${maxsize} != <-> ]]; then
+        maxsize=10
+    fi
+    if (( ${#vcsupstack} > size )); then
+        vcsupstack=( "${(@)vcsupstack[1,$maxsize]}" )
+    fi
+}
+
+function VCSUP_from_() {
+    VCSUP_pop $1
+    ret=$?
+    if (( ret == 2 )); then
+        printf 'vcsupstack empty\n' >&2
+    elif (( ret == 1 )); then
+        printf 'vcsup-BUG: Please report how this happened.\n' >&2
+    else
+        VCSUP_cd "${REPLY}"
+    fi
+    return 0
+}
+
+function VCSUP_stacksize() {
+    local -i num
+
+    num=$1
+    if (( num > ( ${#vcsupstack} - 1 ) )); then
+        printf 'No such entry on `vcsupstack'\'' (%d, max: %d).\n' \
+            ${num} $(( ${#vcsupstack} - 1 ))
+        return 1
+    fi
+}
+
+function VCSUP_from_bot() {
+    local num
+
+    num=${1:-0}
+    VCSUP_stacksize $num || return 1
+    VCSUP_from_ $(( ${#vcsupstack} - num - 1 ))
+}
+
+function VCSUP_from_top() {
+    local -i num
+
+    num=${1:-0}
+    VCSUP_stacksize $num || return 1
+    VCSUP_from_ ${num}
+}
+
+function VCSUP_cd() {
+    local -i ret
+    local VCSUPGUARD
+
+    VCSUPGUARD='-guarded-'
+    builtin cd "$1"
+    ret=$?
+    if (( ret == 0 )) && zstyle -t ${context} stack-auto-push; then
+        VCSUP_push ${PWD}
+    fi
+    unset VCSUPGUARD
+}
+
+function "${cmd}" () {
+    local cmd REPLY VCSUPGUARD
+    local context=':vcsup:settings'
+    local -i ret
+
+    ret=0
+    cmd=$1
+    case "${cmd}" in
+    ('')
+        context="${context}:argless"
+        if zstyle -t ${context} always-to-root; then
+            if [[ ${PWD} != ${vcsupdata[currentbasedir]} ]]; then
+                VCSUPGUARD='-guarded-'
+                builtin cd ${vcsupdata[currentbasedir]}
+                unset VCSUPGUARD
+            fi
+        elif [[ ${PWD} != ${vcsupdata[currentbasedir]} ]]; then
+            if zstyle -T ${context} stack-push-home; then
+                VCSUP_push ${PWD}
+            fi
+            VCSUPGUARD='-guarded-'
+            builtin cd ${vcsupdata[currentbasedir]}
+            unset VCSUPGUARD
+        else
+            VCSUP_from_top 0
+        fi
+        ;;
+    (+|(#b)+(<->))
+        context="${context}:plus"
+        if zstyle -t ${context} stack-minus; then
+            VCSUP_from_top "${match[@]}"
+        else
+            VCSUP_from_bot "${match[@]}"
+        fi
+        ;;
+    (-|(#b)-(<->))
+        context="${context}:minus"
+        if zstyle -t ${context} stack-minus; then
+            VCSUP_from_bot "${match[@]}"
+        else
+            VCSUP_from_top "${match[@]}"
+        fi
+        ;;
+    (-h|--help)
+        ;;
+    (--)
+        [[ -z ${vcsupdata[currentbasedir]} ]] && return 1
+        VCSUPGUARD='-guarded-'
+        builtin cd "${vcsupdata[currentbasedir]}"
+        unset VCSUPGUARD
+        ;;
+    (*)
+        context="${context}:default"
+        if (( ${#argv} != 1 )); then
+            printf 'usage: %s [<cmd>[ <ARG(s)...>]|<directory>]\n' "${cmd}" >&2
+            return 1
+        fi
+        VCSUP_cd "$1"
+        ;;
+    esac
+
+    return $ret
+}
+
+function vcsuptool() {
+    local cmd context REPLY
+    local -i usage ret
+
+    context=':vcsup:settings:vcstool'
+    usage=0
+    ret=0
+    if (( ${#argv} )); then
+        cmd=$1
+        shift
+    fi
+    case "${cmd}" in
+    (clear)
+        if (( ${#argv} )); then
+            usage=1
+        else
+            vcsupstack=( )
+        fi
+        ;;
+    (del|list|pop|push)
+        VCSUP_"${cmd}" "$@"
+        ret=$?
+        (( ret == 1 )) && usage=1
+        if (( ret == 0 )) && [[ ${cmd} == pop ]]; then
+            printf '%s\n' "${REPLY}"
+        fi
+        ;;
+    (*)
+        usage=1
+        ;;
+    esac
+
+    if (( usage )); then
+        printf 'usage: vcsuptool <cmd> <ARG(s)...>\n'
+        return 1
+    fi
+    return $ret
+}
+
+if (( ${+functions[compdef]} )); then
+# compsys integration #######################
+
+function _vcsupcmd_fill() {
+    local -i i
+
+    reply_num=( )
+    reply_disp=( )
+    for (( i = 0; i < ${#vcsupstack}; i++ )); do
+        reply_num+=( $i )
+        reply_disp+=( "${i} -- ${vcsupstack[$i + 1]}" )
+    done
+}
+
+function _vcsupcmd_fill_reversed() {
+    local -i i j max
+
+    max=${#vcsupstack}
+    reply_num=( )
+    reply_disp=( )
+    for (( i = max - 1; i >= 0; i-- )); do
+        j=$(( max - i - 1 ))
+        reply_num+=( $j )
+        reply_disp+=( "$j -- ${vcsupstack[$i + 1]}" )
+    done
+}
+
+function _vcsupcmd_complete() {
+    local context=':vcsup:settings'
+    local -i minus plused
+    local -a reply_num reply_disp
+
+    if (( CURRENT == 2 )) && [[ ${PREFIX} == [-+](|<->) ]]; then
+        # This is a stack lookup.
+        if [[ ${PREFIX} == -* ]]; then
+            context="${context}:minus"
+            compset -P -
+            plused=0
+        else
+            context="${context}:plus"
+            compset -P +
+            plused=1
+        fi
+        zstyle -t ${context} stack-minus && minus=1 || minus=0
+        if { (( minus )) && ! (( plused )) } ||
+           { ! (( minus )) && (( plused )) };
+        then
+            _vcsupcmd_fill_reversed
+        else
+            _vcsupcmd_fill
+        fi
+        _wanted -V indices expl 'stack indices' \
+            compadd "$@" -ld reply_disp -Q -a reply_num
+    elif (( CURRENT == 2 )); then
+        # This is something else, presumably a directory name.
+        _directories
+    else
+        _message 'no more arguments'
+    fi
+}
+compdef _vcsupcmd_complete "${cmd}"
+
+function _vcsuptool-{clear,list}() {
+    _message 'no more arguments'
+}
+
+function _vcsuptool-pop() {
+    local expl
+    local -a num display
+    local -i i
+
+    for (( i = 0; i < ${#vcsupstack}; i++ )); do
+        num+=( $i )
+        display+=( "${i} -- ${vcsupstack[$i + 1]}" )
+    done
+    _wanted -V indices expl 'stack indices' compadd "$@" -ld display -Q -a num
+}
+
+function _vcsuptool-push() {
+    if [[ -z ${vcsupdata[currentbasedir]} ]]; then
+        _message "Not in a VCS repository"
+        return 1
+    fi
+    cd -q ${vcsupdata[currentbasedir]}
+    _path_files -/ "$@" -P "${PWD}"/ -
+}
+
+function _vcsuptool-del() {
+    typeset -aU copy
+    local expl
+
+    copy=( "${vcsupstack[@]}" )
+    _wanted entries expl 'stack entries' compadd ${expl} -- ${copy}
+}
+
+function _vcsuptool_complete() {
+    local curcontext="${curcontext}"
+    local subcmd ret
+    local -a desc
+
+    if (( CURRENT == 2 )); then
+        desc=(
+            "clear: clear the entire stack"
+            "del: delete named entris from the stack"
+            "list:show the current contents of the stack"
+            "pop:remove an entry from the stack and return it"
+            "push:push entries onto the stack"
+        )
+        _describe -t subcommands 'vcsuptool commands' desc
+    else
+        subcmd=${words[2]}
+        curcontext="${curcontext%:*:*}:vcsuptool-${subcmd}:"
+        _call_function ret _vcsuptool-${subcmd}
+    fi
+}
+compdef _vcsuptool_complete vcsuptool
+
+# compsys integration end ###################
+fi
+
+unfunction vcsupinit
