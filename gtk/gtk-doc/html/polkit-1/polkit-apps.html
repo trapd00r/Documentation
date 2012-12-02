@@ -1,0 +1,230 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Writing polkit applications</title>
+<meta name="generator" content="DocBook XSL Stylesheets V1.76.1">
+<link rel="home" href="index.html" title="polkit Reference Manual">
+<link rel="up" href="overview.html" title="Part I. polkit Overview">
+<link rel="prev" href="polkit-intro.html" title="Introduction">
+<link rel="next" href="polkit-agents.html" title="Writing polkit Authentication Agents">
+<meta name="generator" content="GTK-Doc V1.18 (XML mode)">
+<link rel="stylesheet" href="style.css" type="text/css">
+</head>
+<body bgcolor="white" text="black" link="#0000FF" vlink="#840084" alink="#0000FF">
+<table class="navigation" id="top" width="100%" summary="Navigation header" cellpadding="2" cellspacing="2"><tr valign="middle">
+<td><a accesskey="p" href="polkit-intro.html"><img src="left.png" width="24" height="24" border="0" alt="Prev"></a></td>
+<td><a accesskey="u" href="overview.html"><img src="up.png" width="24" height="24" border="0" alt="Up"></a></td>
+<td><a accesskey="h" href="index.html"><img src="home.png" width="24" height="24" border="0" alt="Home"></a></td>
+<th width="100%" align="center">polkit Reference Manual</th>
+<td><a accesskey="n" href="polkit-agents.html"><img src="right.png" width="24" height="24" border="0" alt="Next"></a></td>
+</tr></table>
+<div class="chapter">
+<div class="titlepage"><div><div><h2 class="title">
+<a name="polkit-apps"></a>Writing polkit applications</h2></div></div></div>
+<p>
+      polkit applications are privileged mechanisms using the
+      polkit authority as a decider component. To do this, a
+      <span class="emphasis"><em>mechanism</em></span> use either
+      the <a class="link" href="ref-api.html" title="Part III. Client API Reference">GObject API</a>,
+      the <a class="link" href="ref-dbus-api.html" title="Part II. D-Bus API Reference">D-Bus API</a> or
+      the <a class="link" href="pkcheck.1.html" title="pkcheck">pkcheck</a> command to
+      communicate with the polkit Authority.
+    </p>
+<p>
+      Note that <span class="emphasis"><em>clients</em></span> normally doesn't use the
+      polkit API directly – it is intended for privileged
+      <span class="emphasis"><em>mechanisms</em></span>. If a client needs to disable,
+      modify or remove UI elements to e.g. convey to the user that a
+      certain action cannot be carried out (because e.g. the user is
+      not authorized) or authentication is needed (by e.g. displaying
+      a padlock icon in the UI), it is usually better to have the
+      mechanism provide an API for this.
+    </p>
+<p>
+      If a polkit application wants to handle the case where no
+      authentication agent exists (for example if the app is launched
+      via a
+      <span class="citerefentry"><span class="refentrytitle">ssh</span>(1)</span>
+      login), it is trivial for the application to use the <a class="link" href="PolkitAgentTextListener.html" title="PolkitAgentTextListener">PolkitAgentTextListener</a>
+      class to spawn its own authentication agent as
+      needed. Alternatively, the <a class="xref" href="pkttyagent.1.html" title="pkttyagent"><span class="refentrytitle">pkttyagent</span>(1)</a>
+      helper can be used to do this.
+    </p>
+<p>
+      As an example of code using the GObject API, see <a class="xref" href="polkit-apps.html#cancel-example" title="Example 1. Querying the Authority">Example 1, “Querying the Authority”</a>.
+      For an example using the D-Bus API, see <a class="xref" href="polkit-apps.html#polkit-raw-dbus-py" title="Example 2. Accessing the Authority via D-Bus">Example 2, “Accessing the Authority via D-Bus”</a>.
+    </p>
+<div class="example">
+<a name="cancel-example"></a><p class="title"><b>Example 1. Querying the Authority</b></p>
+<div class="example-contents"><pre class="programlisting">/*
+ * Copyright (C) 2009 Red Hat, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General
+ * Public License along with this library; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place, Suite 330,
+ * Boston, MA 02111-1307, USA.
+ *
+ * Author: David Zeuthen &lt;davidz@redhat.com&gt;
+ */
+
+/* Simple example that shows how to check for an authorization
+ * including cancelling the check.
+ *
+ * Cancelling an authorization check is desirable in situations where
+ * the object/action to check for vanishes.
+ *
+ * One concrete example of this is a disks service in which the user
+ * needs to authenticate to modify a disk. If the disk is removed
+ * while the authentication dialog is shown, the disks service should
+ * cancel the authorization check. A side effect of this, is that the
+ * authentication dialog is removed.
+ */
+
+#include &lt;polkit/polkit.h&gt;
+
+static gboolean
+on_tensec_timeout (gpointer user_data)
+{
+  GMainLoop *loop = user_data;
+  g_print ("Ten seconds has passed. Now exiting.\n");
+  g_main_loop_quit (loop);
+  return FALSE;
+}
+
+static void
+check_authorization_cb (PolkitAuthority *authority,
+                        GAsyncResult    *res,
+                        gpointer         user_data)
+{
+  GMainLoop *loop = user_data;
+  PolkitAuthorizationResult *result;
+  GError *error;
+
+  error = NULL;
+  result = polkit_authority_check_authorization_finish (authority, res, &amp;error);
+  if (error != NULL)
+    {
+      g_print ("Error checking authorization: %s\n", error-&gt;message);
+      g_error_free (error);
+    }
+  else
+    {
+      const gchar *result_str;
+      if (polkit_authorization_result_get_is_authorized (result))
+        {
+          result_str = "authorized";
+        }
+      else if (polkit_authorization_result_get_is_challenge (result))
+        {
+          result_str = "challenge";
+        }
+      else
+        {
+          result_str = "not authorized";
+        }
+
+      g_print ("Authorization result: %s\n", result_str);
+    }
+
+  g_print ("Authorization check has been cancelled and the dialog should now be hidden.\n"
+           "This process will exit in ten seconds.\n");
+  g_timeout_add (10000, on_tensec_timeout, loop);
+}
+
+static gboolean
+do_cancel (GCancellable *cancellable)
+{
+  g_print ("Timer has expired; cancelling authorization check\n");
+  g_cancellable_cancel (cancellable);
+  return FALSE;
+}
+
+int
+main (int argc, char *argv[])
+{
+  pid_t parent_pid;
+  const gchar *action_id;
+  GMainLoop *loop;
+  PolkitSubject *subject;
+  PolkitAuthority *authority;
+  GCancellable *cancellable;
+
+  g_type_init ();
+
+  if (argc != 2)
+    {
+      g_printerr ("usage: %s &lt;action_id&gt;\n", argv[0]);
+      return 1;
+    }
+  action_id = argv[1];
+
+  loop = g_main_loop_new (NULL, FALSE);
+
+  authority = polkit_authority_get_sync (NULL, NULL);
+
+  /* Typically mechanisms will use a PolkitSystemBusName since most
+   * clients communicate with the mechanism via D-Bus. However for
+   * this simple example we use the process id of the calling process.
+   *
+   * Note that if the parent was reaped we have to be careful not to
+   * check if init(1) is authorized (it always is).
+   */
+  parent_pid = getppid ();
+  if (parent_pid == 1)
+    {
+      g_printerr ("Parent process was reaped by init(1)\n");
+      return 1;
+    }
+  subject = polkit_unix_process_new (parent_pid);
+
+  cancellable = g_cancellable_new ();
+
+  g_print ("Will cancel authorization check in 10 seconds\n");
+
+  /* Set up a 10 second timer to cancel the check */
+  g_timeout_add (10 * 1000,
+                 (GSourceFunc) do_cancel,
+                 cancellable);
+
+  polkit_authority_check_authorization (authority,
+                                        subject,
+                                        action_id,
+                                        NULL, /* PolkitDetails */
+                                        POLKIT_CHECK_AUTHORIZATION_FLAGS_ALLOW_USER_INTERACTION,
+                                        cancellable,
+                                        (GAsyncReadyCallback) check_authorization_cb,
+                                        loop);
+
+  g_main_loop_run (loop);
+
+  g_object_unref (authority);
+  g_object_unref (subject);
+  g_object_unref (cancellable);
+  g_main_loop_unref (loop);
+
+  return 0;
+}
+</pre></div>
+</div>
+<br class="example-break"><div class="example">
+<a name="polkit-raw-dbus-py"></a><p class="title"><b>Example 2. Accessing the Authority via D-Bus</b></p>
+<div class="example-contents"><pre class="programlisting">FIXME: MISSING XINCLUDE CONTENT</pre></div>
+</div>
+<br class="example-break">
+</div>
+<div class="footer">
+<hr>
+          Generated by GTK-Doc V1.18</div>
+</body>
+</html>
